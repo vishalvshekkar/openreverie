@@ -1,0 +1,68 @@
+// Layout of a memory folder: the fixed set of directories and files that
+// make up one user's memory. Everything here is derived from a single root
+// path so the rest of the engine never hardcodes a folder name.
+
+import { access, mkdir } from 'node:fs/promises'
+import { join } from 'node:path'
+import { newId, writeDocumentAtomic } from './documents.js'
+
+export interface MemoryPaths {
+  root: string
+  constitution: string
+  realmsDir: string
+  arcsDir: string
+  sessionsDir: string
+  rollupsDailyDir: string
+  rollupsWeeklyDir: string
+  graphLog: string
+  proposals: string
+  indexDb: string
+}
+
+export function memoryPaths(root: string): MemoryPaths {
+  return {
+    root,
+    constitution: join(root, 'constitution.md'),
+    realmsDir: join(root, 'realms'),
+    arcsDir: join(root, 'arcs'),
+    sessionsDir: join(root, 'sessions'),
+    rollupsDailyDir: join(root, 'rollups', 'daily'),
+    rollupsWeeklyDir: join(root, 'rollups', 'weekly'),
+    graphLog: join(root, 'graph.jsonl'),
+    proposals: join(root, 'proposals.jsonl'),
+    indexDb: join(root, 'index.db'),
+  }
+}
+
+const CONSTITUTION_STARTER = 'This constitution is empty. It grows as we talk.\n'
+
+export async function ensureMemoryTree(paths: MemoryPaths): Promise<void> {
+  await mkdir(paths.root, { recursive: true })
+  for (const dir of [
+    paths.realmsDir,
+    paths.arcsDir,
+    paths.sessionsDir,
+    paths.rollupsDailyDir,
+    paths.rollupsWeeklyDir,
+  ]) {
+    await mkdir(dir, { recursive: true })
+  }
+
+  const exists = await pathExists(paths.constitution)
+  if (!exists) {
+    await writeDocumentAtomic({
+      path: paths.constitution,
+      meta: { id: newId('doc') },
+      body: CONSTITUTION_STARTER,
+    })
+  }
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await access(path)
+    return true
+  } catch {
+    return false
+  }
+}
