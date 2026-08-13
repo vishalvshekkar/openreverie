@@ -4,3 +4,4 @@
 // See docs/superpowers/specs for the design.
 
 export * from './config.js'
+export * from './personas.js'
