@@ -143,8 +143,6 @@ export class MemoryEngine {
   }
 
   async endSession(sessionId: string): Promise<void> {
-    this.clearWarnings()
-
     // Idempotency guard: a session whose directory already has a
     // summary.md is already reflected, and an unrecognized sessionId has
     // nothing to reflect. Either way, return without any side effects
@@ -156,6 +154,17 @@ export class MemoryEngine {
       return
     }
 
+    // Only clear warnings after passing the idempotency guard, so a no-op
+    // call on an already-reflected session leaves existing warnings untouched.
+    this.clearWarnings()
+
+    await this._doEndSession(sessionId)
+  }
+
+  private async _doEndSession(sessionId: string): Promise<void> {
+    // Internal session-ending logic used by runMaintenance's loop.
+    // Does NOT clear warnings; the public endSession or runMaintenance
+    // is responsible for warning lifecycle.
     const now = new Date()
     const transcript = await SessionStore.readTranscript(this.paths, sessionId)
     const context = await this.buildReflectionContext()
@@ -350,14 +359,16 @@ export class MemoryEngine {
     // Reflect stale sessions first: pendingDailyRollups only looks at
     // whether a date has sessions, not whether they are reflected, and
     // buildDailyRollup throws for a date with no reflected session.
+    // Call _doEndSession (not endSession) so each session's warnings
+    // accumulate rather than being cleared per session.
     const sessions = await SessionStore.listSessions(this.paths)
     for (const session of sessions) {
       if (session.reflected) continue
       try {
-        await this.endSession(session.sessionId)
+        await this._doEndSession(session.sessionId)
       } catch {
         // reflectSession/applyReflection failed before summary.md was
-        // written (endSession's own reindex and commit steps no longer
+        // written (_doEndSession's own reindex and commit steps no longer
         // throw; see reindexOrWarn below), so the session stays
         // unreflected in its frontmatter and is retried on the next pass.
         // The transcript itself is never at risk.

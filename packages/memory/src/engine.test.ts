@@ -656,5 +656,97 @@ describe('MemoryEngine', () => {
 
       await engine.close()
     })
+
+    it('runMaintenance over two stale sessions that both produce warnings keeps warnings from both', async () => {
+      const now = new Date()
+      const threeDaysAgo = new Date(
+        Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - 3),
+      )
+      const twoDaysAgo = new Date(
+        Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - 2),
+      )
+
+      // Provide scripted reflections for both sessions plus rollups.
+      const chat = new FakeChatProvider([
+        {
+          text: JSON.stringify(emptyReflectionOutput('First session reflected.')),
+          toolCalls: [],
+        },
+        {
+          text: JSON.stringify(emptyReflectionOutput('Second session reflected.')),
+          toolCalls: [],
+        },
+        { text: 'Daily rollup prose for date 1.', toolCalls: [] },
+        { text: 'Daily rollup prose for date 2.', toolCalls: [] },
+      ])
+      const deps = fakeDeps(chat)
+
+      // Open the engine with good git so it can initialize cleanly.
+      const engine = await MemoryEngine.open(dir, deps)
+      expect(engine.warnings).toEqual([])
+
+      // Break git so commitMemory warnings are generated for each session.
+      await rm(join(paths.root, '.git'), { recursive: true, force: true })
+      await writeFile(join(paths.root, '.git'), 'not a real git directory', 'utf8')
+
+      // Create two stale sessions AFTER breaking git, so they will be
+      // reflected in the next runMaintenance call with git broken.
+      const staleStore1 = await SessionStore.start(paths, threeDaysAgo)
+      await staleStore1.appendLine({
+        ts: threeDaysAgo.toISOString(),
+        role: 'user',
+        content: 'First stale session.',
+      })
+
+      const staleStore2 = await SessionStore.start(paths, twoDaysAgo)
+      await staleStore2.appendLine({
+        ts: twoDaysAgo.toISOString(),
+        role: 'user',
+        content: 'Second stale session.',
+      })
+
+      // runMaintenance should accumulate warnings from both sessions' commits failing.
+      await engine.runMaintenance(now)
+
+      // Expect at least 2 warnings (one from each session's commit failure).
+      expect(engine.warnings.length).toBeGreaterThanOrEqual(2)
+      const sessionWarnings = engine.warnings.filter((w) => w.includes('git commit failed'))
+      expect(sessionWarnings.length).toBeGreaterThanOrEqual(2)
+
+      await engine.close()
+    })
+
+    it('no-op endSession on an already-reflected session leaves existing warnings unchanged', async () => {
+      const chat = new FakeChatProvider([
+        {
+          text: JSON.stringify(emptyReflectionOutput('Will be reflected once.')),
+          toolCalls: [],
+        },
+      ])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      const startedAt = new Date()
+      const sessionId = await engine.startSession(startedAt)
+      await engine.appendTranscript(sessionId, {
+        ts: startedAt.toISOString(),
+        role: 'user',
+        content: 'A session to reflect.',
+      })
+
+      // First endSession: reflects the session.
+      await engine.endSession(sessionId)
+      expect(engine.warnings).toEqual([])
+
+      // Manually set a warning to verify it persists.
+      engine.warnings.push('Manually added warning')
+      expect(engine.warnings).toEqual(['Manually added warning'])
+
+      // Second endSession: should be a no-op (already reflected) and must
+      // not clear warnings.
+      await engine.endSession(sessionId)
+      expect(engine.warnings).toEqual(['Manually added warning'])
+
+      await engine.close()
+    })
   })
 })
