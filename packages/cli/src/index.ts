@@ -1,6 +1,114 @@
 #!/usr/bin/env node
-// openreverie CLI
-// Terminal chat interface and the `reverie setup` first-run wizard.
-// See docs/superpowers/specs for the design. Implementation has not started yet.
+// reverie CLI entry point.
+//
+// Subcommands: `setup` runs the first-run wizard, `reindex` rebuilds the
+// SQLite index from the memory folder, `reflect` runs maintenance
+// (reflect stale sessions, build pending rollups) on demand, and the
+// default (no subcommand) starts the chat REPL.
+//
+// This file is kept thin: it parses argv, wires real implementations
+// (readline, loadConfig, the provider factory, MemoryEngine.open) into the
+// functions in chat.ts and setup.ts, and prints their results. All the
+// actual logic lives in those files, where it is tested with injected io
+// and fakes instead of the real filesystem, terminal, and network.
 
-console.log('openreverie: not implemented yet. See https://reverie.my and the repo README.')
+import { createInterface } from 'node:readline/promises'
+import type { ReverieConfig } from '@openreverie/core'
+import { loadConfig, resolveApiKey } from '@openreverie/core'
+import { MemoryEngine } from '@openreverie/memory'
+import type { ProviderSelection } from '@openreverie/providers'
+import { createChatProvider, createEmbeddingProvider } from '@openreverie/providers'
+import type { ChatIo } from './chat.js'
+import { countMemoryDocuments, openCliContext, printWarnings, runChat } from './chat.js'
+import { runSetup } from './setup.js'
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+function providerSelection(config: ReverieConfig): ProviderSelection {
+  const apiKey = resolveApiKey(config)
+  return config.provider.baseUrl === undefined
+    ? { provider: config.provider.name, apiKey }
+    : { provider: config.provider.name, apiKey, baseUrl: config.provider.baseUrl }
+}
+
+const stdout = { write: (text: string) => process.stdout.write(text) }
+
+function readlineChatIo(): ChatIo & { close(): void } {
+  const rl = createInterface({ input: process.stdin, output: process.stdout })
+  let onInterrupt: (() => void) | undefined
+  rl.on('SIGINT', () => onInterrupt?.())
+  return {
+    question: (prompt: string) => rl.question(prompt),
+    write: (text: string) => process.stdout.write(text),
+    onInterrupt: (handler: () => void) => {
+      onInterrupt = handler
+    },
+    close: () => rl.close(),
+  }
+}
+
+async function runSetupCommand(): Promise<void> {
+  const rl = createInterface({ input: process.stdin, output: process.stdout })
+  try {
+    await runSetup({
+      question: (prompt: string) => rl.question(prompt),
+      write: (text: string) => process.stdout.write(text),
+    })
+  } finally {
+    rl.close()
+  }
+}
+
+async function main(): Promise<void> {
+  const subcommand = process.argv[2]
+
+  if (subcommand === 'setup') {
+    await runSetupCommand()
+    return
+  }
+
+  const context = await openCliContext({
+    loadConfig: () => loadConfig(),
+    buildChat: (config) => createChatProvider(providerSelection(config)),
+    buildEmbeddings: (config) => createEmbeddingProvider(providerSelection(config)),
+    openEngine: (config, deps) => MemoryEngine.open(config.memoryDir, deps),
+  })
+
+  if (!context.ok) {
+    stdout.write(`${context.message}\n`)
+    process.exitCode = 1
+    return
+  }
+
+  const { engine, config, chat } = context
+  printWarnings(stdout, engine)
+
+  try {
+    if (subcommand === 'reindex') {
+      await engine.reindexAll()
+      printWarnings(stdout, engine)
+      const count = await countMemoryDocuments(config.memoryDir)
+      stdout.write(`Reindexed ${count} documents.\n`)
+    } else if (subcommand === 'reflect') {
+      await engine.runMaintenance()
+      printWarnings(stdout, engine)
+      stdout.write('Reflection is up to date.\n')
+    } else {
+      const io = readlineChatIo()
+      try {
+        await runChat({ engine, config, chat, io })
+      } finally {
+        io.close()
+      }
+    }
+  } finally {
+    await engine.close()
+  }
+}
+
+main().catch((err: unknown) => {
+  stdout.write(`${errorMessage(err)}\n`)
+  process.exitCode = 1
+})
