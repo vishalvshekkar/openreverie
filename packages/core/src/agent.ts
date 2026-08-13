@@ -46,6 +46,13 @@ export class AgentSession {
   private readonly system: string
   private readonly history: SessionMessage[] = []
   private ended = false
+  // Concurrent send() calls are serialized behind this promise chain: the
+  // Nth send() only begins running once the (N-1)th has fully completed
+  // (its generator exhausted or thrown), so two overlapping callers never
+  // race reads/writes of `history` or interleave transcript appends.
+  // end() awaits the same chain so it never reflects a session while a
+  // round is still being written.
+  private sendChain: Promise<void> = Promise.resolve()
 
   private constructor(
     engine: MemoryEngine,
@@ -72,29 +79,63 @@ export class AgentSession {
   }
 
   async *send(userText: string): AsyncIterable<AgentEvent> {
+    if (this.ended) {
+      throw new Error('AgentSession: send() called after end()')
+    }
+    // Queue behind whatever send() is currently running (or resolved,
+    // if none is). Register this call's own gate in the chain before
+    // awaiting anything, so a second, immediately-following send() (or
+    // an end()) sees this one as already queued/in-flight.
+    const previous = this.sendChain
+    let release: () => void = () => {}
+    this.sendChain = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    try {
+      await previous
+      yield* this.runTurn(userText)
+    } finally {
+      release()
+    }
+  }
+
+  private async *runTurn(userText: string): AsyncIterable<AgentEvent> {
     await this.appendBoth({ role: 'user', content: userText })
 
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       let text = ''
       const toolCalls: ToolCall[] = []
 
-      for await (const event of this.chat.stream({
-        model: this.model,
-        system: this.system,
-        // A snapshot, not a live reference: the provider (or a test fake)
-        // may hold onto this array past the call, and history keeps
-        // growing across rounds.
-        messages: [...this.history],
-        tools: toolDefinitions(),
-      })) {
-        if (event.type === 'text') {
-          text += event.text
-          if (event.text.length > 0) {
-            yield { type: 'text', text: event.text }
+      try {
+        for await (const event of this.chat.stream({
+          model: this.model,
+          system: this.system,
+          // A snapshot, not a live reference: the provider (or a test fake)
+          // may hold onto this array past the call, and history keeps
+          // growing across rounds.
+          messages: [...this.history],
+          tools: toolDefinitions(),
+        })) {
+          if (event.type === 'text') {
+            text += event.text
+            if (event.text.length > 0) {
+              yield { type: 'text', text: event.text }
+            }
+          } else if (event.type === 'tool_call') {
+            toolCalls.push(event.toolCall)
           }
-        } else if (event.type === 'tool_call') {
-          toolCalls.push(event.toolCall)
         }
+      } catch (err) {
+        // The provider failed mid-stream. Any text already yielded to the
+        // caller must not vanish from the durable record just because the
+        // round never reached a clean end: append what was accumulated so
+        // far as this round's assistant line before letting the error
+        // propagate. If nothing was streamed yet, there is nothing to
+        // append (matches the "error before any content" case).
+        if (text.length > 0) {
+          await this.appendBoth({ role: 'assistant', content: text })
+        }
+        throw err
       }
 
       if (toolCalls.length === 0) {
@@ -105,13 +146,20 @@ export class AgentSession {
 
       let first = true
       for (const toolCall of toolCalls) {
-        yield { type: 'tool', name: toolCall.name }
+        // Transcript-first discipline applies to the event stream too:
+        // append the assistant tool-call line, THEN yield the 'tool'
+        // event. If the consumer abandons the iterator right after this
+        // yield (break, thrown handler, cancellation), the transcript
+        // already holds a coherent record of the call; dispatch and the
+        // result line simply never happen, rather than the call being
+        // told about but never recorded.
         await this.appendBoth({
           role: 'assistant',
           content: first ? text : '',
           toolCalls: [toolCall],
         })
         first = false
+        yield { type: 'tool', name: toolCall.name }
 
         const result = await dispatchTool(this.engine, this.sessionId, toolCall)
         await this.appendBoth({ role: 'tool', content: result, toolCallId: toolCall.id })
@@ -127,6 +175,10 @@ export class AgentSession {
   async end(): Promise<void> {
     if (this.ended) return
     this.ended = true
+    // Let any in-flight (or queued) send() finish writing its lines
+    // before reflection reads the transcript, so a round in progress is
+    // never silently excluded from reflection.
+    await this.sendChain
     await this.engine.endSession(this.sessionId)
   }
 

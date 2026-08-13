@@ -18,17 +18,35 @@ function hash32(s: string): number {
   return h >>> 0
 }
 
+// A scripted result for FakeChatProvider. The base shape (`text`,
+// `toolCalls`) is exactly ChatResult, so every existing call site that
+// builds these as plain object literals keeps compiling and behaving
+// unchanged. Two optional fields extend it for tests that need to probe
+// streaming behavior a single-shot `text` string cannot express:
+//
+// - `textChunks`: when present, stream() yields one 'text' event per
+//   array entry instead of a single event carrying the whole `text`
+//   string.
+// - `throwAfterTextEvents`: when present, stream() throws immediately
+//   after yielding this many 'text' events, before any tool_call or done
+//   event. Simulates a provider that fails mid-stream after some text has
+//   already reached the caller.
+export interface FakeChatResult extends ChatResult {
+  textChunks?: string[]
+  throwAfterTextEvents?: number
+}
+
 export class FakeChatProvider implements ChatProvider {
   readonly name = 'fake'
   readonly requests: ChatRequest[] = []
-  private readonly scripted: ChatResult[]
+  private readonly scripted: FakeChatResult[]
   private cursor = 0
 
-  constructor(scripted: ChatResult[]) {
+  constructor(scripted: FakeChatResult[]) {
     this.scripted = scripted
   }
 
-  private next(): ChatResult {
+  private next(): FakeChatResult {
     if (this.cursor >= this.scripted.length) {
       throw new Error('FakeChatProvider: scripted results exhausted')
     }
@@ -49,7 +67,15 @@ export class FakeChatProvider implements ChatProvider {
     this.requests.push(req)
     const result = this.next()
     return (async function* generate() {
-      yield { type: 'text', text: result.text }
+      const chunks = result.textChunks ?? [result.text]
+      let emitted = 0
+      for (const chunk of chunks) {
+        yield { type: 'text', text: chunk }
+        emitted += 1
+        if (result.throwAfterTextEvents !== undefined && emitted >= result.throwAfterTextEvents) {
+          throw new Error('FakeChatProvider: scripted mid-stream failure')
+        }
+      }
       for (const toolCall of result.toolCalls) {
         yield { type: 'tool_call', toolCall }
       }

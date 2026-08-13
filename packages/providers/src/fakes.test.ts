@@ -14,6 +14,29 @@ describe('FakeChatProvider', () => {
     expect(events).toEqual(['text', 'tool_call', 'done'])
     expect(fake.requests).toHaveLength(2)
   })
+
+  it('streams scripted textChunks and throws after throwAfterTextEvents', async () => {
+    const fake = new FakeChatProvider([
+      {
+        text: '',
+        toolCalls: [],
+        textChunks: ['abc', 'def', 'ghi'],
+        throwAfterTextEvents: 2,
+      },
+    ])
+    const events: string[] = []
+    const texts: string[] = []
+    await expect(
+      (async () => {
+        for await (const e of fake.stream({ model: 'm', messages: [] })) {
+          events.push(e.type)
+          if (e.type === 'text') texts.push(e.text)
+        }
+      })(),
+    ).rejects.toThrow()
+    expect(events).toEqual(['text', 'text'])
+    expect(texts).toEqual(['abc', 'def'])
+  })
 })
 
 describe('FakeEmbeddingProvider', () => {

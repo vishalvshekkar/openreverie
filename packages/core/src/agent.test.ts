@@ -145,6 +145,126 @@ describe('AgentSession', () => {
     await engine.close()
   })
 
+  it('keeps the transcript coherent when the consumer abandons the iterator right after a tool event', async () => {
+    const chat = new FakeChatProvider([
+      {
+        text: '',
+        toolCalls: [
+          { id: 'call_1', name: 'search_memory', arguments: JSON.stringify({ query: 'kayaking' }) },
+        ],
+      },
+      { text: 'We went kayaking last spring, on the lake near your place.', toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const session = await AgentSession.start(engine, testConfig(), chat)
+
+    for await (const event of session.send('Did we ever go kayaking?')) {
+      if (event.type === 'tool') break
+    }
+
+    const transcript = await engine.readTranscript(session.sessionId)
+    expect(transcript.map((l) => l.role)).toEqual(['user', 'assistant'])
+    expect(transcript[1]).toMatchObject({ role: 'assistant', content: '' })
+    expect(transcript[1]?.toolCalls).toEqual([
+      { id: 'call_1', name: 'search_memory', arguments: JSON.stringify({ query: 'kayaking' }) },
+    ])
+
+    await engine.close()
+  })
+
+  it('serializes concurrent send() calls so their transcripts do not interleave', async () => {
+    const chat = new FakeChatProvider([
+      { text: 'Reply A', toolCalls: [] },
+      { text: 'Reply B', toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const session = await AgentSession.start(engine, testConfig(), chat)
+
+    const [eventsA, eventsB] = await Promise.all([
+      collect(session.send('Message A')),
+      collect(session.send('Message B')),
+    ])
+
+    expect(eventsA).toEqual([{ type: 'text', text: 'Reply A' }, { type: 'done' }])
+    expect(eventsB).toEqual([{ type: 'text', text: 'Reply B' }, { type: 'done' }])
+
+    const transcript = await engine.readTranscript(session.sessionId)
+    expect(transcript.map((l) => l.role)).toEqual(['user', 'assistant', 'user', 'assistant'])
+    expect(transcript[0]).toMatchObject({ role: 'user', content: 'Message A' })
+    expect(transcript[1]).toMatchObject({ role: 'assistant', content: 'Reply A' })
+    expect(transcript[2]).toMatchObject({ role: 'user', content: 'Message B' })
+    expect(transcript[3]).toMatchObject({ role: 'assistant', content: 'Reply B' })
+
+    await engine.close()
+  })
+
+  it('end() waits for an in-flight send() to finish before reflecting', async () => {
+    const chat = new FakeChatProvider([
+      {
+        text: '',
+        toolCalls: [{ id: 'call_1', name: 'list_arcs', arguments: '{}' }],
+      },
+      { text: 'All done here.', toolCalls: [] },
+      { text: JSON.stringify(emptyReflectionOutput('reflected')), toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const session = await AgentSession.start(engine, testConfig(), chat)
+
+    const sendPromise = collect(session.send('Do a thing'))
+    const endPromise = session.end()
+
+    await Promise.all([sendPromise, endPromise])
+
+    const transcript = await engine.readTranscript(session.sessionId)
+    // All of the in-flight send()'s lines (user, assistant tool-call,
+    // tool result, final assistant text) must be on disk. If end() had
+    // reflected before the send finished, this would be missing lines
+    // and the session would be wrongly marked reflected.
+    expect(transcript.map((l) => l.role)).toEqual(['user', 'assistant', 'tool', 'assistant'])
+
+    await engine.close()
+  })
+
+  it('rejects send() called after end() has begun', async () => {
+    const chat = new FakeChatProvider([
+      { text: 'Just checking in, nothing much today.', toolCalls: [] },
+      { text: JSON.stringify(emptyReflectionOutput('A quiet check-in.')), toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const session = await AgentSession.start(engine, testConfig(), chat)
+
+    await collect(session.send('Just checking in.'))
+    await session.end()
+
+    await expect(collect(session.send('too late'))).rejects.toThrow(Error)
+
+    await engine.close()
+  })
+
+  it('preserves partial text on disk when the provider throws mid-stream', async () => {
+    const chat = new FakeChatProvider([
+      {
+        text: '',
+        toolCalls: [],
+        textChunks: ['We went kayak', 'ing last spring.'],
+        throwAfterTextEvents: 2,
+      },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const session = await AgentSession.start(engine, testConfig(), chat)
+
+    await expect(collect(session.send('Tell me about it.'))).rejects.toThrow()
+
+    const transcript = await engine.readTranscript(session.sessionId)
+    expect(transcript.map((l) => l.role)).toEqual(['user', 'assistant'])
+    expect(transcript[1]).toMatchObject({
+      role: 'assistant',
+      content: 'We went kayaking last spring.',
+    })
+
+    await engine.close()
+  })
+
   it('end reflects the session, and a second end is a no-op', async () => {
     const chat = new FakeChatProvider([
       { text: 'Just checking in, nothing much today.', toolCalls: [] },
