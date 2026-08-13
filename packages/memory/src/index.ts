@@ -4,4 +4,9 @@
 // See docs/superpowers/specs for the design.
 
 export * from './documents.js'
+export * from './gitSync.js'
+export * from './graph.js'
 export * from './paths.js'
+export * from './proposals.js'
+export * from './transcripts.js'
+export * from './rollups.js'
