@@ -1,0 +1,21 @@
+{
+  "name": "@openreverie/core",
+  "version": "0.0.0",
+  "description": "The openreverie agent core: conversation loop, context assembly, tool dispatch, and safety mode enforcement.",
+  "homepage": "https://reverie.my",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@openreverie/memory": "workspace:*",
+    "@openreverie/providers": "workspace:*"
+  }
+}

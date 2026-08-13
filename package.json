@@ -1,0 +1,25 @@
+{
+  "name": "openreverie-workspace",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Workspace root for openreverie, a self-hosted companion agent with a memory that does not forget.",
+  "homepage": "https://reverie.my",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@10.8.1",
+  "scripts": {
+    "build": "tsc -b",
+    "test": "vitest run --passWithNoTests",
+    "test:watch": "vitest",
+    "lint": "biome check .",
+    "format": "biome format --write ."
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.1.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  }
+}

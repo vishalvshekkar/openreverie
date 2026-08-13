@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Test and coverage
+coverage/
+
+# Environment and secrets. Never commit keys.
+.env
+.env.*
+
+# Editor and OS noise
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Local user data. A developer's own memory folder must never enter the repo.
+.reverie/
