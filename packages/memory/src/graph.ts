@@ -10,6 +10,7 @@
 // are left dangling and callers skip them when they matter.
 
 import { appendFile, readFile } from 'node:fs/promises'
+import { z } from 'zod'
 import type { MemoryPaths } from './paths.js'
 
 export type NodeType = 'realm' | 'arc' | 'item' | 'session' | 'person' | 'entity'
@@ -36,6 +37,26 @@ export interface EdgeRecord {
 }
 
 export type GraphRecord = NodeRecord | EdgeRecord
+
+const nodeRecordSchema = z.object({
+  ts: z.string(),
+  op: z.enum(['assert', 'retract']),
+  node: z.string(),
+  type: z.enum(['realm', 'arc', 'item', 'session', 'person', 'entity']),
+  label: z.string(),
+  doc: z.string().optional(),
+})
+
+const edgeRecordSchema = z.object({
+  ts: z.string(),
+  op: z.enum(['assert', 'retract']),
+  edge: z.enum(['part_of', 'in', 'from', 'involves', 'relates_to']),
+  from: z.string(),
+  to: z.string(),
+  confidence: z.number().min(0).max(1),
+  source: z.string().optional(),
+  confirmed: z.boolean(),
+})
 
 export interface GraphNode {
   id: string
@@ -133,12 +154,27 @@ export async function readGraph(paths: MemoryPaths): Promise<GraphState> {
     if (line === undefined || line.trim() === '') {
       continue
     }
+    let parsed: unknown
     try {
-      records.push(JSON.parse(line) as GraphRecord)
+      parsed = JSON.parse(line)
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       throw new Error(`Graph log ${paths.graphLog} line ${i + 1} is not valid JSON: ${message}`)
     }
+
+    const nodeValidation = nodeRecordSchema.safeParse(parsed)
+    if (nodeValidation.success) {
+      records.push(nodeValidation.data as NodeRecord)
+      continue
+    }
+
+    const edgeValidation = edgeRecordSchema.safeParse(parsed)
+    if (edgeValidation.success) {
+      records.push(edgeValidation.data as EdgeRecord)
+      continue
+    }
+
+    throw new Error(`Graph log ${paths.graphLog} line ${i + 1}: ${edgeValidation.error.message}`)
   }
 
   return foldGraph(records)

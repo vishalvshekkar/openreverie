@@ -237,4 +237,37 @@ describe('appendGraph and readGraph', () => {
 
     await expect(readGraph(paths)).rejects.toThrow(/line 2/)
   })
+
+  it('throws with line number when a valid JSON line has invalid op value', async () => {
+    const paths = memoryPaths(dir)
+    await ensureMemoryTree(paths)
+
+    const line1 = JSON.stringify({
+      ts: '2026-08-01T00:00:00Z',
+      op: 'sideways',
+      node: 'realm_1',
+      type: 'realm',
+      label: 'Work',
+    })
+    await writeFile(paths.graphLog, `${line1}\n`, 'utf8')
+
+    await expect(readGraph(paths)).rejects.toThrow(/line 1/)
+  })
+
+  it('throws with line number when a valid JSON edge line is missing the "to" field', async () => {
+    const paths = memoryPaths(dir)
+    await ensureMemoryTree(paths)
+
+    const line1 = JSON.stringify({
+      ts: '2026-08-01T00:00:00Z',
+      op: 'assert',
+      edge: 'in',
+      from: 'item_1',
+      confidence: 0.5,
+      confirmed: false,
+    })
+    await writeFile(paths.graphLog, `${line1}\n`, 'utf8')
+
+    await expect(readGraph(paths)).rejects.toThrow(/line 1/)
+  })
 })
