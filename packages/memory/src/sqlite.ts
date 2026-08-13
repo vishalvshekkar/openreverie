@@ -159,6 +159,47 @@ export class MemoryIndex {
     run()
   }
 
+  // True full-rebuild wipe: clears every document, chunk, embedding, and
+  // FTS row in one transaction, leaving the schema intact and ready for a
+  // fresh set of upsertDocument calls to rebuild from. Nodes and edges
+  // (folded from graph.jsonl via replaceGraph) are untouched; this only
+  // covers the prose/document side of the index.
+  wipeAllDocuments(): void {
+    const run = this.db.transaction(() => {
+      this.db.exec('DELETE FROM embeddings;')
+      this.db.exec('DELETE FROM chunks;')
+      this.db.exec('DELETE FROM documents;')
+      // chunks_fts is an external-content FTS5 table (content='chunks'):
+      // deleting the underlying chunks rows directly does not update its
+      // shadow tables on its own, so 'rebuild' resyncs it against the
+      // now-empty chunks table instead of leaving stale FTS entries
+      // behind.
+      this.db.exec("INSERT INTO chunks_fts(chunks_fts) VALUES ('rebuild')")
+    })
+    run()
+  }
+
+  // Path collision self-heal: removes any row whose path matches `path`
+  // but whose id is not `keepId`. Callers use this immediately before
+  // indexing the current, authoritative document at that path, so any
+  // other row still sitting at the same path is necessarily stale (e.g. a
+  // previous doc id superseded when a file like summary.md is rewritten
+  // with a freshly minted id on every reflection). Deliberately keyed on
+  // path rather than id, since documents are otherwise looked up by id
+  // only, which is exactly what lets a stale id linger unnoticed.
+  removeDocumentsAtPath(path: string, keepId: string): void {
+    const run = this.db.transaction(() => {
+      const staleRows = this.db
+        .prepare('SELECT id FROM documents WHERE path = ? AND id != ?')
+        .all(path, keepId) as { id: string }[]
+      for (const stale of staleRows) {
+        this.deleteChunksForDoc(stale.id)
+        this.db.prepare('DELETE FROM documents WHERE id = ?').run(stale.id)
+      }
+    })
+    run()
+  }
+
   removeDocument(docId: string): void {
     const run = this.db.transaction(() => {
       this.deleteChunksForDoc(docId)

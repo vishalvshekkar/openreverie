@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -446,6 +446,215 @@ describe('MemoryEngine', () => {
 
       const arcDocs = await listDocuments(paths.arcsDir)
       expect(arcDocs.some((d) => d.meta.name === 'Ghost Arc')).toBe(false)
+    })
+  })
+
+  describe('endSession idempotency', () => {
+    let dir: string
+    let paths: MemoryPaths
+
+    beforeEach(async () => {
+      dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-idempotent-'))
+      paths = memoryPaths(dir)
+      await ensureMemoryTree(paths)
+    })
+
+    afterEach(async () => {
+      await rm(dir, { recursive: true, force: true })
+    })
+
+    it('calling endSession twice on the same session reflects only once: one summary row, one reflection call, no duplicate search hits', async () => {
+      const chat = new FakeChatProvider([
+        {
+          text: JSON.stringify(emptyReflectionOutput('Only one reflection should ever happen.')),
+          toolCalls: [],
+        },
+      ])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      const startedAt = new Date()
+      const sessionId = await engine.startSession(startedAt)
+      await engine.appendTranscript(sessionId, {
+        ts: startedAt.toISOString(),
+        role: 'user',
+        content: 'A short session about a first item.',
+      })
+
+      await engine.endSession(sessionId)
+      await engine.endSession(sessionId)
+
+      expect(chat.requests).toHaveLength(1)
+
+      // Query by path (not just kind), so a ghost row for the same
+      // physical summary.md under a stale, different doc id would be
+      // caught even if it happened to be outranked in the fused results.
+      const summaryPath = join(
+        paths.sessionsDir,
+        `${isoDate(startedAt)}-${sessionId}`,
+        'summary.md',
+      )
+      const hits = await engine.search('reflection')
+      const summaryHits = hits.filter((h) => h.path === summaryPath)
+      expect(summaryHits).toHaveLength(1)
+
+      await engine.close()
+    })
+
+    it('endSession on an unknown sessionId returns without any side effects', async () => {
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      await expect(engine.endSession('session_does_not_exist')).resolves.toBeUndefined()
+      expect(chat.requests).toHaveLength(0)
+
+      await engine.close()
+    })
+  })
+
+  describe('reindexAll true full rebuild', () => {
+    let dir: string
+    let paths: MemoryPaths
+
+    beforeEach(async () => {
+      dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-reindex-'))
+      paths = memoryPaths(dir)
+      await ensureMemoryTree(paths)
+    })
+
+    afterEach(async () => {
+      await rm(dir, { recursive: true, force: true })
+    })
+
+    it('drops rows for documents whose source file was deleted, not just upserts current ones', async () => {
+      const tempRealmDocId = newId('doc')
+      const tempRealmPath = join(paths.realmsDir, 'temp-realm.md')
+      await writeDocumentAtomic({
+        path: tempRealmPath,
+        meta: { id: tempRealmDocId, name: 'Temp Realm' },
+        body: 'A realm about kayaking expeditions.\n',
+      })
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      await engine.reindexAll()
+
+      const hitsBeforeDelete = await engine.search('kayaking')
+      expect(hitsBeforeDelete.some((h) => h.docId === tempRealmDocId)).toBe(true)
+
+      await rm(tempRealmPath)
+      await engine.reindexAll()
+
+      // The orphaned row for the deleted file must be gone, not just
+      // out-ranked: a vector-search fallback can still surface unrelated
+      // documents for any query, so absence of the specific docId is the
+      // correct assertion, not an empty result set.
+      const hitsAfterDelete = await engine.search('kayaking')
+      expect(hitsAfterDelete.some((h) => h.docId === tempRealmDocId)).toBe(false)
+
+      await engine.close()
+    })
+  })
+
+  describe('sessionContext', () => {
+    let dir: string
+    let paths: MemoryPaths
+
+    beforeEach(async () => {
+      dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-context-'))
+      paths = memoryPaths(dir)
+      await ensureMemoryTree(paths)
+    })
+
+    afterEach(async () => {
+      await rm(dir, { recursive: true, force: true })
+    })
+
+    it('includes only active arcs, alongside the constitution text and pending proposals', async () => {
+      const activeArcId = 'arc_active'
+      const dormantArcId = 'arc_dormant'
+      const activeArcPath = join(paths.arcsDir, 'active-arc.md')
+      const dormantArcPath = join(paths.arcsDir, 'dormant-arc.md')
+      await writeDocumentAtomic({
+        path: activeArcPath,
+        meta: { id: newId('doc'), name: 'Active Arc', status: 'active' },
+        body: 'Still going.\n',
+      })
+      await writeDocumentAtomic({
+        path: dormantArcPath,
+        meta: { id: newId('doc'), name: 'Dormant Arc', status: 'dormant' },
+        body: 'On pause.\n',
+      })
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: activeArcId,
+          type: 'arc',
+          label: 'Active Arc',
+          doc: activeArcPath,
+        },
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: dormantArcId,
+          type: 'arc',
+          label: 'Dormant Arc',
+          doc: dormantArcPath,
+        },
+      ])
+
+      const proposal: Proposal = {
+        id: newId('prop'),
+        ts: new Date().toISOString(),
+        kind: 'link',
+        summary: 'Pending link proposal for the context test.',
+        payload: { edge: 'part_of', from: newId('item'), to: activeArcId, confidence: 0.5 },
+        source: 'session_seed',
+      }
+      await appendProposals(paths, [proposal])
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+
+      const context = await engine.sessionContext()
+
+      expect(context.arcs.map((a) => a.id)).toEqual([activeArcId])
+      expect(context.arcs[0]?.status).toBe('active')
+      expect(context.constitution.length).toBeGreaterThan(0)
+      expect(context.pendingProposals.map((p) => p.id)).toContain(proposal.id)
+
+      await engine.close()
+    })
+  })
+
+  describe('warnings', () => {
+    let dir: string
+    let paths: MemoryPaths
+
+    beforeEach(async () => {
+      dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-warnings-'))
+      paths = memoryPaths(dir)
+      await ensureMemoryTree(paths)
+    })
+
+    afterEach(async () => {
+      await rm(dir, { recursive: true, force: true })
+    })
+
+    it('surfaces a commitMemory failure as a warning after runMaintenance instead of swallowing it silently', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      expect(engine.warnings).toEqual([])
+
+      // Break git so every future commitMemory call fails: replace the
+      // .git directory with a plain file, which makes `git init` itself
+      // refuse to run on the next commit attempt.
+      await rm(join(paths.root, '.git'), { recursive: true, force: true })
+      await writeFile(join(paths.root, '.git'), 'not a real git directory', 'utf8')
+
+      await engine.runMaintenance()
+
+      expect(engine.warnings.length).toBeGreaterThan(0)
+      expect(engine.warnings.some((w) => w.includes('git commit failed'))).toBe(true)
+
+      await engine.close()
     })
   })
 })

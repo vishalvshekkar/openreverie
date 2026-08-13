@@ -86,6 +86,7 @@ export class MemoryEngine {
   private graphState: GraphState
   private docPaths = new Map<string, string>()
   private readonly liveItems = new Map<string, ReflectionItem[]>()
+  readonly warnings: string[] = []
 
   private constructor(
     paths: MemoryPaths,
@@ -106,6 +107,7 @@ export class MemoryEngine {
     const graphState = await readGraph(paths)
     index.replaceGraph(graphState)
     const engine = new MemoryEngine(paths, deps, index, graphState)
+    engine.clearWarnings()
     await engine.refreshDocPaths()
     await engine.runMaintenance()
     return engine
@@ -141,6 +143,19 @@ export class MemoryEngine {
   }
 
   async endSession(sessionId: string): Promise<void> {
+    this.clearWarnings()
+
+    // Idempotency guard: a session whose directory already has a
+    // summary.md is already reflected, and an unrecognized sessionId has
+    // nothing to reflect. Either way, return without any side effects
+    // instead of minting a second summary.md (with a fresh doc id) and
+    // leaving the old, undeleted row behind it in the index forever.
+    const sessions = await SessionStore.listSessions(this.paths)
+    const session = sessions.find((s) => s.sessionId === sessionId)
+    if (!session || session.reflected) {
+      return
+    }
+
     const now = new Date()
     const transcript = await SessionStore.readTranscript(this.paths, sessionId)
     const context = await this.buildReflectionContext()
@@ -170,19 +185,30 @@ export class MemoryEngine {
     this.liveItems.delete(sessionId)
 
     await this.syncGraph()
-    await this.reindexDocument(result.summaryDoc, 'summary')
+    await this.reindexOrWarn(result.summaryDoc, 'summary', `session ${sessionId} summary`)
 
     if (out.constitutionUpdate !== null) {
-      await this.reindexDocument(await readDocument(this.paths.constitution), 'constitution')
+      await this.reindexOrWarn(
+        await readDocument(this.paths.constitution),
+        'constitution',
+        `session ${sessionId} constitution update`,
+      )
     }
     for (const narrative of out.arcNarratives) {
       const arcNode = this.graphState.nodes.get(narrative.arcId)
       if (arcNode?.type === 'arc' && arcNode.doc) {
-        await this.reindexDocument(await readDocument(arcNode.doc), 'arc')
+        await this.reindexOrWarn(
+          await readDocument(arcNode.doc),
+          'arc',
+          `session ${sessionId} arc narrative for ${narrative.arcId}`,
+        )
       }
     }
 
-    await commitMemory(this.paths.root, `reflect: session ${sessionId}`)
+    const commitResult = await commitMemory(this.paths.root, `reflect: session ${sessionId}`)
+    if (!commitResult.ok && commitResult.warning) {
+      this.warnings.push(commitResult.warning)
+    }
   }
 
   async sessionContext(now: Date = new Date()): Promise<SessionContext> {
@@ -203,6 +229,10 @@ export class MemoryEngine {
           // back to defaults rather than failing the whole context build.
         }
       }
+      // Ruling 3: sessionContext only carries active arcs into the
+      // assembled context; dormant and closed arcs never age out of
+      // graphState on their own, so they must be filtered here instead.
+      if (status !== 'active') continue
       arcs.push({ id: node.id, name: node.label, status, ...(lastTouched ? { lastTouched } : {}) })
     }
 
@@ -315,6 +345,8 @@ export class MemoryEngine {
   }
 
   async runMaintenance(now: Date = new Date()): Promise<void> {
+    this.clearWarnings()
+
     // Reflect stale sessions first: pendingDailyRollups only looks at
     // whether a date has sessions, not whether they are reflected, and
     // buildDailyRollup throws for a date with no reflected session.
@@ -324,8 +356,10 @@ export class MemoryEngine {
       try {
         await this.endSession(session.sessionId)
       } catch {
-        // Reflection failed again; the session stays unreflected in its
-        // frontmatter (no summary.md) and is retried on the next pass.
+        // reflectSession/applyReflection failed before summary.md was
+        // written (endSession's own reindex and commit steps no longer
+        // throw; see reindexOrWarn below), so the session stays
+        // unreflected in its frontmatter and is retried on the next pass.
         // The transcript itself is never at risk.
       }
     }
@@ -342,9 +376,16 @@ export class MemoryEngine {
           { chat: this.deps.chat, model: this.deps.reflectionModel, paths: this.paths },
           date,
         )
-        await this.reindexDocument(doc, 'rollup_daily')
+        // The rollup file is already durably written on disk at this
+        // point, so pendingDailyRollups will not consider this date
+        // pending again on the next pass. A reindex failure here is
+        // therefore not automatically retried; it is recoverable via
+        // reindexAll(), and is surfaced as a warning instead of thrown.
+        await this.reindexOrWarn(doc, 'rollup_daily', `daily rollup ${date}`)
       } catch {
-        // Provider failure or similar; the date is still pending next time.
+        // buildDailyRollup itself failed (provider error or similar)
+        // before anything was written to disk, so the date is genuinely
+        // still pending and will be retried on the next pass.
       }
     }
 
@@ -357,20 +398,35 @@ export class MemoryEngine {
           { chat: this.deps.chat, model: this.deps.reflectionModel, paths: this.paths },
           week,
         )
-        await this.reindexDocument(doc, 'rollup_weekly')
+        // Same reasoning as the daily rollup above: the file is already
+        // written, so a reindex failure here is durable-but-unsearchable,
+        // not automatically retried, and only surfaced as a warning.
+        await this.reindexOrWarn(doc, 'rollup_weekly', `weekly rollup ${week}`)
       } catch {
-        // Same as above: retried next pass.
+        // buildWeeklyRollup itself failed before writing; the week is
+        // still pending and retried on the next pass.
       }
     }
 
-    await commitMemory(
+    const commitResult = await commitMemory(
       this.paths.root,
       'maintenance: reflect stale sessions and build pending rollups',
     )
+    if (!commitResult.ok && commitResult.warning) {
+      this.warnings.push(commitResult.warning)
+    }
   }
 
   async reindexAll(): Promise<void> {
     const docs = await this.walkAllDocuments()
+    // True full rebuild: wipe every document/chunk/fts/embedding row
+    // before reinserting from the current folder walk. A plain
+    // upsert-per-current-id pass never removes ids that no longer appear
+    // on disk (a deleted source file, or a stale id left behind by a
+    // superseded document at the same path), so it leaves orphaned rows
+    // behind. Wiping first makes reindexAll() an actual repair tool
+    // rather than something that only works after deleting index.db.
+    this.index.wipeAllDocuments()
     const embed = (texts: string[]) => this.deps.embeddings.embed(this.deps.embeddingModel, texts)
     for (const { doc, kind } of docs) {
       await this.index.upsertDocument(doc, kind, embed)
@@ -394,9 +450,37 @@ export class MemoryEngine {
   }
 
   private async reindexDocument(doc: Document, kind: DocKind): Promise<void> {
+    // Ruling 2: this call is always the authoritative write for whatever
+    // document currently lives at doc.path, so any other row still
+    // sitting at that path is stale (e.g. a superseded doc id from a
+    // previous summary.md rewrite) and self-heals here before indexing
+    // the current one.
+    this.index.removeDocumentsAtPath(doc.path, doc.meta.id)
     const embed = (texts: string[]) => this.deps.embeddings.embed(this.deps.embeddingModel, texts)
     await this.index.upsertDocument(doc, kind, embed)
     this.docPaths.set(doc.meta.id, doc.path)
+  }
+
+  // Ruling 4: reindex failures inside endSession/runMaintenance must not
+  // throw out of those methods. The document behind `doc` is already
+  // durably written to disk by the time this runs; a failure here only
+  // means it is missing from search until someone runs reindexAll(). It
+  // is not automatically retried, so the failure is recorded as a
+  // warning instead of being silently dropped or left to crash the
+  // caller.
+  private async reindexOrWarn(doc: Document, kind: DocKind, description: string): Promise<void> {
+    try {
+      await this.reindexDocument(doc, kind)
+    } catch (err) {
+      this.warnings.push(
+        `Failed to index ${description} (${doc.path}): ${errorMessage(err)}. ` +
+          'Content is durably written but missing from search until reindexAll() runs; it is not automatically retried.',
+      )
+    }
+  }
+
+  private clearWarnings(): void {
+    this.warnings.length = 0
   }
 
   private async refreshDocPaths(): Promise<void> {
@@ -582,6 +666,10 @@ function isDegraded(
   result: ReflectionOutput | { summary: string; degraded: true },
 ): result is { summary: string; degraded: true } {
   return 'degraded' in result && result.degraded === true
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
 }
 
 function stringMeta(docs: Document[], key: string): string[] {

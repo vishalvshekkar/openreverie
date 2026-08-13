@@ -196,6 +196,73 @@ describe('MemoryIndex', () => {
     })
   })
 
+  describe('removeDocumentsAtPath', () => {
+    it('deletes any other row at the same path, keeping only the given id, so a path collision self-heals', async () => {
+      const path = '/memory/realms/collide.md'
+      await index.upsertDocument(
+        doc({
+          meta: { id: 'realm_stale' },
+          path,
+          body: 'Collision term appears in the stale doc.',
+        }),
+        'realm',
+        embedFn(),
+      )
+      await index.upsertDocument(
+        doc({
+          meta: { id: 'realm_fresh' },
+          path,
+          body: 'Collision term appears in the fresh doc.',
+        }),
+        'realm',
+        embedFn(),
+      )
+      // upsertDocument alone is keyed by id, not path: both rows coexist
+      // until something explicitly reconciles the path.
+      expect(
+        index
+          .searchText('collision', 10)
+          .map((h) => h.docId)
+          .sort(),
+      ).toEqual(['realm_fresh', 'realm_stale'])
+
+      index.removeDocumentsAtPath(path, 'realm_fresh')
+
+      const hits = index.searchText('collision', 10)
+      expect(hits.length).toBe(1)
+      expect(hits.map((h) => h.docId)).toEqual(['realm_fresh'])
+    })
+
+    it('does nothing when the given id is the only row at the path', async () => {
+      await index.upsertDocument(doc(), 'realm', embedFn())
+
+      index.removeDocumentsAtPath('/memory/realms/work.md', 'realm_1')
+
+      expect(index.searchText('work', 10).length).toBe(1)
+    })
+  })
+
+  describe('wipeAllDocuments', () => {
+    it('clears documents, chunks, chunks_fts, and embeddings, leaving the index empty but usable', async () => {
+      await index.upsertDocument(doc(), 'realm', embedFn())
+      expect(index.searchText('work', 10).length).toBe(1)
+
+      index.wipeAllDocuments()
+
+      expect(index.searchText('work', 10)).toEqual([])
+
+      const provider = new FakeEmbeddingProvider()
+      const [queryVec] = await provider.embed('fake-model', ['work'])
+      if (!queryVec) throw new Error('expected a query vector')
+      expect(await index.searchVector(queryVec, 5)).toEqual([])
+
+      // The index must still be usable after a wipe: the manual
+      // chunks_fts 'rebuild' sync must not have broken future upserts.
+      await index.upsertDocument(doc(), 'realm', embedFn())
+      expect(index.searchText('work', 10).length).toBe(1)
+    })
+  })
+
   describe('searchVector', () => {
     it('ranks an exact-text vector match above unrelated documents', async () => {
       const provider = new FakeEmbeddingProvider()
