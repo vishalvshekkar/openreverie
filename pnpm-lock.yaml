@@ -26,6 +26,12 @@ importers:
       '@openreverie/core':
         specifier: workspace:*
         version: link:../core
+      '@openreverie/memory':
+        specifier: workspace:*
+        version: link:../memory
+      '@openreverie/providers':
+        specifier: workspace:*
+        version: link:../providers
 
   packages/core:
     dependencies:
