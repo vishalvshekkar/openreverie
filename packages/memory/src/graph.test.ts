@@ -270,4 +270,43 @@ describe('appendGraph and readGraph', () => {
 
     await expect(readGraph(paths)).rejects.toThrow(/line 1/)
   })
+
+  it('throws and writes nothing when appending a record with confidence out of the 0-1 range', async () => {
+    const paths = memoryPaths(dir)
+    await ensureMemoryTree(paths)
+
+    const badRecords: GraphRecord[] = [
+      {
+        ts: '2026-08-01T00:00:00Z',
+        op: 'assert',
+        edge: 'in',
+        from: 'item_1',
+        to: 'realm_1',
+        confidence: 1.5,
+        confirmed: false,
+      },
+    ]
+
+    await expect(appendGraph(paths, badRecords)).rejects.toThrow(/index 0/)
+
+    const state = await readGraph(paths)
+    expect(state.edges.size).toBe(0)
+  })
+
+  it('throws and writes nothing when appending a record matching neither node nor edge shape', async () => {
+    const paths = memoryPaths(dir)
+    await ensureMemoryTree(paths)
+
+    const wrongShape = {
+      ts: '2026-08-01T00:00:00Z',
+      op: 'assert',
+      foo: 'bar',
+    } as unknown as GraphRecord
+
+    await expect(appendGraph(paths, [wrongShape])).rejects.toThrow(/index 0/)
+
+    const state = await readGraph(paths)
+    expect(state.nodes.size).toBe(0)
+    expect(state.edges.size).toBe(0)
+  })
 })

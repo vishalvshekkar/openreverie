@@ -38,7 +38,10 @@ export interface EdgeRecord {
 
 export type GraphRecord = NodeRecord | EdgeRecord
 
-const nodeRecordSchema = z.object({
+// Exported so callers that need to validate a record shape independently of
+// appendGraph/readGraph (e.g. reflection.ts, or tests) can reuse the exact
+// rules the graph log enforces, instead of re-deriving them.
+export const nodeRecordSchema = z.object({
   ts: z.string(),
   op: z.enum(['assert', 'retract']),
   node: z.string(),
@@ -47,7 +50,7 @@ const nodeRecordSchema = z.object({
   doc: z.string().optional(),
 })
 
-const edgeRecordSchema = z.object({
+export const edgeRecordSchema = z.object({
   ts: z.string(),
   op: z.enum(['assert', 'retract']),
   edge: z.enum(['part_of', 'in', 'from', 'involves', 'relates_to']),
@@ -128,9 +131,38 @@ export function foldGraph(records: GraphRecord[]): GraphState {
   return { nodes, edges }
 }
 
+interface RecordValidation {
+  success: boolean
+  data?: GraphRecord
+  error?: string
+}
+
+// Shared shape check for both the write path (appendGraph) and the read
+// path (readGraph), so a record that would fail to parse back off disk can
+// never be appended in the first place.
+function parseGraphRecord(parsed: unknown): RecordValidation {
+  const nodeValidation = nodeRecordSchema.safeParse(parsed)
+  if (nodeValidation.success) {
+    return { success: true, data: nodeValidation.data as NodeRecord }
+  }
+
+  const edgeValidation = edgeRecordSchema.safeParse(parsed)
+  if (edgeValidation.success) {
+    return { success: true, data: edgeValidation.data as EdgeRecord }
+  }
+
+  return { success: false, error: edgeValidation.error.message }
+}
+
 export async function appendGraph(paths: MemoryPaths, records: GraphRecord[]): Promise<void> {
   if (records.length === 0) {
     return
+  }
+  for (let i = 0; i < records.length; i++) {
+    const validation = parseGraphRecord(records[i])
+    if (!validation.success) {
+      throw new Error(`Cannot append graph record at index ${i}: ${validation.error}`)
+    }
   }
   const lines = records.map((record) => `${JSON.stringify(record)}\n`).join('')
   await appendFile(paths.graphLog, lines, 'utf8')
@@ -162,19 +194,11 @@ export async function readGraph(paths: MemoryPaths): Promise<GraphState> {
       throw new Error(`Graph log ${paths.graphLog} line ${i + 1} is not valid JSON: ${message}`)
     }
 
-    const nodeValidation = nodeRecordSchema.safeParse(parsed)
-    if (nodeValidation.success) {
-      records.push(nodeValidation.data as NodeRecord)
-      continue
+    const validation = parseGraphRecord(parsed)
+    if (!validation.success || !validation.data) {
+      throw new Error(`Graph log ${paths.graphLog} line ${i + 1}: ${validation.error}`)
     }
-
-    const edgeValidation = edgeRecordSchema.safeParse(parsed)
-    if (edgeValidation.success) {
-      records.push(edgeValidation.data as EdgeRecord)
-      continue
-    }
-
-    throw new Error(`Graph log ${paths.graphLog} line ${i + 1}: ${edgeValidation.error.message}`)
+    records.push(validation.data)
   }
 
   return foldGraph(records)

@@ -13,7 +13,13 @@ import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { ChatProvider } from '@openreverie/providers'
 import { z } from 'zod'
-import { type Document, newId, readDocument, writeDocumentAtomic } from './documents.js'
+import {
+  type Document,
+  type DocumentMeta,
+  newId,
+  readDocument,
+  writeDocumentAtomic,
+} from './documents.js'
 import {
   appendGraph,
   type GraphNode,
@@ -58,7 +64,7 @@ export const reflectionOutputSchema: z.ZodType<ReflectionOutput> = z.object({
   summary: z.string(),
   items: z.array(z.object({ text: z.string(), kind: reflectionItemKindSchema })),
   attributions: z.array(
-    z.object({ itemIndex: z.number(), arcId: z.string(), confidence: z.number() }),
+    z.object({ itemIndex: z.number(), arcId: z.string(), confidence: z.number().min(0).max(1) }),
   ),
   newArcs: z.array(
     z.object({
@@ -233,7 +239,15 @@ function newPersonProposalSummary(name: string): string {
 
 function resolveItemIds(indexes: number[], mintedItems: ReflectionItem[]): string[] {
   const ids: string[] = []
+  const seen = new Set<number>()
   for (const index of indexes) {
+    if (seen.has(index)) {
+      continue
+    }
+    seen.add(index)
+    if (index < 0 || index >= mintedItems.length) {
+      continue
+    }
     const item = mintedItems[index]
     if (item) {
       ids.push(item.id)
@@ -242,36 +256,42 @@ function resolveItemIds(indexes: number[], mintedItems: ReflectionItem[]): strin
   return ids
 }
 
+interface PendingWrite {
+  path: string
+  meta: DocumentMeta
+  body: string
+}
+
 export async function applyReflection(
   paths: MemoryPaths,
   out: ReflectionOutput,
   sessionId: string,
   liveItems: ReflectionItem[],
   now: Date,
-): Promise<{ summaryDoc: Document; autoAsserted: number; proposals: Proposal[] }> {
+): Promise<{
+  summaryDoc: Document
+  autoAsserted: number
+  proposals: Proposal[]
+  droppedProposals: number
+  skippedNarratives: number
+}> {
   const nowIso = now.toISOString()
+
+  // Phase 1: validation and minting only, no filesystem writes. Every id is
+  // minted and every proposal/graph record is fully decided in memory before
+  // anything touches disk, so a bad input never leaves partial state behind.
   const mintedItems = mintItems(out.items, now)
   const mergedItems = mergeLiveItems(mintedItems, liveItems)
 
   const { dir, date } = await findSessionDir(paths, sessionId)
   const summaryPath = join(dir, 'summary.md')
-  await writeDocumentAtomic({
-    path: summaryPath,
-    meta: {
-      id: newId('doc'),
-      kind: 'summary',
-      session: sessionId,
-      date,
-      items: mergedItems,
-    },
-    body: out.summary,
-  })
-  const summaryDoc = await readDocument(summaryPath)
 
   const graphState = await readGraph(paths)
   const graphRecords: GraphRecord[] = []
   const proposals: Proposal[] = []
   let autoAsserted = 0
+  let droppedProposals = 0
+  let skippedNarratives = 0
 
   for (const item of mergedItems) {
     graphRecords.push({
@@ -298,7 +318,8 @@ export async function applyReflection(
     if (!item) {
       continue
     }
-    const arcExists = graphState.nodes.has(attribution.arcId)
+    const arcNode = graphState.nodes.get(attribution.arcId)
+    const arcExists = arcNode?.type === 'arc'
     if (attribution.confidence >= CONFIDENCE_THRESHOLD && arcExists) {
       graphRecords.push({
         ts: nowIso,
@@ -311,6 +332,10 @@ export async function applyReflection(
       })
       autoAsserted += 1
     } else {
+      // Unknown id or an id that resolves to a non-arc node (e.g. a realm)
+      // both fall through here: neither is a valid part_of target, so both
+      // become a link proposal for a human to confirm instead of a
+      // structurally invalid edge in the permanent graph log.
       proposals.push({
         id: newId('prop'),
         ts: nowIso,
@@ -328,58 +353,96 @@ export async function applyReflection(
   }
 
   for (const arc of out.newArcs) {
+    const itemIds = resolveItemIds(arc.itemIndexes, mintedItems)
+    if (itemIds.length === 0) {
+      droppedProposals += 1
+      continue
+    }
     proposals.push({
       id: newId('prop'),
       ts: nowIso,
       kind: 'new_arc',
       summary: newArcProposalSummary(arc.name, arc.realm),
-      payload: {
-        name: arc.name,
-        realm: arc.realm,
-        itemIds: resolveItemIds(arc.itemIndexes, mintedItems),
-      },
+      payload: { name: arc.name, realm: arc.realm, itemIds },
       source: sessionId,
     })
   }
 
   for (const person of out.newPersons) {
+    const itemIds = resolveItemIds(person.itemIndexes, mintedItems)
+    if (itemIds.length === 0) {
+      droppedProposals += 1
+      continue
+    }
     proposals.push({
       id: newId('prop'),
       ts: nowIso,
       kind: 'new_person',
       summary: newPersonProposalSummary(person.name),
-      payload: {
-        name: person.name,
-        itemIds: resolveItemIds(person.itemIndexes, mintedItems),
-      },
+      payload: { name: person.name, itemIds },
       source: sessionId,
     })
   }
 
-  await appendGraph(paths, graphRecords)
-  await appendProposals(paths, proposals)
-
+  const narrativeWrites: PendingWrite[] = []
   for (const narrative of out.arcNarratives) {
     const arcNode = graphState.nodes.get(narrative.arcId)
-    if (!arcNode?.doc) {
+    if (arcNode?.type !== 'arc' || !arcNode.doc) {
+      skippedNarratives += 1
       continue
     }
     const arcDoc = await readDocument(arcNode.doc)
-    await writeDocumentAtomic({
+    narrativeWrites.push({
       path: arcDoc.path,
       meta: { ...arcDoc.meta, updated: nowIso },
       body: narrative.narrative,
     })
   }
 
+  let constitutionWrite: PendingWrite | null = null
   if (out.constitutionUpdate !== null) {
     const constitutionDoc = await readDocument(paths.constitution)
-    await writeDocumentAtomic({
+    constitutionWrite = {
       path: constitutionDoc.path,
       meta: { ...constitutionDoc.meta, updated: nowIso },
       body: out.constitutionUpdate,
-    })
+    }
   }
 
-  return { summaryDoc, autoAsserted, proposals }
+  // Phase 2: side effects, ordered so summary.md is written last. Its
+  // presence is what flips a session from unreflected to reflected
+  // (SessionStore reads it that way), so it doubles as the commit marker
+  // for this whole function. If anything below throws before that final
+  // write, the session still has no summary.md and is retried in full on
+  // the next pass. A retry after a partial graph append can mint a few
+  // duplicate item nodes; that is visible in the graph and harmless.
+  // Writing summary.md first would be worse: a crash after it would
+  // permanently mark the session reflected while silently dropping graph
+  // edges, proposals, and document rewrites, with nothing left to notice
+  // the loss or retry it.
+  await appendGraph(paths, graphRecords)
+  await appendProposals(paths, proposals)
+
+  for (const write of narrativeWrites) {
+    await writeDocumentAtomic(write)
+  }
+
+  if (constitutionWrite) {
+    await writeDocumentAtomic(constitutionWrite)
+  }
+
+  await writeDocumentAtomic({
+    path: summaryPath,
+    meta: {
+      id: newId('doc'),
+      kind: 'summary',
+      session: sessionId,
+      date,
+      items: mergedItems,
+    },
+    body: out.summary,
+  })
+  const summaryDoc = await readDocument(summaryPath)
+
+  return { summaryDoc, autoAsserted, proposals, droppedProposals, skippedNarratives }
 }

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FakeChatProvider } from '@openreverie/providers'
@@ -138,6 +138,30 @@ describe('reflection', () => {
       const retryPrompt = chat.requests[1]?.messages[0]?.content ?? ''
       expect(retryPrompt).toContain('failed validation')
       expect(retryPrompt).toContain('summary')
+    })
+
+    it('retries once when confidence is outside the valid 0-1 range', async () => {
+      const badOut = {
+        ...emptyReflectionOutput('Bad confidence scale.'),
+        items: [{ text: 'Went for a run', kind: 'event' }],
+        attributions: [{ itemIndex: 0, arcId: 'arc_health', confidence: 1.5 }],
+      }
+      const goodOut = emptyReflectionOutput('Recovered with a valid confidence.')
+      const chat = new FakeChatProvider([
+        { text: JSON.stringify(badOut), toolCalls: [] },
+        { text: JSON.stringify(goodOut), toolCalls: [] },
+      ])
+
+      const result = await reflectSession({ chat, model: 'fake-model' }, TRANSCRIPT, {
+        constitution: 'Empty constitution.',
+        arcs: [],
+        realms: [],
+      })
+
+      expect(result).toEqual(goodOut)
+      expect(chat.requests).toHaveLength(2)
+      const retryPrompt = chat.requests[1]?.messages[0]?.content ?? ''
+      expect(retryPrompt).toContain('failed validation')
     })
 
     it('retries once on malformed JSON and consumes the second scripted result', async () => {
@@ -388,6 +412,128 @@ describe('reflection', () => {
       expect(graph.nodes.has(liveItems[1]?.id as string)).toBe(true)
       // The duplicate live item never got its own node under a new id.
       expect(graph.nodes.has(liveItems[0]?.id as string)).toBe(false)
+    })
+
+    it('routes an attribution to an existing non-arc node into a link proposal, not an edge', async () => {
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('Talked about health broadly.'),
+        items: [{ text: 'Thought about health goals', kind: 'observation' }],
+        attributions: [{ itemIndex: 0, arcId: 'realm_health', confidence: 0.95 }],
+      }
+
+      const result = await applyReflection(paths, out, sessionId, [], now)
+      expect(result.autoAsserted).toBe(0)
+
+      const item = (result.summaryDoc.meta.items as ReflectionItem[])[0] as ReflectionItem
+      const graph = await readGraph(paths)
+      expect(graph.edges.get(`part_of:${item.id}:realm_health`)).toBeUndefined()
+
+      const proposals = await pendingProposals(paths)
+      expect(proposals).toHaveLength(1)
+      expect(proposals[0]?.kind).toBe('link')
+      expect(proposals[0]?.payload).toEqual({
+        edge: 'part_of',
+        from: item.id,
+        to: 'realm_health',
+        confidence: 0.95,
+      })
+    })
+
+    it('does not rewrite a non-arc node document even when arcNarratives names it and it has a doc', async () => {
+      const personDocPath = join(paths.realmsDir, 'person.md')
+      await writeDocumentAtomic({
+        path: personDocPath,
+        meta: { id: newId('doc'), name: 'Sam' },
+        body: 'Original person notes.\n',
+      })
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'person_sam',
+          type: 'person',
+          label: 'Sam',
+          doc: personDocPath,
+        },
+      ])
+
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('A session.'),
+        arcNarratives: [{ arcId: 'person_sam', narrative: 'This should never land anywhere.' }],
+      }
+
+      const result = await applyReflection(paths, out, sessionId, [], now)
+      expect(result.skippedNarratives).toBe(1)
+
+      const personDoc = await readDocument(personDocPath)
+      expect(personDoc.body).toBe('Original person notes.\n')
+      expect(personDoc.meta.updated).toBeUndefined()
+    })
+
+    it('dedupes and bounds-checks itemIndexes, dropping any proposal that resolves to no items', async () => {
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('A session with messy indexes.'),
+        items: [{ text: 'Went for a run', kind: 'event' }],
+        newArcs: [
+          {
+            name: 'marathon training',
+            realm: 'realm_health',
+            reason: 'duplicate and valid indexes',
+            itemIndexes: [0, 0, 0],
+          },
+          {
+            name: 'ghost arc',
+            realm: 'realm_health',
+            reason: 'only out-of-range indexes',
+            itemIndexes: [5, -1],
+          },
+        ],
+        newPersons: [
+          {
+            name: 'ghost person',
+            reason: 'only out-of-range indexes',
+            itemIndexes: [9],
+          },
+        ],
+      }
+
+      const result = await applyReflection(paths, out, sessionId, [], now)
+
+      expect(result.droppedProposals).toBe(2)
+      expect(result.proposals).toHaveLength(1)
+
+      const proposals = await pendingProposals(paths)
+      expect(proposals).toHaveLength(1)
+      expect(proposals[0]?.kind).toBe('new_arc')
+      const item = (result.summaryDoc.meta.items as ReflectionItem[])[0] as ReflectionItem
+      expect(proposals[0]?.payload).toEqual({
+        name: 'marathon training',
+        realm: 'realm_health',
+        itemIds: [item.id],
+      })
+    })
+
+    it('leaves the session unreflected and retryable if the summary write fails after graph/proposal writes succeed', async () => {
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('Should not fully persist.'),
+        items: [{ text: 'Went for a run', kind: 'event' }],
+      }
+
+      // Remove write permission on the session dir so writeDocumentAtomic's
+      // summary.md write (the last step) fails, while graph.jsonl (which
+      // lives outside the session dir) still succeeds.
+      await chmod(sessionDir, 0o500)
+      try {
+        await expect(applyReflection(paths, out, sessionId, [], now)).rejects.toThrow()
+      } finally {
+        await chmod(sessionDir, 0o700)
+      }
+
+      const graph = await readGraph(paths)
+      const itemNodes = [...graph.nodes.values()].filter((node) => node.type === 'item')
+      expect(itemNodes).toHaveLength(1)
+
+      await expect(readDocument(join(sessionDir, 'summary.md'))).rejects.toThrow()
     })
   })
 
