@@ -5,6 +5,18 @@
 // date lists (from session dirs, existing rollup files) and get back the
 // dates or ISO weeks that still need a rollup written.
 
+import { join } from 'node:path'
+import type { ChatProvider } from '@openreverie/providers'
+import {
+  type Document,
+  listDocuments,
+  newId,
+  readDocument,
+  writeDocumentAtomic,
+} from './documents.js'
+import type { MemoryPaths } from './paths.js'
+import { SessionStore } from './transcripts.js'
+
 // --- Pure functions ---
 
 /**
@@ -71,4 +83,94 @@ export function pendingWeeklyRollups(
     }
   }
   return [...pending].sort()
+}
+
+// --- LLM rollup builders ---
+
+export interface RollupDeps {
+  chat: ChatProvider
+  model: string
+  paths: MemoryPaths
+}
+
+const DAILY_ROLLUP_PROMPT =
+  "Synthesize this day in this person's life into a short honest rollup: what happened, what they felt, what moved. Plain prose, no headings, no em dashes."
+
+const WEEKLY_ROLLUP_PROMPT =
+  "Synthesize this week in this person's life into a short honest rollup: what happened, what they felt, what moved. Plain prose, no headings, no em dashes."
+
+/**
+ * Build the daily rollup for `date`: read every reflected session's
+ * summary from that date, ask the chat provider to synthesize them, and
+ * write the result to rollups/daily/<date>.md. Throws if the date has no
+ * reflected session to draw from; callers are expected to only pass dates
+ * that pendingDailyRollups reported, which always have sources.
+ */
+export async function buildDailyRollup(deps: RollupDeps, date: string): Promise<Document> {
+  const sessions = await SessionStore.listSessions(deps.paths)
+  const daySessions = sessions.filter((session) => session.date === date && session.reflected)
+  if (daySessions.length === 0) {
+    throw new Error(
+      `No reflected session summaries found for ${date}; cannot build a daily rollup.`,
+    )
+  }
+
+  const summaries: string[] = []
+  for (const session of daySessions) {
+    const summaryPath = join(
+      deps.paths.sessionsDir,
+      `${session.date}-${session.sessionId}`,
+      'summary.md',
+    )
+    const summary = await readDocument(summaryPath)
+    summaries.push(summary.body.trim())
+  }
+
+  const result = await deps.chat.complete({
+    model: deps.model,
+    system: DAILY_ROLLUP_PROMPT,
+    messages: [{ role: 'user', content: summaries.join('\n\n') }],
+  })
+
+  const path = join(deps.paths.rollupsDailyDir, `${date}.md`)
+  await writeDocumentAtomic({
+    path,
+    meta: { id: newId('doc'), kind: 'rollup_daily', date },
+    body: result.text,
+  })
+  return readDocument(path)
+}
+
+/**
+ * Build the weekly rollup for `week` (an ISO week identifier, e.g.
+ * 2026-W32): read every daily rollup whose date falls in that week, ask
+ * the chat provider to synthesize them, and write the result to
+ * rollups/weekly/<week>.md. Throws if the week has no daily rollup to
+ * draw from; callers are expected to only pass weeks that
+ * pendingWeeklyRollups reported, which always have sources.
+ */
+export async function buildWeeklyRollup(deps: RollupDeps, week: string): Promise<Document> {
+  const dailies = await listDocuments(deps.paths.rollupsDailyDir)
+  const weekDailies = dailies.filter(
+    (doc) => typeof doc.meta.date === 'string' && isoWeekOf(doc.meta.date) === week,
+  )
+  if (weekDailies.length === 0) {
+    throw new Error(`No daily rollups found for week ${week}; cannot build a weekly rollup.`)
+  }
+
+  const bodies = weekDailies.map((doc) => doc.body.trim())
+
+  const result = await deps.chat.complete({
+    model: deps.model,
+    system: WEEKLY_ROLLUP_PROMPT,
+    messages: [{ role: 'user', content: bodies.join('\n\n') }],
+  })
+
+  const path = join(deps.paths.rollupsWeeklyDir, `${week}.md`)
+  await writeDocumentAtomic({
+    path,
+    meta: { id: newId('doc'), kind: 'rollup_weekly', week },
+    body: result.text,
+  })
+  return readDocument(path)
 }

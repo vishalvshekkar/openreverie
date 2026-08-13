@@ -1,5 +1,18 @@
-import { describe, expect, it } from 'vitest'
-import { isoWeekOf, pendingDailyRollups, pendingWeeklyRollups } from './rollups.js'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { FakeChatProvider } from '@openreverie/providers'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { newId, readDocument, writeDocumentAtomic } from './documents.js'
+import { ensureMemoryTree, type MemoryPaths, memoryPaths } from './paths.js'
+import {
+  buildDailyRollup,
+  buildWeeklyRollup,
+  isoWeekOf,
+  pendingDailyRollups,
+  pendingWeeklyRollups,
+  type RollupDeps,
+} from './rollups.js'
 
 describe('isoWeekOf', () => {
   const boundaryCases: Array<[string, string]> = [
@@ -121,5 +134,163 @@ describe('pendingWeeklyRollups', () => {
     // 2025-12-31 is ISO week 2026-W01. If today is early in 2026-W02, that week is strictly before.
     const result = pendingWeeklyRollups(['2025-12-31'], [], '2026-01-08')
     expect(result).toEqual(['2026-W01'])
+  })
+})
+
+describe('buildDailyRollup', () => {
+  let dir: string
+  let paths: MemoryPaths
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'openreverie-memory-'))
+    paths = memoryPaths(dir)
+    await ensureMemoryTree(paths)
+  })
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  async function writeSummary(date: string, sessionId: string, body: string): Promise<void> {
+    const sessionDir = join(paths.sessionsDir, `${date}-${sessionId}`)
+    await mkdir(sessionDir, { recursive: true })
+    await writeDocumentAtomic({
+      path: join(sessionDir, 'summary.md'),
+      meta: { id: newId('doc') },
+      body,
+    })
+  }
+
+  it('writes the daily rollup with the fake text and correct meta, prompting with the summaries', async () => {
+    await writeSummary('2026-08-10', 'session_aaa', 'Went for a long walk and felt calm.')
+    await writeSummary('2026-08-10', 'session_bbb', 'Argued with a friend, then made up.')
+
+    const chat = new FakeChatProvider([
+      { text: 'A quiet day of walking and mending a friendship.', toolCalls: [] },
+    ])
+    const deps: RollupDeps = { chat, model: 'test-model', paths }
+
+    const doc = await buildDailyRollup(deps, '2026-08-10')
+
+    expect(doc.path).toBe(join(paths.rollupsDailyDir, '2026-08-10.md'))
+    expect(doc.meta.kind).toBe('rollup_daily')
+    expect(doc.meta.date).toBe('2026-08-10')
+    expect(typeof doc.meta.id).toBe('string')
+    expect(doc.body).toBe('A quiet day of walking and mending a friendship.\n')
+
+    const onDisk = await readDocument(doc.path)
+    expect(onDisk.meta).toEqual(doc.meta)
+    expect(onDisk.body).toBe(doc.body)
+
+    expect(chat.requests).toHaveLength(1)
+    const sentContent = chat.requests[0]?.messages.map((m) => m.content).join('\n')
+    expect(sentContent).toContain('Went for a long walk and felt calm.')
+    expect(sentContent).toContain('Argued with a friend, then made up.')
+  })
+
+  it('throws when the date has no sessions at all', async () => {
+    const chat = new FakeChatProvider([])
+    const deps: RollupDeps = { chat, model: 'test-model', paths }
+
+    await expect(buildDailyRollup(deps, '2026-08-10')).rejects.toThrow()
+  })
+
+  it('throws when the date has sessions but none are reflected yet', async () => {
+    const sessionDir = join(paths.sessionsDir, '2026-08-10-session_ccc')
+    await mkdir(sessionDir, { recursive: true })
+    await writeFile(join(sessionDir, 'transcript.jsonl'), '', 'utf8')
+
+    const chat = new FakeChatProvider([])
+    const deps: RollupDeps = { chat, model: 'test-model', paths }
+
+    await expect(buildDailyRollup(deps, '2026-08-10')).rejects.toThrow(
+      'No reflected session summaries found for 2026-08-10',
+    )
+    expect(chat.requests).toHaveLength(0)
+  })
+
+  it('does not pull in a session summary from a different date', async () => {
+    await writeSummary('2026-08-10', 'session_aaa', 'On the target date.')
+    await writeSummary('2026-08-11', 'session_bbb', 'On a different date, should not be included.')
+
+    const chat = new FakeChatProvider([{ text: 'Rollup text.', toolCalls: [] }])
+    const deps: RollupDeps = { chat, model: 'test-model', paths }
+
+    await buildDailyRollup(deps, '2026-08-10')
+
+    const sentContent = chat.requests[0]?.messages.map((m) => m.content).join('\n')
+    expect(sentContent).toContain('On the target date.')
+    expect(sentContent).not.toContain('On a different date')
+  })
+})
+
+describe('buildWeeklyRollup', () => {
+  let dir: string
+  let paths: MemoryPaths
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'openreverie-memory-'))
+    paths = memoryPaths(dir)
+    await ensureMemoryTree(paths)
+  })
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  async function writeDaily(date: string, body: string): Promise<void> {
+    await writeDocumentAtomic({
+      path: join(paths.rollupsDailyDir, `${date}.md`),
+      meta: { id: newId('doc'), kind: 'rollup_daily', date },
+      body,
+    })
+  }
+
+  it('writes the weekly rollup with the fake text and correct meta, prompting with the dailies', async () => {
+    await writeDaily('2026-08-03', 'Started the week tired but hopeful.')
+    await writeDaily('2026-08-05', 'A breakthrough at work, felt proud.')
+
+    const chat = new FakeChatProvider([
+      { text: 'A week of tiredness turning into pride.', toolCalls: [] },
+    ])
+    const deps: RollupDeps = { chat, model: 'test-model', paths }
+
+    const doc = await buildWeeklyRollup(deps, '2026-W32')
+
+    expect(doc.path).toBe(join(paths.rollupsWeeklyDir, '2026-W32.md'))
+    expect(doc.meta.kind).toBe('rollup_weekly')
+    expect(doc.meta.week).toBe('2026-W32')
+    expect(typeof doc.meta.id).toBe('string')
+    expect(doc.body).toBe('A week of tiredness turning into pride.\n')
+
+    const onDisk = await readDocument(doc.path)
+    expect(onDisk.meta).toEqual(doc.meta)
+    expect(onDisk.body).toBe(doc.body)
+
+    expect(chat.requests).toHaveLength(1)
+    const sentContent = chat.requests[0]?.messages.map((m) => m.content).join('\n')
+    expect(sentContent).toContain('Started the week tired but hopeful.')
+    expect(sentContent).toContain('A breakthrough at work, felt proud.')
+  })
+
+  it('only includes dailies that fall in the requested week', async () => {
+    await writeDaily('2026-08-03', 'In week 32.')
+    await writeDaily('2026-08-10', 'In week 33, should not be included.')
+
+    const chat = new FakeChatProvider([{ text: 'Rollup text.', toolCalls: [] }])
+    const deps: RollupDeps = { chat, model: 'test-model', paths }
+
+    await buildWeeklyRollup(deps, '2026-W32')
+
+    const sentContent = chat.requests[0]?.messages.map((m) => m.content).join('\n')
+    expect(sentContent).toContain('In week 32.')
+    expect(sentContent).not.toContain('In week 33')
+  })
+
+  it('throws when the week has no daily rollups', async () => {
+    const chat = new FakeChatProvider([])
+    const deps: RollupDeps = { chat, model: 'test-model', paths }
+
+    await expect(buildWeeklyRollup(deps, '2026-W32')).rejects.toThrow()
   })
 })
