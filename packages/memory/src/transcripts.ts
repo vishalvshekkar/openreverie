@@ -62,7 +62,8 @@ export class SessionStore {
 
     let lastNonBlankIndex = -1
     for (let i = lines.length - 1; i >= 0; i--) {
-      if (lines[i].length > 0) {
+      const line = lines[i]
+      if (line !== undefined && line.length > 0) {
         lastNonBlankIndex = i
         break
       }
@@ -70,7 +71,7 @@ export class SessionStore {
 
     for (let i = 0; i < lines.length; i++) {
       const rawLine = lines[i]
-      if (rawLine.length === 0) continue
+      if (rawLine === undefined || rawLine.length === 0) continue
 
       try {
         const parsed = JSON.parse(rawLine) as TranscriptLine
