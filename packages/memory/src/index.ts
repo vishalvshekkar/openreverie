@@ -4,6 +4,7 @@
 // See docs/superpowers/specs for the design.
 
 export * from './documents.js'
+export * from './engine.js'
 export * from './gitSync.js'
 export * from './graph.js'
 export * from './paths.js'
