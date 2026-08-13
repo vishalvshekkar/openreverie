@@ -15,6 +15,13 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
-    "@openreverie/providers": "workspace:*"
+    "@openreverie/providers": "workspace:*",
+    "better-sqlite3": "^12.2.0",
+    "gray-matter": "^4.0.3",
+    "ulid": "^3.0.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13"
   }
 }
