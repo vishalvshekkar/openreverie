@@ -1,5 +1,8 @@
 // Hybrid retrieval: merges FTS text search and cosine vector search with
-// reciprocal rank fusion, then applies caller filters.
+// reciprocal rank fusion, then applies the caller's date filters. Kind
+// filtering happens earlier, inside the index (SQL WHERE), so a kind that
+// is common but outranked elsewhere can't be pushed out of the top-20
+// candidate windows before this function ever sees it.
 //
 // A note on date filtering: SearchFilters compares after/before against
 // the document's meta date "when present". MemoryIndex, though, never
@@ -33,12 +36,17 @@ export async function searchMemory(
   filters?: SearchFilters,
   limit = DEFAULT_LIMIT,
 ): Promise<SearchHit[]> {
-  const textHits = index.searchText(query, CANDIDATE_LIMIT)
+  const textHits = index.searchText(query, CANDIDATE_LIMIT, filters?.kinds)
   const [queryVector] = await embeddings.embed(embeddingModel, [query])
-  const vectorHits = queryVector ? await index.searchVector(queryVector, CANDIDATE_LIMIT) : []
+  const vectorHits = queryVector
+    ? await index.searchVector(queryVector, CANDIDATE_LIMIT, filters?.kinds)
+    : []
 
   const fused = fuseByReciprocalRank([textHits, vectorHits])
-  const filtered = fused.filter((hit) => passesFilters(hit, filters))
+  // Date filtering is post-fusion by design: it stays here rather than
+  // moving into the index because MemoryIndex never persists document
+  // dates to SQL (see the module comment above).
+  const filtered = fused.filter((hit) => passesDateFilters(hit, filters))
   return filtered.slice(0, limit)
 }
 
@@ -101,11 +109,7 @@ function dedupeByDocId(hits: SearchHit[]): SearchHit[] {
   return deduped
 }
 
-function passesFilters(hit: SearchHit, filters?: SearchFilters): boolean {
-  if (filters?.kinds && !filters.kinds.includes(hit.kind)) {
-    return false
-  }
-
+function passesDateFilters(hit: SearchHit, filters?: SearchFilters): boolean {
   const date = dateFromPath(hit.path)
   if (date === undefined) {
     return true

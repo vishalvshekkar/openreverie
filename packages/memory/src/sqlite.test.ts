@@ -5,7 +5,7 @@ import { FakeEmbeddingProvider } from '@openreverie/providers'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Document } from './documents.js'
 import type { GraphState } from './graph.js'
-import { type EmbedFn, MemoryIndex } from './sqlite.js'
+import { type DocKind, type EmbedFn, MemoryIndex } from './sqlite.js'
 
 function doc(overrides: Partial<Document> = {}): Document {
   return {
@@ -152,6 +152,48 @@ describe('MemoryIndex', () => {
       expect(() => index.searchText("don't", 10)).not.toThrow()
       expect(() => index.searchText('foo-bar', 10)).not.toThrow()
     })
+
+    it('searchText applies a kinds filter at the SQL level', async () => {
+      await index.upsertDocument(
+        doc({ meta: { id: 'realm_kite' }, body: 'A note about kite surfing.' }),
+        'realm',
+        embedFn(),
+      )
+      await index.upsertDocument(
+        doc({ meta: { id: 'summary_kite' }, body: 'A note about kite surfing.' }),
+        'summary',
+        embedFn(),
+      )
+
+      const hits = index.searchText('kite', 10, ['summary'])
+      expect(hits.map((h) => h.docId)).toEqual(['summary_kite'])
+    })
+
+    it('searchText treats an explicit empty kinds list as matching nothing', async () => {
+      await index.upsertDocument(
+        doc({ meta: { id: 'realm_kite2' }, body: 'A note about kite surfing.' }),
+        'realm',
+        embedFn(),
+      )
+
+      expect(index.searchText('kite', 10, [])).toEqual([])
+    })
+
+    it('searchText treats a kinds value containing a quote as an ordinary bound value, not SQL syntax', async () => {
+      await index.upsertDocument(
+        doc({ meta: { id: 'realm_kite3' }, body: 'A note about kite surfing.' }),
+        'realm',
+        embedFn(),
+      )
+
+      // Not a real DocKind, but proves the value is bound as a parameter:
+      // if it were ever string-interpolated into the query it would break
+      // the SQL (unbalanced quote) or, worse, silently widen the match.
+      const maliciousKinds = ["realm' OR '1'='1"] as unknown as DocKind[]
+
+      expect(() => index.searchText('kite', 10, maliciousKinds)).not.toThrow()
+      expect(index.searchText('kite', 10, maliciousKinds)).toEqual([])
+    })
   })
 
   describe('searchVector', () => {
@@ -181,6 +223,77 @@ describe('MemoryIndex', () => {
       expect(hits.length).toBe(2)
       expect(hits[0]?.docId).toBe('realm_a')
       expect(hits[0]?.score).toBeGreaterThan(hits[1]?.score ?? 0)
+    })
+
+    it('applies a kinds filter at the SQL level', async () => {
+      const provider = new FakeEmbeddingProvider()
+      const embed = (texts: string[]) => provider.embed('fake-model', texts)
+
+      await index.upsertDocument(
+        doc({ meta: { id: 'realm_fox' }, body: 'The quick brown fox jumps over the lazy dog.' }),
+        'realm',
+        embed,
+      )
+      await index.upsertDocument(
+        doc({ meta: { id: 'summary_fox' }, body: 'The quick brown fox jumps over the lazy dog.' }),
+        'summary',
+        embed,
+      )
+
+      const [queryVec] = await provider.embed('fake-model', [
+        'The quick brown fox jumps over the lazy dog.',
+      ])
+      if (!queryVec) {
+        throw new Error('expected a query vector')
+      }
+
+      const hits = await index.searchVector(queryVec, 5, ['summary'])
+      expect(hits.map((h) => h.docId)).toEqual(['summary_fox'])
+    })
+
+    it('treats an explicit empty kinds list as matching nothing', async () => {
+      const provider = new FakeEmbeddingProvider()
+      const embed = (texts: string[]) => provider.embed('fake-model', texts)
+
+      await index.upsertDocument(
+        doc({ meta: { id: 'realm_fox2' }, body: 'The quick brown fox jumps over the lazy dog.' }),
+        'realm',
+        embed,
+      )
+
+      const [queryVec] = await provider.embed('fake-model', [
+        'The quick brown fox jumps over the lazy dog.',
+      ])
+      if (!queryVec) {
+        throw new Error('expected a query vector')
+      }
+
+      expect(await index.searchVector(queryVec, 5, [])).toEqual([])
+    })
+
+    it('treats a kinds value containing a quote as an ordinary bound value, not SQL syntax', async () => {
+      const provider = new FakeEmbeddingProvider()
+      const embed = (texts: string[]) => provider.embed('fake-model', texts)
+
+      await index.upsertDocument(
+        doc({ meta: { id: 'realm_fox3' }, body: 'The quick brown fox jumps over the lazy dog.' }),
+        'realm',
+        embed,
+      )
+
+      const [queryVec] = await provider.embed('fake-model', [
+        'The quick brown fox jumps over the lazy dog.',
+      ])
+      if (!queryVec) {
+        throw new Error('expected a query vector')
+      }
+
+      // Not a real DocKind, but proves the value is bound as a parameter:
+      // if it were ever string-interpolated into the query it would break
+      // the SQL (unbalanced quote) or, worse, silently widen the match.
+      const maliciousKinds = ["realm' OR '1'='1"] as unknown as DocKind[]
+
+      await expect(index.searchVector(queryVec, 5, maliciousKinds)).resolves.toEqual([])
     })
   })
 

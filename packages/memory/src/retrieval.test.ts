@@ -92,6 +92,48 @@ describe('searchMemory', () => {
     expect(hits.map((h) => h.docId)).toEqual(['doc_realm'])
   })
 
+  it('kinds filter reaches matches that fall outside the top-20 candidate windows', async () => {
+    const query = 'quarterly budget review'
+
+    // 21 kind-A docs, each an exact-text match to the query: guaranteed
+    // top score in both text search (matches all three query words with
+    // nothing else competing for term frequency) and vector search
+    // (cosine similarity 1.0, since FakeEmbeddingProvider is deterministic
+    // per exact string). This fills the CANDIDATE_LIMIT=20 window in both
+    // lists entirely with kind-A docs, before any filtering happens.
+    for (let i = 0; i < 21; i++) {
+      await index.upsertDocument(
+        doc({ meta: { id: `doc_a_${i}` }, body: query }),
+        'realm',
+        embedFn(embeddings),
+      )
+    }
+
+    // A handful of kind-B docs that still match the query (all three
+    // words present, so they pass the FTS AND), but padded with enough
+    // extra text that both their FTS rank and their vector cosine
+    // similarity are lower than every kind-A doc above. Before the fix,
+    // these fall outside both top-20 windows and searchMemory silently
+    // returns zero results for kinds: ['other']; after the fix, the kinds
+    // filter is applied inside the index before the windows are built, so
+    // these are the only candidates considered and all three come back.
+    const bIds = ['doc_b_0', 'doc_b_1', 'doc_b_2']
+    for (const id of bIds) {
+      await index.upsertDocument(
+        doc({
+          meta: { id },
+          body: `${query} mentioned briefly amid a long stretch of unrelated padding text added specifically to dilute both the term frequency and the vector similarity well below every exact-match kind-A document seeded above.`,
+        }),
+        'summary',
+        embedFn(embeddings),
+      )
+    }
+
+    const hits = await searchMemory(index, embeddings, MODEL, query, { kinds: ['summary'] })
+
+    expect(hits.map((h) => h.docId).sort()).toEqual(bIds)
+  })
+
   it('respects the limit even when more documents match', async () => {
     const query = 'kayaking trip photos'
 

@@ -217,11 +217,20 @@ export class MemoryIndex {
     run()
   }
 
-  searchText(query: string, limit: number): SearchHit[] {
+  searchText(query: string, limit: number, kinds?: DocKind[]): SearchHit[] {
     const ftsQuery = toFtsQuery(query)
     if (ftsQuery === null) {
       return []
     }
+    // An explicit but empty kinds list matches nothing, same as the old
+    // post-fusion `.includes` check on an empty array did. Short-circuit
+    // rather than emit `IN ()`, which is invalid SQL.
+    if (kinds && kinds.length === 0) {
+      return []
+    }
+    // Values are always bound as parameters, never interpolated into the
+    // SQL string; only the placeholder count (one '?' per kind) varies.
+    const kindClause = kinds ? `AND d.kind IN (${kinds.map(() => '?').join(', ')})` : ''
     const rows = this.db
       .prepare(
         `SELECT d.id as docId, d.path as path, d.kind as kind,
@@ -230,11 +239,11 @@ export class MemoryIndex {
          FROM chunks_fts
          JOIN chunks c ON c.id = chunks_fts.rowid
          JOIN documents d ON d.id = c.doc_id
-         WHERE chunks_fts MATCH ?
+         WHERE chunks_fts MATCH ? ${kindClause}
          ORDER BY rank
          LIMIT ?`,
       )
-      .all(ftsQuery, limit) as (DocumentRow & { snippet: string; rank: number })[]
+      .all(ftsQuery, ...(kinds ?? []), limit) as (DocumentRow & { snippet: string; rank: number })[]
 
     return rows.map((row) => ({
       docId: row.docId,
@@ -245,15 +254,26 @@ export class MemoryIndex {
     }))
   }
 
-  async searchVector(queryVec: number[], limit: number): Promise<SearchHit[]> {
+  async searchVector(queryVec: number[], limit: number, kinds?: DocKind[]): Promise<SearchHit[]> {
+    if (kinds && kinds.length === 0) {
+      return []
+    }
+    const kindClause = kinds ? `WHERE d.kind IN (${kinds.map(() => '?').join(', ')})` : ''
     const rows = this.db
       .prepare(
         `SELECT e.vector as vector, d.id as docId, d.path as path, d.kind as kind, c.text as text
          FROM embeddings e
          JOIN chunks c ON c.id = e.chunk_id
-         JOIN documents d ON d.id = c.doc_id`,
+         JOIN documents d ON d.id = c.doc_id
+         ${kindClause}`,
       )
-      .all() as { vector: Buffer; docId: string; path: string; kind: DocKind; text: string }[]
+      .all(...(kinds ?? [])) as {
+      vector: Buffer
+      docId: string
+      path: string
+      kind: DocKind
+      text: string
+    }[]
 
     const scored: SearchHit[] = rows.map((row) => ({
       docId: row.docId,
