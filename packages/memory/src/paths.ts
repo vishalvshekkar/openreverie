@@ -2,7 +2,7 @@
 // make up one user's memory. Everything here is derived from a single root
 // path so the rest of the engine never hardcodes a folder name.
 
-import { access, mkdir } from 'node:fs/promises'
+import { access, mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { newId, writeDocumentAtomic } from './documents.js'
 
@@ -48,13 +48,20 @@ export async function ensureMemoryTree(paths: MemoryPaths): Promise<void> {
     await mkdir(dir, { recursive: true })
   }
 
-  const exists = await pathExists(paths.constitution)
-  if (!exists) {
+  const constitutionExists = await pathExists(paths.constitution)
+  if (!constitutionExists) {
     await writeDocumentAtomic({
       path: paths.constitution,
       meta: { id: newId('doc') },
       body: CONSTITUTION_STARTER,
     })
+  }
+
+  // Seed .gitignore to exclude the SQLite index and atomic-write temp files
+  const gitignorePath = join(paths.root, '.gitignore')
+  const gitignoreExists = await pathExists(gitignorePath)
+  if (!gitignoreExists) {
+    await writeFile(gitignorePath, 'index.db\n*.tmp-*\n', 'utf8')
   }
 }
 

@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -159,5 +159,28 @@ describe('paths and ensureMemoryTree', () => {
     const second = await readDocument(paths.constitution)
 
     expect(second.meta.id).toBe(first.meta.id)
+  })
+
+  it('seeds .gitignore with index.db and *.tmp-* patterns', async () => {
+    const paths = memoryPaths(dir)
+    await ensureMemoryTree(paths)
+
+    const gitignorePath = join(dir, '.gitignore')
+    const content = await readFile(gitignorePath, 'utf8')
+    expect(content).toBe('index.db\n*.tmp-*\n')
+  })
+
+  it('does not overwrite a user-modified .gitignore', async () => {
+    const paths = memoryPaths(dir)
+    await ensureMemoryTree(paths)
+
+    const gitignorePath = join(dir, '.gitignore')
+    const customContent = 'custom user content\n'
+    await writeFile(gitignorePath, customContent, 'utf8')
+
+    await ensureMemoryTree(paths)
+
+    const content = await readFile(gitignorePath, 'utf8')
+    expect(content).toBe(customContent)
   })
 })
