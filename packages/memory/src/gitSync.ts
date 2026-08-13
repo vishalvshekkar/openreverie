@@ -34,7 +34,18 @@ export async function commitMemory(root: string, message: string): Promise<Commi
       return { ok: true }
     }
 
-    await git(root, ['-c', 'commit.gpgsign=false', 'commit', '-q', '-m', message])
+    await git(root, [
+      '-c',
+      'user.name=reverie',
+      '-c',
+      'user.email=reverie@local',
+      '-c',
+      'commit.gpgsign=false',
+      'commit',
+      '-q',
+      '-m',
+      message,
+    ])
     return { ok: true }
   } catch (err) {
     return { ok: false, warning: `git commit failed: ${errorMessage(err)}` }

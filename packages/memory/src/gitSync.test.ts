@@ -86,4 +86,24 @@ describe('commitMemory', () => {
     expect(result.ok).toBe(false)
     expect(result.warning).toBeTruthy()
   })
+
+  it('succeeds with user-initialized repo lacking global git identity', async () => {
+    // User manually initialized a repo without configuring git identity.
+    // Simulate this by blanking global git config and initializing manually.
+    const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' }
+    await run('git', ['init', '-q'], { cwd: dir, env })
+    await writeFile(join(dir, 'note.md'), 'test note\n', 'utf8')
+
+    const result = await commitMemory(dir, 'user-init commit')
+
+    expect(result).toEqual({ ok: true })
+    expect(await revCount(dir)).toBe(1)
+
+    // Verify the author is reverie (the identity we set on commit).
+    const { stdout: authorName } = await run('git', ['log', '-1', '--format=%an'], {
+      cwd: dir,
+      env,
+    })
+    expect(authorName.trim()).toBe('reverie')
+  })
 })
