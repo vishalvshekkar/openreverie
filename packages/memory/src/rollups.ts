@@ -23,15 +23,14 @@ export function isoWeekOf(date: string): string {
   }
   const target = new Date(Date.UTC(year, month - 1, day))
 
-  // ISO day number: Monday = 1 .. Sunday = 7.
-  const isoDayNum = ((target.getUTCDay() + 6) % 7) + 1
+  // ISO day number: Monday = 1 .. Sunday = 7 (getUTCDay() gives 0 for Sunday).
+  const isoDayNum = target.getUTCDay() || 7
   // Move to the Thursday of this ISO week; the Thursday's calendar year
   // is always the ISO week-numbering year.
-  target.setUTCDate(target.getUTCDate() + 4 - isoDayNum)
+  target.setUTCDate(target.getUTCDate() + (4 - isoDayNum))
 
   const isoYear = target.getUTCFullYear()
-  const yearStart = Date.UTC(isoYear, 0, 1)
-  const weekNumber = Math.ceil((target.getTime() - yearStart) / 86400000 / 7 + 0.5)
+  const weekNumber = Math.ceil(((target.getTime() - Date.UTC(isoYear, 0, 1)) / 86400000 + 1) / 7)
 
   return `${isoYear}-W${String(weekNumber).padStart(2, '0')}`
 }

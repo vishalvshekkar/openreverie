@@ -2,24 +2,48 @@ import { describe, expect, it } from 'vitest'
 import { isoWeekOf, pendingDailyRollups, pendingWeeklyRollups } from './rollups.js'
 
 describe('isoWeekOf', () => {
-  it('computes a mid-year week', () => {
-    expect(isoWeekOf('2026-08-13')).toBe('2026-W33')
+  const boundaryCases: Array<[string, string]> = [
+    ['2021-01-01', '2020-W53'],
+    ['2022-12-31', '2022-W52'],
+    ['2023-01-01', '2022-W52'],
+    ['2024-12-30', '2025-W01'],
+    ['2025-01-01', '2025-W01'],
+    ['2026-01-01', '2026-W01'],
+    ['2026-08-13', '2026-W33'],
+    ['2027-01-01', '2026-W53'],
+    ['2016-01-03', '2015-W53'],
+  ]
+
+  it.each(boundaryCases)('maps %s to %s', (date, expected) => {
+    expect(isoWeekOf(date)).toBe(expected)
   })
 
-  it('assigns January 1st to the prior ISO year when it falls before that year first Thursday', () => {
-    expect(isoWeekOf('2027-01-01')).toBe('2026-W53')
+  it('only changes label on Mondays across 2022 through 2024', () => {
+    const start = Date.UTC(2022, 0, 1)
+    const end = Date.UTC(2024, 11, 31)
+    let previousLabel: string | null = null
+    for (let t = start; t <= end; t += 86400000) {
+      const d = new Date(t)
+      const dateStr = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`
+      const label = isoWeekOf(dateStr)
+      if (previousLabel !== null && label !== previousLabel) {
+        expect(d.getUTCDay()).toBe(1)
+      }
+      previousLabel = label
+    }
   })
 
-  it('assigns January 1st to week 1 when it falls on or after the ISO year first Thursday', () => {
-    expect(isoWeekOf('2026-01-01')).toBe('2026-W01')
-  })
-
-  it('assigns a late December date to the next ISO year week 1 when applicable', () => {
-    expect(isoWeekOf('2025-12-31')).toBe('2026-W01')
-  })
-
-  it('assigns the last day of a 53-week ISO year correctly', () => {
-    expect(isoWeekOf('2026-12-31')).toBe('2026-W53')
+  it('places December 28th in that same year final ISO week for every year 2015 through 2030', () => {
+    for (let year = 2015; year <= 2030; year++) {
+      const dateStr = `${year}-12-28`
+      const label = isoWeekOf(dateStr)
+      const match = label.match(/^(\d{4})-W(\d{2})$/)
+      expect(match).not.toBeNull()
+      const [, isoYearStr, weekStr] = match as RegExpMatchArray
+      expect(Number(isoYearStr)).toBe(year)
+      const week = Number(weekStr)
+      expect(week === 52 || week === 53).toBe(true)
+    }
   })
 })
 
