@@ -236,4 +236,76 @@ describe('OpenAiChatProvider.stream', () => {
 
     await expect(drain()).rejects.toThrow(`openai: HTTP 429: ${longBody.slice(0, 200)}`)
   })
+
+  it('reassembles a data: line whose bytes are split across two read chunks', async () => {
+    const body =
+      'data: {"choices":[{"index":0,"delta":{"content":"Hello, world!"},"finish_reason":null}]}\n\n' +
+      'data: [DONE]\n'
+    const encoded = new TextEncoder().encode(body)
+    // Cut mid-way through the JSON payload, well clear of any line boundary,
+    // so the split lands at an awkward byte position inside the data: line.
+    const splitAt = 42
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoded.slice(0, splitAt))
+        controller.enqueue(encoded.slice(splitAt))
+        controller.close()
+      },
+    })
+    const canned = new Response(stream, { status: 200 })
+    const { fetch } = fakeFetch(canned)
+    const provider = new OpenAiChatProvider({ apiKey: 'sk-test' }, fetch)
+
+    const events: ChatEvent[] = []
+    for await (const event of provider.stream(baseRequest)) events.push(event)
+
+    expect(events).toEqual([{ type: 'text', text: 'Hello, world!' }, { type: 'done' }])
+  })
+
+  it('flushes a final data: line that has no trailing newline and no [DONE]', async () => {
+    const body = 'data: {"choices":[{"index":0,"delta":{"content":"tail"},"finish_reason":null}]}'
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(body))
+        controller.close()
+      },
+    })
+    const canned = new Response(stream, { status: 200 })
+    const { fetch } = fakeFetch(canned)
+    const provider = new OpenAiChatProvider({ apiKey: 'sk-test' }, fetch)
+
+    const events: ChatEvent[] = []
+    for await (const event of provider.stream(baseRequest)) events.push(event)
+
+    expect(events).toEqual([{ type: 'text', text: 'tail' }, { type: 'done' }])
+  })
+
+  it('cancels the reader when the consumer breaks out of the iterator early', async () => {
+    let cancelled = false
+    const firstChunk =
+      'data: {"choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}\n\n'
+    // Deliberately never close or enqueue further chunks: the stream stays
+    // open past the first event so an early `break` must actively cancel
+    // it, rather than merely draining an already-closed stream.
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(firstChunk))
+      },
+      cancel() {
+        cancelled = true
+      },
+    })
+    const canned = new Response(stream, { status: 200 })
+    const { fetch } = fakeFetch(canned)
+    const provider = new OpenAiChatProvider({ apiKey: 'sk-test' }, fetch)
+
+    const events: ChatEvent[] = []
+    for await (const event of provider.stream(baseRequest)) {
+      events.push(event)
+      break
+    }
+
+    expect(events).toEqual([{ type: 'text', text: 'Hello' }])
+    expect(cancelled).toBe(true)
+  })
 })

@@ -189,6 +189,35 @@ export class OpenAiChatProvider implements ChatProvider {
       })
     }
 
+    // Parses one SSE line and yields the events it produces. Returns true
+    // when the line was `data: [DONE]`, which tells the caller the stream
+    // is finished and no further lines (including a flushed tail buffer)
+    // should be processed.
+    function* processLine(rawLine: string): Generator<ChatEvent, boolean> {
+      const line = rawLine.trim()
+      if (!line.startsWith('data: ')) return false
+      const payload = line.slice('data: '.length)
+      if (payload === '[DONE]') {
+        yield* flushPendingToolCalls()
+        yield { type: 'done' }
+        return true
+      }
+      const chunk = JSON.parse(payload) as OpenAiStreamChunk
+      const choice = chunk.choices?.[0]
+      if (!choice) return false
+
+      if (choice.delta?.content) {
+        yield { type: 'text', text: choice.delta.content }
+      }
+      for (const tcDelta of choice.delta?.tool_calls ?? []) {
+        applyToolCallDelta(tcDelta)
+      }
+      if (choice.finish_reason) {
+        yield* flushPendingToolCalls()
+      }
+      return false
+    }
+
     const reader = res.body.getReader()
     const decoder = new TextDecoder()
     let buffer = ''
@@ -202,31 +231,28 @@ export class OpenAiChatProvider implements ChatProvider {
         buffer = lines.pop() ?? ''
 
         for (const rawLine of lines) {
-          const line = rawLine.trim()
-          if (!line.startsWith('data: ')) continue
-          const payload = line.slice('data: '.length)
-          if (payload === '[DONE]') {
-            yield* flushPendingToolCalls()
-            yield { type: 'done' }
-            return
-          }
-          const chunk = JSON.parse(payload) as OpenAiStreamChunk
-          const choice = chunk.choices?.[0]
-          if (!choice) continue
-
-          if (choice.delta?.content) {
-            yield { type: 'text', text: choice.delta.content }
-          }
-          for (const tcDelta of choice.delta?.tool_calls ?? []) {
-            applyToolCallDelta(tcDelta)
-          }
-          if (choice.finish_reason) {
-            yield* flushPendingToolCalls()
-          }
+          const finished = yield* processLine(rawLine)
+          if (finished) return
         }
       }
     } finally {
+      // Abort the in-flight request if the consumer never reached [DONE]
+      // (an early `break` out of `for await` resumes here via the async
+      // iterator's implicit `return()`, which runs this finally block).
+      await reader.cancel().catch(() => {
+        // Already errored or already closed; nothing left to abort.
+      })
       reader.releaseLock()
+    }
+
+    // The read loop only exits here when the stream closed without ever
+    // seeing `data: [DONE]`. Flush the decoder for any pending multi-byte
+    // tail bytes and process whatever line remains unterminated in the
+    // buffer, so its content isn't silently dropped.
+    buffer += decoder.decode()
+    if (buffer.trim().length > 0) {
+      const finished = yield* processLine(buffer)
+      if (finished) return
     }
 
     yield* flushPendingToolCalls()
