@@ -16,6 +16,13 @@ export interface ChatIo {
   question(prompt: string): Promise<string>
   write(text: string): void
   onInterrupt(handler: () => void): void
+  // Unblocks whatever question() call is currently pending, the way a real
+  // terminal's AbortSignal-backed readline question rejects when aborted.
+  // Firing the SIGINT event alone does not settle a pending question() in
+  // Node (verified against node:readline/promises); this is the hook that
+  // actually does, so the second Ctrl-C while idle at the prompt can exit
+  // instead of hanging forever on an unresolved question().
+  cancelPending(): void
 }
 
 const ANSI_DIM = '\x1b[2m'
@@ -60,18 +67,27 @@ export async function runChat(deps: {
   // 0 = no interrupt yet, 1 = one Ctrl-C seen (reminded about /bye), 2+ =
   // a second Ctrl-C seen (exit without reflecting). The handler itself
   // prints its message so the reassurance appears the moment the signal
-  // fires, not only once the main loop next checks in.
+  // fires, not only once the main loop next checks in. `responding` tracks
+  // whether a reply is currently streaming, so the first-press message can
+  // say the right thing whether the user interrupts mid-reply or while
+  // sitting idle at the prompt.
   let interruptLevel = 0
+  let responding = false
   io.onInterrupt(() => {
     interruptLevel += 1
     if (interruptLevel === 1) {
       io.write(
-        '\nFinishing this reply. Type /bye when you want to stop; it reflects on the session first.\n',
+        responding
+          ? '\nFinishing this reply. Type /bye when you want to stop; it reflects on the session first.\n'
+          : '\nType /bye when you want to stop; it reflects on the session first.\n',
       )
     } else {
       io.write(
         '\nStopping without reflecting. This conversation is already saved and will be reflected the next time reverie starts.\n',
       )
+      // Second press: if we are idle, blocked on question(), unblock it now
+      // instead of waiting forever for a line of input that may never come.
+      io.cancelPending()
     }
   })
 
@@ -101,6 +117,7 @@ export async function runChat(deps: {
     }
 
     let sawText = false
+    responding = true
     try {
       for await (const event of session.send(line)) {
         if (event.type === 'text') {
@@ -122,6 +139,8 @@ export async function runChat(deps: {
       io.write(
         `\nI could not reach the model: ${errorMessage(err)}. Your message is saved; try again, or type /bye.\n`,
       )
+    } finally {
+      responding = false
     }
 
     if (interruptLevel >= 2) {

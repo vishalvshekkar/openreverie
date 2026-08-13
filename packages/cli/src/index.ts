@@ -38,12 +38,28 @@ const stdout = { write: (text: string) => process.stdout.write(text) }
 function readlineChatIo(): ChatIo & { close(): void } {
   const rl = createInterface({ input: process.stdin, output: process.stdout })
   let onInterrupt: (() => void) | undefined
+  // Tracks the AbortController for whatever question() call is currently
+  // pending, so cancelPending() (called by chat.ts on the second Ctrl-C)
+  // has something to abort. Firing the 'SIGINT' event does not by itself
+  // settle a pending rl.question() in Node; only aborting its signal does.
+  let pendingController: AbortController | undefined
   rl.on('SIGINT', () => onInterrupt?.())
   return {
-    question: (prompt: string) => rl.question(prompt),
+    question: (prompt: string) => {
+      const controller = new AbortController()
+      pendingController = controller
+      return rl.question(prompt, { signal: controller.signal }).finally(() => {
+        if (pendingController === controller) {
+          pendingController = undefined
+        }
+      })
+    },
     write: (text: string) => process.stdout.write(text),
     onInterrupt: (handler: () => void) => {
       onInterrupt = handler
+    },
+    cancelPending: () => {
+      pendingController?.abort()
     },
     close: () => rl.close(),
   }
@@ -88,7 +104,6 @@ async function main(): Promise<void> {
   try {
     if (subcommand === 'reindex') {
       await engine.reindexAll()
-      printWarnings(stdout, engine)
       const count = await countMemoryDocuments(config.memoryDir)
       stdout.write(`Reindexed ${count} documents.\n`)
     } else if (subcommand === 'reflect') {

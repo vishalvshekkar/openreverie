@@ -66,24 +66,42 @@ function scriptedIo(answers: string[]): { io: ChatIo; output: string[] } {
       output.push(text)
     },
     onInterrupt() {
-      // No-op: tests that exercise interrupt behavior use interruptingIo below.
+      // No-op: tests that exercise interrupt behavior use the fakes below.
+    },
+    cancelPending() {
+      // No-op: nothing is ever left pending in this fake.
     },
   }
   return { io, output }
 }
 
-// Simulates two Ctrl-C presses arriving while the REPL is waiting on the
-// first question(): the handler registered by runChat is invoked twice
-// before question() resolves, mirroring a signal firing mid-wait.
-function interruptingIo(): { io: ChatIo; output: string[] } {
+// Mirrors real node:readline/promises semantics (verified against the real
+// module, not assumed): a pending question() does not settle merely
+// because the registered interrupt handler runs. It only settles when
+// answerPending() resolves it (as if the user pressed Enter) or
+// cancelPending() rejects it (as if an AbortSignal fired), exactly the way
+// index.ts's readlineChatIo wires a real rl.question()'s AbortSignal to
+// the second Ctrl-C. This is the shape that let the old, instantly-
+// resolving interrupt fake hide a real hang.
+function pendingQuestionIo(): {
+  io: ChatIo
+  output: string[]
+  triggerInterrupt: () => void
+  answerPending: (text: string) => void
+  cancelCount: { value: number }
+} {
   const output: string[] = []
   let handler: (() => void) | undefined
+  let pendingResolve: ((value: string) => void) | undefined
+  let pendingReject: ((err: Error) => void) | undefined
+  const cancelCount = { value: 0 }
   const io: ChatIo = {
-    async question(prompt: string) {
+    question(prompt: string) {
       output.push(prompt)
-      handler?.()
-      handler?.()
-      return '/bye'
+      return new Promise<string>((resolve, reject) => {
+        pendingResolve = resolve
+        pendingReject = reject
+      })
     },
     write(text: string) {
       output.push(text)
@@ -91,8 +109,35 @@ function interruptingIo(): { io: ChatIo; output: string[] } {
     onInterrupt(h: () => void) {
       handler = h
     },
+    cancelPending() {
+      cancelCount.value += 1
+      pendingReject?.(new Error('The operation was aborted'))
+      pendingResolve = undefined
+      pendingReject = undefined
+    },
   }
-  return { io, output }
+  return {
+    io,
+    output,
+    triggerInterrupt: () => handler?.(),
+    answerPending: (text: string) => {
+      pendingResolve?.(text)
+      pendingResolve = undefined
+      pendingReject = undefined
+    },
+    cancelCount,
+  }
+}
+
+// Polls output for the 'you> ' prompt instead of assuming a fixed number of
+// microtask ticks, since AgentSession.start() does real async work before
+// the REPL loop reaches its first question().
+async function waitForPrompt(output: string[]): Promise<void> {
+  for (let i = 0; i < 200; i++) {
+    if (output.some((chunk) => chunk.includes('you> '))) return
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  }
+  throw new Error('timed out waiting for the you> prompt')
 }
 
 async function sessionSummaryFiles(memoryDir: string): Promise<string[]> {
@@ -202,6 +247,7 @@ describe('runChat', () => {
         output.push(text)
       },
       onInterrupt() {},
+      cancelPending() {},
     }
 
     await runChat({ engine, config, chat, io })
@@ -214,19 +260,149 @@ describe('runChat', () => {
     await engine.close()
   })
 
-  it('exits without reflecting after a second interrupt, saving the transcript only', async () => {
+  it('reminds about /bye without hanging or aborting on the first Ctrl-C while idle at the prompt', async () => {
+    const chat = new FakeChatProvider([
+      { text: emptyReflectionJson('Said nothing.'), toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const { io, output, triggerInterrupt, answerPending, cancelCount } = pendingQuestionIo()
+
+    const done = runChat({ engine, config, chat, io })
+    await waitForPrompt(output)
+
+    triggerInterrupt()
+
+    const joined = output.join('').toLowerCase()
+    expect(joined).toContain('/bye')
+    expect(joined).not.toContain('finishing this reply')
+    expect(cancelCount.value).toBe(0)
+
+    // The pending question is still alive (not aborted): answering it
+    // normally proves the REPL kept waiting rather than exiting.
+    answerPending('/bye')
+    await expect(done).resolves.toBeUndefined()
+
+    const joinedAfter = output.join('')
+    expect(joinedAfter).toContain('reflecting on this session...')
+
+    await engine.close()
+  })
+
+  it('exits without reflecting when a second Ctrl-C arrives idle at the prompt, actually unblocking question()', async () => {
     const chat = new FakeChatProvider([])
     const engine = await MemoryEngine.open(dir, fakeDeps(chat))
     const config = testConfig(dir)
-    const { io, output } = interruptingIo()
+    const { io, output, triggerInterrupt, cancelCount } = pendingQuestionIo()
 
-    await runChat({ engine, config, chat, io })
+    const done = runChat({ engine, config, chat, io })
+    await waitForPrompt(output)
 
+    triggerInterrupt() // first: reminder only, question() stays pending
+    triggerInterrupt() // second: aborts the pending question() and exits
+
+    // If the pending question is never unblocked, this hangs until the
+    // test's own timeout, which is exactly the bug (C1) this test guards.
+    await expect(done).resolves.toBeUndefined()
+
+    expect(cancelCount.value).toBeGreaterThanOrEqual(1)
     const joined = output.join('').toLowerCase()
     expect(joined).toContain('without reflecting')
     expect(joined).toContain('saved')
     expect(joined).not.toContain('reflecting on this session...')
     expect(chat.requests).toHaveLength(0)
+
+    const summaries = await sessionSummaryFiles(dir)
+    expect(summaries).toHaveLength(0)
+
+    await engine.close()
+  })
+
+  it('finishes the streaming write on the first Ctrl-C mid-response, then reminds about /bye', async () => {
+    const chat = new FakeChatProvider([
+      { text: '', toolCalls: [], textChunks: ['Hel', 'lo the', 're.'] },
+      { text: emptyReflectionJson('Said hi.'), toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const output: string[] = []
+    let handler: (() => void) | undefined
+    let fired = false
+    const answers = ['hello', '/bye']
+    let cursor = 0
+    const io: ChatIo = {
+      async question(prompt) {
+        output.push(prompt)
+        const next = answers[cursor++]
+        if (next === undefined) throw new Error('no more scripted answers')
+        return next
+      },
+      write(text) {
+        output.push(text)
+        // Simulate a SIGINT arriving right after the first chunk of the
+        // reply has already reached the terminal.
+        if (text === 'Hel' && !fired) {
+          fired = true
+          handler?.()
+        }
+      },
+      onInterrupt(h) {
+        handler = h
+      },
+      cancelPending() {},
+    }
+
+    await expect(runChat({ engine, config, chat, io })).resolves.toBeUndefined()
+
+    const joined = output.join('')
+    expect(joined).toContain('Hel')
+    expect(joined).toContain('lo the')
+    expect(joined).toContain('re.')
+    expect(joined.toLowerCase()).toContain('finishing this reply')
+    expect(joined).toContain('reflecting on this session...')
+
+    await engine.close()
+  })
+
+  it('stops streaming and exits without reflecting when a second Ctrl-C arrives mid-response', async () => {
+    const chat = new FakeChatProvider([
+      { text: '', toolCalls: [], textChunks: ['Hel', 'lo the', 're.'] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const output: string[] = []
+    let handler: (() => void) | undefined
+    let firedFirst = false
+    let firedSecond = false
+    const io: ChatIo = {
+      async question(prompt) {
+        output.push(prompt)
+        return 'hello'
+      },
+      write(text) {
+        output.push(text)
+        if (text === 'Hel' && !firedFirst) {
+          firedFirst = true
+          handler?.()
+        } else if (text === 'lo the' && !firedSecond) {
+          firedSecond = true
+          handler?.()
+        }
+      },
+      onInterrupt(h) {
+        handler = h
+      },
+      cancelPending() {},
+    }
+
+    await expect(runChat({ engine, config, chat, io })).resolves.toBeUndefined()
+
+    const joined = output.join('')
+    expect(joined).toContain('Hel')
+    expect(joined).toContain('lo the')
+    expect(joined).not.toContain('re.')
+    expect(joined.toLowerCase()).toContain('without reflecting')
+    expect(chat.requests).toHaveLength(1)
 
     const summaries = await sessionSummaryFiles(dir)
     expect(summaries).toHaveLength(0)
