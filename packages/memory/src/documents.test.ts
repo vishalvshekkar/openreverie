@@ -41,6 +41,32 @@ describe('documents', () => {
     expect(read.body).toBe(doc.body)
   })
 
+  it('normalizes body without trailing newline to end with exactly one', async () => {
+    const path = join(dir, 'note.md')
+    const inputBody = 'This is the body without newline'
+    const doc: Document = {
+      path,
+      meta: { id: newId('doc') },
+      body: inputBody,
+    }
+    await writeDocumentAtomic(doc)
+    const read = await readDocument(path)
+    expect(read.body).toBe(`${inputBody}\n`)
+  })
+
+  it('normalizes body with multiple trailing newlines to end with exactly one', async () => {
+    const path = join(dir, 'note.md')
+    const inputBody = 'This is the body with multiple newlines\n\n\n'
+    const doc: Document = {
+      path,
+      meta: { id: newId('doc') },
+      body: inputBody,
+    }
+    await writeDocumentAtomic(doc)
+    const read = await readDocument(path)
+    expect(read.body).toBe('This is the body with multiple newlines\n')
+  })
+
   it('writes atomically, leaving no .tmp- files behind', async () => {
     const path = join(dir, 'note.md')
     const doc: Document = {

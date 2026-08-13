@@ -42,7 +42,10 @@ export async function writeDocumentAtomic(doc: Document): Promise<void> {
   if (typeof doc.meta.id !== 'string' || doc.meta.id.length === 0) {
     throw new Error(`Cannot write document at ${doc.path}: meta is missing an id.`)
   }
-  const serialized = matter.stringify(doc.body, doc.meta)
+  // Normalize body to end with exactly one trailing newline before serialization.
+  // This ensures stored documents always have a single trailing newline regardless of input.
+  const normalizedBody = doc.body.replace(/\n*$/, '\n')
+  const serialized = matter.stringify(normalizedBody, doc.meta)
   const tmpPath = `${doc.path}.tmp-${ulid()}`
   await writeFile(tmpPath, serialized, 'utf8')
   await rename(tmpPath, doc.path)
