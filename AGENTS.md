@@ -33,6 +33,10 @@ The README's Status section must reflect reality at all times. After any meaning
 - Never write code that could leak memory folder contents anywhere except the user's configured model provider. No telemetry, no analytics, no phoning home. Ever.
 - A developer's own `.reverie/` data must never enter the repo. It is gitignored; keep it that way.
 
+## Orchestration and token discipline
+
+The main agent in a session acts as an orchestrator. It plans, decomposes, reviews, and talks to the human. It delegates the actual work (implementation, research, codebase exploration, audits, reviews) to subagents sized to the task, and it parallelizes independent work. Do not burn the expensive main-loop context on mechanical work a cheaper subagent can do. Pin an explicit model on every subagent: cheap models for mechanical and lookup work, mid-tier models for implementation and review, top-tier models only for the hardest judgment calls.
+
 ## Engineering practice
 
 - TDD for deterministic logic (stores, graph log, indexer, rollup triggers, config). Write the failing test first.
