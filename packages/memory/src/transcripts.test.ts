@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { appendFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -109,5 +109,41 @@ describe('SessionStore', () => {
       { sessionId: first.sessionId, date: '2026-08-13', reflected: false },
       { sessionId: second.sessionId, date: '2026-08-14', reflected: false },
     ])
+  })
+
+  it('readTranscript silently drops a truncated final line from a crash mid-append', async () => {
+    const now = new Date('2026-08-13T21:04:11Z')
+    const store = await SessionStore.start(paths, now)
+
+    const validLine = { ts: now.toISOString(), role: 'user' as const, content: 'hello' }
+    await store.appendLine(validLine)
+
+    const transcriptFile = join(store.dir, 'transcript.jsonl')
+    await appendFile(transcriptFile, '{"ts":"2026-08-13T21:04:12Z","role":"assistant","c', 'utf8')
+
+    const read = await SessionStore.readTranscript(paths, store.sessionId)
+    expect(read).toEqual([validLine])
+  })
+
+  it('readTranscript throws for malformed JSON in the middle of a transcript', async () => {
+    const now = new Date('2026-08-13T21:04:11Z')
+    const store = await SessionStore.start(paths, now)
+
+    const transcriptFile = join(store.dir, 'transcript.jsonl')
+    await writeFile(
+      transcriptFile,
+      '{"ts":"2026-08-13T21:04:11Z","role":"user","content":"hello"}\n',
+      'utf8',
+    )
+    await appendFile(transcriptFile, 'malformed\n', 'utf8')
+    await appendFile(
+      transcriptFile,
+      '{"ts":"2026-08-13T21:04:12Z","role":"assistant","content":"hi"}\n',
+      'utf8',
+    )
+
+    await expect(SessionStore.readTranscript(paths, store.sessionId)).rejects.toThrow(
+      /Malformed JSON in transcript for session.*line 2/,
+    )
   })
 })

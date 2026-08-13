@@ -52,10 +52,38 @@ export class SessionStore {
   static async readTranscript(paths: MemoryPaths, sessionId: string): Promise<TranscriptLine[]> {
     const dir = await findSessionDir(paths, sessionId)
     const raw = await readFile(join(dir, TRANSCRIPT_FILE), 'utf8')
-    return raw
-      .split('\n')
-      .filter((rawLine) => rawLine.length > 0)
-      .map((rawLine) => JSON.parse(rawLine) as TranscriptLine)
+    const lines = raw.split('\n')
+    const result: TranscriptLine[] = []
+
+    // A crash during append can leave a partial final line. This is silently
+    // dropped because it never fully landed. Malformed lines elsewhere indicate
+    // interior corruption and throw an error naming the session and line number.
+    // Blank lines are skipped anywhere.
+
+    let lastNonBlankIndex = -1
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (lines[i].length > 0) {
+        lastNonBlankIndex = i
+        break
+      }
+    }
+
+    for (let i = 0; i < lines.length; i++) {
+      const rawLine = lines[i]
+      if (rawLine.length === 0) continue
+
+      try {
+        const parsed = JSON.parse(rawLine) as TranscriptLine
+        result.push(parsed)
+      } catch {
+        if (i === lastNonBlankIndex) {
+          continue
+        }
+        throw new Error(`Malformed JSON in transcript for session ${sessionId} at line ${i + 1}`)
+      }
+    }
+
+    return result
   }
 
   static async listSessions(
