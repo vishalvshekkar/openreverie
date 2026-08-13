@@ -9,6 +9,7 @@ import type {
   ChatProvider,
   ChatRequest,
   ChatResult,
+  EmbeddingProvider,
   FetchLike,
   ToolCall,
   ToolDefinition,
@@ -230,5 +231,45 @@ export class OpenAiChatProvider implements ChatProvider {
 
     yield* flushPendingToolCalls()
     yield { type: 'done' }
+  }
+}
+
+interface OpenAiEmbeddingResponse {
+  data: Array<{ embedding: number[]; index: number }>
+}
+
+const EMBEDDING_BATCH_SIZE = 100
+
+export class OpenAiEmbeddingProvider implements EmbeddingProvider {
+  readonly name = 'openai'
+  private readonly apiKey: string
+  private readonly baseUrl: string
+  private readonly fetchImpl: FetchLike
+
+  constructor(cfg: OpenAiConfig, fetchImpl: FetchLike = fetch) {
+    this.apiKey = cfg.apiKey
+    this.baseUrl = cfg.baseUrl ?? DEFAULT_BASE_URL
+    this.fetchImpl = fetchImpl
+  }
+
+  async embed(model: string, texts: string[]): Promise<number[][]> {
+    const results: number[][] = []
+    for (let i = 0; i < texts.length; i += EMBEDDING_BATCH_SIZE) {
+      const batch = texts.slice(i, i + EMBEDDING_BATCH_SIZE)
+      const batchResults = await this.embedBatch(model, batch)
+      results.push(...batchResults)
+    }
+    return results
+  }
+
+  private async embedBatch(model: string, texts: string[]): Promise<number[][]> {
+    const res = await this.fetchImpl(`${this.baseUrl}/embeddings`, {
+      method: 'POST',
+      headers: authHeaders(this.apiKey),
+      body: JSON.stringify({ model, input: texts }),
+    })
+    await requireOk(res)
+    const data = (await res.json()) as OpenAiEmbeddingResponse
+    return [...data.data].sort((a, b) => a.index - b.index).map((item) => item.embedding)
   }
 }
