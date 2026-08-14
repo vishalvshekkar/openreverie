@@ -156,6 +156,7 @@ describe('paths and ensureMemoryTree', () => {
     expect(paths.constitution).toBe(join(dir, 'constitution.md'))
     expect(paths.realmsDir).toBe(join(dir, 'realms'))
     expect(paths.arcsDir).toBe(join(dir, 'arcs'))
+    expect(paths.peopleDir).toBe(join(dir, 'people'))
     expect(paths.sessionsDir).toBe(join(dir, 'sessions'))
     expect(paths.rollupsDailyDir).toBe(join(dir, 'rollups', 'daily'))
     expect(paths.rollupsWeeklyDir).toBe(join(dir, 'rollups', 'weekly'))
@@ -175,6 +176,7 @@ describe('paths and ensureMemoryTree', () => {
     for (const d of [
       paths.realmsDir,
       paths.arcsDir,
+      paths.peopleDir,
       paths.sessionsDir,
       paths.rollupsDailyDir,
       paths.rollupsWeeklyDir,

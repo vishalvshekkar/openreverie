@@ -100,6 +100,15 @@ describe('buildPersona', () => {
     }
   })
 
+  // The forget feature is parked: reverie must not claim a capability it
+  // does not currently offer. No persona text should mention forgetting.
+  it('never mentions a forget capability: the feature is parked, not shipped', () => {
+    for (const mode of ['companion', 'firewall'] as const) {
+      const text = buildPersona(mode, resources, defaultStyle)
+      expect(text.toLowerCase()).not.toContain('forget')
+    }
+  })
+
   it('renders correctly with an empty resource list', () => {
     expect(() => buildPersona('companion', [], defaultStyle)).not.toThrow()
     expect(() => buildPersona('firewall', [], defaultStyle)).not.toThrow()

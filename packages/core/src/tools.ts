@@ -92,7 +92,7 @@ export function toolDefinitions(): ToolDefinition[] {
             items: { type: 'string' },
             description:
               'Restrict results to these document kinds. Valid values: constitution, realm, arc, summary, ' +
-              'rollup_daily, rollup_weekly. Omit to search across all kinds.',
+              'rollup_daily, rollup_weekly, person. Omit to search across all kinds.',
           },
           after: {
             type: 'string',
@@ -118,7 +118,8 @@ export function toolDefinitions(): ToolDefinition[] {
         'Query the relationship graph directly, for structural facts a text search would not surface. Use ' +
         '"neighbors" to see everything linked to a node (a person, an item, an arc, a realm). Use "items_in_arc" to ' +
         'list what has been filed under a specific arc. Use "arcs_involving_person" to find every storyline a ' +
-        'specific person appears in. In every case nodeId is the id of the node you are starting from.',
+        'specific person appears in. In every case nodeId is the id of the node you are starting from. A returned ' +
+        'node that has a page on disk carries a docId; pass that docId to read_document to get its full text.',
       parameters: {
         type: 'object',
         properties: {

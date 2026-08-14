@@ -1,28 +1,29 @@
-import { mkdtemp, readdir, rm } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { loadConfig, type ReverieConfig, saveConfig } from '@openreverie/core'
 import {
+  appendGraph,
   type EngineDeps,
   ensureMemoryTree,
   MemoryEngine,
   memoryPaths,
   newId,
+  readDocument,
   writeDocumentAtomic,
 } from '@openreverie/memory'
-import { FakeChatProvider, FakeEmbeddingProvider } from '@openreverie/providers'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { type ChatProvider, FakeChatProvider, FakeEmbeddingProvider } from '@openreverie/providers'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   type ChatIo,
   countMemoryDocuments,
   createStylePersister,
-  cyan,
-  magenta,
   openCliContext,
   printWarnings,
   runChat,
   toolNotice,
 } from './chat.js'
+import { cyan, magenta } from './colors.js'
 
 function testConfig(memoryDir: string): ReverieConfig {
   return {
@@ -50,7 +51,8 @@ function emptyReflectionJson(summary: string): string {
     attributions: [],
     newArcs: [],
     newPersons: [],
-    arcNarratives: [],
+    arcUpdates: [],
+    personUpdates: [],
     constitutionUpdate: null,
   })
 }
@@ -161,6 +163,29 @@ async function sessionSummaryFiles(memoryDir: string): Promise<string[]> {
   return summaries
 }
 
+// Reads the transcript.jsonl of the single session directory under
+// memoryDir/sessions, for tests that need to see what actually got
+// persisted rather than just the CLI's own terminal output.
+async function soleTranscript(
+  memoryDir: string,
+): Promise<Array<{ role: string; content: string }>> {
+  const sessionsDir = path.join(memoryDir, 'sessions')
+  const entries = await readdir(sessionsDir)
+  if (entries.length !== 1) {
+    throw new Error(
+      `soleTranscript: expected exactly one session directory, found ${entries.length}`,
+    )
+  }
+  const raw = await readFile(
+    path.join(sessionsDir, entries[0] as string, 'transcript.jsonl'),
+    'utf8',
+  )
+  return raw
+    .split('\n')
+    .filter((line) => line.length > 0)
+    .map((line) => JSON.parse(line))
+}
+
 describe('runChat', () => {
   let dir: string
 
@@ -174,6 +199,7 @@ describe('runChat', () => {
 
   it('streams a hello then /bye session, reflects on exit, and never throws', async () => {
     const chat = new FakeChatProvider([
+      { text: 'Good to see you.', toolCalls: [] },
       { text: 'Hi there. Good to hear from you.', toolCalls: [] },
       { text: emptyReflectionJson('Said hello.'), toolCalls: [] },
     ])
@@ -197,6 +223,7 @@ describe('runChat', () => {
 
   it('renders tool events as dim searching-memory notices', async () => {
     const chat = new FakeChatProvider([
+      { text: 'Good to see you.', toolCalls: [] },
       {
         text: '',
         toolCalls: [
@@ -221,6 +248,7 @@ describe('runChat', () => {
 
   it('tells the user plainly when the agent got lost in its notes with no text reply', async () => {
     const chat = new FakeChatProvider([
+      { text: 'Good to see you.', toolCalls: [] },
       { text: '', toolCalls: [] },
       { text: emptyReflectionJson('Quiet session.'), toolCalls: [] },
     ])
@@ -237,10 +265,14 @@ describe('runChat', () => {
     await engine.close()
   })
 
-  it('ends the session and reflects on EOF (question rejecting) just like /bye', async () => {
-    const chat = new FakeChatProvider([
-      { text: emptyReflectionJson('Nothing was said.'), toolCalls: [] },
-    ])
+  // Question rejecting on the very first call (EOF before anything is
+  // typed) leaves the transcript with only the greeting, no user line.
+  // That is exactly the empty-session case Part Two of this task covers:
+  // the session ends via the same /bye path, but is skipped rather than
+  // reflected, since there was never a user message for a reflection call
+  // to run against.
+  it('ends the session on EOF (question rejecting) just like /bye, and skips reflection since no user message was ever sent', async () => {
+    const chat = new FakeChatProvider([{ text: 'Good to see you.', toolCalls: [] }])
     const engine = await MemoryEngine.open(dir, fakeDeps(chat))
     const config = testConfig(dir)
     const output: string[] = []
@@ -261,14 +293,145 @@ describe('runChat', () => {
     expect(joined).toContain('reflecting on this session...')
     const summaries = await sessionSummaryFiles(dir)
     expect(summaries).toHaveLength(1)
+    const summary = await readDocument(
+      path.join(dir, 'sessions', summaries[0] as string, 'summary.md'),
+    )
+    expect(summary.meta.skipped).toBe(true)
+    expect(chat.requests).toHaveLength(1)
 
     await engine.close()
   })
 
-  it('reminds about /bye without hanging or aborting on the first Ctrl-C while idle at the prompt', async () => {
+  // Before this fix, session.end() had no try/catch here: a reflection
+  // failure on /bye (a provider error, or any other throw inside
+  // MemoryEngine.endSession) propagated out of runChat entirely, past
+  // index.ts, into main().catch(), and printed a raw stack trace with exit
+  // code 1 instead of the plain message every other failure path in this
+  // loop already gives.
+  it('does not crash on /bye when reflection fails, and tells the user their conversation is saved and will be retried', async () => {
     const chat = new FakeChatProvider([
-      { text: emptyReflectionJson('Said nothing.'), toolCalls: [] },
+      { text: 'Good to see you.', toolCalls: [] },
+      { text: 'Hi there.', toolCalls: [] },
+      // No third scripted reply: reflectSession's chat.complete() call
+      // inside session.end() throws when the fake provider's script runs
+      // out, standing in for a real provider error (a 429 or 500).
     ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const { io, output } = scriptedIo(['hello', '/bye'])
+
+    await expect(runChat({ engine, config, chat, io })).resolves.toBeUndefined()
+
+    const joined = output.join('')
+    expect(joined).toContain('reflecting on this session...')
+    expect(joined).toContain('could not finish reflecting')
+    expect(joined).toContain('reflected the next time reverie starts')
+    expect(joined).not.toContain('Saved and reflected.')
+
+    // The session is genuinely unreflected, not just reported that way:
+    // no summary.md exists yet, so a future runMaintenance() will retry it.
+    const summaries = await sessionSummaryFiles(dir)
+    expect(summaries).toHaveLength(0)
+
+    await engine.close()
+  })
+
+  // The first version of the /bye fix wrapped session.end() in try/catch
+  // but only called printWarnings() on the success branch, so a warning
+  // resolveNarratives had already recorded earlier in the same reflection
+  // (the arc page skipped below) would be silently dropped if something
+  // later in that same reflection then threw. This proves both halves are
+  // covered: the skip is recorded as a warning, and it still reaches the
+  // screen even though the reflection as a whole fails.
+  //
+  // The later throw is arcsDir itself being unwritable, not a timing-based
+  // interruption of the hello turn: chmod happens once, before the engine
+  // ever opens, and arcsDir is not touched by the hello turn at all, so
+  // there is no race with any in-flight write to synchronize against. The
+  // scripted reflection reply both fails to update the (deleted) Health
+  // page and proposes a genuinely new arc, whose page write into the now
+  // read-only arcsDir is what throws.
+  it('still prints a warning recorded earlier in reflection when reflection later fails outright on /bye', async () => {
+    const paths = memoryPaths(dir)
+    await ensureMemoryTree(paths)
+
+    const arcDocPath = path.join(paths.arcsDir, 'health.md')
+    await writeDocumentAtomic({
+      path: arcDocPath,
+      meta: { id: newId('doc'), name: 'Health' },
+      body: 'Original arc narrative.\n',
+    })
+    await appendGraph(paths, [
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'arc_health',
+        type: 'arc',
+        label: 'Health',
+        doc: arcDocPath,
+      },
+    ])
+    // The user hand-deletes the page; the graph node and its doc pointer
+    // both stay exactly as they were.
+    await rm(arcDocPath)
+
+    // Revoking write on arcsDir up front does not disturb anything before
+    // materializeNew's createArc call: reading the existing Health arc
+    // only needs read and execute, and the hello turn never touches
+    // arcsDir at all.
+    await chmod(paths.arcsDir, 0o500)
+
+    const chat = new FakeChatProvider([
+      { text: 'Good to see you.', toolCalls: [] },
+      { text: 'Hi there.', toolCalls: [] },
+      {
+        text: JSON.stringify({
+          summary: 'Talked about health and started running.',
+          items: [{ text: 'Started running', kind: 'event' }],
+          attributions: [],
+          newArcs: [
+            {
+              name: 'Running',
+              realm: 'Fitness',
+              reason: 'mentioned starting a new habit',
+              itemIndexes: [0],
+              narrative: 'Just started running.',
+            },
+          ],
+          newPersons: [],
+          arcUpdates: [{ arcId: 'arc_health', note: 'Should be skipped, the page is gone.' }],
+          personUpdates: [],
+          constitutionUpdate: null,
+        }),
+        toolCalls: [],
+      },
+    ])
+
+    let engine: MemoryEngine
+    try {
+      engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const config = testConfig(dir)
+      const { io, output } = scriptedIo(['hello', '/bye'])
+
+      await expect(runChat({ engine, config, chat, io })).resolves.toBeUndefined()
+
+      const joined = output.join('')
+      expect(joined).toContain('could not finish reflecting')
+      expect(joined).toContain('note:')
+      expect(joined).toContain('Health')
+
+      await engine.close()
+    } finally {
+      await chmod(paths.arcsDir, 0o700)
+    }
+  })
+
+  it('reminds about /bye without hanging or aborting on the first Ctrl-C while idle at the prompt', async () => {
+    // Only the greeting is ever scripted: the user never gets past the
+    // idle prompt before answering /bye, so the session ends with no user
+    // line and is skipped rather than reflected. No further scripted
+    // response is needed.
+    const chat = new FakeChatProvider([{ text: 'Good to see you.', toolCalls: [] }])
     const engine = await MemoryEngine.open(dir, fakeDeps(chat))
     const config = testConfig(dir)
     const { io, output, triggerInterrupt, answerPending, cancelCount } = pendingQuestionIo()
@@ -315,7 +478,10 @@ describe('runChat', () => {
     expect(joined).toContain('without reflecting')
     expect(joined).toContain('saved')
     expect(joined).not.toContain('reflecting on this session...')
-    expect(chat.requests).toHaveLength(0)
+    // The only request that can have reached the model is the greeting's
+    // own (failed, since the script is empty) attempt, which always
+    // carries an empty messages array; no user turn ever ran.
+    expect(chat.requests.every((r) => r.messages.length === 0)).toBe(true)
 
     const summaries = await sessionSummaryFiles(dir)
     expect(summaries).toHaveLength(0)
@@ -325,6 +491,7 @@ describe('runChat', () => {
 
   it('finishes the streaming write on the first Ctrl-C mid-response, then reminds about /bye', async () => {
     const chat = new FakeChatProvider([
+      { text: 'Good to see you.', toolCalls: [] },
       { text: '', toolCalls: [], textChunks: ['Hel', 'lo the', 're.'] },
       { text: emptyReflectionJson('Said hi.'), toolCalls: [] },
     ])
@@ -371,6 +538,7 @@ describe('runChat', () => {
 
   it('stops streaming and exits without reflecting when a second Ctrl-C arrives mid-response', async () => {
     const chat = new FakeChatProvider([
+      { text: 'Good to see you.', toolCalls: [] },
       { text: '', toolCalls: [], textChunks: ['Hel', 'lo the', 're.'] },
     ])
     const engine = await MemoryEngine.open(dir, fakeDeps(chat))
@@ -407,7 +575,9 @@ describe('runChat', () => {
     expect(joined).toContain('lo the')
     expect(joined).not.toContain('re.')
     expect(joined.toLowerCase()).toContain('without reflecting')
-    expect(chat.requests).toHaveLength(1)
+    // One request for the greeting, one for the user's turn that got cut
+    // off; the second Ctrl-C stops before a third (reflection) request.
+    expect(chat.requests).toHaveLength(2)
 
     const summaries = await sessionSummaryFiles(dir)
     expect(summaries).toHaveLength(0)
@@ -417,6 +587,7 @@ describe('runChat', () => {
 
   it('reports plainly when the model is unreachable mid-response instead of crashing', async () => {
     const chat = new FakeChatProvider([
+      { text: 'Good to see you.', toolCalls: [] },
       { text: 'partial', toolCalls: [], throwAfterTextEvents: 1 },
       { text: emptyReflectionJson('Hit a snag.'), toolCalls: [] },
     ])
@@ -429,6 +600,132 @@ describe('runChat', () => {
     const joined = output.join('')
     expect(joined).toContain('partial')
     expect(joined.toLowerCase()).toContain('could not reach the model')
+
+    await engine.close()
+  })
+
+  it('greets before the first prompt, streaming the greeting the same way it streams a reply', async () => {
+    const chat = new FakeChatProvider([
+      { text: 'Good to see you. How has the week been treating you?', toolCalls: [] },
+      { text: 'Hi there.', toolCalls: [] },
+      { text: emptyReflectionJson('Said hi.'), toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const { io, output } = scriptedIo(['hello', '/bye'])
+
+    await runChat({ engine, config, chat, io })
+
+    const joined = output.join('')
+    const greetingIndex = joined.indexOf('Good to see you. How has the week been treating you?')
+    const promptIndex = joined.indexOf('you> ')
+    expect(greetingIndex).toBeGreaterThanOrEqual(0)
+    expect(greetingIndex).toBeLessThan(promptIndex)
+
+    await engine.close()
+  })
+
+  it('prints nothing for the greeting when the provider fails, and still reaches the first prompt', async () => {
+    const chat = new FakeChatProvider([])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const { io, output } = scriptedIo(['/bye'])
+
+    await expect(runChat({ engine, config, chat, io })).resolves.toBeUndefined()
+
+    const joined = output.join('')
+    expect(joined).toContain('you> ')
+    expect(joined).not.toContain('reverie> ')
+
+    await engine.close()
+  })
+
+  it('shows the responding message, not the idle message, on the first Ctrl-C during a streaming greeting', async () => {
+    const chat = new FakeChatProvider([
+      { text: '', toolCalls: [], textChunks: ['Hel', 'lo the', 're.'] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const output: string[] = []
+    let handler: (() => void) | undefined
+    let fired = false
+    const io: ChatIo = {
+      async question(prompt) {
+        output.push(prompt)
+        return '/bye'
+      },
+      write(text) {
+        output.push(text)
+        // A response is actively streaming (the greeting), the same as a
+        // real turn: the first Ctrl-C here must say so, not the idle
+        // message meant for sitting at the prompt with nothing running.
+        if (text === 'Hel' && !fired) {
+          fired = true
+          handler?.()
+        }
+      },
+      onInterrupt(h) {
+        handler = h
+      },
+      cancelPending() {},
+    }
+
+    await runChat({ engine, config, chat, io })
+
+    const joined = output.join('').toLowerCase()
+    expect(joined).toContain('finishing this reply')
+
+    await engine.close()
+  })
+
+  it('actually stops the greeting on a second Ctrl-C, instead of hanging after saying it stopped', async () => {
+    const chat = new FakeChatProvider([
+      { text: '', toolCalls: [], textChunks: ['Hel', 'lo the', 're.'] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const output: string[] = []
+    let handler: (() => void) | undefined
+    let firedFirst = false
+    let firedSecond = false
+    const io: ChatIo = {
+      async question() {
+        // A double Ctrl-C during the greeting must end runChat before it
+        // ever asks a question; reaching this would mean the CLI said it
+        // stopped and then kept waiting anyway.
+        throw new Error('question() should not be called after a double Ctrl-C during the greeting')
+      },
+      write(text) {
+        output.push(text)
+        if (text === 'Hel' && !firedFirst) {
+          firedFirst = true
+          handler?.()
+        } else if (text === 'lo the' && !firedSecond) {
+          firedSecond = true
+          handler?.()
+        }
+      },
+      onInterrupt(h) {
+        handler = h
+      },
+      cancelPending() {},
+    }
+
+    await expect(runChat({ engine, config, chat, io })).resolves.toBeUndefined()
+
+    const joined = output.join('')
+    expect(joined).toContain('Hel')
+    expect(joined).toContain('lo the')
+    expect(joined).not.toContain('re.')
+    expect(joined.toLowerCase()).toContain('without reflecting')
+
+    // The text already streamed before the second Ctrl-C persists, per
+    // Task 10's abandonment guarantee (and the withTimeout fix that keeps
+    // the underlying provider iterator unwinding on that path); the chunk
+    // after the cutoff point does not.
+    const transcript = await soleTranscript(dir)
+    expect(transcript).toHaveLength(1)
+    expect(transcript[0]).toMatchObject({ role: 'assistant', content: 'Hello the' })
 
     await engine.close()
   })
@@ -524,7 +821,7 @@ describe('openCliContext', () => {
 })
 
 describe('countMemoryDocuments', () => {
-  it('counts the constitution plus every realm and arc document', async () => {
+  it('counts the constitution plus every realm, arc, and person document', async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'openreverie-count-'))
     try {
       const paths = memoryPaths(dir)
@@ -539,9 +836,62 @@ describe('countMemoryDocuments', () => {
         meta: { id: newId('doc'), name: 'Checkup', status: 'active' },
         body: 'An arc.\n',
       })
+      await writeDocumentAtomic({
+        path: path.join(paths.peopleDir, 'alex.md'),
+        meta: {
+          id: newId('doc'),
+          name: 'Alex',
+          node: 'person_1',
+          opened: '2026-08-01T00:00:00.000Z',
+        },
+        body: 'This page is new. It grows as we talk.\n',
+      })
 
       const count = await countMemoryDocuments(dir)
-      expect(count).toBe(3) // constitution + 1 realm + 1 arc
+      expect(count).toBe(4) // constitution + 1 realm + 1 arc + 1 person
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('does not count a skipped session summary, matching what reindex actually indexes', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'openreverie-count-skip-'))
+    try {
+      const paths = memoryPaths(dir)
+      await ensureMemoryTree(paths)
+
+      const reflectedDir = path.join(paths.sessionsDir, '2026-08-01-session_reflected')
+      await mkdir(reflectedDir, { recursive: true })
+      await writeDocumentAtomic({
+        path: path.join(reflectedDir, 'summary.md'),
+        meta: {
+          id: newId('doc'),
+          kind: 'summary',
+          session: 'session_reflected',
+          date: '2026-08-01',
+        },
+        body: 'A real session summary.\n',
+      })
+
+      const skippedDir = path.join(paths.sessionsDir, '2026-08-02-session_skipped')
+      await mkdir(skippedDir, { recursive: true })
+      await writeDocumentAtomic({
+        path: path.join(skippedDir, 'summary.md'),
+        meta: {
+          id: newId('doc'),
+          kind: 'summary',
+          session: 'session_skipped',
+          date: '2026-08-02',
+          skipped: true,
+          reason: 'no user messages in this session',
+        },
+        body: 'This session had no user messages, so there was nothing to reflect on.\n',
+      })
+
+      const count = await countMemoryDocuments(dir)
+      // constitution + 1 reflected session summary; the skipped session's
+      // summary is not indexed by reindexAll and must not be counted here.
+      expect(count).toBe(2)
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
@@ -576,6 +926,12 @@ describe('toolNotice', () => {
   it('falls back to a plain, truthful notice for an unknown tool', () => {
     expect(toolNotice('some_future_tool')).toBe('[using: some_future_tool]')
   })
+
+  // forget is parked, not shipped: it has no notice of its own and falls
+  // back to the same plain, truthful default as any other unlisted tool.
+  it('has no notice of its own for forget, since the feature is parked', () => {
+    expect(toolNotice('forget')).toBe('[using: forget]')
+  })
 })
 
 describe('runChat speaker rendering', () => {
@@ -591,6 +947,7 @@ describe('runChat speaker rendering', () => {
 
   it('renders the reverie> tag before assistant text streams', async () => {
     const chat = new FakeChatProvider([
+      { text: 'Good to see you.', toolCalls: [] },
       { text: 'Hi there.', toolCalls: [] },
       { text: emptyReflectionJson('Said hi.'), toolCalls: [] },
     ])
@@ -611,6 +968,7 @@ describe('runChat speaker rendering', () => {
 
   it('renders colored you> and reverie> when colorEnabled is true', async () => {
     const chat = new FakeChatProvider([
+      { text: 'Good to see you.', toolCalls: [] },
       { text: 'Hi there.', toolCalls: [] },
       { text: emptyReflectionJson('Said hi.'), toolCalls: [] },
     ])
@@ -629,6 +987,7 @@ describe('runChat speaker rendering', () => {
 
   it('renders plain, uncolored you> and reverie> when colorEnabled is left off', async () => {
     const chat = new FakeChatProvider([
+      { text: 'Good to see you.', toolCalls: [] },
       { text: 'Hi there.', toolCalls: [] },
       { text: emptyReflectionJson('Said hi.'), toolCalls: [] },
     ])
@@ -642,6 +1001,308 @@ describe('runChat speaker rendering', () => {
     expect(joined).not.toContain('\x1b[')
     expect(joined).toContain('you> ')
     expect(joined).toContain('reverie> ')
+
+    await engine.close()
+  })
+})
+
+describe('runChat status line', () => {
+  let dir: string
+
+  beforeEach(async () => {
+    dir = await mkdtemp(path.join(tmpdir(), 'openreverie-chat-status-'))
+  })
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  it('shows an animated thinking line that clears before the reply text, when colorEnabled is true', async () => {
+    const chat = new FakeChatProvider([
+      { text: 'Good to see you.', toolCalls: [] },
+      { text: 'Hi there.', toolCalls: [] },
+      { text: emptyReflectionJson('Said hi.'), toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const { io, output } = scriptedIo(['hello', '/bye'])
+
+    await runChat({
+      engine,
+      config,
+      chat,
+      io,
+      colorEnabled: true,
+      setInterval: () => 1,
+      clearInterval: () => {},
+      now: () => 0,
+    })
+
+    const joined = output.join('')
+    const clearIndex = joined.indexOf('\r\x1b[K')
+    const textIndex = joined.indexOf('Hi there.')
+    expect(clearIndex).toBeGreaterThanOrEqual(0)
+    expect(clearIndex).toBeLessThan(textIndex)
+    expect(joined).toContain('thinking')
+
+    await engine.close()
+  })
+
+  it('shows the honest tool label while a tool call runs, distinct from the permanent bracketed notice', async () => {
+    const chat = new FakeChatProvider([
+      { text: 'Good to see you.', toolCalls: [] },
+      {
+        text: '',
+        toolCalls: [
+          { id: 'call_1', name: 'search_memory', arguments: JSON.stringify({ query: 'run' }) },
+        ],
+      },
+      { text: 'Found something.', toolCalls: [] },
+      { text: emptyReflectionJson('Looked something up.'), toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const { io, output } = scriptedIo(['what did we talk about', '/bye'])
+
+    await runChat({
+      engine,
+      config,
+      chat,
+      io,
+      colorEnabled: true,
+      setInterval: () => 1,
+      clearInterval: () => {},
+      now: () => 0,
+    })
+
+    const joined = output.join('')
+    // The permanent, dim, bracketed notice line: printed once and left on
+    // screen.
+    expect(joined).toContain('[searching memory]')
+    // The status line's own bare, spinner-framed render of the same label,
+    // distinct from the notice above: with the tick fake here never firing,
+    // start() renders exactly once, on the first frame, so the full frame
+    // is asserted rather than just the word "searching memory" (which the
+    // bracketed notice above already contains as a substring and would let
+    // this assertion pass even with the status line never wired to tool
+    // calls at all).
+    expect(joined).toContain('\r\x1b[2m| searching memory\x1b[0m\x1b[K')
+
+    await engine.close()
+  })
+
+  it('stays completely silent when colorEnabled is false, matching the existing no-escape guarantee', async () => {
+    const chat = new FakeChatProvider([
+      { text: 'Good to see you.', toolCalls: [] },
+      { text: 'Hi there.', toolCalls: [] },
+      { text: emptyReflectionJson('Said hi.'), toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const { io, output } = scriptedIo(['hello', '/bye'])
+
+    await runChat({ engine, config, chat, io })
+
+    const joined = output.join('')
+    expect(joined).not.toContain('\x1b[')
+
+    await engine.close()
+  })
+
+  // The status line has zero coverage of its stop-on-error invariant: if
+  // an error path never stops it, the spinner keeps animating forever
+  // over the next prompt, since neither error path (the provider throwing
+  // mid turn, or either way the greeting can fail) ever emits a 'done'
+  // event, which is the only other thing that stops it. Each of the three
+  // tests below was confirmed to fail when its corresponding stop() call
+  // was removed (see task-13-report.md for the exact failure output),
+  // then confirmed to pass again once restored.
+
+  it('clears the status line before the error message when the provider throws mid turn, in the main send loop', async () => {
+    const chat = new FakeChatProvider([
+      { text: 'Good to see you.', toolCalls: [] },
+      // No text at all before the throw (throwAfterTextEvents: 0 fires
+      // right after the one, empty, always-yielded chunk): the 'thinking'
+      // frame is still the last thing on screen when the error hits, so
+      // only the catch block's own statusLine.stop() (not the 'text'
+      // branch, which never runs on this path) can clear it.
+      { text: '', toolCalls: [], throwAfterTextEvents: 0 },
+      { text: emptyReflectionJson('Hit a snag.'), toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const { io, output } = scriptedIo(['hello', '/bye'])
+
+    await runChat({
+      engine,
+      config,
+      chat,
+      io,
+      colorEnabled: true,
+      setInterval: () => 1,
+      clearInterval: () => {},
+      now: () => 0,
+    })
+
+    const joined = output.join('')
+    const errorIndex = output.findIndex((chunk) => chunk.includes('could not reach the model'))
+    expect(errorIndex).toBeGreaterThan(0)
+    // The write immediately before the error message must be the bare
+    // clear, not a stranded animated frame: the frame is only ever
+    // written by start()/tick, and the clear is only ever written by
+    // stop(), so this is the direct proof the line was actually stopped
+    // before the error text landed, in the correct order, not merely
+    // stopped at some later point.
+    expect(output[errorIndex - 1]).toBe('\r\x1b[K')
+    expect(joined).toContain('thinking')
+
+    await engine.close()
+  })
+
+  it('clears the status line when the greeting fails outright, even though that path never emits a done event', async () => {
+    const chat = new FakeChatProvider([
+      // Fails before yielding any real text: greet() sees only 'thinking'
+      // and then ends, with no 'text' or 'done' event ever reaching
+      // chat.ts's runGreeting. Only its unconditional finally can clear
+      // the line.
+      { text: '', toolCalls: [], throwAfterTextEvents: 0 },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const { io, output } = scriptedIo(['/bye'])
+
+    await runChat({
+      engine,
+      config,
+      chat,
+      io,
+      colorEnabled: true,
+      setInterval: () => 1,
+      clearInterval: () => {},
+      now: () => 0,
+    })
+
+    const promptIndex = output.findIndex((chunk) => chunk.includes('you> '))
+    expect(promptIndex).toBeGreaterThan(0)
+    expect(output[promptIndex - 1]).toBe('\r\x1b[K')
+
+    await engine.close()
+  })
+
+  it('clears the status line when the greeting times out, even though that path never emits a done event', async () => {
+    vi.useFakeTimers()
+    try {
+      const hangingChat: ChatProvider = {
+        name: 'hanging',
+        async complete() {
+          throw new Error('not used in this test')
+        },
+        stream() {
+          // Never yields and never settles: the same shape core's own
+          // agent.test.ts uses to force the greeting's 20 second timeout.
+          return (async function* () {
+            await new Promise<never>(() => {})
+          })()
+        },
+      }
+      const engine = await MemoryEngine.open(dir, {
+        chat: hangingChat,
+        embeddings: new FakeEmbeddingProvider(),
+        reflectionModel: 'fake-reflect',
+        embeddingModel: 'fake-embed',
+      })
+      const config = testConfig(dir)
+      const { io, output } = scriptedIo(['/bye'])
+
+      const done = runChat({
+        engine,
+        config,
+        chat: hangingChat,
+        io,
+        colorEnabled: true,
+        setInterval: () => 1,
+        clearInterval: () => {},
+        now: () => 0,
+      })
+      let settled = false
+      done.then(() => {
+        settled = true
+      })
+
+      // Advancing the fake clock in one single 20,001ms jump races ahead
+      // of runChat's own real (unfaked) async setup, MemoryEngine.open()'s
+      // session bookkeeping, assembling the system prompt: that work has
+      // not even reached the point of registering the timeout's setTimeout
+      // yet when a single advance call returns, so the jump finds nothing
+      // to fire and the greeting never times out. Advancing in many small
+      // steps, checked against the real event loop between each one,
+      // lets that real setup interleave normally while still accumulating
+      // well past the 20 second threshold.
+      for (let i = 0; i < 500 && !settled; i++) {
+        await vi.advanceTimersByTimeAsync(100)
+      }
+      await done
+
+      const promptIndex = output.findIndex((chunk) => chunk.includes('you> '))
+      expect(promptIndex).toBeGreaterThan(0)
+      expect(output[promptIndex - 1]).toBe('\r\x1b[K')
+
+      await engine.close()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('stops the status line before writing the interrupt message, so no frame is left stranded in scrollback', async () => {
+    const chat = new FakeChatProvider([{ text: 'Good to see you.', toolCalls: [] }])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const output: string[] = []
+    let handler: (() => void) | undefined
+    let fired = false
+    // The status line's first (and, with this fake tick that never fires,
+    // only) frame for the greeting's 'thinking' event, written the
+    // instant statusLine.start('thinking') runs, before the model has
+    // produced anything. Firing the interrupt right on this exact write
+    // simulates Ctrl-C landing while the spinner is on screen.
+    const thinkingFrame = '\r\x1b[2m| thinking\x1b[0m\x1b[K'
+    const io: ChatIo = {
+      async question(prompt) {
+        output.push(prompt)
+        return '/bye'
+      },
+      write(text) {
+        output.push(text)
+        if (text === thinkingFrame && !fired) {
+          fired = true
+          handler?.()
+        }
+      },
+      onInterrupt(h) {
+        handler = h
+      },
+      cancelPending() {},
+    }
+
+    await runChat({
+      engine,
+      config,
+      chat,
+      io,
+      colorEnabled: true,
+      setInterval: () => 1,
+      clearInterval: () => {},
+      now: () => 0,
+    })
+
+    const frameIndex = output.indexOf(thinkingFrame)
+    expect(frameIndex).toBeGreaterThanOrEqual(0)
+    // The very next write after the frame must be the bare clear, then
+    // the interrupt message: without stopping the line first, the
+    // message would be written directly after the frame with nothing
+    // erasing it.
+    expect(output[frameIndex + 1]).toBe('\r\x1b[K')
+    expect(output[frameIndex + 2]?.toLowerCase()).toContain('finishing this reply')
 
     await engine.close()
   })
@@ -699,6 +1360,7 @@ describe('runChat update_style tool notice', () => {
       await saveConfig(config, configPath)
 
       const chat = new FakeChatProvider([
+        { text: 'Good to see you.', toolCalls: [] },
         {
           text: '',
           toolCalls: [

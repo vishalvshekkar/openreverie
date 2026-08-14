@@ -16,6 +16,7 @@ export type DocKind =
   | 'summary'
   | 'rollup_daily'
   | 'rollup_weekly'
+  | 'person'
 
 export interface IndexedChunk {
   docId: string

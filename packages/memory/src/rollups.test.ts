@@ -222,6 +222,42 @@ describe('buildDailyRollup', () => {
     expect(sentContent).toContain('On the target date.')
     expect(sentContent).not.toContain('On a different date')
   })
+
+  async function writeSkippedSummary(date: string, sessionId: string): Promise<void> {
+    const sessionDir = join(paths.sessionsDir, `${date}-${sessionId}`)
+    await mkdir(sessionDir, { recursive: true })
+    await writeDocumentAtomic({
+      path: join(sessionDir, 'summary.md'),
+      meta: { id: newId('doc'), skipped: true, reason: 'no user messages in this session' },
+      body: 'This session had no user messages, so there was nothing to reflect on.\n',
+    })
+  }
+
+  it('excludes a skipped session summary from the day it synthesizes', async () => {
+    await writeSummary('2026-08-10', 'session_aaa', 'Real content for the day.')
+    await writeSkippedSummary('2026-08-10', 'session_skipped')
+
+    const chat = new FakeChatProvider([{ text: 'Rollup text.', toolCalls: [] }])
+    const deps: RollupDeps = { chat, model: 'test-model', paths }
+
+    await buildDailyRollup(deps, '2026-08-10')
+
+    const sentContent = chat.requests[0]?.messages.map((m) => m.content).join('\n')
+    expect(sentContent).toContain('Real content for the day.')
+    expect(sentContent).not.toContain('nothing to reflect on')
+  })
+
+  it('throws when the date has only a skipped session, the same as having nothing to roll up', async () => {
+    await writeSkippedSummary('2026-08-10', 'session_skipped')
+
+    const chat = new FakeChatProvider([])
+    const deps: RollupDeps = { chat, model: 'test-model', paths }
+
+    await expect(buildDailyRollup(deps, '2026-08-10')).rejects.toThrow(
+      'No reflected session summaries found for 2026-08-10',
+    )
+    expect(chat.requests).toHaveLength(0)
+  })
 })
 
 describe('buildWeeklyRollup', () => {

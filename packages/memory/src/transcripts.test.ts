@@ -92,12 +92,16 @@ describe('SessionStore', () => {
     await store.appendLine({ ts: now.toISOString(), role: 'user', content: 'hello' })
 
     const before = await SessionStore.listSessions(paths)
-    expect(before).toEqual([{ sessionId: store.sessionId, date: '2026-08-13', reflected: false }])
+    expect(before).toEqual([
+      { sessionId: store.sessionId, date: '2026-08-13', reflected: false, skipped: false },
+    ])
 
     await writeFile(join(store.dir, 'summary.md'), '---\nid: doc_x\n---\nSummary text.\n', 'utf8')
 
     const after = await SessionStore.listSessions(paths)
-    expect(after).toEqual([{ sessionId: store.sessionId, date: '2026-08-13', reflected: true }])
+    expect(after).toEqual([
+      { sessionId: store.sessionId, date: '2026-08-13', reflected: true, skipped: false },
+    ])
   })
 
   it('listSessions returns multiple sessions sorted by directory name', async () => {
@@ -106,9 +110,35 @@ describe('SessionStore', () => {
 
     const sessions = await SessionStore.listSessions(paths)
     expect(sessions).toEqual([
-      { sessionId: first.sessionId, date: '2026-08-13', reflected: false },
-      { sessionId: second.sessionId, date: '2026-08-14', reflected: false },
+      { sessionId: first.sessionId, date: '2026-08-13', reflected: false, skipped: false },
+      { sessionId: second.sessionId, date: '2026-08-14', reflected: false, skipped: false },
     ])
+  })
+
+  it('listSessions reports skipped true when the summary carries skipped: true in its frontmatter', async () => {
+    const now = new Date('2026-08-13T21:04:11Z')
+    const store = await SessionStore.start(paths, now)
+
+    await writeFile(
+      join(store.dir, 'summary.md'),
+      '---\nid: doc_x\nskipped: true\nreason: no user messages in this session\n---\nNothing happened.\n',
+      'utf8',
+    )
+
+    const sessions = await SessionStore.listSessions(paths)
+    expect(sessions).toEqual([
+      { sessionId: store.sessionId, date: '2026-08-13', reflected: true, skipped: true },
+    ])
+  })
+
+  it('listSessions reports skipped false for a summary with no skipped field at all', async () => {
+    const now = new Date('2026-08-13T21:04:11Z')
+    const store = await SessionStore.start(paths, now)
+
+    await writeFile(join(store.dir, 'summary.md'), '---\nid: doc_x\n---\nSummary text.\n', 'utf8')
+
+    const sessions = await SessionStore.listSessions(paths)
+    expect(sessions[0]?.skipped).toBe(false)
   })
 
   it('readTranscript silently drops a truncated final line from a crash mid-append', async () => {

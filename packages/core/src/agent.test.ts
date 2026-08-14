@@ -2,8 +2,8 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { type EngineDeps, MemoryEngine } from '@openreverie/memory'
-import { FakeChatProvider, FakeEmbeddingProvider } from '@openreverie/providers'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { type ChatProvider, FakeChatProvider, FakeEmbeddingProvider } from '@openreverie/providers'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { type AgentEvent, AgentSession } from './agent.js'
 import { defaultCrisisResources, type ReverieConfig } from './config.js'
 
@@ -27,7 +27,7 @@ function testConfig(): ReverieConfig {
   }
 }
 
-function fakeDeps(chat: FakeChatProvider): EngineDeps {
+function fakeDeps(chat: ChatProvider): EngineDeps {
   return {
     chat,
     embeddings: new FakeEmbeddingProvider(),
@@ -43,7 +43,8 @@ function emptyReflectionOutput(summary: string) {
     attributions: [],
     newArcs: [],
     newPersons: [],
-    arcNarratives: [],
+    arcUpdates: [],
+    personUpdates: [],
     constitutionUpdate: null,
   }
 }
@@ -57,6 +58,46 @@ async function collect(events: AsyncIterable<AgentEvent>): Promise<AgentEvent[]>
 }
 
 describe('AgentSession', () => {
+  it('yields thinking at the start of every round, including after a tool call resumes the model', async () => {
+    const chat = new FakeChatProvider([
+      {
+        text: '',
+        toolCalls: [{ id: 'call_1', name: 'list_arcs', arguments: '{}' }],
+      },
+      { text: 'Here is what I found.', toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const session = await AgentSession.start(engine, testConfig(), chat)
+
+    const events = await collect(session.send('What is going on?'))
+
+    expect(events).toEqual([
+      { type: 'thinking' },
+      { type: 'tool', name: 'list_arcs' },
+      { type: 'thinking' },
+      { type: 'text', text: 'Here is what I found.' },
+      { type: 'done' },
+    ])
+
+    await engine.close()
+  })
+
+  it('greet() also yields thinking before the greeting text', async () => {
+    const chat = new FakeChatProvider([{ text: 'Hello again.', toolCalls: [] }])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const session = await AgentSession.start(engine, testConfig(), chat)
+
+    const events = await collect(session.greet())
+
+    expect(events).toEqual([
+      { type: 'thinking' },
+      { type: 'text', text: 'Hello again.' },
+      { type: 'done' },
+    ])
+
+    await engine.close()
+  })
+
   it('runs a tool round then a final text round, forwarding events and the transcript in order', async () => {
     const chat = new FakeChatProvider([
       {
@@ -73,7 +114,9 @@ describe('AgentSession', () => {
     const events = await collect(session.send('Did we ever go kayaking?'))
 
     expect(events).toEqual([
+      { type: 'thinking' },
       { type: 'tool', name: 'search_memory' },
+      { type: 'thinking' },
       { type: 'text', text: 'We went kayaking last spring, on the lake near your place.' },
       { type: 'done' },
     ])
@@ -186,8 +229,16 @@ describe('AgentSession', () => {
       collect(session.send('Message B')),
     ])
 
-    expect(eventsA).toEqual([{ type: 'text', text: 'Reply A' }, { type: 'done' }])
-    expect(eventsB).toEqual([{ type: 'text', text: 'Reply B' }, { type: 'done' }])
+    expect(eventsA).toEqual([
+      { type: 'thinking' },
+      { type: 'text', text: 'Reply A' },
+      { type: 'done' },
+    ])
+    expect(eventsB).toEqual([
+      { type: 'thinking' },
+      { type: 'text', text: 'Reply B' },
+      { type: 'done' },
+    ])
 
     const transcript = await engine.readTranscript(session.sessionId)
     expect(transcript.map((l) => l.role)).toEqual(['user', 'assistant', 'user', 'assistant'])
@@ -323,7 +374,9 @@ describe('AgentSession', () => {
     const events = await collect(session.send('Change how you talk to me.'))
 
     expect(events).toEqual([
+      { type: 'thinking' },
       { type: 'tool', name: 'update_style' },
+      { type: 'thinking' },
       { type: 'text', text: 'Now speaking playfully.' },
       { type: 'done' },
     ])
@@ -373,7 +426,9 @@ describe('AgentSession', () => {
     const events = await collect(session.send('Try to change how you talk.'))
 
     expect(events).toEqual([
+      { type: 'thinking' },
       { type: 'tool', name: 'update_style' },
+      { type: 'thinking' },
       { type: 'text', text: 'Still warm.' },
       { type: 'done' },
     ])
@@ -385,6 +440,275 @@ describe('AgentSession', () => {
 
     expect(firstSystemPrompt).toBe(secondSystemPrompt)
     expect(secondSystemPrompt).toContain('Your configured tone is warm')
+
+    await engine.close()
+  })
+
+  it('greet() streams the greeting and appends it as a single assistant line, with no user line', async () => {
+    const chat = new FakeChatProvider([
+      { text: 'Good to see you again. How has the week been?', toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const session = await AgentSession.start(engine, testConfig(), chat)
+
+    const events = await collect(session.greet())
+
+    expect(events).toEqual([
+      { type: 'thinking' },
+      { type: 'text', text: 'Good to see you again. How has the week been?' },
+      { type: 'done' },
+    ])
+
+    const transcript = await engine.readTranscript(session.sessionId)
+    expect(transcript.map((l) => l.role)).toEqual(['assistant'])
+    expect(transcript[0]).toMatchObject({
+      role: 'assistant',
+      content: 'Good to see you again. How has the week been?',
+    })
+
+    expect(chat.requests[0]?.messages).toEqual([])
+    expect(chat.requests[0]?.tools).toEqual([])
+
+    // The greeting request must carry today's date and the greeting
+    // instruction, both folded into the session's system prompt: today's
+    // date is the only way the model can tell a recent-sessions entry
+    // dated five days ago from one dated yesterday.
+    const today = new Date().toISOString().slice(0, 10)
+    expect(chat.requests[0]?.system).toContain(today)
+    expect(chat.requests[0]?.system).toContain('## Speak first')
+
+    await engine.close()
+  })
+
+  it('greet() writes a transcript line in the same shape as a normal assistant line', async () => {
+    const chat = new FakeChatProvider([{ text: 'Hello again.', toolCalls: [] }])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const session = await AgentSession.start(engine, testConfig(), chat)
+
+    await collect(session.greet())
+
+    const transcript = await engine.readTranscript(session.sessionId)
+    expect(transcript).toHaveLength(1)
+    const [line] = transcript
+    expect(line?.role).toBe('assistant')
+    expect(line?.content).toBe('Hello again.')
+    expect(typeof line?.ts).toBe('string')
+    expect(line?.toolCalls).toBeUndefined()
+    expect(line?.toolCallId).toBeUndefined()
+
+    await engine.close()
+  })
+
+  it('greet() abandons silently, writing no transcript line, when the provider fails', async () => {
+    const chat = new FakeChatProvider([])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const session = await AgentSession.start(engine, testConfig(), chat)
+
+    const events = await collect(session.greet())
+
+    expect(events).toEqual([{ type: 'thinking' }])
+    const transcript = await engine.readTranscript(session.sessionId)
+    expect(transcript).toEqual([])
+
+    await engine.close()
+  })
+
+  it('greet() writes no transcript line even when the provider streams text before it fails', async () => {
+    // Regression guard: FakeChatProvider's stream() calls next() before it
+    // ever returns a generator, so a provider that fails with nothing
+    // scripted (the test above) throws before withTimeout ever gets an
+    // iterator, and `text` in runGreeting is always empty on that path.
+    // That test alone cannot catch a bug where runGreeting's catch block
+    // appends whatever partial text had already streamed, the way
+    // runTurn's error handling deliberately does. This test streams real
+    // text first, then fails, so the transcript-stays-empty guarantee is
+    // actually exercised on a non-empty `text`.
+    const chat = new FakeChatProvider([
+      {
+        text: '',
+        toolCalls: [],
+        textChunks: ['Good to see', ' you again.'],
+        throwAfterTextEvents: 2,
+      },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const session = await AgentSession.start(engine, testConfig(), chat)
+
+    const events = await collect(session.greet())
+
+    expect(events).toEqual([
+      { type: 'thinking' },
+      { type: 'text', text: 'Good to see' },
+      { type: 'text', text: ' you again.' },
+    ])
+    const transcript = await engine.readTranscript(session.sessionId)
+    expect(transcript).toEqual([])
+
+    await engine.close()
+  })
+
+  it('greet() times out after 20 seconds without blocking, writing no transcript line', async () => {
+    vi.useFakeTimers()
+    try {
+      const hangingChat: ChatProvider = {
+        name: 'hanging',
+        async complete() {
+          throw new Error('not used in this test')
+        },
+        stream() {
+          return (async function* () {
+            await new Promise<never>(() => {
+              // Never resolves: simulates a provider that stalls forever.
+            })
+          })()
+        },
+      }
+      const engine = await MemoryEngine.open(dir, fakeDeps(hangingChat))
+      const session = await AgentSession.start(engine, testConfig(), hangingChat)
+
+      const resultPromise = collect(session.greet())
+      await vi.advanceTimersByTimeAsync(20_001)
+      const events = await resultPromise
+
+      expect(events).toEqual([{ type: 'thinking' }])
+      const transcript = await engine.readTranscript(session.sessionId)
+      expect(transcript).toEqual([])
+
+      await engine.close()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps the transcript coherent when a consumer abandons greet() mid stream, persisting only the text already yielded', async () => {
+    const chat = new FakeChatProvider([
+      { text: '', toolCalls: [], textChunks: ['Good to see you again.', ' How has today gone?'] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const session = await AgentSession.start(engine, testConfig(), chat)
+
+    for await (const event of session.greet()) {
+      if (event.type === 'text') break
+    }
+
+    const transcript = await engine.readTranscript(session.sessionId)
+    expect(transcript).toHaveLength(1)
+    expect(transcript[0]).toMatchObject({
+      role: 'assistant',
+      content: 'Good to see you again.',
+    })
+
+    await engine.close()
+  })
+
+  it('withTimeout asks the provider iterator to unwind on timeout, so its own cleanup eventually runs', async () => {
+    vi.useFakeTimers()
+    try {
+      let cleanedUp = false
+      let releaseHang: () => void = () => {}
+      const delayedCleanupChat: ChatProvider = {
+        name: 'delayed-cleanup',
+        async complete() {
+          throw new Error('not used in this test')
+        },
+        stream() {
+          // Shaped like OpenAiChatProvider's real read loop: a `while`
+          // loop that awaits the next chunk, then yields it. Suspending
+          // partway through an unsettled await (not at the yield) is
+          // what matters here: only a shape with an actual yield inside
+          // the loop can distinguish "the queued return() intercepted
+          // the next suspension point" from "the finally happened to
+          // run because the generator reached its own natural end
+          // anyway," which a body with no yield at all cannot do.
+          return (async function* () {
+            try {
+              while (true) {
+                // Simulates a provider whose connection is still open
+                // when the greeting times out and settles only later on
+                // its own, the way a stalled fetch might eventually
+                // produce more data or error once the OS or a proxy
+                // closes the idle socket.
+                await new Promise<void>((resolve) => {
+                  releaseHang = resolve
+                })
+                yield { type: 'text' as const, text: 'late chunk' }
+              }
+            } finally {
+              cleanedUp = true
+            }
+          })()
+        },
+      }
+      const engine = await MemoryEngine.open(dir, fakeDeps(delayedCleanupChat))
+      const session = await AgentSession.start(engine, testConfig(), delayedCleanupChat)
+
+      const resultPromise = collect(session.greet())
+      await vi.advanceTimersByTimeAsync(20_001)
+      const events = await resultPromise
+
+      expect(events).toEqual([{ type: 'thinking' }])
+      expect(cleanedUp).toBe(false)
+
+      // The provider's connection finally settles, well after greet()
+      // already gave up on it. The return() request queued at timeout
+      // time is what makes the generator unwind straight to its own
+      // finally at that point, instead of yielding the late chunk to
+      // nobody and sitting suspended there forever.
+      releaseHang()
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+
+      expect(cleanedUp).toBe(true)
+
+      await engine.close()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('withTimeout also asks the provider iterator to unwind when a consumer plainly abandons the stream, not only on timeout', async () => {
+    // Ctrl-C while the greeting is still streaming, the moment right
+    // after a chunk has already reached the terminal: the real provider
+    // iterator is suspended at its own yield (having just produced that
+    // chunk) and is about to await its next one. No fake timers here and
+    // no timeout ever fires; the point of this test is the plain
+    // abandonment path, distinct from the timeout path above.
+    let cleanedUp = false
+    const abandonedMidStreamChat: ChatProvider = {
+      name: 'abandoned-mid-stream',
+      async complete() {
+        throw new Error('not used in this test')
+      },
+      stream() {
+        return (async function* () {
+          try {
+            yield { type: 'text' as const, text: 'Good to see you.' }
+            // Suspended mid-await, not at a yield, exactly like the real
+            // provider's own next chunk still being awaited when the
+            // consumer stops asking for more.
+            await new Promise<void>(() => {})
+          } finally {
+            cleanedUp = true
+          }
+        })()
+      },
+    }
+    const engine = await MemoryEngine.open(dir, fakeDeps(abandonedMidStreamChat))
+    const session = await AgentSession.start(engine, testConfig(), abandonedMidStreamChat)
+
+    for await (const event of session.greet()) {
+      if (event.type === 'text') break
+    }
+
+    // A generator suspended at its own yield (exactly where this provider
+    // sits right after producing the first chunk) is serviced by
+    // return() immediately: no timer advance and no external release are
+    // needed for its finally to run, unlike the timeout test above.
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(cleanedUp).toBe(true)
 
     await engine.close()
   })

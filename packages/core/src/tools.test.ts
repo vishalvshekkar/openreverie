@@ -55,7 +55,8 @@ function emptyReflectionOutput(summary: string) {
     attributions: [],
     newArcs: [],
     newPersons: [],
-    arcNarratives: [],
+    arcUpdates: [],
+    personUpdates: [],
     constitutionUpdate: null,
   }
 }
@@ -88,6 +89,24 @@ describe('toolDefinitions', () => {
     for (const def of toolDefinitions()) {
       expect(def.description).not.toContain(emDash)
     }
+  })
+
+  it('lists person among the valid kinds for search_memory', () => {
+    const defs = toolDefinitions()
+    const searchMemory = defs.find((d) => d.name === 'search_memory')
+    if (!searchMemory) throw new Error('expected a search_memory tool definition')
+    const kinds = (searchMemory.parameters as { properties: { kinds: { description: string } } })
+      .properties.kinds
+    expect(kinds.description).toContain('person')
+  })
+
+  // The forget feature is parked: MemoryEngine.forget still exists as
+  // dormant code, but no tool exposes it. This guards against it coming
+  // back on the tool list by accident, unnoticed, in some later change.
+  it('does not list a forget tool: the feature is parked, not shipped', () => {
+    const defs = toolDefinitions()
+    const names = defs.map((d) => d.name)
+    expect(names).not.toContain('forget')
   })
 })
 

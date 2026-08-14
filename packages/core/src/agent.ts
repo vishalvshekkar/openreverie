@@ -23,9 +23,95 @@ import { dispatchTool, type ToolDeps, toolDefinitions } from './tools.js'
 export type AgentEvent =
   | { type: 'text'; text: string }
   | { type: 'tool'; name: string }
+  | { type: 'thinking' }
   | { type: 'done' }
 
 const MAX_TOOL_ROUNDS = 8
+
+const GREETING_TIMEOUT_MS = 20_000
+
+const GREETING_INSTRUCTION = `## Speak first
+
+You are opening this session before the user has said anything. Say something now, unprompted.
+
+If the guidance above is the first conversation guidance, follow it exactly and ignore everything below in this section: it already tells you how to open, so treat this as your instruction to do that now rather than wait to be spoken to.
+
+Otherwise: always speak, even when nothing in particular needs raising. If nothing is pressing, one or two warm sentences with no agenda is enough.
+
+If there is something worth opening with, choose exactly one, in this order, and lead with only that:
+1. Something left unresolved from the most recent session.
+2. Something notable in the recent record: a day that sounded hard, a milestone coming up.
+3. Nothing. A short hello.
+
+Never open with a list. Never summarize the record. Never give a status report. Say the one thing you picked the way you would say it out loud to someone you know, not the way you would write a briefing.
+
+How hard you reach for a thread depends on your configured engagement: following stays light, leading is more willing to name one directly.`
+
+// A single-use, per-call timeout wrapper around an async iterable: each
+// call to the underlying iterator races against a fresh ms-long timer, so
+// a provider that stalls between chunks (or never yields at all) throws
+// instead of hanging forever. The timer is cleared after every step,
+// whether it wins or loses the race.
+//
+// When the timer wins, the underlying iterator is left parked mid-call
+// (an OpenAiChatProvider generator suspended at `await reader.read()`, for
+// example), and nobody will ever call next() on it again after this
+// function throws. Left alone, that generator's own finally (which
+// cancels the reader and releases its lock) never runs. iterator.return()
+// queues a request that the generator will service the next time it
+// reaches a yield or its own await settles, unwinding through that
+// finally instead of continuing normally.
+//
+// The timer winning is not the only way this generator stops early: a
+// consumer can also abandon it directly (Ctrl-C while the greeting is
+// streaming calls .return() on this generator the same way a `for await`
+// break does). `advancedPastYield` distinguishes the two ways execution
+// can reach the finally below. It is only ever set to true by the line
+// immediately after `yield result.value`, so it stays false whenever
+// that yield does not resume normally: a plain abandonment injects a
+// return completion at the yield instead of continuing past it, per
+// generator .return() semantics, which is exactly the case this exists
+// to catch. It is also false, harmlessly, on the `result.done` early
+// return and when `iterator.next()` itself throws (a real provider
+// error): in both cases the underlying iterator is already finished or
+// already errored out, so calling .return() on it below is a no-op, not
+// a double-unwind.
+//
+// This is fire-and-forget, not awaited: measured against a generator
+// that is currently mid an unsettled await (not suspended at a yield),
+// a queued return() is not serviced until that specific await settles on
+// its own; there is no way to force it sooner. A provider stuck there
+// (there is no AbortController wired through ChatRequest to make it
+// settle) may never resolve at all, and awaiting return() here would
+// hang for exactly as long as this timeout (and this abandonment path)
+// exist to avoid. Any throw from return() itself is swallowed: it must
+// never replace or delay the timeout error, or a plain abandonment,
+// already propagating.
+async function* withTimeout<T>(iterable: AsyncIterable<T>, ms: number): AsyncGenerator<T> {
+  const iterator = iterable[Symbol.asyncIterator]()
+  while (true) {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let timedOut = false
+    const timedOutPromise = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        timedOut = true
+        reject(new Error('AgentSession: greeting timed out'))
+      }, ms)
+    })
+    let advancedPastYield = false
+    try {
+      const result = await Promise.race([iterator.next(), timedOutPromise])
+      if (result.done) return
+      yield result.value
+      advancedPastYield = true
+    } finally {
+      clearTimeout(timer)
+      if (timedOut || !advancedPastYield) {
+        iterator.return?.()?.catch(() => {})
+      }
+    }
+  }
+}
 
 // A message this session ever appends is always user, assistant, or tool,
 // never system (the system prompt is passed separately on every request).
@@ -107,10 +193,76 @@ export class AgentSession {
     }
   }
 
+  // Opens a session before the user has said anything: streams a model
+  // turn using the system prompt plus GREETING_INSTRUCTION, with no user
+  // message and no tools, and appends the result as a single assistant
+  // transcript line. Queued on the same sendChain as send(), so a greeting
+  // and a send() (or end()) never race each other's transcript writes.
+  async *greet(): AsyncIterable<AgentEvent> {
+    if (this.ended) {
+      throw new Error('AgentSession: greet() called after end()')
+    }
+    const previous = this.sendChain
+    let release: () => void = () => {}
+    this.sendChain = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    try {
+      await previous
+      yield* this.runGreeting()
+    } finally {
+      release()
+    }
+  }
+
+  private async *runGreeting(): AsyncIterable<AgentEvent> {
+    yield { type: 'thinking' }
+    let text = ''
+    let errored = false
+    try {
+      const stream = this.chat.stream({
+        model: this.model,
+        system: `${this.system}\n\n${GREETING_INSTRUCTION}`,
+        messages: [],
+        tools: [],
+      })
+      for await (const event of withTimeout(stream, GREETING_TIMEOUT_MS)) {
+        if (event.type === 'text' && event.text.length > 0) {
+          text += event.text
+          yield { type: 'text', text: event.text }
+        }
+      }
+    } catch {
+      // Any provider error, or the timeout above, abandons the greeting
+      // silently. Nothing streamed so far is appended to the transcript:
+      // the user never asked for this message, so a half-written
+      // greeting has no source to point back to. The user's first real
+      // message will surface a real provider problem clearly.
+      errored = true
+    } finally {
+      // Reached on normal completion, on the catch above, and also when a
+      // consumer abandons the iterator mid stream (Ctrl-C while the
+      // greeting is still streaming): that early exit resumes here via
+      // the generator's own return(), bypassing the catch entirely, the
+      // same way a `for await` break resumes a `finally` around it.
+      // Persist whatever text was actually streamed to the caller in
+      // every case except the error path: text the user already saw on
+      // screen must not vanish from the record, but a message that never
+      // got past the provider, or never got past the timeout, must never
+      // appear at all.
+      if (!errored && text.length > 0) {
+        await this.appendBoth({ role: 'assistant', content: text })
+      }
+    }
+    if (errored) return
+    yield { type: 'done' }
+  }
+
   private async *runTurn(userText: string): AsyncIterable<AgentEvent> {
     await this.appendBoth({ role: 'user', content: userText })
 
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+      yield { type: 'thinking' }
       let text = ''
       const toolCalls: ToolCall[] = []
 

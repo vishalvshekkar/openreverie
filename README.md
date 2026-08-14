@@ -12,13 +12,17 @@ Website: [reverie.my](https://reverie.my)
 
 What works today:
 
-- Terminal chat with persistent, layered memory (constitution, realms, arcs, session transcripts)
+- Terminal chat with persistent, layered memory (constitution, realms, arcs, people, session transcripts)
 - Live capture during a conversation (the agent can call `remember` mid-session)
-- Post-session reflection: each session is summarized, filed into memory, and produces confidence-split proposals (high-confidence links are asserted automatically as unconfirmed; everything else waits for you to accept or reject it)
+- Reverie speaks first. A session opens with a short, model-written hello instead of waiting for you to type. Reverie is instructed to lead with anything left unresolved from last time or notable in the recent record, and to keep it to a plain hello otherwise, but that is guidance to the model, not a guarantee of what it actually says. If the model is unreachable or the call times out, the greeting is skipped silently and the session just opens at the prompt. A first conversation still gets the guided flow, not this.
+- Person pages: people who recur get a narrative document under `people/` that reflection maintains, the same way it maintains arc narratives.
+- Post-session reflection: each session is summarized and filed into memory directly. New arcs, new people, and every attribution (whatever the model's confidence) are saved right away: nothing is held back for your review, and nothing saved this way can be undone through the product (see below). A memory folder from an earlier release may still carry pending proposals from before this changed; those still surface and can still be accepted or rejected with `resolve_proposal`
 - Lazy daily and weekly rollups, built the first time enough time has passed to need them
 - Both safety modes (companion and firewall)
 - A first-run setup wizard
-- The `reindex` and `reflect` CLI subcommands
+- The `reindex`, `reflect`, and `read` CLI subcommands. `read` works with no network call and no API key: it is a plain filesystem read of your memory record
+- A status line while the model or a tool is working, so a slow call looks slow rather than stuck. It only appears when the terminal supports color; a piped or non-interactive session gets none.
+- Opening a session and leaving without typing anything costs nothing: no reflection call, no rollup
 - The OpenAI provider
 
 What does not exist yet:
@@ -28,6 +32,7 @@ What does not exist yet:
 - Any deployment target beyond running it yourself (no Cloudflare or VPS packaging)
 - Graph visualization of realms, arcs, and their connections
 - Monthly and yearly rollups (only daily and weekly exist)
+- Any way to make reverie forget. The feature exists in code and is tested, but it is deliberately unexposed: no tool, no persona instruction, and no CLI command reaches it. Deleting or editing a page under `people/` or `arcs/` removes the prose, but not the record: the node it corresponds to, its edges, and every attribution that named it still live in `graph.jsonl`, nothing in the product retracts them, and the agent can still surface what the graph knows about a person or arc whose page you deleted. Running `reindex` does clear the deleted page's stale rows out of the search index, so it stops turning up in `search_memory` hits, but `reindex` rebuilds the graph from `graph.jsonl` exactly as it already was, so the node and its edges come straight back. There is currently no user-accessible way to remove a node, an edge, or an attribution at all.
 
 The architecture and memory model are specified in full in [the design spec](docs/superpowers/specs/2026-08-13-openreverie-design.md). This README is updated honestly as the project progresses; if this section says something works, it works.
 
@@ -42,10 +47,11 @@ node packages/cli/dist/index.js
 
 `setup` runs a first-run wizard that asks for your provider API key, your safety mode, and where you want your memory folder to live, then writes a config file. Run it once before anything else.
 
-With no arguments, the same binary starts the terminal chat REPL, loading your existing memory (constitution, arcs, recent context) into the conversation. Two more subcommands are available:
+With no arguments, the same binary starts the terminal chat REPL, loading your existing memory (constitution, arcs, recent context) into the conversation. A few more subcommands are available:
 
 - `reindex`: rebuilds the SQLite search index from your memory folder from scratch. Safe to run any time; the index is always derived and disposable.
 - `reflect`: runs maintenance on demand (reflects any stale unreflected sessions, builds any daily or weekly rollups that are due) instead of waiting for it to happen automatically.
+- `read`: prints part of your memory record straight from the files on disk. With no arguments it lists your constitution, arcs, realms, and people; `read constitution` prints the constitution in full; `read arc <name>`, `read realm <name>`, and `read person <name>` print one document by a case-insensitive substring match on its name. This is a plain filesystem read: it works even with no model provider configured or reachable, since seeing what is being kept about you should never depend on the network being up.
 
 ## Why this exists
 
@@ -57,16 +63,17 @@ Your memory is a folder. Prose lives in markdown files, structure lives in an ap
 
 ```
 memory/
-├── constitution.md        A living record of who you are
-├── realms/                Life domains (health, career, ...)
-├── arcs/                  Ongoing storylines, positive and negative
-├── sessions/              Verbatim transcripts and session summaries
-├── rollups/               Daily and weekly synthesis
-├── graph.jsonl            Timestamped relationships between all of it
-└── index.db               Rebuildable search index (FTS + vectors)
+├── constitution.md   A living record of who you are
+├── realms/           Life domains (health, career, ...)
+├── arcs/             Ongoing storylines, positive and negative
+├── people/           People who recur, each with a narrative page
+├── sessions/         Verbatim transcripts and session summaries
+├── rollups/          Daily and weekly synthesis
+├── graph.jsonl       Timestamped relationships between all of it
+└── index.db          Rebuildable search index (FTS + vectors)
 ```
 
-Each conversation starts with your constitution, active arcs, and recent context already loaded. The agent retrieves deeper memory through tools: semantic search, keyword search, graph traversal, and full transcript reads. After each session, a reflection pass extracts what mattered, updates arc narratives, and proposes new connections, which you confirm or reject conversationally. Nothing you said is ever deleted or rewritten; transcripts are append-only.
+Each conversation starts with your constitution, active arcs, and recent context already loaded. The agent retrieves deeper memory through tools: semantic search, keyword search, graph traversal, and full transcript reads. After each session, a reflection pass extracts what mattered and saves it directly: new arcs, new people, updated arc and person narratives, and every attribution, unconfirmed but not held back for approval. A companion that remembers should not have to ask permission to remember. Nothing you said is ever deleted or rewritten; transcripts are append-only.
 
 ## What it is not
 

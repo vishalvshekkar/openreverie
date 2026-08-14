@@ -5,11 +5,12 @@
 //
 // Two pieces of state are cached in memory for cheap synchronous reads:
 // the folded graph (`graphState`, source of truth is graph.jsonl) and a
-// document id to path map (`docPaths`, source of truth is the folder
-// itself, since MemoryIndex exposes no lookup by document id). Both are
-// rebuilt from disk on open() and reindexAll(), and kept in sync after
-// every write that touches the graph or adds a document, so a lost or
-// deleted index.db never loses information, only the SQL projection of it.
+// pair of document id/path maps (`docPaths` id to path, and its sibling
+// `docIdByPath` path to id, source of truth is the folder itself, since
+// MemoryIndex exposes no lookup by document id). All three are rebuilt
+// from disk on open() and reindexAll(), and kept in sync after every write
+// that touches the graph or adds a document, so a lost or deleted index.db
+// never loses information, only the SQL projection of it.
 
 import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -25,6 +26,7 @@ import { commitMemory } from './gitSync.js'
 import {
   appendGraph,
   type EdgeType,
+  edgeKey,
   type GraphNode,
   type GraphRecord,
   type GraphState,
@@ -44,6 +46,8 @@ import {
   type ReflectionItemKind,
   type ReflectionOutput,
   reflectSession,
+  resolveItemIds,
+  resolveNarratives,
 } from './reflection.js'
 import { type SearchFilters, searchMemory } from './retrieval.js'
 import {
@@ -67,8 +71,14 @@ export interface SessionContext {
   realms: { id: string; name: string; firstLine: string }[]
   arcs: { id: string; name: string; status: string; lastTouched?: string }[]
   latestDailyRollup?: { date: string; body: string }
-  yesterdaySummaries: { sessionId: string; body: string }[]
+  recentSummaries: { sessionId: string; date: string; body: string }[]
   pendingProposals: Proposal[]
+  // Today's date, in the same YYYY-MM-DD form used for recent session
+  // dates and the daily rollup date, built from the same clock passed to
+  // sessionContext. The model is never told the current date any other
+  // way, so this is the only anchor it has for reading an absolute date
+  // like "2026-08-12" as recent or old.
+  today: string
   // True when this memory has no reflected sessions and no arcs at all
   // (of any status), meaning the person has never actually talked with
   // reverie before. The session that was just started to hold the current
@@ -83,8 +93,24 @@ export type GraphQuery =
   | { kind: 'items_in_arc'; arcId: string }
   | { kind: 'arcs_involving_person'; personId: string }
 
+export interface ForgetInput {
+  what: string
+  nodeIds?: string[]
+  edges?: { edge: EdgeType; from: string; to: string }[]
+  documents?: { docId: string; body: string }[]
+}
+
+export interface ForgetResult {
+  retractedNodes: number
+  retractedEdges: number
+  rewrittenDocuments: string[]
+}
+
 const REALM_STARTER_BODY = 'This realm is new. It grows as we talk.\n'
 const ARC_STARTER_BODY = 'This arc is new. It grows as we talk.\n'
+const RECENT_SUMMARIES_WINDOW_DAYS = 7
+const RECENT_SUMMARIES_CAP = 3
+const PERSON_STARTER_BODY = 'This page is new. It grows as we talk.\n'
 
 export class MemoryEngine {
   private readonly paths: MemoryPaths
@@ -92,6 +118,7 @@ export class MemoryEngine {
   private readonly index: MemoryIndex
   private graphState: GraphState
   private docPaths = new Map<string, string>()
+  private docIdByPath = new Map<string, string>()
   private readonly liveItems = new Map<string, ReflectionItem[]>()
   readonly warnings: string[] = []
 
@@ -188,6 +215,13 @@ export class MemoryEngine {
     // is responsible for warning lifecycle.
     const now = new Date()
     const transcript = await SessionStore.readTranscript(this.paths, sessionId)
+
+    if (!transcript.some((line) => line.role === 'user')) {
+      await this.writeSkippedSummary(sessionId, now)
+      this.liveItems.delete(sessionId)
+      return
+    }
+
     const context = await this.buildReflectionContext()
     const raw = await reflectSession(
       { chat: this.deps.chat, model: this.deps.reflectionModel },
@@ -205,13 +239,84 @@ export class MemoryEngine {
           attributions: [],
           newArcs: [],
           newPersons: [],
-          arcNarratives: [],
+          arcUpdates: [],
+          personUpdates: [],
           constitutionUpdate: null,
         }
       : raw
 
     const liveItems = this.liveItems.get(sessionId) ?? []
-    const result = await applyReflection(this.paths, out, sessionId, liveItems, now)
+    // onFailure here is a best-effort note, not the containment: resolveNarratives
+    // itself already skips a document that fails and keeps going (see the
+    // comment above it in reflection.ts), which is what lets this session
+    // still reflect. This callback only tries to make that skip visible; a
+    // warning pushed here can still be cleared before anyone reads it (by
+    // a later clearWarnings() in the same process, before printWarnings ever
+    // runs), so its absence is not proof nothing was skipped.
+    const narratives = await resolveNarratives(
+      this.paths,
+      this.graphState,
+      out,
+      this.deps.chat,
+      this.deps.reflectionModel,
+      (id, label, reason) => {
+        this.warnings.push(
+          `Could not update the page for "${label}" (${id}) this session: ${reason}. The page was left as it was; this session's note about it was not saved to prose.`,
+        )
+      },
+    )
+
+    // Reflection no longer proposes new arcs or persons; it saves them
+    // directly, using the itemIds applyReflection mints. This runs as a
+    // callback INSIDE applyReflection's phase two, before the summary
+    // write, not after applyReflection returns: summary.md's presence is
+    // what marks a session reflected, so materialization must complete
+    // before that write or a crash here would permanently mark the session
+    // reflected while the arc or person it should have created never
+    // materializes, with no retry path left. An entry whose itemIndexes
+    // resolve to no items is dropped silently rather than materializing an
+    // arc or person with nothing attached to it. Nothing here was
+    // affirmed by the user, so confirmed is false on every edge, unlike
+    // materializeProposal's confirmed: true for an accepted proposal.
+    const materializeNew = async (mintedItems: ReflectionItem[]): Promise<void> => {
+      for (const arc of out.newArcs) {
+        const itemIds = resolveItemIds(arc.itemIndexes, mintedItems)
+        if (itemIds.length === 0) {
+          continue
+        }
+        await this.createArc({
+          name: arc.name,
+          realm: arc.realm,
+          itemIds,
+          narrative: arc.narrative,
+          source: sessionId,
+          confirmed: false,
+        })
+      }
+      for (const person of out.newPersons) {
+        const itemIds = resolveItemIds(person.itemIndexes, mintedItems)
+        if (itemIds.length === 0) {
+          continue
+        }
+        await this.createPersonPage({
+          name: person.name,
+          itemIds,
+          narrative: person.narrative,
+          source: sessionId,
+          confirmed: false,
+        })
+      }
+    }
+
+    const result = await applyReflection(
+      this.paths,
+      out,
+      sessionId,
+      liveItems,
+      now,
+      narratives,
+      materializeNew,
+    )
     this.liveItems.delete(sessionId)
 
     await this.syncGraph()
@@ -224,13 +329,13 @@ export class MemoryEngine {
         `session ${sessionId} constitution update`,
       )
     }
-    for (const narrative of out.arcNarratives) {
-      const arcNode = this.graphState.nodes.get(narrative.arcId)
-      if (arcNode?.type === 'arc' && arcNode.doc) {
+    for (const [id] of narratives) {
+      const node = this.graphState.nodes.get(id)
+      if (node?.doc) {
         await this.reindexOrWarn(
-          await readDocument(arcNode.doc),
-          'arc',
-          `session ${sessionId} arc narrative for ${narrative.arcId}`,
+          await readDocument(node.doc),
+          node.type === 'person' ? 'person' : 'arc',
+          `session ${sessionId} narrative rewrite for ${id}`,
         )
       }
     }
@@ -289,18 +394,29 @@ export class MemoryEngine {
       }
     }
 
-    const yesterday = addDaysUTC(now, -1)
     const sessions = await SessionStore.listSessions(this.paths)
-    const yesterdaySummaries: SessionContext['yesterdaySummaries'] = []
-    for (const session of sessions) {
-      if (session.date !== yesterday || !session.reflected) continue
+    const recentCutoff = addDaysUTC(now, -RECENT_SUMMARIES_WINDOW_DAYS)
+    // Sort by calendar date, most recent first. Session ids are ULIDs
+    // built from the wall clock at creation time, not from the session's
+    // own date, so they only break ties between two sessions that land on
+    // the same date; they cannot stand in for date order on their own.
+    const recentCandidates = sessions
+      .filter((session) => session.reflected && !session.skipped && session.date >= recentCutoff)
+      .sort((a, b) => {
+        if (a.date !== b.date) return a.date < b.date ? 1 : -1
+        return a.sessionId < b.sessionId ? 1 : a.sessionId > b.sessionId ? -1 : 0
+      })
+      .slice(0, RECENT_SUMMARIES_CAP)
+
+    const recentSummaries: SessionContext['recentSummaries'] = []
+    for (const session of recentCandidates) {
       const summaryPath = join(
         this.paths.sessionsDir,
         `${session.date}-${session.sessionId}`,
         'summary.md',
       )
       const doc = await readDocument(summaryPath)
-      yesterdaySummaries.push({ sessionId: session.sessionId, body: doc.body })
+      recentSummaries.push({ sessionId: session.sessionId, date: session.date, body: doc.body })
     }
 
     const proposals = await pendingProposals(this.paths)
@@ -311,7 +427,10 @@ export class MemoryEngine {
     // above, which is filtered down to active arcs only: a memory with
     // only a dormant or closed arc is still not a first session.
     const hasAnyArc = [...this.graphState.nodes.values()].some((node) => node.type === 'arc')
-    const hasReflectedSession = sessions.some((session) => session.reflected)
+    // A skipped session never happened as far as this check is concerned:
+    // it carries no content, so it must not be able to consume someone's
+    // guided first-conversation flow by itself.
+    const hasReflectedSession = sessions.some((session) => session.reflected && !session.skipped)
     const isFirstSession = !hasAnyArc && !hasReflectedSession
 
     return {
@@ -319,8 +438,9 @@ export class MemoryEngine {
       realms,
       arcs,
       ...(latestDailyRollup ? { latestDailyRollup } : {}),
-      yesterdaySummaries,
+      recentSummaries,
       pendingProposals: proposals,
+      today: formatDateUTC(now),
       isFirstSession,
     }
   }
@@ -337,9 +457,26 @@ export class MemoryEngine {
   }
 
   graphQuery(query: GraphQuery): unknown[] {
-    if (query.kind === 'neighbors') return this.index.neighbors(query.nodeId)
-    if (query.kind === 'items_in_arc') return this.index.itemsInArc(query.arcId)
-    return this.index.arcsInvolvingPerson(query.personId)
+    if (query.kind === 'neighbors') {
+      return this.index.neighbors(query.nodeId).map(({ edge, node }) => ({
+        edge,
+        node: this.withDocId(node),
+      }))
+    }
+    if (query.kind === 'items_in_arc') {
+      return this.index.itemsInArc(query.arcId).map((node) => this.withDocId(node))
+    }
+    return this.index.arcsInvolvingPerson(query.personId).map((node) => this.withDocId(node))
+  }
+
+  docIdForPath(path: string): string | undefined {
+    return this.docIdByPath.get(path)
+  }
+
+  private withDocId(node: GraphNode): GraphNode & { docId?: string } {
+    if (!node.doc) return node
+    const docId = this.docIdByPath.get(node.doc)
+    return docId ? { ...node, docId } : node
   }
 
   async readDocumentById(docId: string): Promise<Document | null> {
@@ -384,6 +521,103 @@ export class MemoryEngine {
     await commitMemory(this.paths.root, `proposal: ${resolution} ${id}`)
   }
 
+  // Parked, not shipped. Nothing in core or cli calls this: no tool
+  // exposes it to the model, and no persona text promises it. It stays
+  // here as dormant code, kept working and kept tested, because the
+  // project intends to offer a forget path eventually and does not want
+  // to rebuild this from scratch when it does. Two known gaps must be
+  // closed before this is ever wired back up to a tool: retracting a node
+  // does not remove the page it points at, so a person or arc's page
+  // stays on disk and fully searchable after their node is gone, and a
+  // multi document forget call is not atomic, so a failure partway
+  // through can leave the graph and some documents already changed while
+  // still reporting failure, with no commit. Do not expose this to a tool
+  // or a persona without fixing both first.
+  //
+  // Retracts requested nodes and edges by appending op: 'retract' records
+  // (both the original assertion and the retraction stay in graph.jsonl;
+  // nothing is ever erased) and rewrites documents in full through
+  // writeDocumentAtomic. Every document rewrite is validated before any
+  // write happens: a body that would leave the file empty or whitespace
+  // only is rejected, and a rejection here changes nothing on disk, in the
+  // graph, or anywhere else. This never touches a transcript or a session
+  // summary; the only files it can write are the graph log and prose
+  // documents outside the sessions folder.
+  async forget(input: ForgetInput): Promise<ForgetResult> {
+    const targets: { path: string; doc: Document; kind: DocKind }[] = []
+    for (const { docId, body } of input.documents ?? []) {
+      if (body.trim().length === 0) {
+        throw new Error(
+          `forget: the new body for ${docId} is empty or whitespace only; refusing to write it`,
+        )
+      }
+      let path = this.docPaths.get(docId)
+      if (!path) {
+        await this.refreshDocPaths()
+        path = this.docPaths.get(docId)
+      }
+      if (!path) {
+        throw new Error(`forget: no document found for id ${docId}`)
+      }
+      const current = await readDocument(path)
+      targets.push({ path, doc: { ...current, body }, kind: this.kindForDocumentPath(path) })
+    }
+
+    const now = new Date().toISOString()
+    const records: GraphRecord[] = []
+    let retractedNodes = 0
+    let retractedEdges = 0
+
+    for (const nodeId of input.nodeIds ?? []) {
+      const node = this.graphState.nodes.get(nodeId)
+      if (!node) continue
+      records.push({
+        ts: now,
+        op: 'retract',
+        node: nodeId,
+        type: node.type,
+        label: node.label,
+        ...(node.doc !== undefined ? { doc: node.doc } : {}),
+      })
+      retractedNodes += 1
+    }
+
+    for (const e of input.edges ?? []) {
+      const edge = this.graphState.edges.get(edgeKey(e))
+      if (!edge) continue
+      records.push({
+        ts: now,
+        op: 'retract',
+        edge: e.edge,
+        from: e.from,
+        to: e.to,
+        confidence: edge.confidence,
+        confirmed: edge.confirmed,
+        ...(edge.source !== undefined ? { source: edge.source } : {}),
+      })
+      retractedEdges += 1
+    }
+
+    if (records.length > 0) {
+      await appendGraph(this.paths, records)
+      await this.syncGraph()
+    }
+
+    const rewrittenDocuments: string[] = []
+    for (const target of targets) {
+      await writeDocumentAtomic(target.doc)
+      await this.reindexOrWarn(target.doc, target.kind, `forget: ${input.what}`)
+      rewrittenDocuments.push(target.path)
+    }
+
+    const commitResult = await commitMemory(this.paths.root, `forget: ${input.what}`)
+    if (!commitResult.ok && commitResult.warning) {
+      this.warnings.push(commitResult.warning)
+    }
+
+    return { retractedNodes, retractedEdges, rewrittenDocuments }
+  }
+
   async runMaintenance(now: Date = new Date()): Promise<void> {
     this.clearWarnings()
 
@@ -398,17 +632,27 @@ export class MemoryEngine {
       try {
         await this._doEndSession(session.sessionId)
       } catch {
-        // reflectSession/applyReflection failed before summary.md was
-        // written (_doEndSession's own reindex and commit steps no longer
-        // throw; see reindexOrWarn below), so the session stays
-        // unreflected in its frontmatter and is retried on the next pass.
-        // The transcript itself is never at risk.
+        // reflectSession, applyReflection's own writes, or the
+        // materializeNew callback it invokes (creating a new arc or
+        // person) all failed before summary.md was written (_doEndSession's
+        // own reindex and commit steps no longer throw; see reindexOrWarn
+        // below), so the session stays unreflected in its frontmatter and
+        // is retried on the next pass. The transcript itself is never at
+        // risk. This is caught silently, with no warning recorded, the
+        // same way every other pre-summary failure here always has been:
+        // the retry on the next pass is the recovery, not a warning.
       }
     }
 
     const today = formatDateUTC(now)
 
-    const reflected = (await SessionStore.listSessions(this.paths)).filter((s) => s.reflected)
+    // A date whose only session was skipped has no content to roll up:
+    // excluding skipped sessions here means such a date never becomes
+    // "pending" in the first place, so buildDailyRollup below is never
+    // asked to synthesize a rollup out of nothing but a placeholder line.
+    const reflected = (await SessionStore.listSessions(this.paths)).filter(
+      (s) => s.reflected && !s.skipped,
+    )
     const sessionDates = reflected.map((s) => s.date)
     const existingDailies = stringMeta(
       await listDocuments(this.paths.rollupsDailyDir, this.onDocSkip),
@@ -483,6 +727,7 @@ export class MemoryEngine {
       await this.index.upsertDocument(doc, kind, embed)
     }
     this.docPaths = new Map(docs.map(({ doc }) => [doc.meta.id, doc.path]))
+    this.docIdByPath = new Map(docs.map(({ doc }) => [doc.path, doc.meta.id]))
     await this.syncGraph()
   }
 
@@ -492,7 +737,8 @@ export class MemoryEngine {
     const constitutionDoc = await readDocument(this.paths.constitution)
     const arcs = [...this.graphState.nodes.values()].filter((node) => node.type === 'arc')
     const realms = [...this.graphState.nodes.values()].filter((node) => node.type === 'realm')
-    return { constitution: constitutionDoc.body, arcs, realms }
+    const people = [...this.graphState.nodes.values()].filter((node) => node.type === 'person')
+    return { constitution: constitutionDoc.body, arcs, realms, people }
   }
 
   private async syncGraph(): Promise<void> {
@@ -510,6 +756,7 @@ export class MemoryEngine {
     const embed = (texts: string[]) => this.deps.embeddings.embed(this.deps.embeddingModel, texts)
     await this.index.upsertDocument(doc, kind, embed)
     this.docPaths.set(doc.meta.id, doc.path)
+    this.docIdByPath.set(doc.path, doc.meta.id)
   }
 
   // Ruling 4: reindex failures inside endSession/runMaintenance must not
@@ -530,6 +777,66 @@ export class MemoryEngine {
     }
   }
 
+  // A session with no user line at all (an abandoned session that only
+  // ever got as far as the proactive greeting) is not worth a reflection
+  // call. It still needs a summary.md: that file's presence is what
+  // SessionStore.listSessions() reads as "reflected", so without one this
+  // session would be retried by every future runMaintenance() call
+  // forever. SessionStore.listSessions() also reads this summary's own
+  // `skipped: true` back out, which is what lets every downstream
+  // consumer (recentSummaries, isFirstSession, the daily/weekly rollup
+  // date lists) tell this session apart from a real reflection.
+  //
+  // Deliberately never indexed: unlike every other summary.md, this one
+  // is not passed to reindexOrWarn. Its body is a fixed placeholder
+  // sentence with no content of the person's own in it, so there is
+  // nothing here worth retrieving through search_memory, and indexing it
+  // would only let a search surface a session where nothing happened.
+  // walkAllDocuments (used by both reindexAll and the docId cache) skips
+  // any summary carrying skipped: true for the same reason, so a full
+  // index rebuild never reintroduces it either.
+  private async writeSkippedSummary(sessionId: string, now: Date): Promise<void> {
+    const sessions = await SessionStore.listSessions(this.paths)
+    const session = sessions.find((s) => s.sessionId === sessionId)
+    const date = session?.date ?? formatDateUTC(now)
+    const dir = join(this.paths.sessionsDir, `${date}-${sessionId}`)
+    const summaryPath = join(dir, 'summary.md')
+
+    await writeDocumentAtomic({
+      path: summaryPath,
+      meta: {
+        id: newId('doc'),
+        kind: 'summary',
+        session: sessionId,
+        date,
+        skipped: true,
+        reason: 'no user messages in this session',
+        items: [],
+      },
+      body: 'This session had no user messages, so there was nothing to reflect on.\n',
+    })
+
+    const commitResult = await commitMemory(
+      this.paths.root,
+      `reflect: session ${sessionId} skipped, no user messages`,
+    )
+    if (!commitResult.ok && commitResult.warning) {
+      this.warnings.push(commitResult.warning)
+    }
+  }
+
+  // forget is only ever allowed to rewrite prose that is not a transcript
+  // or a session summary: the constitution, an arc, a realm, or a person
+  // page. Anything else is a programming error in the caller, not a case
+  // to degrade quietly.
+  private kindForDocumentPath(path: string): DocKind {
+    if (path === this.paths.constitution) return 'constitution'
+    if (path.startsWith(this.paths.realmsDir)) return 'realm'
+    if (path.startsWith(this.paths.arcsDir)) return 'arc'
+    if (path.startsWith(this.paths.peopleDir)) return 'person'
+    throw new Error(`forget: ${path} is not a document kind forget is allowed to rewrite`)
+  }
+
   private clearWarnings(): void {
     this.warnings.length = 0
   }
@@ -537,6 +844,7 @@ export class MemoryEngine {
   private async refreshDocPaths(): Promise<void> {
     const docs = await this.walkAllDocuments()
     this.docPaths = new Map(docs.map(({ doc }) => [doc.meta.id, doc.path]))
+    this.docIdByPath = new Map(docs.map(({ doc }) => [doc.path, doc.meta.id]))
   }
 
   private async walkAllDocuments(): Promise<{ doc: Document; kind: DocKind }[]> {
@@ -547,6 +855,9 @@ export class MemoryEngine {
     }
     for (const doc of await listDocuments(this.paths.arcsDir, this.onDocSkip)) {
       result.push({ doc, kind: 'arc' })
+    }
+    for (const doc of await listDocuments(this.paths.peopleDir, this.onDocSkip)) {
+      result.push({ doc, kind: 'person' })
     }
     for (const doc of await listDocuments(this.paths.rollupsDailyDir, this.onDocSkip)) {
       result.push({ doc, kind: 'rollup_daily' })
@@ -565,7 +876,12 @@ export class MemoryEngine {
     for (const name of sessionEntries) {
       const summaryPath = join(this.paths.sessionsDir, name, 'summary.md')
       try {
-        result.push({ doc: await readDocument(summaryPath), kind: 'summary' })
+        const doc = await readDocument(summaryPath)
+        // A skipped summary is never indexed, on the initial write path
+        // (writeSkippedSummary) or here on a full rebuild: its body is a
+        // fixed placeholder with nothing of the person's own in it.
+        if (doc.meta.skipped === true) continue
+        result.push({ doc, kind: 'summary' })
       } catch {
         // No summary.md yet: session is not reflected. Nothing to index.
       }
@@ -575,91 +891,36 @@ export class MemoryEngine {
   }
 
   private async materializeProposal(proposal: Proposal): Promise<void> {
-    const now = new Date()
-    const nowIso = now.toISOString()
-
     if (proposal.kind === 'new_arc') {
       const payload = proposal.payload as { name: string; realm: string; itemIds: string[] }
-      const realmNodeId = await this.resolveOrCreateRealm(payload.realm, nowIso)
-
-      const arcNodeId = newId('arc')
-      const slug = await uniqueSlug(this.paths.arcsDir, payload.name)
-      const arcPath = join(this.paths.arcsDir, `${slug}.md`)
-      const arcDoc: Document = {
-        path: arcPath,
-        meta: {
-          id: newId('doc'),
-          name: payload.name,
-          status: 'active',
-          realm: realmNodeId,
-          opened: nowIso,
-        },
-        body: ARC_STARTER_BODY,
-      }
-      await writeDocumentAtomic(arcDoc)
-
-      const records: GraphRecord[] = [
-        {
-          ts: nowIso,
-          op: 'assert',
-          node: arcNodeId,
-          type: 'arc',
-          label: payload.name,
-          doc: arcPath,
-        },
-        {
-          ts: nowIso,
-          op: 'assert',
-          edge: 'in',
-          from: arcNodeId,
-          to: realmNodeId,
-          confidence: 1,
-          confirmed: true,
-          source: proposal.source,
-        },
-      ]
-      for (const itemId of payload.itemIds) {
-        records.push({
-          ts: nowIso,
-          op: 'assert',
-          edge: 'part_of',
-          from: itemId,
-          to: arcNodeId,
-          confidence: 1,
-          confirmed: true,
-          source: proposal.source,
-        })
-      }
-      await appendGraph(this.paths, records)
-      await this.syncGraph()
-      await this.reindexDocument(await readDocument(arcPath), 'arc')
+      await this.createArc({
+        name: payload.name,
+        realm: payload.realm,
+        itemIds: payload.itemIds,
+        narrative: '',
+        source: proposal.source,
+        // The user explicitly accepted this proposal, so every edge it
+        // creates is confirmed, unlike the direct materialization path in
+        // _doEndSession where nothing was ever put in front of anyone.
+        confirmed: true,
+      })
       return
     }
 
     if (proposal.kind === 'new_person') {
       const payload = proposal.payload as { name: string; itemIds: string[] }
-      const personNodeId = newId('person')
-      const records: GraphRecord[] = [
-        { ts: nowIso, op: 'assert', node: personNodeId, type: 'person', label: payload.name },
-      ]
-      for (const itemId of payload.itemIds) {
-        records.push({
-          ts: nowIso,
-          op: 'assert',
-          edge: 'involves',
-          from: itemId,
-          to: personNodeId,
-          confidence: 1,
-          confirmed: true,
-          source: proposal.source,
-        })
-      }
-      await appendGraph(this.paths, records)
-      await this.syncGraph()
+      await this.createPersonPage({
+        name: payload.name,
+        itemIds: payload.itemIds,
+        narrative: '',
+        source: proposal.source,
+        confirmed: true,
+      })
       return
     }
 
     // proposal.kind === 'link'
+    const now = new Date()
     const payload = proposal.payload as {
       edge: EdgeType
       from: string
@@ -668,7 +929,7 @@ export class MemoryEngine {
     }
     await appendGraph(this.paths, [
       {
-        ts: nowIso,
+        ts: now.toISOString(),
         op: 'assert',
         edge: payload.edge,
         from: payload.from,
@@ -679,6 +940,148 @@ export class MemoryEngine {
       },
     ])
     await this.syncGraph()
+  }
+
+  // Creates a new arc document and node, in a realm resolved or created via
+  // resolveOrCreateRealm, and confirms part_of edges for every item passed
+  // in. Shared by materializeProposal's new_arc branch (proposals accepted
+  // from an older memory folder) and _doEndSession's direct materialization
+  // of reflection's newArcs: one implementation, two call sites, so there
+  // is exactly one place that writes an arc document.
+  private async createArc(input: {
+    name: string
+    realm: string
+    itemIds: string[]
+    narrative: string
+    source: string
+    // Whether the user explicitly affirmed this arc, not whether it is
+    // "approved": true for an accepted proposal, false for reflection's
+    // direct materialization, which nobody has seen yet.
+    confirmed: boolean
+  }): Promise<GraphNode> {
+    const now = new Date()
+    const nowIso = now.toISOString()
+    const realmNodeId = await this.resolveOrCreateRealm(input.realm, nowIso)
+
+    const arcNodeId = newId('arc')
+    const slug = await uniqueSlug(this.paths.arcsDir, input.name)
+    const arcPath = join(this.paths.arcsDir, `${slug}.md`)
+    const narrative = input.narrative.trim()
+    const arcDoc: Document = {
+      path: arcPath,
+      meta: {
+        id: newId('doc'),
+        name: input.name,
+        status: 'active',
+        realm: realmNodeId,
+        opened: nowIso,
+      },
+      body: narrative.length > 0 ? input.narrative : ARC_STARTER_BODY,
+    }
+    await writeDocumentAtomic(arcDoc)
+
+    // Node assert and every part_of edge for this arc's items go in one
+    // appendGraph call: a failure partway through would otherwise leave an
+    // arc node and page on disk with no edges connecting its items to it.
+    const records: GraphRecord[] = [
+      { ts: nowIso, op: 'assert', node: arcNodeId, type: 'arc', label: input.name, doc: arcPath },
+      {
+        ts: nowIso,
+        op: 'assert',
+        edge: 'in',
+        from: arcNodeId,
+        to: realmNodeId,
+        confidence: 1,
+        confirmed: input.confirmed,
+        source: input.source,
+      },
+    ]
+    for (const itemId of input.itemIds) {
+      records.push({
+        ts: nowIso,
+        op: 'assert',
+        edge: 'part_of',
+        from: itemId,
+        to: arcNodeId,
+        confidence: 1,
+        confirmed: input.confirmed,
+        source: input.source,
+      })
+    }
+    await appendGraph(this.paths, records)
+    await this.syncGraph()
+    await this.reindexOrWarn(await readDocument(arcPath), 'arc', `arc page for ${input.name}`)
+    const node = this.graphState.nodes.get(arcNodeId)
+    if (!node) {
+      throw new Error(`createArc: arc node ${arcNodeId} missing from graph state after assert.`)
+    }
+    return node
+  }
+
+  // Writes a person's page and asserts their node, with its doc pointer set
+  // to the page path, together with confirmed involves edges for every item
+  // passed in. Shared by materializeProposal's new_person branch (proposals
+  // accepted from an older memory folder) and _doEndSession's direct
+  // materialization of reflection's newPersons: one implementation, two
+  // call sites, so there is exactly one place that writes a person page.
+  private async createPersonPage(input: {
+    name: string
+    itemIds: string[]
+    narrative: string
+    source: string
+    // Same meaning as createArc's confirmed: true for an accepted
+    // proposal, false for reflection's direct materialization.
+    confirmed: boolean
+  }): Promise<GraphNode> {
+    const now = new Date()
+    const nowIso = now.toISOString()
+
+    const personNodeId = newId('person')
+    const slug = await uniqueSlug(this.paths.peopleDir, input.name)
+    const personPath = join(this.paths.peopleDir, `${slug}.md`)
+    const narrative = input.narrative.trim()
+    const personDoc: Document = {
+      path: personPath,
+      meta: { id: newId('doc'), name: input.name, node: personNodeId, opened: nowIso },
+      body: narrative.length > 0 ? input.narrative : PERSON_STARTER_BODY,
+    }
+    await writeDocumentAtomic(personDoc)
+
+    // Node assert and every involves edge for this person's items go in one
+    // appendGraph call: a failure partway through would otherwise leave a
+    // person node and page on disk with no edges connecting its items to it.
+    const records: GraphRecord[] = [
+      {
+        ts: nowIso,
+        op: 'assert',
+        node: personNodeId,
+        type: 'person',
+        label: input.name,
+        doc: personPath,
+      },
+    ]
+    for (const itemId of input.itemIds) {
+      records.push({
+        ts: nowIso,
+        op: 'assert',
+        edge: 'involves',
+        from: itemId,
+        to: personNodeId,
+        confidence: 1,
+        confirmed: input.confirmed,
+        source: input.source,
+      })
+    }
+    await appendGraph(this.paths, records)
+    await this.syncGraph()
+    await this.reindexOrWarn(personDoc, 'person', `person page for ${input.name}`)
+    const node = this.graphState.nodes.get(personNodeId)
+    if (!node) {
+      throw new Error(
+        `createPersonPage: person node ${personNodeId} missing from graph state after assert.`,
+      )
+    }
+    return node
   }
 
   // Resolves a new_arc proposal's `realm` field to a realm node id. It
@@ -712,7 +1115,11 @@ export class MemoryEngine {
       { ts: nowIso, op: 'assert', node: realmNodeId, type: 'realm', label: realm, doc: realmPath },
     ])
     await this.syncGraph()
-    await this.reindexDocument(realmDoc, 'realm')
+    // reindexOrWarn, not reindexDocument: this runs inside createArc, which
+    // runs inside both materializeProposal and reflection's direct
+    // materialization, neither of which may let an indexing failure throw
+    // out and abort an otherwise-successful arc creation.
+    await this.reindexOrWarn(realmDoc, 'realm', `realm page for ${realm}`)
     return realmNodeId
   }
 }

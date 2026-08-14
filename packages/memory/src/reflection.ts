@@ -5,9 +5,14 @@
 // JSON twice in a row). It never touches the filesystem.
 //
 // applyReflection is the deterministic half: it takes a ReflectionOutput and
-// writes the session summary, mints item ids, appends graph records, and
-// queues proposals for anything that is not a high-confidence link to an
-// arc that already exists. It never touches the network.
+// writes the session summary, mints item ids, and appends graph records.
+// Every attribution becomes a part_of edge carrying the model's confidence,
+// whatever it is. newArcs and newPersons are materialized by the
+// materializeNew callback the caller (MemoryEngine) injects, invoked here
+// before the summary write so a failure inside it leaves the session
+// unreflected and retryable rather than silently losing the new arc or
+// person. applyReflection itself never touches the network (the callback is
+// a plain function, not a ChatProvider) and never writes to proposals.jsonl.
 
 import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -28,10 +33,7 @@ import {
   readGraph,
 } from './graph.js'
 import type { MemoryPaths } from './paths.js'
-import { appendProposals, type Proposal } from './proposals.js'
 import type { TranscriptLine } from './transcripts.js'
-
-export const CONFIDENCE_THRESHOLD = 0.8
 
 export type ReflectionItemKind = 'observation' | 'feeling' | 'event' | 'intention'
 
@@ -46,9 +48,16 @@ export interface ReflectionOutput {
   summary: string
   items: { text: string; kind: ReflectionItemKind }[]
   attributions: { itemIndex: number; arcId: string; confidence: number }[]
-  newArcs: { name: string; realm: string; reason: string; itemIndexes: number[] }[]
-  newPersons: { name: string; reason: string; itemIndexes: number[] }[]
-  arcNarratives: { arcId: string; narrative: string }[]
+  newArcs: {
+    name: string
+    realm: string
+    reason: string
+    itemIndexes: number[]
+    narrative: string
+  }[]
+  newPersons: { name: string; reason: string; itemIndexes: number[]; narrative: string }[]
+  arcUpdates: { arcId: string; note: string }[]
+  personUpdates: { personId: string; note: string }[]
   constitutionUpdate: string | null
 }
 
@@ -56,6 +65,7 @@ export interface ReflectionContext {
   constitution: string
   arcs: GraphNode[]
   realms: GraphNode[]
+  people: GraphNode[]
 }
 
 const reflectionItemKindSchema = z.enum(['observation', 'feeling', 'event', 'intention'])
@@ -72,12 +82,19 @@ export const reflectionOutputSchema: z.ZodType<ReflectionOutput> = z.object({
       realm: z.string(),
       reason: z.string(),
       itemIndexes: z.array(z.number()),
+      narrative: z.string(),
     }),
   ),
   newPersons: z.array(
-    z.object({ name: z.string(), reason: z.string(), itemIndexes: z.array(z.number()) }),
+    z.object({
+      name: z.string(),
+      reason: z.string(),
+      itemIndexes: z.array(z.number()),
+      narrative: z.string(),
+    }),
   ),
-  arcNarratives: z.array(z.object({ arcId: z.string(), narrative: z.string() })),
+  arcUpdates: z.array(z.object({ arcId: z.string(), note: z.string() })),
+  personUpdates: z.array(z.object({ personId: z.string(), note: z.string() })),
   constitutionUpdate: z.string().nullable(),
 })
 
@@ -96,9 +113,10 @@ const RESPONSE_SHAPE = `{
   "summary": string,
   "items": [{"text": string, "kind": "observation" | "feeling" | "event" | "intention"}],
   "attributions": [{"itemIndex": number, "arcId": string, "confidence": number}],
-  "newArcs": [{"name": string, "realm": string, "reason": string, "itemIndexes": number[]}],
-  "newPersons": [{"name": string, "reason": string, "itemIndexes": number[]}],
-  "arcNarratives": [{"arcId": string, "narrative": string}],
+  "newArcs": [{"name": string, "realm": string, "reason": string, "itemIndexes": number[], "narrative": string}],
+  "newPersons": [{"name": string, "reason": string, "itemIndexes": number[], "narrative": string}],
+  "arcUpdates": [{"arcId": string, "note": string}],
+  "personUpdates": [{"personId": string, "note": string}],
   "constitutionUpdate": string | null
 }`
 
@@ -115,10 +133,19 @@ function buildReflectionPrompt(context: ReflectionContext, transcript: Transcrip
     'Known realms:',
     renderListing(context.realms),
     '',
+    'Known people:',
+    renderListing(context.people),
+    '',
     'Transcript:',
     renderTranscript(transcript),
     '',
     'When updating the constitution: basic identity facts about the user (their name, pronouns, where they live, their timezone, their occupation or work situation) always belong in the constitution when first learned or when they change. Do not wait for these facts to feel weighty; update the constitution to include them immediately.',
+    '',
+    "When deciding whether someone deserves a person page, in newPersons: a person page is for someone who recurs in this person's life and whom they actually talk about, not for every name that appears in a sentence. A partner, a close friend, a sibling, a therapist seen regularly: those recur. A coworker mentioned once in passing, a stranger from a single story, a public figure named in the news: those do not. When you are not sure someone recurs, do not add them yet.",
+    '',
+    'For each entry in newArcs and newPersons, narrative is the first paragraph of that document, written as if this session is the first time anything has been recorded about it.',
+    '',
+    'For each entry in arcUpdates and personUpdates, note is a short line describing what this session added or changed about an arc or person that already exists. Do not write full narrative prose in note; a separate pass uses it to rewrite the document.',
     '',
     'Respond with only JSON matching this shape, no other text:',
     RESPONSE_SHAPE,
@@ -225,21 +252,7 @@ async function findSessionDir(
   return { dir: join(paths.sessionsDir, match.name), date }
 }
 
-function linkProposalSummary(item: ReflectionItem, arcId: string, graph: GraphState): string {
-  const arc = graph.nodes.get(arcId)
-  const arcName = arc ? arc.label : 'that arc'
-  return `You mentioned "${item.text}"; want me to link it to ${arcName}?`
-}
-
-function newArcProposalSummary(name: string, realm: string): string {
-  return `You mentioned ${name} a few times; want me to track it as an arc in ${realm}?`
-}
-
-function newPersonProposalSummary(name: string): string {
-  return `You mentioned ${name}; want me to add them as someone in your life?`
-}
-
-function resolveItemIds(indexes: number[], mintedItems: ReflectionItem[]): string[] {
+export function resolveItemIds(indexes: number[], mintedItems: ReflectionItem[]): string[] {
   const ids: string[] = []
   const seen = new Set<number>()
   for (const index of indexes) {
@@ -258,6 +271,197 @@ function resolveItemIds(indexes: number[], mintedItems: ReflectionItem[]): strin
   return ids
 }
 
+export const narrativeRewriteSchema: z.ZodType<{ body: string }> = z.object({ body: z.string() })
+
+interface NarrativeParseSuccess {
+  success: true
+  data: { body: string }
+}
+interface NarrativeParseFailure {
+  success: false
+  error: string
+}
+
+function parseNarrativeRewrite(raw: string): NarrativeParseSuccess | NarrativeParseFailure {
+  let json: unknown
+  try {
+    json = JSON.parse(raw)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    return { success: false, error: `response is not valid JSON: ${message}` }
+  }
+  const result = narrativeRewriteSchema.safeParse(json)
+  if (result.success) {
+    return { success: true, data: result.data }
+  }
+  return { success: false, error: result.error.message }
+}
+
+function buildNarrativeRewritePrompt(input: {
+  name: string
+  currentBody: string
+  summary: string
+  itemTexts: string[]
+  note: string
+}): string {
+  return [
+    `You are rewriting the memory page for "${input.name}". This page already has a body; you are updating it, not starting over.`,
+    '',
+    'Current body:',
+    input.currentBody,
+    '',
+    'Session summary:',
+    input.summary,
+    '',
+    'Items from this session relevant to this page:',
+    input.itemTexts.length > 0 ? input.itemTexts.map((t) => `- ${t}`).join('\n') : '(none)',
+    '',
+    'What this session added or changed:',
+    input.note,
+    '',
+    'Rewrite the body so it carries forward everything in the current body that still matters, changing only what this session actually changed. The body you return replaces the file entirely, so do not drop anything that still matters just because this session did not mention it again.',
+    '',
+    'Respond with only JSON matching this shape, no other text:',
+    '{"body": string}',
+  ].join('\n')
+}
+
+export async function rewriteNarrative(
+  chat: ChatProvider,
+  model: string,
+  input: { name: string; currentBody: string; summary: string; itemTexts: string[]; note: string },
+): Promise<{ body: string } | null> {
+  const prompt = buildNarrativeRewritePrompt(input)
+
+  const first = await chat.complete({ model, messages: [{ role: 'user', content: prompt }] })
+  const firstParse = parseNarrativeRewrite(first.text)
+  if (firstParse.success) {
+    return firstParse.data
+  }
+
+  const retryPrompt = [
+    prompt,
+    '',
+    `Your previous response failed validation: ${firstParse.error}`,
+    '',
+    'Previous response:',
+    first.text,
+    '',
+    'Respond again with only corrected JSON matching the shape above.',
+  ].join('\n')
+
+  const second = await chat.complete({ model, messages: [{ role: 'user', content: retryPrompt }] })
+  const secondParse = parseNarrativeRewrite(second.text)
+  if (secondParse.success) {
+    return secondParse.data
+  }
+  return null
+}
+
+// Runs pass two once per arc or person update that still has something to
+// rewrite: an id that no longer resolves to a node, a node with no doc, a
+// node that is neither arc nor person, or an update for something also
+// proposed as new this same session, are all dropped silently rather than
+// treated as errors. A rewriteNarrative call that fails its one retry is
+// dropped the same way, so the map simply lacks that key and the caller
+// leaves the document on disk untouched.
+//
+// A thrown error is dropped the same way, not just a null result: readDocument
+// can throw (the file behind node.doc was deleted or its frontmatter is
+// broken, and a memory folder made of hand-editable markdown makes both of
+// those things a user can actually do) and chat.complete can throw (a
+// provider error). Either one is caught per document here so it degrades
+// exactly like a failed parse: this one document is skipped and left
+// untouched, and the rest of pass two, and reflection as a whole, still
+// completes. Without this, one failure would escape resolveNarratives,
+// escape the caller's _doEndSession, and abort reflection entirely before
+// applyReflection ever ran, silently, for every future session that touches
+// the same arc or person. onFailure is an optional, best-effort hook for the
+// caller to record what was skipped and why; it is not the fix, the
+// containment above is. A caller must not treat the absence of an onFailure
+// call as the absence of a failure.
+//
+// The first parameter is accepted for signature symmetry with the rest of
+// this module's public functions and for a possible future disk-backed
+// lookup; the current implementation resolves documents through
+// graphState and readDocument alone.
+export async function resolveNarratives(
+  _paths: MemoryPaths,
+  graphState: GraphState,
+  out: ReflectionOutput,
+  chat: ChatProvider,
+  model: string,
+  onFailure?: (id: string, label: string, reason: string) => void,
+): Promise<Map<string, string>> {
+  const newArcNames = new Set(out.newArcs.map((a) => a.name.toLowerCase()))
+  const newPersonNames = new Set(out.newPersons.map((p) => p.name.toLowerCase()))
+
+  const narratives = new Map<string, string>()
+
+  for (const update of out.arcUpdates) {
+    const node = graphState.nodes.get(update.arcId)
+    if (node?.type !== 'arc' || !node.doc) {
+      continue
+    }
+    if (newArcNames.has(node.label.toLowerCase())) {
+      continue
+    }
+    try {
+      const itemTexts = out.attributions
+        .filter((a) => a.arcId === update.arcId)
+        .map((a) => out.items[a.itemIndex]?.text)
+        .filter((text): text is string => typeof text === 'string')
+      const currentDoc = await readDocument(node.doc)
+      const result = await rewriteNarrative(chat, model, {
+        name: node.label,
+        currentBody: currentDoc.body,
+        summary: out.summary,
+        itemTexts,
+        note: update.note,
+      })
+      if (result) {
+        narratives.set(update.arcId, result.body)
+      }
+    } catch (err) {
+      onFailure?.(update.arcId, node.label, errorMessage(err))
+    }
+  }
+
+  for (const update of out.personUpdates) {
+    const node = graphState.nodes.get(update.personId)
+    if (node?.type !== 'person' || !node.doc) {
+      continue
+    }
+    if (newPersonNames.has(node.label.toLowerCase())) {
+      continue
+    }
+    try {
+      // ReflectionOutput carries per-item attribution only for arcs
+      // (out.attributions). There is no equivalent for people, so a person's
+      // pass two call gets no item texts; its note still says what changed.
+      const currentDoc = await readDocument(node.doc)
+      const result = await rewriteNarrative(chat, model, {
+        name: node.label,
+        currentBody: currentDoc.body,
+        summary: out.summary,
+        itemTexts: [],
+        note: update.note,
+      })
+      if (result) {
+        narratives.set(update.personId, result.body)
+      }
+    } catch (err) {
+      onFailure?.(update.personId, node.label, errorMessage(err))
+    }
+  }
+
+  return narratives
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
 interface PendingWrite {
   path: string
   meta: DocumentMeta
@@ -270,17 +474,17 @@ export async function applyReflection(
   sessionId: string,
   liveItems: ReflectionItem[],
   now: Date,
+  narratives: Map<string, string>,
+  materializeNew: (mintedItems: ReflectionItem[]) => Promise<void>,
 ): Promise<{
   summaryDoc: Document
   autoAsserted: number
-  proposals: Proposal[]
-  droppedProposals: number
-  skippedNarratives: number
+  mintedItems: ReflectionItem[]
 }> {
   const nowIso = now.toISOString()
 
   // Phase 1: validation and minting only, no filesystem writes. Every id is
-  // minted and every proposal/graph record is fully decided in memory before
+  // minted and every graph record is fully decided in memory before
   // anything touches disk, so a bad input never leaves partial state behind.
   const mintedItems = mintItems(out.items, now)
   const mergedItems = mergeLiveItems(mintedItems, liveItems)
@@ -290,10 +494,7 @@ export async function applyReflection(
 
   const graphState = await readGraph(paths)
   const graphRecords: GraphRecord[] = []
-  const proposals: Proposal[] = []
   let autoAsserted = 0
-  let droppedProposals = 0
-  let skippedNarratives = 0
 
   // Assert the session node itself before any item's `from` edge points at
   // it: MemoryIndex.replaceGraph skips edges whose endpoints are not both
@@ -333,86 +534,25 @@ export async function applyReflection(
     if (!item) {
       continue
     }
-    const arcNode = graphState.nodes.get(attribution.arcId)
-    const arcExists = arcNode?.type === 'arc'
-    if (attribution.confidence >= CONFIDENCE_THRESHOLD && arcExists) {
-      graphRecords.push({
-        ts: nowIso,
-        op: 'assert',
-        edge: 'part_of',
-        from: item.id,
-        to: attribution.arcId,
-        confidence: attribution.confidence,
-        confirmed: false,
-      })
-      autoAsserted += 1
-    } else {
-      // Unknown id or an id that resolves to a non-arc node (e.g. a realm)
-      // both fall through here: neither is a valid part_of target, so both
-      // become a link proposal for a human to confirm instead of a
-      // structurally invalid edge in the permanent graph log.
-      proposals.push({
-        id: newId('prop'),
-        ts: nowIso,
-        kind: 'link',
-        summary: linkProposalSummary(item, attribution.arcId, graphState),
-        payload: {
-          edge: 'part_of',
-          from: item.id,
-          to: attribution.arcId,
-          confidence: attribution.confidence,
-        },
-        source: sessionId,
-      })
-    }
-  }
-
-  for (const arc of out.newArcs) {
-    const itemIds = resolveItemIds(arc.itemIndexes, mintedItems)
-    if (itemIds.length === 0) {
-      droppedProposals += 1
-      continue
-    }
-    proposals.push({
-      id: newId('prop'),
+    graphRecords.push({
       ts: nowIso,
-      kind: 'new_arc',
-      summary: newArcProposalSummary(arc.name, arc.realm),
-      payload: { name: arc.name, realm: arc.realm, itemIds },
-      source: sessionId,
+      op: 'assert',
+      edge: 'part_of',
+      from: item.id,
+      to: attribution.arcId,
+      confidence: attribution.confidence,
+      confirmed: false,
     })
+    autoAsserted += 1
   }
 
-  for (const person of out.newPersons) {
-    const itemIds = resolveItemIds(person.itemIndexes, mintedItems)
-    if (itemIds.length === 0) {
-      droppedProposals += 1
-      continue
-    }
-    proposals.push({
-      id: newId('prop'),
-      ts: nowIso,
-      kind: 'new_person',
-      summary: newPersonProposalSummary(person.name),
-      payload: { name: person.name, itemIds },
-      source: sessionId,
-    })
-  }
-
-  const narrativeWrites: PendingWrite[] = []
-  for (const narrative of out.arcNarratives) {
-    const arcNode = graphState.nodes.get(narrative.arcId)
-    if (arcNode?.type !== 'arc' || !arcNode.doc) {
-      skippedNarratives += 1
-      continue
-    }
-    const arcDoc = await readDocument(arcNode.doc)
-    narrativeWrites.push({
-      path: arcDoc.path,
-      meta: { ...arcDoc.meta, updated: nowIso },
-      body: narrative.narrative,
-    })
-  }
+  // newArcs and newPersons are materialized by the injected materializeNew
+  // callback (see MemoryEngine.createArc / createPersonPage), invoked below
+  // in phase 2, before the summary write. applyReflection itself never
+  // creates a proposal for them, and it never writes to proposals.jsonl at
+  // all. The callback is a plain function, not a ChatProvider: reflection
+  // stays free of any model dependency, which is what keeps this function
+  // testable without a fake chat script for every case.
 
   let constitutionWrite: PendingWrite | null = null
   if (out.constitutionUpdate !== null) {
@@ -424,6 +564,21 @@ export async function applyReflection(
     }
   }
 
+  // Pass two already decided which ids get a rewritten body (resolveNarratives,
+  // called by the engine between reflectSession and applyReflection); this
+  // function only ever reads that decision, never calls a model. An id absent
+  // from the map (dropped for any reason on the way in) leaves its document
+  // on disk untouched.
+  const narrativeWrites: PendingWrite[] = []
+  for (const [id, body] of narratives) {
+    const node = graphState.nodes.get(id)
+    if (!node?.doc) {
+      continue
+    }
+    const doc = await readDocument(node.doc)
+    narrativeWrites.push({ path: doc.path, meta: { ...doc.meta, updated: nowIso }, body })
+  }
+
   // Phase 2: side effects, ordered so summary.md is written last. Its
   // presence is what flips a session from unreflected to reflected
   // (SessionStore reads it that way), so it doubles as the commit marker
@@ -433,10 +588,13 @@ export async function applyReflection(
   // duplicate item nodes; that is visible in the graph and harmless.
   // Writing summary.md first would be worse: a crash after it would
   // permanently mark the session reflected while silently dropping graph
-  // edges, proposals, and document rewrites, with nothing left to notice
-  // the loss or retry it.
+  // edges, document rewrites, and any new arc or person materializeNew was
+  // about to create, with nothing left to notice the loss or retry it.
+  // materializeNew therefore runs here too, before the summary write, not
+  // after applyReflection returns: a failure inside it must leave the
+  // session unreflected and retryable, the same guarantee every other
+  // phase-2 write already has.
   await appendGraph(paths, graphRecords)
-  await appendProposals(paths, proposals)
 
   for (const write of narrativeWrites) {
     await writeDocumentAtomic(write)
@@ -445,6 +603,8 @@ export async function applyReflection(
   if (constitutionWrite) {
     await writeDocumentAtomic(constitutionWrite)
   }
+
+  await materializeNew(mintedItems)
 
   await writeDocumentAtomic({
     path: summaryPath,
@@ -459,5 +619,5 @@ export async function applyReflection(
   })
   const summaryDoc = await readDocument(summaryPath)
 
-  return { summaryDoc, autoAsserted, proposals, droppedProposals, skippedNarratives }
+  return { summaryDoc, autoAsserted, mintedItems }
 }

@@ -11,6 +11,8 @@ import { AgentSession, saveConfig } from '@openreverie/core'
 import type { EngineDeps, MemoryEngine } from '@openreverie/memory'
 import { listDocuments, memoryPaths, readDocument } from '@openreverie/memory'
 import type { ChatProvider, EmbeddingProvider } from '@openreverie/providers'
+import { cyan, dim, magenta } from './colors.js'
+import { createStatusLine, type StatusLine } from './status.js'
 
 export interface ChatIo {
   question(prompt: string): Promise<string>
@@ -23,38 +25,6 @@ export interface ChatIo {
   // actually does, so the second Ctrl-C while idle at the prompt can exit
   // instead of hanging forever on an unresolved question().
   cancelPending(): void
-}
-
-// --- Terminal colors ----------------------------------------------------
-// Raw ANSI escapes, no dependency. Every helper here takes an explicit
-// `enabled` flag rather than sniffing process.stdout.isTTY or NO_COLOR
-// itself: that sniffing happens once, at the edge, in index.ts, and gets
-// threaded down as a plain boolean. That keeps these functions (and the
-// tests that exercise them) free of any dependency on real process state.
-const ANSI_RESET = '\x1b[0m'
-const ANSI_DIM = '\x1b[2m'
-const ANSI_CYAN = '\x1b[36m'
-const ANSI_MAGENTA = '\x1b[35m'
-
-function colorize(code: string, text: string, enabled: boolean): string {
-  return enabled ? `${code}${text}${ANSI_RESET}` : text
-}
-
-// Tool notices and warning notes: dim gray, easy to skim past.
-function dim(text: string, enabled = false): string {
-  return colorize(ANSI_DIM, text, enabled)
-}
-
-// The user's own prompt.
-export function cyan(text: string, enabled: boolean): string {
-  return colorize(ANSI_CYAN, text, enabled)
-}
-
-// reverie's speaker tag. Soft magenta rather than a bright or bold color,
-// so it reads clearly without fighting the terminal's own foreground on
-// either a light or a dark background.
-export function magenta(text: string, enabled: boolean): string {
-  return colorize(ANSI_MAGENTA, text, enabled)
 }
 
 // One honest, specific notice per tool, so the person watching the
@@ -79,6 +49,14 @@ export function toolNotice(name: string): string {
   return label !== undefined ? `[${label}]` : `[using: ${name}]`
 }
 
+// The status line's label for a tool call in flight: the same honest
+// wording as toolNotice, but bare, since the status line's own frame and
+// dim styling already carry the "this is a transient status" signal that
+// toolNotice's brackets exist to provide for the permanent notice line.
+function toolStatusLabel(name: string): string {
+  return TOOL_NOTICES[name] ?? `using: ${name}`
+}
+
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
@@ -100,6 +78,67 @@ export function printWarnings(
 const LOST_IN_NOTES_MESSAGE =
   'I got lost in my notes there and did not get to an answer. Ask me again?\n'
 
+// Streams AgentSession.greet() the same way the main loop streams a
+// reply: the reverie> tag before the first chunk of text, plain writes
+// after that. Error handling deliberately differs from a normal turn:
+// any failure inside greet() (a provider error, or its own 20 second
+// timeout) is swallowed here without a word, because the greeting was
+// never asked for and a visible error about it would be confusing rather
+// than honest. A real provider problem still surfaces normally on the
+// user's first actual message.
+//
+// Mirrors the main loop's own interrupt handling, which this needs just
+// as much as a real turn does: setResponding(true) around the loop so a
+// Ctrl-C that lands mid-greeting prints the "finishing this reply"
+// message instead of the idle one (nothing else marks a greeting as a
+// response actively streaming), and breaking on interruptLevel() >= 2 so
+// a second Ctrl-C actually ends the greeting rather than leaving it
+// running for up to 20 seconds after the CLI has already said it
+// stopped. Breaking the for-await loop calls .return() on session.greet()
+// the same way an abandoned real turn does, which is what persists the
+// text already streamed (Task 10) and unwinds the underlying provider
+// iterator instead of leaving it parked (the withTimeout fix this task
+// also makes).
+async function runGreeting(
+  session: AgentSession,
+  io: ChatIo,
+  colorEnabled: boolean,
+  interruptLevel: () => number,
+  setResponding: (value: boolean) => void,
+  statusLine: StatusLine,
+): Promise<void> {
+  let tagged = false
+  setResponding(true)
+  try {
+    for await (const event of session.greet()) {
+      if (event.type === 'thinking') {
+        statusLine.start('thinking')
+      } else if (event.type === 'text') {
+        statusLine.stop()
+        if (!tagged) {
+          io.write(magenta('reverie> ', colorEnabled))
+          tagged = true
+        }
+        io.write(event.text)
+      } else if (event.type === 'done' && tagged) {
+        statusLine.stop()
+        io.write('\n')
+      }
+      if (interruptLevel() >= 2) {
+        break
+      }
+    }
+  } catch {
+    // Silent abandon, per the greeting's own degradation rule.
+  } finally {
+    // Neither the catch above nor a plain abandon (break on the second
+    // Ctrl-C) ever emits 'done', so the line can only be relied on to stop
+    // here, never by keying off 'done' alone.
+    statusLine.stop()
+    setResponding(false)
+  }
+}
+
 export async function runChat(deps: {
   engine: MemoryEngine
   config: ReverieConfig
@@ -107,8 +146,30 @@ export async function runChat(deps: {
   io: ChatIo
   toolDeps?: ToolDeps
   colorEnabled?: boolean
+  setInterval?: (fn: () => void, ms: number) => unknown
+  clearInterval?: (handle: unknown) => void
+  now?: () => number
 }): Promise<void> {
-  const { engine, config, chat, io, toolDeps, colorEnabled = false } = deps
+  const {
+    engine,
+    config,
+    chat,
+    io,
+    toolDeps,
+    colorEnabled = false,
+    setInterval: setIntervalDep = (fn: () => void, ms: number) => setInterval(fn, ms),
+    clearInterval: clearIntervalDep = (handle: unknown) =>
+      clearInterval(handle as Parameters<typeof clearInterval>[0]),
+    now = () => Date.now(),
+  } = deps
+
+  const statusLine = createStatusLine({
+    write: io.write,
+    colorEnabled,
+    setInterval: setIntervalDep,
+    clearInterval: clearIntervalDep,
+    now,
+  })
 
   io.write(`Memory folder: ${config.memoryDir}. Safety mode: ${config.safety.mode}.\n\n`)
 
@@ -125,6 +186,10 @@ export async function runChat(deps: {
   let responding = false
   io.onInterrupt(() => {
     interruptLevel += 1
+    // Stop the status line before writing anything: otherwise the current
+    // frame (e.g. "| thinking") is left stranded in scrollback, with the
+    // interrupt message printed right after it instead of on a clean line.
+    statusLine.stop()
     if (interruptLevel === 1) {
       io.write(
         responding
@@ -140,6 +205,21 @@ export async function runChat(deps: {
       io.cancelPending()
     }
   })
+
+  await runGreeting(
+    session,
+    io,
+    colorEnabled,
+    () => interruptLevel,
+    (value) => {
+      responding = value
+    },
+    statusLine,
+  )
+
+  if (interruptLevel >= 2) {
+    return
+  }
 
   for (;;) {
     let line: string
@@ -157,9 +237,21 @@ export async function runChat(deps: {
     const trimmed = line.trim()
     if (trimmed === '/bye') {
       io.write('reflecting on this session...\n')
-      await session.end()
-      printWarnings(io, engine, colorEnabled)
-      io.write('Saved and reflected. See you next time.\n')
+      try {
+        await session.end()
+        printWarnings(io, engine, colorEnabled)
+        io.write('Saved and reflected. See you next time.\n')
+      } catch (err) {
+        // Any warning the engine accumulated before the throw (a page
+        // resolveNarratives had to skip, a git commit that failed) belongs
+        // on screen either way; losing it here would be the same silent
+        // drop this whole fix exists to close.
+        printWarnings(io, engine, colorEnabled)
+        io.write(
+          `\nI could not finish reflecting: ${errorMessage(err)}. Your conversation is saved; ` +
+            'it will be reflected the next time reverie starts.\n',
+        )
+      }
       return
     }
     if (trimmed === '') {
@@ -171,7 +263,10 @@ export async function runChat(deps: {
     responding = true
     try {
       for await (const event of session.send(line)) {
-        if (event.type === 'text') {
+        if (event.type === 'thinking') {
+          statusLine.start('thinking')
+        } else if (event.type === 'text') {
+          statusLine.stop()
           sawText = true
           if (!taggedThisTurn) {
             io.write(magenta('reverie> ', colorEnabled))
@@ -179,8 +274,11 @@ export async function runChat(deps: {
           }
           io.write(event.text)
         } else if (event.type === 'tool') {
+          statusLine.stop()
           io.write(`${dim(toolNotice(event.name), colorEnabled)}\n`)
+          statusLine.start(toolStatusLabel(event.name))
         } else if (event.type === 'done') {
+          statusLine.stop()
           io.write('\n')
           if (!sawText) {
             if (!taggedThisTurn) {
@@ -195,10 +293,22 @@ export async function runChat(deps: {
         }
       }
     } catch (err) {
+      // This stop() is the one the ordering invariant actually depends on:
+      // it clears the frame before the error message below is written, so
+      // the message never lands after a stale frame stranded in scrollback.
+      // Do not remove it on the assumption that the finally below covers
+      // the same guarantee; the finally runs after this whole block,
+      // which is too late to protect the write order here.
+      statusLine.stop()
       io.write(
         `\nI could not reach the model: ${errorMessage(err)}. Your message is saved; try again, or type /bye.\n`,
       )
     } finally {
+      // A backstop, not the ordering guarantor above: this covers the path
+      // that exits the loop without ever emitting 'done' and without
+      // throwing (a break on the second Ctrl-C mid response), which the
+      // catch block above never sees.
+      statusLine.stop()
       responding = false
     }
 
@@ -277,14 +387,15 @@ export async function openCliContext(deps: CliEngineDeps): Promise<CliContextRes
 }
 
 // Counts every prose document reverie knows about (constitution, realms,
-// arcs, rollups, and reflected session summaries), by walking the memory
-// folder the same way the engine does internally. Used to give the
+// arcs, people, rollups, and reflected session summaries), by walking the
+// memory folder the same way the engine does internally. Used to give the
 // `reindex` subcommand a concrete count line instead of a bare "done".
 export async function countMemoryDocuments(memoryDir: string): Promise<number> {
   const paths = memoryPaths(memoryDir)
   let count = 1 // constitution.md always exists once the memory tree is set up.
   count += (await listDocuments(paths.realmsDir)).length
   count += (await listDocuments(paths.arcsDir)).length
+  count += (await listDocuments(paths.peopleDir)).length
   count += (await listDocuments(paths.rollupsDailyDir)).length
   count += (await listDocuments(paths.rollupsWeeklyDir)).length
 
@@ -297,7 +408,12 @@ export async function countMemoryDocuments(memoryDir: string): Promise<number> {
   }
   for (const name of sessionDirs) {
     try {
-      await readDocument(join(paths.sessionsDir, name, 'summary.md'))
+      const doc = await readDocument(join(paths.sessionsDir, name, 'summary.md'))
+      // A skipped summary (no user messages in that session) is never
+      // indexed by walkAllDocuments/reindexAll either; counting it here
+      // would report a document count higher than what reindex actually
+      // indexes, growing by one for every skipped session.
+      if (doc.meta.skipped === true) continue
       count += 1
     } catch {
       // No summary.md yet: this session has not been reflected.

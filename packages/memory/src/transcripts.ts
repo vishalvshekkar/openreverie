@@ -8,7 +8,7 @@
 import { access, appendFile, mkdir, readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { ToolCall } from '@openreverie/providers'
-import { newId } from './documents.js'
+import { newId, readDocument } from './documents.js'
 import type { MemoryPaths } from './paths.js'
 
 export interface TranscriptLine {
@@ -89,21 +89,39 @@ export class SessionStore {
 
   static async listSessions(
     paths: MemoryPaths,
-  ): Promise<{ sessionId: string; date: string; reflected: boolean }[]> {
+  ): Promise<{ sessionId: string; date: string; reflected: boolean; skipped: boolean }[]> {
     const entries = await readdir(paths.sessionsDir, { withFileTypes: true })
     const dirNames = entries
       .filter((entry) => entry.isDirectory())
       .map((entry) => entry.name)
       .sort()
 
-    const sessions: { sessionId: string; date: string; reflected: boolean }[] = []
+    const sessions: { sessionId: string; date: string; reflected: boolean; skipped: boolean }[] = []
     for (const dirName of dirNames) {
       const match = dirName.match(SESSION_DIR_PATTERN)
       if (!match) continue
       const date = match[1] as string
       const sessionId = match[2] as string
-      const reflected = await pathExists(join(paths.sessionsDir, dirName, SUMMARY_FILE))
-      sessions.push({ sessionId, date, reflected })
+      const summaryPath = join(paths.sessionsDir, dirName, SUMMARY_FILE)
+      const reflected = await pathExists(summaryPath)
+      // A session only ever counts as skipped when its summary is both
+      // present and explicitly marked that way: this is the single place
+      // every consumer (recentSummaries, isFirstSession, rollup dates,
+      // search indexing) reads that distinction from, instead of each one
+      // re-reading summary.md's frontmatter itself.
+      let skipped = false
+      if (reflected) {
+        try {
+          const doc = await readDocument(summaryPath)
+          skipped = doc.meta.skipped === true
+        } catch {
+          // A summary.md that fails to parse is reflected (it exists) but
+          // its skipped status is unknowable; treat it as not skipped
+          // rather than throwing listSessions out for every caller.
+          skipped = false
+        }
+      }
+      sessions.push({ sessionId, date, reflected, skipped })
     }
     return sessions
   }

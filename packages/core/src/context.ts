@@ -1,11 +1,19 @@
 // Session context assembly: the system prompt handed to the chat provider
 // at the start of a session. It is the persona for the configured safety
-// mode, followed by a snapshot of memory state pulled from
-// MemoryEngine.sessionContext(): the constitution, realms, active arcs, the
-// latest daily rollup, yesterday's session summaries, and pending
-// proposals. A section with nothing to say is left out entirely rather than
-// rendered as an empty header, so the model never sees "## Realms" with
-// nothing under it.
+// mode, followed by today's date, followed by a snapshot of memory state
+// pulled from MemoryEngine.sessionContext(): the constitution, realms,
+// active arcs, the latest daily rollup, session summaries from the last
+// week, and pending proposals. A section with nothing to say is left out
+// entirely rather than rendered as an empty header, so the model never sees
+// "## Realms" with nothing under it.
+//
+// The model is never told the current date anywhere else. Recent sessions
+// and the latest daily rollup are rendered with absolute dates
+// (2026-08-12), and without today's date stated somewhere the model has no
+// way to tell whether that was yesterday or last week. Today's date always
+// comes from context.today, the same clock MemoryEngine.sessionContext used
+// to compute the recent-sessions window, never from a second call to
+// Date() here.
 
 import type { MemoryEngine, SessionContext } from '@openreverie/memory'
 import type { ReverieConfig } from './config.js'
@@ -19,16 +27,17 @@ export async function assembleSystemPrompt(
   const persona = buildPersona(config.safety.mode, config.safety.resources, config.style)
 
   if (context.isFirstSession) {
-    return [persona, firstConversationSection()].join('\n\n')
+    return [persona, todaySection(context), firstConversationSection()].join('\n\n')
   }
 
   const sections = [
     persona,
+    todaySection(context),
     constitutionSection(context),
     realmsSection(context),
     arcsSection(context),
     latestDailyRollupSection(context),
-    yesterdaySection(context),
+    recentSummariesSection(context),
     pendingProposalsSection(context),
   ].filter((section): section is string => section !== undefined)
 
@@ -37,7 +46,7 @@ export async function assembleSystemPrompt(
 
 // Replaces every usual optional section when this is the first conversation
 // this memory has ever had: there is no constitution worth reciting, no
-// realms, no arcs, nothing yesterday, nothing pending. Instead of any of
+// realms, no arcs, nothing recent, nothing pending. Instead of any of
 // that, guide a short, warm, unhurried onboarding.
 function firstConversationSection(): string {
   return `## First conversation
@@ -47,6 +56,10 @@ This is the very first conversation in this memory. Open with a short, warm welc
 Then get to know them gently, one question at a time, waiting for their answer before moving to the next: first their name and how they would like to be addressed (pronouns included), then where they live and their timezone, then one thing currently going on in their life, small or large, whatever comes to mind first. Do not stack these into one message. Ask, wait, listen, then ask the next.
 
 The memory is empty right now: there is nothing to search, nothing to retrieve, no earlier session to reference. Do not call a memory tool looking for history that is not there. Do not tell them you can continue where an earlier conversation left off, or greet them as though you already know them. There is no earlier conversation. This is the first one. During a first conversation, this guidance outranks the engagement setting.`
+}
+
+function todaySection(context: SessionContext): string {
+  return `## Today\n\nToday's date is ${context.today}.`
 }
 
 function constitutionSection(context: SessionContext): string | undefined {
@@ -80,10 +93,10 @@ function latestDailyRollupSection(context: SessionContext): string | undefined {
   return `## Latest daily rollup\n\nDate: ${context.latestDailyRollup.date}\n\n${body}`
 }
 
-function yesterdaySection(context: SessionContext): string | undefined {
-  if (context.yesterdaySummaries.length === 0) return undefined
-  const parts = context.yesterdaySummaries.map((summary) => summary.body.trim())
-  return `## Yesterday\n\n${parts.join('\n\n')}`
+function recentSummariesSection(context: SessionContext): string | undefined {
+  if (context.recentSummaries.length === 0) return undefined
+  const parts = context.recentSummaries.map((summary) => `${summary.date}: ${summary.body.trim()}`)
+  return `## Recent sessions\n\n${parts.join('\n\n')}`
 }
 
 function pendingProposalsSection(context: SessionContext): string | undefined {
