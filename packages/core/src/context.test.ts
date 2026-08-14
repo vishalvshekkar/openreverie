@@ -328,6 +328,43 @@ describe('assembleSystemPrompt', () => {
     await engine.close()
   })
 
+  it("states today's date near the top, in the same form as recent session dates", async () => {
+    await writeDocumentAtomic({
+      path: paths.constitution,
+      meta: { id: newId('doc') },
+      body: 'The user prefers direct, unflinching honesty over comfort.\n',
+    })
+    // An arc (any status) is enough to make this not a first session, so
+    // the normal optional-section rendering applies here rather than the
+    // first-conversation flow, and "## Constitution" actually renders.
+    const arcPath = join(paths.arcsDir, 'marathon.md')
+    await writeDocumentAtomic({
+      path: arcPath,
+      meta: { id: newId('doc'), name: 'Marathon Training', status: 'active' },
+      body: 'Training for the fall marathon.\n',
+    })
+    await appendGraph(paths, [
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'arc_marathon',
+        type: 'arc',
+        label: 'Marathon Training',
+        doc: arcPath,
+      },
+    ])
+
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+    const prompt = await assembleSystemPrompt(engine, testConfig())
+
+    const today = new Date().toISOString().slice(0, 10)
+    expect(prompt).toContain('## Today')
+    expect(prompt).toContain(today)
+    expect(prompt.indexOf('## Today')).toBeLessThan(prompt.indexOf('## Constitution'))
+
+    await engine.close()
+  })
+
   it('renders the firewall persona at the top when the configured mode is firewall', async () => {
     const config = testConfig({ safety: { mode: 'firewall', resources: defaultCrisisResources } })
     const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
@@ -415,6 +452,17 @@ describe('assembleSystemPrompt', () => {
       const prompt = await assembleSystemPrompt(engine, testConfig())
 
       expect(prompt).not.toContain('## First conversation')
+
+      await engine.close()
+    })
+
+    it("still states today's date during a first conversation", async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const prompt = await assembleSystemPrompt(engine, testConfig())
+
+      const today = new Date().toISOString().slice(0, 10)
+      expect(prompt).toContain('## Today')
+      expect(prompt).toContain(today)
 
       await engine.close()
     })

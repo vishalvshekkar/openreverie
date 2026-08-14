@@ -73,6 +73,12 @@ export interface SessionContext {
   latestDailyRollup?: { date: string; body: string }
   recentSummaries: { sessionId: string; date: string; body: string }[]
   pendingProposals: Proposal[]
+  // Today's date, in the same YYYY-MM-DD form used for recent session
+  // dates and the daily rollup date, built from the same clock passed to
+  // sessionContext. The model is never told the current date any other
+  // way, so this is the only anchor it has for reading an absolute date
+  // like "2026-08-12" as recent or old.
+  today: string
   // True when this memory has no reflected sessions and no arcs at all
   // (of any status), meaning the person has never actually talked with
   // reverie before. The session that was just started to hold the current
@@ -412,6 +418,7 @@ export class MemoryEngine {
       ...(latestDailyRollup ? { latestDailyRollup } : {}),
       recentSummaries,
       pendingProposals: proposals,
+      today: formatDateUTC(now),
       isFirstSession,
     }
   }

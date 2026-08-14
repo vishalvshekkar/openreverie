@@ -1705,6 +1705,39 @@ describe('MemoryEngine', () => {
     })
   })
 
+  describe('sessionContext today', () => {
+    let dir: string
+
+    beforeEach(async () => {
+      dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-today-'))
+    })
+
+    afterEach(async () => {
+      await rm(dir, { recursive: true, force: true })
+    })
+
+    it('carries today, the date the context was built for, in the same YYYY-MM-DD form as recent session dates', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+
+      const now = new Date('2026-08-14T09:30:00.000Z')
+      const context = await engine.sessionContext(now)
+
+      expect(context.today).toBe(isoDate(now))
+
+      await engine.close()
+    })
+
+    it('renders a different date when the session context is built for a different day', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+
+      const context = await engine.sessionContext(new Date('2026-08-02T00:00:00.000Z'))
+
+      expect(context.today).toBe('2026-08-02')
+
+      await engine.close()
+    })
+  })
+
   describe('warnings', () => {
     let dir: string
     let paths: MemoryPaths

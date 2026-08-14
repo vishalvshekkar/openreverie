@@ -1,11 +1,19 @@
 // Session context assembly: the system prompt handed to the chat provider
 // at the start of a session. It is the persona for the configured safety
-// mode, followed by a snapshot of memory state pulled from
-// MemoryEngine.sessionContext(): the constitution, realms, active arcs, the
-// latest daily rollup, session summaries from the last week, and pending
-// proposals. A section with nothing to say is left out entirely rather than
-// rendered as an empty header, so the model never sees "## Realms" with
-// nothing under it.
+// mode, followed by today's date, followed by a snapshot of memory state
+// pulled from MemoryEngine.sessionContext(): the constitution, realms,
+// active arcs, the latest daily rollup, session summaries from the last
+// week, and pending proposals. A section with nothing to say is left out
+// entirely rather than rendered as an empty header, so the model never sees
+// "## Realms" with nothing under it.
+//
+// The model is never told the current date anywhere else. Recent sessions
+// and the latest daily rollup are rendered with absolute dates
+// (2026-08-12), and without today's date stated somewhere the model has no
+// way to tell whether that was yesterday or last week. Today's date always
+// comes from context.today, the same clock MemoryEngine.sessionContext used
+// to compute the recent-sessions window, never from a second call to
+// Date() here.
 
 import type { MemoryEngine, SessionContext } from '@openreverie/memory'
 import type { ReverieConfig } from './config.js'
@@ -19,11 +27,12 @@ export async function assembleSystemPrompt(
   const persona = buildPersona(config.safety.mode, config.safety.resources, config.style)
 
   if (context.isFirstSession) {
-    return [persona, firstConversationSection()].join('\n\n')
+    return [persona, todaySection(context), firstConversationSection()].join('\n\n')
   }
 
   const sections = [
     persona,
+    todaySection(context),
     constitutionSection(context),
     realmsSection(context),
     arcsSection(context),
@@ -47,6 +56,10 @@ This is the very first conversation in this memory. Open with a short, warm welc
 Then get to know them gently, one question at a time, waiting for their answer before moving to the next: first their name and how they would like to be addressed (pronouns included), then where they live and their timezone, then one thing currently going on in their life, small or large, whatever comes to mind first. Do not stack these into one message. Ask, wait, listen, then ask the next.
 
 The memory is empty right now: there is nothing to search, nothing to retrieve, no earlier session to reference. Do not call a memory tool looking for history that is not there. Do not tell them you can continue where an earlier conversation left off, or greet them as though you already know them. There is no earlier conversation. This is the first one. During a first conversation, this guidance outranks the engagement setting.`
+}
+
+function todaySection(context: SessionContext): string {
+  return `## Today\n\nToday's date is ${context.today}.`
 }
 
 function constitutionSection(context: SessionContext): string | undefined {
