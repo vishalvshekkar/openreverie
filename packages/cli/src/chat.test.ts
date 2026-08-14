@@ -16,13 +16,12 @@ import {
   type ChatIo,
   countMemoryDocuments,
   createStylePersister,
-  cyan,
-  magenta,
   openCliContext,
   printWarnings,
   runChat,
   toolNotice,
 } from './chat.js'
+import { cyan, magenta } from './colors.js'
 
 function testConfig(memoryDir: string): ReverieConfig {
   return {
