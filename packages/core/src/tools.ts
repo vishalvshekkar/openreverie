@@ -13,6 +13,17 @@
 import type { DocKind, GraphQuery, MemoryEngine } from '@openreverie/memory'
 import type { ToolCall, ToolDefinition } from '@openreverie/providers'
 import { z } from 'zod'
+import type { StyleConfig } from './config.js'
+
+// Core must not know config file paths or how style preferences are
+// persisted: that is a CLI concern. ToolDeps is how a caller injects the
+// one operation dispatchTool needs to fulfil update_style, without core
+// ever importing from the config file layer. Optional because most tests
+// and most tool calls never touch it; when update_style is called without
+// one wired up, dispatch reports that plainly instead of throwing.
+export interface ToolDeps {
+  updateStyle?: (patch: Partial<StyleConfig>) => Promise<StyleConfig>
+}
 
 const searchMemoryArgs = z.strictObject({
   query: z.string(),
@@ -46,6 +57,18 @@ const resolveProposalArgs = z.strictObject({
   proposalId: z.string(),
   resolution: z.enum(['accepted', 'rejected']),
 })
+
+const updateStyleArgs = z
+  .strictObject({
+    engagement: z.enum(['leading', 'balanced', 'following']).optional(),
+    tone: z.enum(['warm', 'playful', 'snarky', 'direct', 'formal']).optional(),
+    orientation: z.enum(['listening', 'balanced', 'solutions']).optional(),
+  })
+  .refine(
+    (value) =>
+      value.engagement !== undefined || value.tone !== undefined || value.orientation !== undefined,
+    { message: 'at least one of engagement, tone, or orientation is required' },
+  )
 
 export function toolDefinitions(): ToolDefinition[] {
   return [
@@ -220,6 +243,37 @@ export function toolDefinitions(): ToolDefinition[] {
         additionalProperties: false,
       },
     },
+    {
+      name: 'update_style',
+      description:
+        'Change how you converse with this person going forward: engagement (leading, balanced, following), tone ' +
+        '(warm, playful, snarky, direct, formal), or orientation (listening, balanced, solutions). Use this only ' +
+        'when the person has actually asked to change how you talk with them, not on your own judgment. At least ' +
+        'one field is required; omit the axes that should stay as they are. The change applies immediately, from ' +
+        'that point in the conversation onward, and is saved so it persists into future sessions.',
+      parameters: {
+        type: 'object',
+        properties: {
+          engagement: {
+            type: 'string',
+            enum: ['leading', 'balanced', 'following'],
+            description: 'How much you initiate versus wait to be led.',
+          },
+          tone: {
+            type: 'string',
+            enum: ['warm', 'playful', 'snarky', 'direct', 'formal'],
+            description: 'The register you speak in.',
+          },
+          orientation: {
+            type: 'string',
+            enum: ['listening', 'balanced', 'solutions'],
+            description:
+              'Whether you mostly listen, balance listening and suggesting, or offer next steps.',
+          },
+        },
+        additionalProperties: false,
+      },
+    },
   ]
 }
 
@@ -227,6 +281,7 @@ export async function dispatchTool(
   engine: MemoryEngine,
   sessionId: string,
   call: ToolCall,
+  deps?: ToolDeps,
 ): Promise<string> {
   const parsedArgs = parseArguments(call.arguments)
   if (!parsedArgs.ok) {
@@ -251,6 +306,8 @@ export async function dispatchTool(
         return await dispatchListRealms(engine, parsedArgs.value)
       case 'resolve_proposal':
         return await dispatchResolveProposal(engine, parsedArgs.value)
+      case 'update_style':
+        return await dispatchUpdateStyle(deps, parsedArgs.value)
       default:
         return errorJson(`unknown tool: ${call.name}`)
     }
@@ -342,6 +399,33 @@ async function dispatchResolveProposal(engine: MemoryEngine, value: unknown): Pr
 
   await engine.resolveProposal(parsed.data.proposalId, parsed.data.resolution)
   return JSON.stringify({ ok: true })
+}
+
+async function dispatchUpdateStyle(deps: ToolDeps | undefined, value: unknown): Promise<string> {
+  const parsed = updateStyleArgs.safeParse(value)
+  if (!parsed.success) return errorJson(zodErrorMessage('update_style', parsed.error))
+
+  if (!deps?.updateStyle) {
+    return errorJson('update_style is not available in this session: no persister is configured')
+  }
+
+  // zod's .optional() fields type as `T | undefined` even though an
+  // absent key in the input yields an absent key in parsed.data, never an
+  // explicit `undefined` value. exactOptionalPropertyTypes distinguishes
+  // "absent" from "present and undefined", so the patch handed to the
+  // persister is rebuilt key-by-key to match Partial<StyleConfig> exactly.
+  const patch: Partial<StyleConfig> = {}
+  if (parsed.data.engagement !== undefined) patch.engagement = parsed.data.engagement
+  if (parsed.data.tone !== undefined) patch.tone = parsed.data.tone
+  if (parsed.data.orientation !== undefined) patch.orientation = parsed.data.orientation
+
+  const style = await deps.updateStyle(patch)
+  return JSON.stringify({
+    ok: true,
+    style,
+    message:
+      'These settings apply from this moment onward in this conversation, and persist into future sessions.',
+  })
 }
 
 function parseArguments(raw: string): { ok: true; value: unknown } | { ok: false; error: string } {

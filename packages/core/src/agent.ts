@@ -18,7 +18,7 @@ import type { MemoryEngine } from '@openreverie/memory'
 import type { ChatProvider, ToolCall } from '@openreverie/providers'
 import type { ReverieConfig } from './config.js'
 import { assembleSystemPrompt } from './context.js'
-import { dispatchTool, toolDefinitions } from './tools.js'
+import { dispatchTool, type ToolDeps, toolDefinitions } from './tools.js'
 
 export type AgentEvent =
   | { type: 'text'; text: string }
@@ -43,7 +43,7 @@ export class AgentSession {
   private readonly engine: MemoryEngine
   private readonly chat: ChatProvider
   private readonly model: string
-  private readonly system: string
+  private system: string
   private readonly history: SessionMessage[] = []
   private ended = false
   // Concurrent send() calls are serialized behind this promise chain: the
@@ -54,28 +54,36 @@ export class AgentSession {
   // round is still being written.
   private sendChain: Promise<void> = Promise.resolve()
 
+  private readonly toolDeps: ToolDeps | undefined
+  private readonly config: ReverieConfig
+
   private constructor(
     engine: MemoryEngine,
     chat: ChatProvider,
     model: string,
     system: string,
     sessionId: string,
+    toolDeps: ToolDeps | undefined,
+    config: ReverieConfig,
   ) {
     this.engine = engine
     this.chat = chat
     this.model = model
     this.system = system
     this.sessionId = sessionId
+    this.toolDeps = toolDeps
+    this.config = config
   }
 
   static async start(
     engine: MemoryEngine,
     config: ReverieConfig,
     chat: ChatProvider,
+    toolDeps?: ToolDeps,
   ): Promise<AgentSession> {
     const system = await assembleSystemPrompt(engine, config)
     const sessionId = await engine.startSession()
-    return new AgentSession(engine, chat, config.models.chat, system, sessionId)
+    return new AgentSession(engine, chat, config.models.chat, system, sessionId, toolDeps, config)
   }
 
   async *send(userText: string): AsyncIterable<AgentEvent> {
@@ -161,7 +169,16 @@ export class AgentSession {
         first = false
         yield { type: 'tool', name: toolCall.name }
 
-        const result = await dispatchTool(this.engine, this.sessionId, toolCall)
+        const result = await dispatchTool(this.engine, this.sessionId, toolCall, this.toolDeps)
+
+        // If update_style succeeds, reassemble the system prompt so the new
+        // style applies immediately to subsequent requests.
+        if (toolCall.name === 'update_style' && !this.resultHasError(result)) {
+          const resultData = JSON.parse(result)
+          this.config.style = resultData.style
+          this.system = await assembleSystemPrompt(this.engine, this.config)
+        }
+
         await this.appendBoth({ role: 'tool', content: result, toolCallId: toolCall.id })
       }
     }
@@ -194,5 +211,14 @@ export class AgentSession {
       ...(message.toolCallId ? { toolCallId: message.toolCallId } : {}),
     })
     this.history.push(message)
+  }
+
+  private resultHasError(result: string): boolean {
+    try {
+      const parsed = JSON.parse(result)
+      return 'error' in parsed
+    } catch {
+      return false
+    }
   }
 }

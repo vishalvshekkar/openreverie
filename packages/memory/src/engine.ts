@@ -69,6 +69,13 @@ export interface SessionContext {
   latestDailyRollup?: { date: string; body: string }
   yesterdaySummaries: { sessionId: string; body: string }[]
   pendingProposals: Proposal[]
+  // True when this memory has no reflected sessions and no arcs at all
+  // (of any status), meaning the person has never actually talked with
+  // reverie before. The session that was just started to hold the current
+  // conversation is itself unreflected and must not count: sessionContext
+  // is always called after startSession, so without this carve-out no
+  // session would ever look like a first one.
+  isFirstSession: boolean
 }
 
 export type GraphQuery =
@@ -298,6 +305,15 @@ export class MemoryEngine {
 
     const proposals = await pendingProposals(this.paths)
 
+    // Any arc at all (regardless of status) or any reflected session
+    // (regardless of date) means this person has talked with reverie
+    // before. Note this deliberately does not reuse the `arcs` array
+    // above, which is filtered down to active arcs only: a memory with
+    // only a dormant or closed arc is still not a first session.
+    const hasAnyArc = [...this.graphState.nodes.values()].some((node) => node.type === 'arc')
+    const hasReflectedSession = sessions.some((session) => session.reflected)
+    const isFirstSession = !hasAnyArc && !hasReflectedSession
+
     return {
       constitution: constitutionDoc.body,
       realms,
@@ -305,6 +321,7 @@ export class MemoryEngine {
       ...(latestDailyRollup ? { latestDailyRollup } : {}),
       yesterdaySummaries,
       pendingProposals: proposals,
+      isFirstSession,
     }
   }
 

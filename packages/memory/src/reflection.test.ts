@@ -118,6 +118,8 @@ describe('reflection', () => {
       expect(prompt).toContain('user: I went for a long run this morning.')
       expect(prompt).toContain('assistant: That sounds like a good start to the day.')
       expect(prompt).toContain('"constitutionUpdate": string | null')
+      expect(prompt).toContain('identity facts')
+      expect(prompt).toContain('first learned or when they change')
     })
 
     it('retries once when the reply is valid JSON but fails schema validation', async () => {

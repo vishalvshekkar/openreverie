@@ -23,6 +23,7 @@ function testConfig(): ReverieConfig {
     provider: { name: 'openai', apiKeyEnv: 'OPENREVERIE_TEST_KEY' },
     models: { chat: 'gpt-5', reflection: 'gpt-5-mini', embeddings: 'text-embedding-3-small' },
     safety: { mode: 'companion', resources: defaultCrisisResources },
+    style: { engagement: 'balanced', tone: 'warm', orientation: 'listening' },
   }
 }
 
@@ -281,6 +282,109 @@ describe('AgentSession', () => {
 
     await session.end()
     expect(chat.requests.length).toBe(2)
+
+    await engine.close()
+  })
+
+  it('rebuilds the system prompt when update_style succeeds, so the new style applies immediately to subsequent requests', async () => {
+    const chat = new FakeChatProvider([
+      {
+        text: '',
+        toolCalls: [
+          {
+            id: 'call_1',
+            name: 'update_style',
+            arguments: JSON.stringify({ tone: 'playful' }),
+          },
+        ],
+      },
+      { text: 'Now speaking playfully.', toolCalls: [] },
+    ])
+
+    const toolDeps = {
+      updateStyle: async (_patch: Record<string, unknown>) => {
+        return {
+          engagement: 'balanced' as const,
+          tone: 'playful' as const,
+          orientation: 'listening' as const,
+        }
+      },
+    }
+
+    const engine = await MemoryEngine.open(dir, {
+      chat,
+      embeddings: new FakeEmbeddingProvider(),
+      reflectionModel: 'fake-reflect',
+      embeddingModel: 'fake-embed',
+    })
+    const config = testConfig()
+    const session = await AgentSession.start(engine, config, chat, toolDeps)
+
+    const events = await collect(session.send('Change how you talk to me.'))
+
+    expect(events).toEqual([
+      { type: 'tool', name: 'update_style' },
+      { type: 'text', text: 'Now speaking playfully.' },
+      { type: 'done' },
+    ])
+
+    expect(chat.requests.length).toBe(2)
+
+    const firstSystemPrompt = chat.requests[0]?.system || ''
+    const secondSystemPrompt = chat.requests[1]?.system || ''
+
+    expect(firstSystemPrompt).not.toBe(secondSystemPrompt)
+    expect(firstSystemPrompt).toContain('Your configured tone is warm')
+    expect(secondSystemPrompt).toContain('Your configured tone is playful')
+
+    await engine.close()
+  })
+
+  it('does not rebuild the system prompt when update_style fails', async () => {
+    const chat = new FakeChatProvider([
+      {
+        text: '',
+        toolCalls: [
+          {
+            id: 'call_1',
+            name: 'update_style',
+            arguments: JSON.stringify({ tone: 'playful' }),
+          },
+        ],
+      },
+      { text: 'Still warm.', toolCalls: [] },
+    ])
+
+    const toolDeps = {
+      updateStyle: async () => {
+        throw new Error('could not persist style')
+      },
+    }
+
+    const engine = await MemoryEngine.open(dir, {
+      chat,
+      embeddings: new FakeEmbeddingProvider(),
+      reflectionModel: 'fake-reflect',
+      embeddingModel: 'fake-embed',
+    })
+    const config = testConfig()
+    const session = await AgentSession.start(engine, config, chat, toolDeps)
+
+    const events = await collect(session.send('Try to change how you talk.'))
+
+    expect(events).toEqual([
+      { type: 'tool', name: 'update_style' },
+      { type: 'text', text: 'Still warm.' },
+      { type: 'done' },
+    ])
+
+    expect(chat.requests.length).toBe(2)
+
+    const firstSystemPrompt = chat.requests[0]?.system || ''
+    const secondSystemPrompt = chat.requests[1]?.system || ''
+
+    expect(firstSystemPrompt).toBe(secondSystemPrompt)
+    expect(secondSystemPrompt).toContain('Your configured tone is warm')
 
     await engine.close()
   })

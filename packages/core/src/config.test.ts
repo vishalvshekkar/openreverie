@@ -26,6 +26,7 @@ function fullConfig(overrides: Partial<ReverieConfig> = {}): ReverieConfig {
     provider: { name: 'openai', apiKeyEnv: 'OPENREVERIE_TEST_KEY' },
     models: { chat: 'gpt-5', reflection: 'gpt-5-mini', embeddings: 'text-embedding-3-small' },
     safety: { mode: 'companion', resources: defaultCrisisResources },
+    style: { engagement: 'balanced', tone: 'warm', orientation: 'listening' },
     ...overrides,
   }
 }
@@ -48,6 +49,18 @@ describe('saveConfig and loadConfig round trip', () => {
         mode: 'firewall',
         resources: [{ label: 'Local crisis line', contact: '555-0100' }],
       },
+    })
+
+    await saveConfig(config, configPath)
+    const loaded = await loadConfig(configPath)
+
+    expect(loaded).toEqual(config)
+  })
+
+  it('preserves a non-default style selection', async () => {
+    const configPath = path.join(dir, 'config.toml')
+    const config = fullConfig({
+      style: { engagement: 'following', tone: 'snarky', orientation: 'solutions' },
     })
 
     await saveConfig(config, configPath)
@@ -84,6 +97,56 @@ describe('loadConfig defaults', () => {
     })
     expect(loaded.safety.resources).toEqual(defaultCrisisResources)
     expect(loaded.safety.resources).not.toBe(defaultCrisisResources)
+    expect(loaded.style).toEqual({ engagement: 'balanced', tone: 'warm', orientation: 'listening' })
+  })
+
+  it('applies balanced/warm/listening style defaults when the [style] section is omitted entirely', async () => {
+    const configPath = path.join(dir, 'config.toml')
+    await writeFile(
+      configPath,
+      [
+        '[provider]',
+        'name = "openai"',
+        'apiKey = "sk-test"',
+        '',
+        '[safety]',
+        'mode = "companion"',
+        '',
+      ].join('\n'),
+      'utf8',
+    )
+
+    const loaded = await loadConfig(configPath)
+
+    expect(loaded.style).toEqual({ engagement: 'balanced', tone: 'warm', orientation: 'listening' })
+  })
+
+  it('fills a defaulted field when the [style] section is present but partial', async () => {
+    const configPath = path.join(dir, 'config.toml')
+    await writeFile(
+      configPath,
+      [
+        '[provider]',
+        'name = "openai"',
+        'apiKey = "sk-test"',
+        '',
+        '[safety]',
+        'mode = "companion"',
+        '',
+        '[style]',
+        'tone = "playful"',
+        '',
+      ].join('\n'),
+      'utf8',
+    )
+
+    const loaded = await loadConfig(configPath)
+
+    expect(loaded.style).toEqual({
+      engagement: 'balanced',
+      tone: 'playful',
+      orientation: 'listening',
+    })
   })
 })
 
@@ -142,6 +205,49 @@ describe('loadConfig unknown keys', () => {
     await writeFile(configPath, ['[provider]', 'name = "openai"', ''].join('\n'), 'utf8')
 
     await expect(loadConfig(configPath)).rejects.toThrow(/safety/)
+  })
+
+  it('rejects an unknown key inside the style section and names it', async () => {
+    const configPath = path.join(dir, 'config.toml')
+    await writeFile(
+      configPath,
+      [
+        '[provider]',
+        'name = "openai"',
+        '',
+        '[safety]',
+        'mode = "companion"',
+        '',
+        '[style]',
+        'tone = "warm"',
+        'bogusStyleField = "oops"',
+        '',
+      ].join('\n'),
+      'utf8',
+    )
+
+    await expect(loadConfig(configPath)).rejects.toThrow('bogusStyleField')
+  })
+
+  it('rejects an invalid enum value for a style axis', async () => {
+    const configPath = path.join(dir, 'config.toml')
+    await writeFile(
+      configPath,
+      [
+        '[provider]',
+        'name = "openai"',
+        '',
+        '[safety]',
+        'mode = "companion"',
+        '',
+        '[style]',
+        'tone = "grumpy"',
+        '',
+      ].join('\n'),
+      'utf8',
+    )
+
+    await expect(loadConfig(configPath)).rejects.toThrow(/style.tone/)
   })
 })
 

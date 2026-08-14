@@ -118,6 +118,8 @@ function buildReflectionPrompt(context: ReflectionContext, transcript: Transcrip
     'Transcript:',
     renderTranscript(transcript),
     '',
+    'When updating the constitution: basic identity facts about the user (their name, pronouns, where they live, their timezone, their occupation or work situation) always belong in the constitution when first learned or when they change. Do not wait for these facts to feel weighty; update the constitution to include them immediately.',
+    '',
     'Respond with only JSON matching this shape, no other text:',
     RESPONSE_SHAPE,
   ].join('\n')

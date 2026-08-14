@@ -1,7 +1,7 @@
 import { mkdtemp, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import type { ReverieConfig } from '@openreverie/core'
+import { loadConfig, type ReverieConfig, saveConfig } from '@openreverie/core'
 import {
   type EngineDeps,
   ensureMemoryTree,
@@ -15,9 +15,13 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
   type ChatIo,
   countMemoryDocuments,
+  createStylePersister,
+  cyan,
+  magenta,
   openCliContext,
   printWarnings,
   runChat,
+  toolNotice,
 } from './chat.js'
 
 function testConfig(memoryDir: string): ReverieConfig {
@@ -26,6 +30,7 @@ function testConfig(memoryDir: string): ReverieConfig {
     provider: { name: 'openai', apiKeyEnv: 'OPENAI_API_KEY' },
     models: { chat: 'fake-chat', reflection: 'fake-reflect', embeddings: 'fake-embed' },
     safety: { mode: 'companion', resources: [] },
+    style: { engagement: 'balanced', tone: 'warm', orientation: 'listening' },
   }
 }
 
@@ -208,7 +213,7 @@ describe('runChat', () => {
     await runChat({ engine, config, chat, io })
 
     const joined = output.join('')
-    expect(joined).toContain('[searching memory: search_memory]')
+    expect(joined).toContain('[searching memory]')
     expect(joined).toContain('Found something.')
 
     await engine.close()
@@ -537,6 +542,195 @@ describe('countMemoryDocuments', () => {
 
       const count = await countMemoryDocuments(dir)
       expect(count).toBe(3) // constitution + 1 realm + 1 arc
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('color helpers', () => {
+  it('emit ANSI escapes when enabled', () => {
+    expect(cyan('you> ', true)).toBe('\x1b[36myou> \x1b[0m')
+    expect(magenta('reverie> ', true)).toBe('\x1b[35mreverie> \x1b[0m')
+  })
+
+  it('emit plain text with no escapes when disabled', () => {
+    expect(cyan('you> ', false)).toBe('you> ')
+    expect(magenta('reverie> ', false)).toBe('reverie> ')
+  })
+})
+
+describe('toolNotice', () => {
+  it('maps each known tool to its honest, specific notice', () => {
+    expect(toolNotice('remember')).toBe('[remembering]')
+    expect(toolNotice('resolve_proposal')).toBe('[updating memory]')
+    expect(toolNotice('update_style')).toBe('[adjusting style]')
+    expect(toolNotice('search_memory')).toBe('[searching memory]')
+    expect(toolNotice('read_document')).toBe('[reading memory]')
+    expect(toolNotice('read_transcript')).toBe('[reading memory]')
+    expect(toolNotice('graph_query')).toBe('[checking connections]')
+    expect(toolNotice('list_arcs')).toBe('[checking memory]')
+    expect(toolNotice('list_realms')).toBe('[checking memory]')
+  })
+
+  it('falls back to a plain, truthful notice for an unknown tool', () => {
+    expect(toolNotice('some_future_tool')).toBe('[using: some_future_tool]')
+  })
+})
+
+describe('runChat speaker rendering', () => {
+  let dir: string
+
+  beforeEach(async () => {
+    dir = await mkdtemp(path.join(tmpdir(), 'openreverie-chat-speaker-'))
+  })
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  it('renders the reverie> tag before assistant text streams', async () => {
+    const chat = new FakeChatProvider([
+      { text: 'Hi there.', toolCalls: [] },
+      { text: emptyReflectionJson('Said hi.'), toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const { io, output } = scriptedIo(['hello', '/bye'])
+
+    await runChat({ engine, config, chat, io })
+
+    const joined = output.join('')
+    const tagIndex = joined.indexOf('reverie> ')
+    const textIndex = joined.indexOf('Hi there.')
+    expect(tagIndex).toBeGreaterThanOrEqual(0)
+    expect(tagIndex).toBeLessThan(textIndex)
+
+    await engine.close()
+  })
+
+  it('renders colored you> and reverie> when colorEnabled is true', async () => {
+    const chat = new FakeChatProvider([
+      { text: 'Hi there.', toolCalls: [] },
+      { text: emptyReflectionJson('Said hi.'), toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const { io, output } = scriptedIo(['hello', '/bye'])
+
+    await runChat({ engine, config, chat, io, colorEnabled: true })
+
+    const joined = output.join('')
+    expect(joined).toContain('\x1b[36myou> \x1b[0m')
+    expect(joined).toContain('\x1b[35mreverie> \x1b[0m')
+
+    await engine.close()
+  })
+
+  it('renders plain, uncolored you> and reverie> when colorEnabled is left off', async () => {
+    const chat = new FakeChatProvider([
+      { text: 'Hi there.', toolCalls: [] },
+      { text: emptyReflectionJson('Said hi.'), toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const { io, output } = scriptedIo(['hello', '/bye'])
+
+    await runChat({ engine, config, chat, io })
+
+    const joined = output.join('')
+    expect(joined).not.toContain('\x1b[')
+    expect(joined).toContain('you> ')
+    expect(joined).toContain('reverie> ')
+
+    await engine.close()
+  })
+})
+
+describe('createStylePersister', () => {
+  it('patches only the given axes and persists the result atomically to the same path', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'openreverie-style-persist-'))
+    try {
+      const configPath = path.join(dir, 'config.toml')
+      const config = testConfig(dir)
+      await saveConfig(config, configPath)
+
+      const persist = createStylePersister(config, configPath)
+      const result = await persist({ tone: 'direct' })
+
+      expect(result).toEqual({ engagement: 'balanced', tone: 'direct', orientation: 'listening' })
+      // The in-memory config object the running session holds is updated too,
+      // not just the file on disk.
+      expect(config.style).toEqual(result)
+
+      const reloaded = await loadConfig(configPath)
+      expect(reloaded.style).toEqual(result)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('applies a second patch on top of the first, leaving untouched axes alone', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'openreverie-style-persist-2-'))
+    try {
+      const configPath = path.join(dir, 'config.toml')
+      const config = testConfig(dir)
+      await saveConfig(config, configPath)
+
+      const persist = createStylePersister(config, configPath)
+      await persist({ engagement: 'leading' })
+      const result = await persist({ tone: 'snarky' })
+
+      expect(result).toEqual({ engagement: 'leading', tone: 'snarky', orientation: 'listening' })
+      const reloaded = await loadConfig(configPath)
+      expect(reloaded.style).toEqual(result)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('runChat update_style tool notice', () => {
+  it('renders [adjusting style] and persists the change through the wired toolDeps', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'openreverie-chat-style-'))
+    try {
+      const configPath = path.join(dir, 'config.toml')
+      const config = testConfig(dir)
+      await saveConfig(config, configPath)
+
+      const chat = new FakeChatProvider([
+        {
+          text: '',
+          toolCalls: [
+            {
+              id: 'call_1',
+              name: 'update_style',
+              arguments: JSON.stringify({ tone: 'direct' }),
+            },
+          ],
+        },
+        { text: 'Done, I will be more direct.', toolCalls: [] },
+        { text: emptyReflectionJson('Changed tone.'), toolCalls: [] },
+      ])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const { io, output } = scriptedIo(['talk to me more directly', '/bye'])
+
+      await runChat({
+        engine,
+        config,
+        chat,
+        io,
+        toolDeps: { updateStyle: createStylePersister(config, configPath) },
+      })
+
+      const joined = output.join('')
+      expect(joined).toContain('[adjusting style]')
+      expect(joined).toContain('Done, I will be more direct.')
+
+      const reloaded = await loadConfig(configPath)
+      expect(reloaded.style.tone).toBe('direct')
+
+      await engine.close()
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
