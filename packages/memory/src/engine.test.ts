@@ -1734,8 +1734,20 @@ describe('MemoryEngine', () => {
     it('retracts requested nodes and edges: foldGraph drops them, and the tool reports what actually changed', async () => {
       await ensureMemoryTree(forgetPaths)
       await appendGraph(forgetPaths, [
-        { ts: '2026-08-01T00:00:00.000Z', op: 'assert', node: 'person_x', type: 'person', label: 'Alex' },
-        { ts: '2026-08-01T00:00:00.000Z', op: 'assert', node: 'item_x', type: 'item', label: 'A note' },
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'person_x',
+          type: 'person',
+          label: 'Alex',
+        },
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'item_x',
+          type: 'item',
+          label: 'A note',
+        },
         {
           ts: '2026-08-01T00:00:01.000Z',
           op: 'assert',
@@ -1766,7 +1778,13 @@ describe('MemoryEngine', () => {
     it('preserves history: the original assert lines stay in graph.jsonl alongside the new retract lines', async () => {
       await ensureMemoryTree(forgetPaths)
       await appendGraph(forgetPaths, [
-        { ts: '2026-08-01T00:00:00.000Z', op: 'assert', node: 'person_y', type: 'person', label: 'Sam' },
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'person_y',
+          type: 'person',
+          label: 'Sam',
+        },
       ])
 
       const engine = await MemoryEngine.open(forgetDir, fakeDeps(new FakeChatProvider([])))
@@ -1831,7 +1849,13 @@ describe('MemoryEngine', () => {
     it('never writes to a transcript or a session summary', async () => {
       await ensureMemoryTree(forgetPaths)
       await appendGraph(forgetPaths, [
-        { ts: '2026-08-01T00:00:00.000Z', op: 'assert', node: 'person_z', type: 'person', label: 'Jo' },
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'person_z',
+          type: 'person',
+          label: 'Jo',
+        },
       ])
 
       const engine = await MemoryEngine.open(forgetDir, fakeDeps(new FakeChatProvider([])))
@@ -1859,13 +1883,21 @@ describe('MemoryEngine', () => {
     it('commits the change with message "forget: <what>"', async () => {
       await ensureMemoryTree(forgetPaths)
       await appendGraph(forgetPaths, [
-        { ts: '2026-08-01T00:00:00.000Z', op: 'assert', node: 'person_w', type: 'person', label: 'Pat' },
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'person_w',
+          type: 'person',
+          label: 'Pat',
+        },
       ])
       const engine = await MemoryEngine.open(forgetDir, fakeDeps(new FakeChatProvider([])))
 
       await engine.forget({ what: 'an old contact named Pat', nodeIds: ['person_w'] })
 
-      const { stdout } = await execFileAsync('git', ['log', '-1', '--format=%s'], { cwd: forgetDir })
+      const { stdout } = await execFileAsync('git', ['log', '-1', '--format=%s'], {
+        cwd: forgetDir,
+      })
       expect(stdout.trim()).toBe('forget: an old contact named Pat')
 
       await engine.close()

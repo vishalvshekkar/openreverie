@@ -25,8 +25,8 @@ import {
 import { commitMemory } from './gitSync.js'
 import {
   appendGraph,
-  edgeKey,
   type EdgeType,
+  edgeKey,
   type GraphNode,
   type GraphRecord,
   type GraphState,

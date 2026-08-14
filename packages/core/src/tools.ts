@@ -10,7 +10,7 @@
 // model, so the model sees its own mistake in the transcript and can
 // correct it, rather than the whole session crashing on a bad call.
 
-import type { DocKind, GraphQuery, MemoryEngine } from '@openreverie/memory'
+import type { DocKind, ForgetInput, GraphQuery, MemoryEngine } from '@openreverie/memory'
 import type { ToolCall, ToolDefinition } from '@openreverie/providers'
 import { z } from 'zod'
 import type { StyleConfig } from './config.js'
@@ -304,7 +304,8 @@ export function toolDefinitions(): ToolDefinition[] {
         properties: {
           what: {
             type: 'string',
-            description: 'A short, plain description of what is being forgotten. Used as the git commit message.',
+            description:
+              'A short, plain description of what is being forgotten. Used as the git commit message.',
           },
           nodeIds: {
             type: 'array',
@@ -326,7 +327,8 @@ export function toolDefinitions(): ToolDefinition[] {
               required: ['edge', 'from', 'to'],
               additionalProperties: false,
             },
-            description: 'Specific edges to retract, each naming the edge type and the two node ids it connects.',
+            description:
+              'Specific edges to retract, each naming the edge type and the two node ids it connects.',
           },
           documents: {
             type: 'array',
@@ -508,7 +510,17 @@ async function dispatchForget(engine: MemoryEngine, value: unknown): Promise<str
   const parsed = forgetArgs.safeParse(value)
   if (!parsed.success) return errorJson(zodErrorMessage('forget', parsed.error))
 
-  const result = await engine.forget(parsed.data)
+  // Same reasoning as dispatchUpdateStyle's patch above: zod's .optional()
+  // fields type as `T | undefined` even when the key itself is absent from
+  // parsed.data, and exactOptionalPropertyTypes distinguishes "absent" from
+  // "present and undefined". Rebuilt key-by-key so ForgetInput's optional
+  // fields are only ever set when a value is actually present.
+  const input: ForgetInput = { what: parsed.data.what }
+  if (parsed.data.nodeIds !== undefined) input.nodeIds = parsed.data.nodeIds
+  if (parsed.data.edges !== undefined) input.edges = parsed.data.edges
+  if (parsed.data.documents !== undefined) input.documents = parsed.data.documents
+
+  const result = await engine.forget(input)
   return JSON.stringify({ ok: true, ...result })
 }
 
