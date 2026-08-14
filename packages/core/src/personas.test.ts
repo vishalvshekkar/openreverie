@@ -229,5 +229,11 @@ describe('buildPersona', () => {
         expect(text).toContain('yields')
       }
     })
+
+    it('states that personal-register rule outranks the orientation setting on personal topics when orientation is solutions', () => {
+      const solutionsStyle: StyleConfig = { ...defaultStyle, orientation: 'solutions' }
+      const text = buildPersona('companion', resources, solutionsStyle).toLowerCase()
+      expect(text).toContain('personal-register rule outranks the orientation setting')
+    })
   })
 })

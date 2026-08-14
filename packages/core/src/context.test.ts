@@ -393,6 +393,16 @@ describe('assembleSystemPrompt', () => {
 
       await engine.close()
     })
+
+    it('states that first-conversation guidance outranks the engagement setting during a first conversation', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const prompt = await assembleSystemPrompt(engine, testConfig())
+
+      const lower = prompt.toLowerCase()
+      expect(lower).toContain('outranks the engagement setting')
+
+      await engine.close()
+    })
   })
 
   it('never contains an em dash character', async () => {
