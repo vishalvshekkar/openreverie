@@ -44,6 +44,7 @@ import {
   type ReflectionItemKind,
   type ReflectionOutput,
   reflectSession,
+  resolveItemIds,
   resolveNarratives,
 } from './reflection.js'
 import { type SearchFilters, searchMemory } from './retrieval.js'
@@ -244,6 +245,37 @@ export class MemoryEngine {
           `session ${sessionId} narrative rewrite for ${id}`,
         )
       }
+    }
+
+    // Reflection no longer proposes new arcs or persons; it saves them
+    // directly, right here, using the itemIds applyReflection already
+    // minted. An entry whose itemIndexes resolve to no items is dropped
+    // silently rather than materializing an arc or person with nothing
+    // attached to it.
+    for (const arc of out.newArcs) {
+      const itemIds = resolveItemIds(arc.itemIndexes, result.mintedItems)
+      if (itemIds.length === 0) {
+        continue
+      }
+      await this.createArc({
+        name: arc.name,
+        realm: arc.realm,
+        itemIds,
+        narrative: arc.narrative,
+        source: sessionId,
+      })
+    }
+    for (const person of out.newPersons) {
+      const itemIds = resolveItemIds(person.itemIndexes, result.mintedItems)
+      if (itemIds.length === 0) {
+        continue
+      }
+      await this.createPersonPage({
+        name: person.name,
+        itemIds,
+        narrative: person.narrative,
+        source: sessionId,
+      })
     }
 
     const commitResult = await commitMemory(this.paths.root, `reflect: session ${sessionId}`)

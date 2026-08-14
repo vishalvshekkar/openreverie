@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -46,7 +46,7 @@ function fakeDeps(chat: FakeChatProvider): EngineDeps {
 }
 
 // An EmbeddingProvider that always fails, used to prove that a document's
-// caller (e.g. writePersonPage) survives an indexing failure instead of
+// caller (e.g. createPersonPage) survives an indexing failure instead of
 // throwing out of it, the same guarantee reindexOrWarn gives every other
 // caller.
 class ThrowingEmbeddingProvider implements EmbeddingProvider {
@@ -166,16 +166,19 @@ describe('MemoryEngine', () => {
         confirmed: false,
       })
 
-      // The new-arc suggestion is a pending proposal, not an auto-created arc.
+      // The new arc is materialized directly by reflection, with no proposal.
       const pending = await pendingProposals(paths)
-      const newArcProposal = pending.find((p) => p.kind === 'new_arc')
-      expect(newArcProposal).toBeDefined()
-      expect(newArcProposal?.payload).toEqual({
-        name: 'presentation prep',
-        realm: 'realm_health',
-        itemIds: [anxiousItem.id],
+      expect(pending.find((p) => p.kind === 'new_arc')).toBeUndefined()
+      const newArc = engine.listArcs().find((n) => n.label === 'presentation prep')
+      if (!newArc?.doc) throw new Error('expected the new arc to have a doc pointer')
+      expect(await readDocument(newArc.doc)).toMatchObject({
+        body: 'Presentation prep starts here.\n',
       })
-      expect(engine.listArcs()).toHaveLength(1)
+      expect(graph.edges.get(`part_of:${anxiousItem.id}:${newArc.id}`)).toMatchObject({
+        confidence: 1,
+        confirmed: true,
+      })
+      expect(engine.listArcs()).toHaveLength(2)
       expect(engine.listRealms()).toHaveLength(1)
 
       // graphQuery surfaces the item filed under the pre-existing arc.
@@ -462,7 +465,7 @@ describe('MemoryEngine', () => {
 
     it('resolves a new_person proposal and keeps its edges even when reindexing the new page fails', async () => {
       // Swap in an engine backed by an embeddings provider that always
-      // throws, so writePersonPage's reindex call fails. resolveProposal
+      // throws, so createPersonPage's reindex call fails. resolveProposal
       // must still complete: the proposal must clear, the person node and
       // page must exist, and the involves edges must be appended, none of
       // which should depend on the page ever making it into search.
@@ -610,6 +613,330 @@ describe('MemoryEngine', () => {
 
       const arcDocs = await listDocuments(paths.arcsDir)
       expect(arcDocs.some((d) => d.meta.name === 'Ghost Arc')).toBe(false)
+    })
+  })
+
+  describe('reflection materializes directly, proposals stay dormant', () => {
+    let dir: string
+    let paths: MemoryPaths
+
+    beforeEach(async () => {
+      dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-save-by-default-'))
+      paths = memoryPaths(dir)
+      await ensureMemoryTree(paths)
+    })
+
+    afterEach(async () => {
+      await rm(dir, { recursive: true, force: true })
+    })
+
+    it('materializes a new arc directly during reflection with no proposal and no acceptance step', async () => {
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('Started training for a marathon.'),
+        items: [{ text: 'Went for a long run', kind: 'event' }],
+        newArcs: [
+          {
+            name: 'Marathon Training',
+            realm: 'Fitness',
+            reason: 'mentioned training for a marathon',
+            itemIndexes: [0],
+            narrative: 'Training for a marathon this fall, starting with long weekend runs.',
+          },
+        ],
+      }
+      const chat = new FakeChatProvider([{ text: JSON.stringify(out), toolCalls: [] }])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      const sessionId = await engine.startSession()
+      await engine.appendTranscript(sessionId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'Went for a long run, training for a marathon this fall.',
+      })
+      await engine.endSession(sessionId)
+
+      const graph = await readGraph(paths)
+      const arcNode = [...graph.nodes.values()].find(
+        (n) => n.type === 'arc' && n.label === 'Marathon Training',
+      )
+      if (!arcNode?.doc) throw new Error('expected an arc node with a doc pointer')
+
+      const arcDoc = await readDocument(arcNode.doc)
+      expect(arcDoc.body).toBe(
+        'Training for a marathon this fall, starting with long weekend runs.\n',
+      )
+      expect(arcDoc.meta.status).toBe('active')
+
+      const pending = await pendingProposals(paths)
+      expect(pending).toHaveLength(0)
+
+      await engine.close()
+    })
+
+    it('materializes a person page directly during reflection with no proposal and no acceptance step', async () => {
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('Talked a lot about Sam today.'),
+        items: [{ text: 'Ran with Sam again', kind: 'event' }],
+        newPersons: [
+          {
+            name: 'Sam',
+            reason: 'recurring running partner, mentioned again this session',
+            itemIndexes: [0],
+            narrative: 'Sam is a running partner who joins for weekend long runs.',
+          },
+        ],
+      }
+      const chat = new FakeChatProvider([{ text: JSON.stringify(out), toolCalls: [] }])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      const sessionId = await engine.startSession()
+      await engine.appendTranscript(sessionId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'Ran with Sam again this morning.',
+      })
+      await engine.endSession(sessionId)
+
+      const graph = await readGraph(paths)
+      const personNode = [...graph.nodes.values()].find(
+        (n) => n.type === 'person' && n.label === 'Sam',
+      )
+      if (!personNode?.doc) throw new Error('expected a person node with a doc pointer')
+
+      const personDoc = await readDocument(personNode.doc)
+      expect(personDoc.body).toBe('Sam is a running partner who joins for weekend long runs.\n')
+      expect(personDoc.meta.name).toBe('Sam')
+      expect(personDoc.meta.node).toBe(personNode.id)
+
+      const pending = await pendingProposals(paths)
+      expect(pending).toHaveLength(0)
+
+      await engine.close()
+    })
+
+    it('materializes a new arc with an empty narrative using the arc starter body, not a blank page', async () => {
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('A session with a thin new arc.'),
+        items: [{ text: 'Went for a long run', kind: 'event' }],
+        newArcs: [
+          {
+            name: 'Marathon Training',
+            realm: 'Fitness',
+            reason: 'mentioned training for a marathon',
+            itemIndexes: [0],
+            narrative: '   ',
+          },
+        ],
+      }
+      const chat = new FakeChatProvider([{ text: JSON.stringify(out), toolCalls: [] }])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      const sessionId = await engine.startSession()
+      await engine.appendTranscript(sessionId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'Went for a long run, training for a marathon this fall.',
+      })
+      await engine.endSession(sessionId)
+
+      const graph = await readGraph(paths)
+      const arcNode = [...graph.nodes.values()].find(
+        (n) => n.type === 'arc' && n.label === 'Marathon Training',
+      )
+      if (!arcNode?.doc) throw new Error('expected an arc node with a doc pointer')
+
+      const arcDoc = await readDocument(arcNode.doc)
+      expect(arcDoc.body).toBe('This arc is new. It grows as we talk.\n')
+
+      await engine.close()
+    })
+
+    it('materializes a new person with an empty narrative using the person starter body, not a blank page', async () => {
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('A session with a thin new person.'),
+        items: [{ text: 'Ran with Sam again', kind: 'event' }],
+        newPersons: [
+          {
+            name: 'Sam',
+            reason: 'recurring running partner',
+            itemIndexes: [0],
+            narrative: '',
+          },
+        ],
+      }
+      const chat = new FakeChatProvider([{ text: JSON.stringify(out), toolCalls: [] }])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      const sessionId = await engine.startSession()
+      await engine.appendTranscript(sessionId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'Ran with Sam again this morning.',
+      })
+      await engine.endSession(sessionId)
+
+      const graph = await readGraph(paths)
+      const personNode = [...graph.nodes.values()].find(
+        (n) => n.type === 'person' && n.label === 'Sam',
+      )
+      if (!personNode?.doc) throw new Error('expected a person node with a doc pointer')
+
+      const personDoc = await readDocument(personNode.doc)
+      expect(personDoc.body).toBe('This page is new. It grows as we talk.\n')
+
+      await engine.close()
+    })
+
+    it('drops a newArcs entry whose itemIndexes resolve to no items, materializing nothing for it', async () => {
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('A session with a ghost arc.'),
+        newArcs: [
+          {
+            name: 'Ghost Arc',
+            realm: 'Fitness',
+            reason: 'only out-of-range indexes',
+            itemIndexes: [5, -1],
+            narrative: 'Should never land anywhere.',
+          },
+        ],
+      }
+      const chat = new FakeChatProvider([{ text: JSON.stringify(out), toolCalls: [] }])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      const sessionId = await engine.startSession()
+      await engine.appendTranscript(sessionId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'A session with nothing much in it.',
+      })
+      await engine.endSession(sessionId)
+
+      const graph = await readGraph(paths)
+      expect([...graph.nodes.values()].some((n) => n.label === 'Ghost Arc')).toBe(false)
+
+      await engine.close()
+    })
+
+    it('a pre-existing pending proposal still surfaces in sessionContext and still resolves end to end', async () => {
+      const proposal: Proposal = {
+        id: newId('prop'),
+        ts: new Date().toISOString(),
+        kind: 'new_arc',
+        summary: 'A proposal that predates this release.',
+        payload: { name: 'Legacy Arc', realm: 'Legacy Realm', itemIds: [newId('item')] },
+        source: 'session_legacy',
+      }
+      await appendProposals(paths, [proposal])
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+
+      const context = await engine.sessionContext()
+      expect(context.pendingProposals.map((p) => p.id)).toContain(proposal.id)
+
+      await engine.resolveProposal(proposal.id, 'accepted')
+
+      const graph = await readGraph(paths)
+      const arcNode = [...graph.nodes.values()].find(
+        (n) => n.type === 'arc' && n.label === 'Legacy Arc',
+      )
+      expect(arcNode).toBeDefined()
+
+      const pending = await pendingProposals(paths)
+      expect(pending.find((p) => p.id === proposal.id)).toBeUndefined()
+
+      await engine.close()
+    })
+
+    it('a reflection run appends nothing to proposals.jsonl even with new arcs, new persons, and low-confidence attributions', async () => {
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('A busy session.'),
+        items: [{ text: 'Went for a long run', kind: 'event' }],
+        attributions: [{ itemIndex: 0, arcId: 'arc_does_not_exist', confidence: 0.1 }],
+        newArcs: [
+          {
+            name: 'Marathon Training',
+            realm: 'Fitness',
+            reason: 'mentioned training',
+            itemIndexes: [0],
+            narrative: 'First body.',
+          },
+        ],
+      }
+      const chat = new FakeChatProvider([{ text: JSON.stringify(out), toolCalls: [] }])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      const sessionId = await engine.startSession()
+      await engine.appendTranscript(sessionId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'A busy session about running.',
+      })
+      await engine.endSession(sessionId)
+
+      await expect(readFile(paths.proposals, 'utf8')).rejects.toThrow()
+
+      await engine.close()
+    })
+
+    it('carries forward an arc document body through a pass-two rewrite triggered end to end by endSession', async () => {
+      // Seed the arc, its realm, and the arc document BEFORE opening the
+      // engine: MemoryEngine.open reads graph.jsonl into the cached
+      // graphState once, and _doEndSession's resolveNarratives call reads
+      // that cached graphState, not a fresh readGraph. Seeding after open()
+      // would leave the arcUpdate below unable to resolve arc_health at all.
+      const arcDocPath = join(paths.arcsDir, 'health.md')
+      await writeDocumentAtomic({
+        path: arcDocPath,
+        meta: { id: newId('doc'), name: 'Health', status: 'active' },
+        body: 'Training log:\n- Ran a 5k last week.\n',
+      })
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'arc_health',
+          type: 'arc',
+          label: 'Health',
+          doc: arcDocPath,
+        },
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'realm_health',
+          type: 'realm',
+          label: 'Health',
+        },
+      ])
+
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('Ran another 10k today, building on last week.'),
+        items: [{ text: 'Went for a 10k run', kind: 'event' }],
+        attributions: [{ itemIndex: 0, arcId: 'arc_health', confidence: 0.9 }],
+        arcUpdates: [
+          { arcId: 'arc_health', note: 'Ran a 10k, building on the 5k from last week.' },
+        ],
+      }
+      const rewrittenBody = 'Training log:\n- Ran a 5k last week.\n- Ran a 10k this week.\n'
+      const chat = new FakeChatProvider([
+        { text: JSON.stringify(out), toolCalls: [] },
+        { text: JSON.stringify({ body: rewrittenBody }), toolCalls: [] },
+      ])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      const sessionId = await engine.startSession()
+      await engine.appendTranscript(sessionId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'Ran another 10k today, building on last week.',
+      })
+      await engine.endSession(sessionId)
+
+      const arcDoc = await readDocument(arcDocPath)
+      expect(arcDoc.body).toBe(rewrittenBody)
+      // What was already on the page before this session carries forward.
+      expect(arcDoc.body).toContain('Ran a 5k last week')
+
+      await engine.close()
     })
   })
 
