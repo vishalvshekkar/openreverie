@@ -43,7 +43,12 @@ function renderResources(resources: CrisisResource[]): string {
 
 function crisisSection(mode: PersonaMode, resources: CrisisResource[]): string {
   const template = mode === 'companion' ? COMPANION_CRISIS_STANCE : FIREWALL_CRISIS_STANCE
-  return template.replace('{{RESOURCES}}', renderResources(resources))
+  // A replacer function, not a plain string: String.prototype.replace
+  // interprets $&, $`, $', $$, and $n as special patterns in a string
+  // replacement, and safety.resources is user-editable config text that
+  // can contain any of those sequences. A function replacement is used
+  // verbatim, with no special-character interpretation.
+  return template.replace('{{RESOURCES}}', () => renderResources(resources))
 }
 
 export function buildPersona(mode: PersonaMode, resources: CrisisResource[]): string {

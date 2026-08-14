@@ -88,6 +88,14 @@ export class MemoryEngine {
   private readonly liveItems = new Map<string, ReflectionItem[]>()
   readonly warnings: string[] = []
 
+  // Passed to every listDocuments() call so a file that cannot be parsed
+  // is reported by path instead of aborting the walk it is part of (see
+  // documents.ts listDocuments). Kept as one instance-bound function so
+  // every call site formats the warning identically.
+  private readonly onDocSkip = (path: string, reason: string): void => {
+    this.warnings.push(`Skipping unreadable document at ${path}: ${reason}`)
+  }
+
   private constructor(
     paths: MemoryPaths,
     deps: EngineDeps,
@@ -108,8 +116,14 @@ export class MemoryEngine {
     index.replaceGraph(graphState)
     const engine = new MemoryEngine(paths, deps, index, graphState)
     engine.clearWarnings()
-    await engine.refreshDocPaths()
+    // runMaintenance() before refreshDocPaths(): runMaintenance clears
+    // warnings as its own first step, which would otherwise wipe out any
+    // skipped-document warnings a doc walk during refreshDocPaths had just
+    // recorded. Nothing in the maintenance path reads docPaths (only
+    // reindexDocument writes it), and running the doc walk last also picks
+    // up any rollups or session summaries maintenance itself just wrote.
     await engine.runMaintenance()
+    await engine.refreshDocPaths()
     return engine
   }
 
@@ -261,7 +275,7 @@ export class MemoryEngine {
     }
 
     let latestDailyRollup: { date: string; body: string } | undefined
-    for (const doc of await listDocuments(this.paths.rollupsDailyDir)) {
+    for (const doc of await listDocuments(this.paths.rollupsDailyDir, this.onDocSkip)) {
       if (typeof doc.meta.date !== 'string') continue
       if (!latestDailyRollup || doc.meta.date > latestDailyRollup.date) {
         latestDailyRollup = { date: doc.meta.date, body: doc.body }
@@ -379,7 +393,10 @@ export class MemoryEngine {
 
     const reflected = (await SessionStore.listSessions(this.paths)).filter((s) => s.reflected)
     const sessionDates = reflected.map((s) => s.date)
-    const existingDailies = stringMeta(await listDocuments(this.paths.rollupsDailyDir), 'date')
+    const existingDailies = stringMeta(
+      await listDocuments(this.paths.rollupsDailyDir, this.onDocSkip),
+      'date',
+    )
 
     for (const date of pendingDailyRollups(sessionDates, existingDailies, today)) {
       try {
@@ -400,8 +417,14 @@ export class MemoryEngine {
       }
     }
 
-    const dailyDates = stringMeta(await listDocuments(this.paths.rollupsDailyDir), 'date')
-    const existingWeeklies = stringMeta(await listDocuments(this.paths.rollupsWeeklyDir), 'week')
+    const dailyDates = stringMeta(
+      await listDocuments(this.paths.rollupsDailyDir, this.onDocSkip),
+      'date',
+    )
+    const existingWeeklies = stringMeta(
+      await listDocuments(this.paths.rollupsWeeklyDir, this.onDocSkip),
+      'week',
+    )
 
     for (const week of pendingWeeklyRollups(dailyDates, existingWeeklies, today)) {
       try {
@@ -502,12 +525,16 @@ export class MemoryEngine {
   private async walkAllDocuments(): Promise<{ doc: Document; kind: DocKind }[]> {
     const result: { doc: Document; kind: DocKind }[] = []
     result.push({ doc: await readDocument(this.paths.constitution), kind: 'constitution' })
-    for (const doc of await listDocuments(this.paths.realmsDir)) result.push({ doc, kind: 'realm' })
-    for (const doc of await listDocuments(this.paths.arcsDir)) result.push({ doc, kind: 'arc' })
-    for (const doc of await listDocuments(this.paths.rollupsDailyDir)) {
+    for (const doc of await listDocuments(this.paths.realmsDir, this.onDocSkip)) {
+      result.push({ doc, kind: 'realm' })
+    }
+    for (const doc of await listDocuments(this.paths.arcsDir, this.onDocSkip)) {
+      result.push({ doc, kind: 'arc' })
+    }
+    for (const doc of await listDocuments(this.paths.rollupsDailyDir, this.onDocSkip)) {
       result.push({ doc, kind: 'rollup_daily' })
     }
-    for (const doc of await listDocuments(this.paths.rollupsWeeklyDir)) {
+    for (const doc of await listDocuments(this.paths.rollupsWeeklyDir, this.onDocSkip)) {
       result.push({ doc, kind: 'rollup_weekly' })
     }
 

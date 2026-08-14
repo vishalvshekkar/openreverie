@@ -100,4 +100,15 @@ describe('buildPersona', () => {
     expect(() => buildPersona('companion', [])).not.toThrow()
     expect(() => buildPersona('firewall', [])).not.toThrow()
   })
+
+  it('renders a resource label with $ replacement sequences literally instead of leaking the template', () => {
+    const trickyResources: CrisisResource[] = [
+      { label: 'Weird $& and $` line', contact: 'Call 555-0100' },
+    ]
+    for (const mode of ['companion', 'firewall'] as const) {
+      const text = buildPersona(mode, trickyResources)
+      expect(text).toContain('Weird $& and $` line')
+      expect(text).not.toContain('{{RESOURCES}}')
+    }
+  })
 })

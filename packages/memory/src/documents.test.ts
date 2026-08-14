@@ -92,6 +92,15 @@ describe('documents', () => {
     await expect(readDocument(path)).rejects.toThrow(path)
   })
 
+  it('throws an error naming the path when the YAML frontmatter itself is malformed', async () => {
+    const path = join(dir, 'broken-yaml.md')
+    // An unterminated flow collection: gray-matter's underlying YAML
+    // parser throws here with no file path in its own message, so
+    // readDocument must attribute it.
+    await writeFile(path, '---\nname: [unterminated\n---\nbody\n', 'utf8')
+    await expect(readDocument(path)).rejects.toThrow(path)
+  })
+
   it('listDocuments returns sorted docs and ignores non-md files', async () => {
     const pathB = join(dir, 'b.md')
     const pathA = join(dir, 'a.md')
@@ -102,6 +111,31 @@ describe('documents', () => {
     const docs = await listDocuments(dir)
     expect(docs.map((d) => d.path)).toEqual([pathA, pathB])
     expect(docs.every((d) => typeof d.meta.id === 'string')).toBe(true)
+  })
+
+  it('listDocuments skips a file it cannot parse and reports it via onSkip, instead of throwing', async () => {
+    const goodPath = join(dir, 'good.md')
+    const brokenPath = join(dir, 'broken.md')
+    await writeDocumentAtomic({ path: goodPath, meta: { id: newId('doc') }, body: 'fine' })
+    await writeFile(brokenPath, '---\nname: [unterminated\n---\nbody\n', 'utf8')
+
+    const skipped: { path: string; reason: string }[] = []
+    const docs = await listDocuments(dir, (path, reason) => skipped.push({ path, reason }))
+
+    expect(docs.map((d) => d.path)).toEqual([goodPath])
+    expect(skipped).toHaveLength(1)
+    expect(skipped[0]?.path).toBe(brokenPath)
+    expect(skipped[0]?.reason.length).toBeGreaterThan(0)
+  })
+
+  it('listDocuments with no onSkip still skips unreadable files silently rather than throwing', async () => {
+    const goodPath = join(dir, 'good.md')
+    const brokenPath = join(dir, 'broken.md')
+    await writeDocumentAtomic({ path: goodPath, meta: { id: newId('doc') }, body: 'fine' })
+    await writeFile(brokenPath, '---\ntitle: no id here\n---\nbody\n', 'utf8')
+
+    const docs = await listDocuments(dir)
+    expect(docs.map((d) => d.path)).toEqual([goodPath])
   })
 })
 

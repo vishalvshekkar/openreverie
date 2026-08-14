@@ -19,7 +19,12 @@
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { type AgentEvent, AgentSession, type ReverieConfig } from '@openreverie/core'
+import {
+  type AgentEvent,
+  AgentSession,
+  assembleSystemPrompt,
+  type ReverieConfig,
+} from '@openreverie/core'
 import { type EngineDeps, MemoryEngine, memoryPaths, readDocument } from '@openreverie/memory'
 import {
   FakeChatProvider,
@@ -131,6 +136,16 @@ describe('end-to-end harness', () => {
       const contextAfterDay1 = await engine.sessionContext()
       expect(contextAfterDay1.pendingProposals).toHaveLength(2)
       expect(contextAfterDay1.pendingProposals.map((p) => p.kind)).toEqual(['new_arc', 'new_arc'])
+
+      // The assembled system prompt (what actually reaches the model) must
+      // carry each pending proposal's exact id, not just its human-readable
+      // summary: that id is the only way resolve_proposal can ever be
+      // called correctly. This does not consume a scripted chat result;
+      // assembleSystemPrompt only reads engine.sessionContext().
+      const promptWithPendingProposals = await assembleSystemPrompt(engine, testConfig())
+      for (const proposal of contextAfterDay1.pendingProposals) {
+        expect(promptWithPendingProposals).toContain(proposal.id)
+      }
 
       for (const proposal of contextAfterDay1.pendingProposals) {
         await engine.resolveProposal(proposal.id, 'accepted')

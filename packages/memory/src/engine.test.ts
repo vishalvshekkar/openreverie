@@ -163,6 +163,17 @@ describe('MemoryEngine', () => {
       const arcItems = engine.graphQuery({ kind: 'items_in_arc', arcId: 'arc_health' })
       expect(arcItems).toHaveLength(1)
 
+      // The session node is asserted alongside its items, so the item's
+      // from-edge to the session actually materializes in the index
+      // instead of dangling on a missing endpoint.
+      const runItemNeighbors = engine.graphQuery({ kind: 'neighbors', nodeId: runItem.id }) as {
+        edge: { edge: string }
+        node: { id: string; type: string }
+      }[]
+      expect(runItemNeighbors.some((n) => n.edge.edge === 'from' && n.node.id === sessionId)).toBe(
+        true,
+      )
+
       // readDocumentById resolves through the engine's document cache.
       const byId = await engine.readDocumentById(summaryDoc.meta.id as string)
       expect(byId?.path).toBe(join(sessionDir, 'summary.md'))
@@ -508,6 +519,50 @@ describe('MemoryEngine', () => {
       expect(chat.requests).toHaveLength(0)
 
       await engine.close()
+    })
+  })
+
+  describe('malformed documents do not brick the engine', () => {
+    let dir: string
+    let paths: MemoryPaths
+
+    beforeEach(async () => {
+      dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-corrupt-'))
+      paths = memoryPaths(dir)
+      await ensureMemoryTree(paths)
+    })
+
+    afterEach(async () => {
+      await rm(dir, { recursive: true, force: true })
+    })
+
+    it('opens past a corrupt arc file, warns with its path, and still lets reindexAll succeed', async () => {
+      const corruptPath = join(paths.arcsDir, 'broken.md')
+      // Unterminated YAML flow collection: readDocument throws on this,
+      // and before the fix, listDocuments aborted the whole walk on the
+      // first such failure, which made MemoryEngine.open throw too.
+      await writeFile(corruptPath, '---\nname: [unterminated\n---\nbody\n', 'utf8')
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+
+      // open() itself must have surfaced the skip as a warning naming the
+      // file, not swallowed it: refreshDocPaths runs its doc walk as the
+      // last step of open() specifically so this warning survives.
+      expect(engine.warnings.some((w) => w.includes(corruptPath))).toBe(true)
+
+      // reindex, the documented repair tool, must still work with the
+      // engine open, not just after deleting the corrupt file by hand.
+      await expect(engine.reindexAll()).resolves.toBeUndefined()
+      expect(engine.warnings.some((w) => w.includes(corruptPath))).toBe(true)
+
+      await engine.close()
+    })
+
+    it('readDocument called directly on the corrupt file still throws, naming the path', async () => {
+      const corruptPath = join(paths.arcsDir, 'broken.md')
+      await writeFile(corruptPath, '---\nname: [unterminated\n---\nbody\n', 'utf8')
+
+      await expect(readDocument(corruptPath)).rejects.toThrow(corruptPath)
     })
   })
 

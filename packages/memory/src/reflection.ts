@@ -293,6 +293,19 @@ export async function applyReflection(
   let droppedProposals = 0
   let skippedNarratives = 0
 
+  // Assert the session node itself before any item's `from` edge points at
+  // it: MemoryIndex.replaceGraph skips edges whose endpoints are not both
+  // present in the node table, so without this node every item -> session
+  // edge below would be logged and then silently dropped from the index.
+  graphRecords.push({
+    ts: nowIso,
+    op: 'assert',
+    node: sessionId,
+    type: 'session',
+    label: date,
+    doc: summaryPath,
+  })
+
   for (const item of mergedItems) {
     graphRecords.push({
       ts: nowIso,

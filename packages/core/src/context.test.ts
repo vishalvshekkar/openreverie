@@ -157,6 +157,9 @@ describe('assembleSystemPrompt', () => {
     expect(prompt).toContain('## Pending proposals')
     expect(prompt).toContain('Link the run item to marathon training.')
     expect(prompt.toLowerCase()).toContain('resolve_proposal')
+    // The proposal id must reach the model verbatim: it is the only way
+    // resolve_proposal can ever be called with a valid proposalId.
+    expect(prompt).toContain(`[${proposal.id}]`)
 
     // Every populated section appears in the order specified by the brief:
     // constitution, realms, active arcs, latest daily rollup, yesterday,

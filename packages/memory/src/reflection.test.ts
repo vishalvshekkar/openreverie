@@ -280,6 +280,15 @@ describe('reflection', () => {
       })
       expect(graph.edges.get(`from:${runItem.id}:${sessionId}`)).toMatchObject({ confirmed: true })
 
+      // The session node itself must be asserted, or the from-edge above
+      // is written to the log and then dropped by the index (dangling
+      // endpoint).
+      expect(graph.nodes.get(sessionId)).toMatchObject({
+        type: 'session',
+        label: '2026-08-13',
+        doc: join(sessionDir, 'summary.md'),
+      })
+
       const partOfKey = `part_of:${runItem.id}:arc_health`
       expect(graph.edges.get(partOfKey)).toMatchObject({
         confidence: 0.9,

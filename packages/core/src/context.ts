@@ -72,7 +72,8 @@ function pendingProposalsSection(context: SessionContext): string | undefined {
   if (context.pendingProposals.length === 0) return undefined
   const instruction =
     "Weave these into the conversation naturally, near the start, and record the user's " +
-    'decision on each with the resolve_proposal tool.'
-  const lines = context.pendingProposals.map((proposal) => `- ${proposal.summary}`)
+    'decision on each with the resolve_proposal tool, passing the bracketed id shown before ' +
+    'each proposal below as proposalId exactly as written.'
+  const lines = context.pendingProposals.map((proposal) => `- [${proposal.id}] ${proposal.summary}`)
   return `## Pending proposals\n\n${instruction}\n\n${lines.join('\n')}`
 }
