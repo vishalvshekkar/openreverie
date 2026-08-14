@@ -186,6 +186,10 @@ export async function runChat(deps: {
   let responding = false
   io.onInterrupt(() => {
     interruptLevel += 1
+    // Stop the status line before writing anything: otherwise the current
+    // frame (e.g. "| thinking") is left stranded in scrollback, with the
+    // interrupt message printed right after it instead of on a clean line.
+    statusLine.stop()
     if (interruptLevel === 1) {
       io.write(
         responding

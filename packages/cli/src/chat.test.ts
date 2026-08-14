@@ -940,6 +940,60 @@ describe('runChat status line', () => {
 
     await engine.close()
   })
+
+  it('stops the status line before writing the interrupt message, so no frame is left stranded in scrollback', async () => {
+    const chat = new FakeChatProvider([{ text: 'Good to see you.', toolCalls: [] }])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const output: string[] = []
+    let handler: (() => void) | undefined
+    let fired = false
+    // The status line's first (and, with this fake tick that never fires,
+    // only) frame for the greeting's 'thinking' event, written the
+    // instant statusLine.start('thinking') runs, before the model has
+    // produced anything. Firing the interrupt right on this exact write
+    // simulates Ctrl-C landing while the spinner is on screen.
+    const thinkingFrame = '\r\x1b[2m| thinking\x1b[0m\x1b[K'
+    const io: ChatIo = {
+      async question(prompt) {
+        output.push(prompt)
+        return '/bye'
+      },
+      write(text) {
+        output.push(text)
+        if (text === thinkingFrame && !fired) {
+          fired = true
+          handler?.()
+        }
+      },
+      onInterrupt(h) {
+        handler = h
+      },
+      cancelPending() {},
+    }
+
+    await runChat({
+      engine,
+      config,
+      chat,
+      io,
+      colorEnabled: true,
+      setInterval: () => 1,
+      clearInterval: () => {},
+      now: () => 0,
+    })
+
+    const frameIndex = output.indexOf(thinkingFrame)
+    expect(frameIndex).toBeGreaterThanOrEqual(0)
+    // The very next write after the frame must be the bare clear, then
+    // the interrupt message: without stopping the line first, the
+    // message would be written directly after the frame with nothing
+    // erasing it.
+    expect(output[frameIndex + 1]).toBe('\r\x1b[K')
+    expect(output[frameIndex + 2]?.toLowerCase()).toContain('finishing this reply')
+
+    await engine.close()
+  })
 })
 
 describe('createStylePersister', () => {
