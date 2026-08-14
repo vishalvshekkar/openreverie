@@ -6,6 +6,8 @@ This file tracks what openreverie can do, what is being worked on, and where hel
 
 Sub-project 1 of 5: the local-first memory engine and agent core, usable as a terminal app. See the README for the full capability list and the [design spec](docs/superpowers/specs/2026-08-13-openreverie-design.md) for how it all fits together.
 
+v0.2.0 added, from the first round of real dogfooding: a close-friend conversational voice replacing the consultant register, three style preferences (engagement, tone, orientation) chosen at setup and changeable mid-conversation with immediate effect, a guided first conversation, speaker colors in the terminal, honest tool notices, and reliable capture of basic identity facts into the constitution.
+
 ## Up next (sub-projects, in intended order)
 
 These are the large pieces from the original design, each sized like its own project. Open an issue before starting one of these; they need design conversation first.
@@ -26,7 +28,7 @@ Good first contributions, roughly ordered by usefulness. Read [CONTRIBUTING.md](
 - **Advisory locking for the memory folder.** Two engines opened on the same folder do not corrupt anything, but they can double-reflect a stale session. A lock file would prevent it.
 - **Skip reflection for empty sessions.** A session with no user messages still spends a reflection call.
 - **Local embedding option.** An `EmbeddingProvider` backed by a local model would keep the search index fully offline.
-- **Nicer tool notices in the CLI.** Write-path tools currently render under a generic "searching memory" style notice.
+- **Person pages.** People get graph nodes and involves-edges today, but no narrative page the way arcs have; a per-person document the agent maintains would make "what's been going on with X" richer.
 
 ## How work happens here
 
