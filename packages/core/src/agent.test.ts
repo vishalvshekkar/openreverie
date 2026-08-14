@@ -611,4 +611,49 @@ describe('AgentSession', () => {
       vi.useRealTimers()
     }
   })
+
+  it('withTimeout also asks the provider iterator to unwind when a consumer plainly abandons the stream, not only on timeout', async () => {
+    // Ctrl-C while the greeting is still streaming, the moment right
+    // after a chunk has already reached the terminal: the real provider
+    // iterator is suspended at its own yield (having just produced that
+    // chunk) and is about to await its next one. No fake timers here and
+    // no timeout ever fires; the point of this test is the plain
+    // abandonment path, distinct from the timeout path above.
+    let cleanedUp = false
+    const abandonedMidStreamChat: ChatProvider = {
+      name: 'abandoned-mid-stream',
+      async complete() {
+        throw new Error('not used in this test')
+      },
+      stream() {
+        return (async function* () {
+          try {
+            yield { type: 'text' as const, text: 'Good to see you.' }
+            // Suspended mid-await, not at a yield, exactly like the real
+            // provider's own next chunk still being awaited when the
+            // consumer stops asking for more.
+            await new Promise<void>(() => {})
+          } finally {
+            cleanedUp = true
+          }
+        })()
+      },
+    }
+    const engine = await MemoryEngine.open(dir, fakeDeps(abandonedMidStreamChat))
+    const session = await AgentSession.start(engine, testConfig(), abandonedMidStreamChat)
+
+    for await (const event of session.greet()) {
+      if (event.type === 'text') break
+    }
+
+    // A generator suspended at its own yield (exactly where this provider
+    // sits right after producing the first chunk) is serviced by
+    // return() immediately: no timer advance and no external release are
+    // needed for its finally to run, unlike the timeout test above.
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(cleanedUp).toBe(true)
+
+    await engine.close()
+  })
 })

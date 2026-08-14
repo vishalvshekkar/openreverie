@@ -61,15 +61,31 @@ How hard you reach for a thread depends on your configured engagement: following
 // reaches a yield or its own await settles, unwinding through that
 // finally instead of continuing normally.
 //
+// The timer winning is not the only way this generator stops early: a
+// consumer can also abandon it directly (Ctrl-C while the greeting is
+// streaming calls .return() on this generator the same way a `for await`
+// break does). `advancedPastYield` distinguishes the two ways execution
+// can reach the finally below. It is only ever set to true by the line
+// immediately after `yield result.value`, so it stays false whenever
+// that yield does not resume normally: a plain abandonment injects a
+// return completion at the yield instead of continuing past it, per
+// generator .return() semantics, which is exactly the case this exists
+// to catch. It is also false, harmlessly, on the `result.done` early
+// return and when `iterator.next()` itself throws (a real provider
+// error): in both cases the underlying iterator is already finished or
+// already errored out, so calling .return() on it below is a no-op, not
+// a double-unwind.
+//
 // This is fire-and-forget, not awaited: measured against a generator
 // that is currently mid an unsettled await (not suspended at a yield),
 // a queued return() is not serviced until that specific await settles on
 // its own; there is no way to force it sooner. A provider stuck there
 // (there is no AbortController wired through ChatRequest to make it
 // settle) may never resolve at all, and awaiting return() here would
-// hang for exactly as long as this timeout exists to avoid. Any throw
-// from return() itself is swallowed: it must never replace or delay the
-// timeout error already propagating.
+// hang for exactly as long as this timeout (and this abandonment path)
+// exist to avoid. Any throw from return() itself is swallowed: it must
+// never replace or delay the timeout error, or a plain abandonment,
+// already propagating.
 async function* withTimeout<T>(iterable: AsyncIterable<T>, ms: number): AsyncGenerator<T> {
   const iterator = iterable[Symbol.asyncIterator]()
   while (true) {
@@ -81,13 +97,15 @@ async function* withTimeout<T>(iterable: AsyncIterable<T>, ms: number): AsyncGen
         reject(new Error('AgentSession: greeting timed out'))
       }, ms)
     })
+    let advancedPastYield = false
     try {
       const result = await Promise.race([iterator.next(), timedOutPromise])
       if (result.done) return
       yield result.value
+      advancedPastYield = true
     } finally {
       clearTimeout(timer)
-      if (timedOut) {
+      if (timedOut || !advancedPastYield) {
         iterator.return?.()?.catch(() => {})
       }
     }
