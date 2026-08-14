@@ -377,8 +377,13 @@ export async function rewriteNarrative(
 // treated as errors. A rewriteNarrative call that fails its one retry is
 // dropped the same way, so the map simply lacks that key and the caller
 // leaves the document on disk untouched.
+//
+// The first parameter is accepted for signature symmetry with the rest of
+// this module's public functions and for a possible future disk-backed
+// lookup; the current implementation resolves documents through
+// graphState and readDocument alone.
 export async function resolveNarratives(
-  paths: MemoryPaths,
+  _paths: MemoryPaths,
   graphState: GraphState,
   out: ReflectionOutput,
   chat: ChatProvider,
@@ -391,7 +396,7 @@ export async function resolveNarratives(
 
   for (const update of out.arcUpdates) {
     const node = graphState.nodes.get(update.arcId)
-    if (!node || node.type !== 'arc' || !node.doc) {
+    if (node?.type !== 'arc' || !node.doc) {
       continue
     }
     if (newArcNames.has(node.label.toLowerCase())) {
@@ -416,7 +421,7 @@ export async function resolveNarratives(
 
   for (const update of out.personUpdates) {
     const node = graphState.nodes.get(update.personId)
-    if (!node || node.type !== 'person' || !node.doc) {
+    if (node?.type !== 'person' || !node.doc) {
       continue
     }
     if (newPersonNames.has(node.label.toLowerCase())) {

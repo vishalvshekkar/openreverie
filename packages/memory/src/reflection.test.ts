@@ -257,7 +257,9 @@ describe('reflection', () => {
 
   describe('rewriteNarrative', () => {
     it('returns the parsed body on the first valid reply', async () => {
-      const chat = new FakeChatProvider([{ text: JSON.stringify({ body: 'Updated body.' }), toolCalls: [] }])
+      const chat = new FakeChatProvider([
+        { text: JSON.stringify({ body: 'Updated body.' }), toolCalls: [] },
+      ])
 
       const result = await rewriteNarrative(chat, 'fake-model', {
         name: 'Health',
@@ -304,7 +306,9 @@ describe('reflection', () => {
         attributions: [{ itemIndex: 0, arcId: 'arc_health', confidence: 0.9 }],
         arcUpdates: [{ arcId: 'arc_health', note: 'Went for another run.' }],
       }
-      const chat = new FakeChatProvider([{ text: JSON.stringify({ body: 'New body.' }), toolCalls: [] }])
+      const chat = new FakeChatProvider([
+        { text: JSON.stringify({ body: 'New body.' }), toolCalls: [] },
+      ])
 
       const graphState = await readGraph(paths)
       const narratives = await resolveNarratives(paths, graphState, out, chat, 'fake-model')
@@ -332,7 +336,13 @@ describe('reflection', () => {
 
     it('drops a personUpdates entry that resolves to a node with no doc', async () => {
       await appendGraph(paths, [
-        { ts: '2026-08-01T00:00:00.000Z', op: 'assert', node: 'person_sam', type: 'person', label: 'Sam' },
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'person_sam',
+          type: 'person',
+          label: 'Sam',
+        },
       ])
       const out: ReflectionOutput = {
         ...emptyReflectionOutput('A session.'),
@@ -719,7 +729,13 @@ describe('reflection', () => {
       ])
 
       const graphStateBefore = await readGraph(paths)
-      const firstNarratives = await resolveNarratives(paths, graphStateBefore, firstOut, firstChat, 'fake-model')
+      const firstNarratives = await resolveNarratives(
+        paths,
+        graphStateBefore,
+        firstOut,
+        firstChat,
+        'fake-model',
+      )
       expect(firstNarratives.get('arc_health')).toBe(firstRewrittenBody)
 
       await applyReflection(paths, firstOut, sessionId, [], now, firstNarratives)
@@ -746,7 +762,13 @@ describe('reflection', () => {
       ])
 
       const graphStateSecond = await readGraph(paths)
-      const secondNarratives = await resolveNarratives(paths, graphStateSecond, secondOut, secondChat, 'fake-model')
+      const secondNarratives = await resolveNarratives(
+        paths,
+        graphStateSecond,
+        secondOut,
+        secondChat,
+        'fake-model',
+      )
 
       const secondPrompt = secondChat.requests[0]?.messages[0]?.content ?? ''
       expect(secondPrompt).toContain('Ran a 5k to start marathon training')
