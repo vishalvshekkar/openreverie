@@ -703,6 +703,88 @@ describe('reflection', () => {
     })
   })
 
+  describe('narrative continuity across sessions', () => {
+    it('carries forward what a previous pass-two rewrite established, across two consecutive reflections', async () => {
+      const now = new Date('2026-08-13T10:00:00.000Z')
+
+      const firstOut: ReflectionOutput = {
+        ...emptyReflectionOutput('First session: started marathon training.'),
+        items: [{ text: 'Went for a 5k run', kind: 'event' }],
+        attributions: [{ itemIndex: 0, arcId: 'arc_health', confidence: 0.9 }],
+        arcUpdates: [{ arcId: 'arc_health', note: 'Started marathon training with a 5k run.' }],
+      }
+      const firstRewrittenBody = 'Training log:\n- Ran a 5k to start marathon training.\n'
+      const firstChat = new FakeChatProvider([
+        { text: JSON.stringify({ body: firstRewrittenBody }), toolCalls: [] },
+      ])
+
+      const graphStateBefore = await readGraph(paths)
+      const firstNarratives = await resolveNarratives(paths, graphStateBefore, firstOut, firstChat, 'fake-model')
+      expect(firstNarratives.get('arc_health')).toBe(firstRewrittenBody)
+
+      await applyReflection(paths, firstOut, sessionId, [], now, firstNarratives)
+
+      const afterFirst = await readDocument(arcDocPath)
+      expect(afterFirst.body).toBe(firstRewrittenBody)
+
+      // Second session, same arc. Pass two must see the body the first pass
+      // actually left on disk, not the original seed body from beforeEach.
+      const secondSessionId = newId('session')
+      const secondSessionDir = join(paths.sessionsDir, `2026-08-14-${secondSessionId}`)
+      await mkdir(secondSessionDir, { recursive: true })
+
+      const secondOut: ReflectionOutput = {
+        ...emptyReflectionOutput('Second session: ran again, longer this time.'),
+        items: [{ text: 'Went for a 10k run', kind: 'event' }],
+        attributions: [{ itemIndex: 0, arcId: 'arc_health', confidence: 0.9 }],
+        arcUpdates: [{ arcId: 'arc_health', note: 'Ran a 10k, building on the 5k.' }],
+      }
+      const secondRewrittenBody =
+        'Training log:\n- Ran a 5k to start marathon training.\n- Ran a 10k, building on the 5k.\n'
+      const secondChat = new FakeChatProvider([
+        { text: JSON.stringify({ body: secondRewrittenBody }), toolCalls: [] },
+      ])
+
+      const graphStateSecond = await readGraph(paths)
+      const secondNarratives = await resolveNarratives(paths, graphStateSecond, secondOut, secondChat, 'fake-model')
+
+      const secondPrompt = secondChat.requests[0]?.messages[0]?.content ?? ''
+      expect(secondPrompt).toContain('Ran a 5k to start marathon training')
+
+      await applyReflection(paths, secondOut, secondSessionId, [], now, secondNarratives)
+
+      const afterSecond = await readDocument(arcDocPath)
+      expect(afterSecond.body).toBe(secondRewrittenBody)
+      expect(afterSecond.body).toContain('Ran a 5k to start marathon training')
+      expect(afterSecond.body).toContain('Ran a 10k, building on the 5k')
+    })
+
+    it('a pass-two failure leaves the existing document byte for byte unchanged', async () => {
+      const now = new Date('2026-08-13T10:00:00.000Z')
+
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('A session that tries and fails to update the arc.'),
+        arcUpdates: [{ arcId: 'arc_health', note: 'Something happened.' }],
+      }
+      const chat = new FakeChatProvider([
+        { text: 'not json', toolCalls: [] },
+        { text: 'still not json', toolCalls: [] },
+      ])
+
+      const before = await readDocument(arcDocPath)
+
+      const graphState = await readGraph(paths)
+      const narratives = await resolveNarratives(paths, graphState, out, chat, 'fake-model')
+      expect(narratives.has('arc_health')).toBe(false)
+
+      await applyReflection(paths, out, sessionId, [], now, narratives)
+
+      const after = await readDocument(arcDocPath)
+      expect(after.body).toBe(before.body)
+      expect(after.meta.updated).toBeUndefined()
+    })
+  })
+
   it('CONFIDENCE_THRESHOLD is 0.8', () => {
     expect(CONFIDENCE_THRESHOLD).toBe(0.8)
   })
