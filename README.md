@@ -14,7 +14,7 @@ What works today:
 
 - Terminal chat with persistent, layered memory (constitution, realms, arcs, session transcripts)
 - Live capture during a conversation (the agent can call `remember` mid-session)
-- Post-session reflection: each session is summarized, filed into memory, and produces confidence-split proposals (high-confidence links are asserted automatically as unconfirmed; everything else waits for you to accept or reject it)
+- Post-session reflection: each session is summarized and filed into memory directly. New arcs, new people, and every attribution (whatever the model's confidence) are saved right away, unconfirmed but not held back for approval. A memory folder from an earlier release may still carry pending proposals from before this changed; those still surface and can still be accepted or rejected with `resolve_proposal`
 - Lazy daily and weekly rollups, built the first time enough time has passed to need them
 - Both safety modes (companion and firewall)
 - A first-run setup wizard
@@ -66,7 +66,7 @@ memory/
 └── index.db               Rebuildable search index (FTS + vectors)
 ```
 
-Each conversation starts with your constitution, active arcs, and recent context already loaded. The agent retrieves deeper memory through tools: semantic search, keyword search, graph traversal, and full transcript reads. After each session, a reflection pass extracts what mattered, updates arc narratives, and proposes new connections, which you confirm or reject conversationally. Nothing you said is ever deleted or rewritten; transcripts are append-only.
+Each conversation starts with your constitution, active arcs, and recent context already loaded. The agent retrieves deeper memory through tools: semantic search, keyword search, graph traversal, and full transcript reads. After each session, a reflection pass extracts what mattered and saves it directly: new arcs, new people, updated arc narratives, and every attribution, unconfirmed but not held back for approval. A companion that remembers should not have to ask permission to remember. Nothing you said is ever deleted or rewritten; transcripts are append-only.
 
 ## What it is not
 

@@ -4,12 +4,12 @@
 //
 // Three synthetic past days are driven at the engine level in one memory
 // folder: each day is a session, ended with a scripted reflection. Day
-// one's reflection proposes two arcs in two different realms; both are
-// accepted, and days two and three attribute items to those arcs with high
-// confidence. Maintenance then builds daily rollups for the completed
-// days. Finally, one present-day conversation runs through AgentSession,
-// using a tool call to reach back into day one's memory, and ends with one
-// more scripted reflection.
+// one's reflection creates two arcs directly, in two different realms, and
+// days two and three attribute items to those arcs with high confidence.
+// Maintenance then builds daily rollups for the completed days. Finally,
+// one present-day conversation runs through AgentSession, using a tool call
+// to reach back into day one's memory, and ends with one more scripted
+// reflection.
 //
 // The proof points asserted at the end are the spec's core promises:
 // transcripts are append-only, memory is searchable, the graph is
@@ -127,7 +127,7 @@ describe('end-to-end harness', () => {
       const chat = new FakeChatProvider(script)
       const engine = await MemoryEngine.open(dir, fakeDeps(chat))
 
-      // --- Day one: two proposals, touching two different realms ---
+      // --- Day one: two arcs, created directly, touching two different realms ---
       const day1Id = await runPastDay(engine, DAY_ONE_DATE, dayOneTurns, dayOneRememberText)
       const day1Path = transcriptPath(DAY_ONE_DATE, day1Id)
       const day1BytesBefore = await readFile(day1Path)
@@ -135,34 +135,25 @@ describe('end-to-end harness', () => {
       await engine.endSession(day1Id)
 
       const contextAfterDay1 = await engine.sessionContext()
-      expect(contextAfterDay1.pendingProposals).toHaveLength(2)
-      expect(contextAfterDay1.pendingProposals.map((p) => p.kind)).toEqual(['new_arc', 'new_arc'])
+      expect(contextAfterDay1.pendingProposals).toHaveLength(0)
 
-      // The assembled system prompt (what actually reaches the model) must
-      // carry each pending proposal's exact id, not just its human-readable
-      // summary: that id is the only way resolve_proposal can ever be
-      // called correctly. This does not consume a scripted chat result;
-      // assembleSystemPrompt only reads engine.sessionContext().
-      const promptWithPendingProposals = await assembleSystemPrompt(engine, testConfig())
-      for (const proposal of contextAfterDay1.pendingProposals) {
-        expect(promptWithPendingProposals).toContain(proposal.id)
-      }
-
-      for (const proposal of contextAfterDay1.pendingProposals) {
-        await engine.resolveProposal(proposal.id, 'accepted')
-      }
+      // assembleSystemPrompt still reads engine.sessionContext() the same
+      // way; with nothing pending, it simply carries no proposals section.
+      // This does not consume a scripted chat result.
+      const promptWithNoPendingProposals = await assembleSystemPrompt(engine, testConfig())
+      expect(promptWithNoPendingProposals).not.toContain('## Pending proposals')
 
       const arcs = engine.listArcs()
       const woodworkingArc = arcs.find((a) => a.label === WOODWORKING_ARC_NAME)
       const jobSearchArc = arcs.find((a) => a.label === JOB_SEARCH_ARC_NAME)
       if (!woodworkingArc || !jobSearchArc) {
-        throw new Error('expected day one proposals to create both arcs once accepted')
+        throw new Error('expected day one reflection to create both arcs directly')
       }
-      // The two accepted arcs live in two distinct realms.
+      // The two arcs live in two distinct realms.
       const woodworkingRealm = engine.listRealms().find((r) => r.label === 'Craft and hobbies')
       const jobSearchRealm = engine.listRealms().find((r) => r.label === 'Career')
       if (!woodworkingRealm || !jobSearchRealm) {
-        throw new Error('expected day one proposals to create both realms once accepted')
+        throw new Error('expected day one reflection to create both realms directly')
       }
       expect(woodworkingRealm.id).not.toBe(jobSearchRealm.id)
 
