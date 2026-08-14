@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -1876,6 +1876,62 @@ describe('MemoryEngine', () => {
       const after = await readFile(transcriptPath, 'utf8')
       expect(after).toBe(before)
       await expect(readDocument(join(sessionDir, 'summary.md'))).rejects.toThrow()
+
+      await engine.close()
+    })
+
+    it('rejects rewriting a session summary or a rollup even given a valid docId for one, leaving the file untouched', async () => {
+      // The transcript test above proves forget never targets a
+      // transcript, but a forget call never names a transcript path in
+      // the first place, since nothing hands a model a transcript's docId.
+      // A session summary and a rollup DO get docIds (walkAllDocuments
+      // indexes both), so this is the case that actually exercises
+      // kindForDocumentPath's guard: a caller with a real, resolvable
+      // docId for one of them must still be refused, not silently allowed
+      // because the id happened to resolve.
+      await ensureMemoryTree(forgetPaths)
+
+      const summaryId = newId('doc')
+      const summaryDir = join(forgetPaths.sessionsDir, '2026-08-01-session_fake')
+      await mkdir(summaryDir, { recursive: true })
+      const summaryPath = join(summaryDir, 'summary.md')
+      await writeDocumentAtomic({
+        path: summaryPath,
+        meta: { id: summaryId, session: 'session_fake' },
+        body: 'What actually happened in this session.\n',
+      })
+
+      const rollupId = newId('doc')
+      const rollupPath = join(forgetPaths.rollupsDailyDir, '2026-08-01.md')
+      await writeDocumentAtomic({
+        path: rollupPath,
+        meta: { id: rollupId, date: '2026-08-01' },
+        body: 'The daily rollup for that date.\n',
+      })
+
+      const engine = await MemoryEngine.open(forgetDir, fakeDeps(new FakeChatProvider([])))
+      // reindexAll walks the whole folder, including sessions/*/summary.md
+      // and the rollups directories, so both docs above are now resolvable
+      // by id exactly the way a model's earlier read_document call would
+      // have made them resolvable.
+      await engine.reindexAll()
+      expect(engine.docIdForPath(summaryPath)).toBe(summaryId)
+      expect(engine.docIdForPath(rollupPath)).toBe(rollupId)
+
+      await expect(
+        engine.forget({
+          what: 'the session',
+          documents: [{ docId: summaryId, body: 'rewritten' }],
+        }),
+      ).rejects.toThrow(/not a document kind/)
+      await expect(
+        engine.forget({ what: 'the rollup', documents: [{ docId: rollupId, body: 'rewritten' }] }),
+      ).rejects.toThrow(/not a document kind/)
+
+      const summaryAfter = await readDocument(summaryPath)
+      expect(summaryAfter.body).toBe('What actually happened in this session.\n')
+      const rollupAfter = await readDocument(rollupPath)
+      expect(rollupAfter.body).toBe('The daily rollup for that date.\n')
 
       await engine.close()
     })
