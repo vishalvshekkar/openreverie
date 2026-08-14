@@ -610,89 +610,31 @@ export class MemoryEngine {
   }
 
   private async materializeProposal(proposal: Proposal): Promise<void> {
-    const now = new Date()
-    const nowIso = now.toISOString()
-
     if (proposal.kind === 'new_arc') {
       const payload = proposal.payload as { name: string; realm: string; itemIds: string[] }
-      const realmNodeId = await this.resolveOrCreateRealm(payload.realm, nowIso)
-
-      const arcNodeId = newId('arc')
-      const slug = await uniqueSlug(this.paths.arcsDir, payload.name)
-      const arcPath = join(this.paths.arcsDir, `${slug}.md`)
-      const arcDoc: Document = {
-        path: arcPath,
-        meta: {
-          id: newId('doc'),
-          name: payload.name,
-          status: 'active',
-          realm: realmNodeId,
-          opened: nowIso,
-        },
-        body: ARC_STARTER_BODY,
-      }
-      await writeDocumentAtomic(arcDoc)
-
-      const records: GraphRecord[] = [
-        {
-          ts: nowIso,
-          op: 'assert',
-          node: arcNodeId,
-          type: 'arc',
-          label: payload.name,
-          doc: arcPath,
-        },
-        {
-          ts: nowIso,
-          op: 'assert',
-          edge: 'in',
-          from: arcNodeId,
-          to: realmNodeId,
-          confidence: 1,
-          confirmed: true,
-          source: proposal.source,
-        },
-      ]
-      for (const itemId of payload.itemIds) {
-        records.push({
-          ts: nowIso,
-          op: 'assert',
-          edge: 'part_of',
-          from: itemId,
-          to: arcNodeId,
-          confidence: 1,
-          confirmed: true,
-          source: proposal.source,
-        })
-      }
-      await appendGraph(this.paths, records)
-      await this.syncGraph()
-      await this.reindexDocument(await readDocument(arcPath), 'arc')
+      await this.createArc({
+        name: payload.name,
+        realm: payload.realm,
+        itemIds: payload.itemIds,
+        narrative: '',
+        source: proposal.source,
+      })
       return
     }
 
     if (proposal.kind === 'new_person') {
       const payload = proposal.payload as { name: string; itemIds: string[] }
-      const { personNodeId } = await this.writePersonPage(payload.name, nowIso)
-      const records: GraphRecord[] = []
-      for (const itemId of payload.itemIds) {
-        records.push({
-          ts: nowIso,
-          op: 'assert',
-          edge: 'involves',
-          from: itemId,
-          to: personNodeId,
-          confidence: 1,
-          confirmed: true,
-          source: proposal.source,
-        })
-      }
-      await appendGraph(this.paths, records)
-      await this.syncGraph()
+      await this.createPersonPage({
+        name: payload.name,
+        itemIds: payload.itemIds,
+        narrative: '',
+        source: proposal.source,
+      })
       return
     }
 
     // proposal.kind === 'link'
+    const now = new Date()
     const payload = proposal.payload as {
       edge: EdgeType
       from: string
@@ -701,7 +643,7 @@ export class MemoryEngine {
     }
     await appendGraph(this.paths, [
       {
-        ts: nowIso,
+        ts: now.toISOString(),
         op: 'assert',
         edge: payload.edge,
         from: payload.from,
@@ -714,37 +656,139 @@ export class MemoryEngine {
     await this.syncGraph()
   }
 
-  // Writes a person's page and asserts their node with its doc pointer set
-  // to the page path, mirroring what resolveOrCreateRealm does for realms.
-  // Kept as its own method, not inlined into materializeProposal, because
-  // the direct-materialization move planned for reflection's newPersons
-  // will call this same helper instead of going through a proposal at all.
-  private async writePersonPage(
-    name: string,
-    nowIso: string,
-  ): Promise<{ personNodeId: string; doc: Document }> {
-    const personNodeId = newId('person')
-    const slug = await uniqueSlug(this.paths.peopleDir, name)
-    const personPath = join(this.paths.peopleDir, `${slug}.md`)
-    const doc: Document = {
-      path: personPath,
-      meta: { id: newId('doc'), name, node: personNodeId, opened: nowIso },
-      body: PERSON_STARTER_BODY,
+  // Creates a new arc document and node, in a realm resolved or created via
+  // resolveOrCreateRealm, and confirms part_of edges for every item passed
+  // in. Shared by materializeProposal's new_arc branch (proposals accepted
+  // from an older memory folder) and _doEndSession's direct materialization
+  // of reflection's newArcs: one implementation, two call sites, so there
+  // is exactly one place that writes an arc document.
+  private async createArc(input: {
+    name: string
+    realm: string
+    itemIds: string[]
+    narrative: string
+    source: string
+  }): Promise<GraphNode> {
+    const now = new Date()
+    const nowIso = now.toISOString()
+    const realmNodeId = await this.resolveOrCreateRealm(input.realm, nowIso)
+
+    const arcNodeId = newId('arc')
+    const slug = await uniqueSlug(this.paths.arcsDir, input.name)
+    const arcPath = join(this.paths.arcsDir, `${slug}.md`)
+    const narrative = input.narrative.trim()
+    const arcDoc: Document = {
+      path: arcPath,
+      meta: {
+        id: newId('doc'),
+        name: input.name,
+        status: 'active',
+        realm: realmNodeId,
+        opened: nowIso,
+      },
+      body: narrative.length > 0 ? input.narrative : ARC_STARTER_BODY,
     }
-    await writeDocumentAtomic(doc)
-    await appendGraph(this.paths, [
+    await writeDocumentAtomic(arcDoc)
+
+    // Node assert and every part_of edge for this arc's items go in one
+    // appendGraph call: a failure partway through would otherwise leave an
+    // arc node and page on disk with no edges connecting its items to it.
+    const records: GraphRecord[] = [
+      { ts: nowIso, op: 'assert', node: arcNodeId, type: 'arc', label: input.name, doc: arcPath },
+      {
+        ts: nowIso,
+        op: 'assert',
+        edge: 'in',
+        from: arcNodeId,
+        to: realmNodeId,
+        confidence: 1,
+        confirmed: true,
+        source: input.source,
+      },
+    ]
+    for (const itemId of input.itemIds) {
+      records.push({
+        ts: nowIso,
+        op: 'assert',
+        edge: 'part_of',
+        from: itemId,
+        to: arcNodeId,
+        confidence: 1,
+        confirmed: true,
+        source: input.source,
+      })
+    }
+    await appendGraph(this.paths, records)
+    await this.syncGraph()
+    await this.reindexOrWarn(await readDocument(arcPath), 'arc', `arc page for ${input.name}`)
+    const node = this.graphState.nodes.get(arcNodeId)
+    if (!node) {
+      throw new Error(`createArc: arc node ${arcNodeId} missing from graph state after assert.`)
+    }
+    return node
+  }
+
+  // Writes a person's page and asserts their node, with its doc pointer set
+  // to the page path, together with confirmed involves edges for every item
+  // passed in. Shared by materializeProposal's new_person branch (proposals
+  // accepted from an older memory folder) and _doEndSession's direct
+  // materialization of reflection's newPersons: one implementation, two
+  // call sites, so there is exactly one place that writes a person page.
+  private async createPersonPage(input: {
+    name: string
+    itemIds: string[]
+    narrative: string
+    source: string
+  }): Promise<GraphNode> {
+    const now = new Date()
+    const nowIso = now.toISOString()
+
+    const personNodeId = newId('person')
+    const slug = await uniqueSlug(this.paths.peopleDir, input.name)
+    const personPath = join(this.paths.peopleDir, `${slug}.md`)
+    const narrative = input.narrative.trim()
+    const personDoc: Document = {
+      path: personPath,
+      meta: { id: newId('doc'), name: input.name, node: personNodeId, opened: nowIso },
+      body: narrative.length > 0 ? input.narrative : PERSON_STARTER_BODY,
+    }
+    await writeDocumentAtomic(personDoc)
+
+    // Node assert and every involves edge for this person's items go in one
+    // appendGraph call: a failure partway through would otherwise leave a
+    // person node and page on disk with no edges connecting its items to it.
+    const records: GraphRecord[] = [
       {
         ts: nowIso,
         op: 'assert',
         node: personNodeId,
         type: 'person',
-        label: name,
+        label: input.name,
         doc: personPath,
       },
-    ])
+    ]
+    for (const itemId of input.itemIds) {
+      records.push({
+        ts: nowIso,
+        op: 'assert',
+        edge: 'involves',
+        from: itemId,
+        to: personNodeId,
+        confidence: 1,
+        confirmed: true,
+        source: input.source,
+      })
+    }
+    await appendGraph(this.paths, records)
     await this.syncGraph()
-    await this.reindexOrWarn(doc, 'person', `person page for ${name}`)
-    return { personNodeId, doc }
+    await this.reindexOrWarn(personDoc, 'person', `person page for ${input.name}`)
+    const node = this.graphState.nodes.get(personNodeId)
+    if (!node) {
+      throw new Error(
+        `createPersonPage: person node ${personNodeId} missing from graph state after assert.`,
+      )
+    }
+    return node
   }
 
   // Resolves a new_arc proposal's `realm` field to a realm node id. It
