@@ -3,8 +3,9 @@
 //
 // Subcommands: `setup` runs the first-run wizard, `reindex` rebuilds the
 // SQLite index from the memory folder, `reflect` runs maintenance
-// (reflect stale sessions, build pending rollups) on demand, and the
-// default (no subcommand) starts the chat REPL.
+// (reflect stale sessions, build pending rollups) on demand, `read` prints
+// part of the memory record without touching the network or the provider,
+// and the default (no subcommand) starts the chat REPL.
 //
 // This file is kept thin: it parses argv, wires real implementations
 // (readline, loadConfig, the provider factory, MemoryEngine.open) into the
@@ -26,6 +27,7 @@ import {
   printWarnings,
   runChat,
 } from './chat.js'
+import { runRead } from './read.js'
 import { runSetup } from './setup.js'
 
 // Colors are read from real process state exactly once, here at the edge:
@@ -97,6 +99,16 @@ async function main(): Promise<void> {
 
   if (subcommand === 'setup') {
     await runSetupCommand()
+    return
+  }
+
+  if (subcommand === 'read') {
+    const exitCode = await runRead(process.argv.slice(3), {
+      loadConfig: () => loadConfig(defaultConfigPath()),
+      write: (text: string) => process.stdout.write(text),
+      colorEnabled: colorsEnabled(),
+    })
+    process.exitCode = exitCode
     return
   }
 
