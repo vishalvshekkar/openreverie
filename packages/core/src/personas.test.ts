@@ -100,6 +100,14 @@ describe('buildPersona', () => {
     }
   })
 
+  it('instructs using the forget tool and always saying the transcript itself is unchanged', () => {
+    for (const mode of ['companion', 'firewall'] as const) {
+      const text = buildPersona(mode, resources, defaultStyle)
+      expect(text.toLowerCase()).toContain('forget')
+      expect(text.toLowerCase()).toMatch(/transcript[^.]*unchanged|unchanged[^.]*transcript/)
+    }
+  })
+
   it('renders correctly with an empty resource list', () => {
     expect(() => buildPersona('companion', [], defaultStyle)).not.toThrow()
     expect(() => buildPersona('firewall', [], defaultStyle)).not.toThrow()
