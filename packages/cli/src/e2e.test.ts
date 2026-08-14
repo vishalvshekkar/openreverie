@@ -115,6 +115,8 @@ describe('end-to-end harness', () => {
     'carries three past days of memory through maintenance and a present-day ' +
       'conversation, and survives a full index rebuild',
     async () => {
+      // FakeChatProvider exhausts the script array in order; a spare entry could let the rebuild
+      // leg's maintenance silently build an extra rollup, corrupting the test's intentions.
       const script: FakeChatResult[] = [{ text: JSON.stringify(dayOneReflection()), toolCalls: [] }]
       const chat = new FakeChatProvider(script)
       const engine = await MemoryEngine.open(dir, fakeDeps(chat))
@@ -225,6 +227,22 @@ describe('end-to-end harness', () => {
       script.push({ text: JSON.stringify(presentDayReflection()), toolCalls: [] })
       await session.end()
       expect(engine.warnings).toEqual([])
+
+      // Verify that search_memory results actually reached the model: find the request
+      // that followed the tool call (the one whose messages include a role 'tool' entry)
+      // and confirm it contains the distinctive day-one phrase from the search hits.
+      const toolResultRequest = chat.requests.find((req) =>
+        (req.messages || []).some((msg) => msg.role === 'tool'),
+      )
+      expect(toolResultRequest).toBeDefined()
+      if (toolResultRequest) {
+        const toolMessage = toolResultRequest.messages.find((msg) => msg.role === 'tool')
+        expect(toolMessage).toBeDefined()
+        if (toolMessage) {
+          expect(typeof toolMessage.content).toBe('string')
+          expect((toolMessage.content as string).includes(DISTINCTIVE_DAY_ONE_PHRASE)).toBe(true)
+        }
+      }
 
       // --- Append-only proof: every past-day transcript is byte-identical
       // to what it was right after its own day's appends, even after
