@@ -12,13 +12,17 @@ Website: [reverie.my](https://reverie.my)
 
 What works today:
 
-- Terminal chat with persistent, layered memory (constitution, realms, arcs, session transcripts)
+- Terminal chat with persistent, layered memory (constitution, realms, arcs, people, session transcripts)
 - Live capture during a conversation (the agent can call `remember` mid-session)
+- Reverie speaks first. A session opens with a short, contextually written hello instead of waiting for you to type. If something is left unresolved from last time, or notable in the recent record, that is what it opens with; otherwise it is just a short hello. A first conversation still gets the guided flow, not this.
+- Person pages: people who recur get a narrative document under `people/` that reflection maintains, the same way it maintains arc narratives.
 - Post-session reflection: each session is summarized and filed into memory directly. New arcs, new people, and every attribution (whatever the model's confidence) are saved right away, unconfirmed but not held back for approval. A memory folder from an earlier release may still carry pending proposals from before this changed; those still surface and can still be accepted or rejected with `resolve_proposal`
 - Lazy daily and weekly rollups, built the first time enough time has passed to need them
 - Both safety modes (companion and firewall)
 - A first-run setup wizard
-- The `reindex`, `reflect`, and `read` CLI subcommands
+- The `reindex`, `reflect`, and `read` CLI subcommands. `read` works with no network call and no API key: it is a plain filesystem read of your memory record
+- A status line while the model or a tool is working, so a slow call looks slow rather than stuck
+- Opening a session and leaving without typing anything costs nothing: no reflection call, no rollup
 - The OpenAI provider
 
 What does not exist yet:
@@ -28,6 +32,7 @@ What does not exist yet:
 - Any deployment target beyond running it yourself (no Cloudflare or VPS packaging)
 - Graph visualization of realms, arcs, and their connections
 - Monthly and yearly rollups (only daily and weekly exist)
+- Any way to make reverie forget. The feature exists in code and is tested, but it is deliberately unexposed: no tool, no persona instruction, and no CLI command reaches it. Nothing in the product removes anything from your memory record. If you want something out, you edit or delete the markdown in your memory folder yourself; the files are plain text you own, readable in any editor. Reverie cannot do it for you.
 
 The architecture and memory model are specified in full in [the design spec](docs/superpowers/specs/2026-08-13-openreverie-design.md). This README is updated honestly as the project progresses; if this section says something works, it works.
 
@@ -58,16 +63,17 @@ Your memory is a folder. Prose lives in markdown files, structure lives in an ap
 
 ```
 memory/
-├── constitution.md        A living record of who you are
-├── realms/                Life domains (health, career, ...)
-├── arcs/                  Ongoing storylines, positive and negative
-├── sessions/              Verbatim transcripts and session summaries
-├── rollups/               Daily and weekly synthesis
-├── graph.jsonl            Timestamped relationships between all of it
-└── index.db               Rebuildable search index (FTS + vectors)
+├── constitution.md   A living record of who you are
+├── realms/           Life domains (health, career, ...)
+├── arcs/             Ongoing storylines, positive and negative
+├── people/           People who recur, each with a narrative page
+├── sessions/         Verbatim transcripts and session summaries
+├── rollups/          Daily and weekly synthesis
+├── graph.jsonl       Timestamped relationships between all of it
+└── index.db          Rebuildable search index (FTS + vectors)
 ```
 
-Each conversation starts with your constitution, active arcs, and recent context already loaded. The agent retrieves deeper memory through tools: semantic search, keyword search, graph traversal, and full transcript reads. After each session, a reflection pass extracts what mattered and saves it directly: new arcs, new people, updated arc narratives, and every attribution, unconfirmed but not held back for approval. A companion that remembers should not have to ask permission to remember. Nothing you said is ever deleted or rewritten; transcripts are append-only.
+Each conversation starts with your constitution, active arcs, and recent context already loaded. The agent retrieves deeper memory through tools: semantic search, keyword search, graph traversal, and full transcript reads. After each session, a reflection pass extracts what mattered and saves it directly: new arcs, new people, updated arc and person narratives, and every attribution, unconfirmed but not held back for approval. A companion that remembers should not have to ask permission to remember. Nothing you said is ever deleted or rewritten; transcripts are append-only.
 
 ## What it is not
 
