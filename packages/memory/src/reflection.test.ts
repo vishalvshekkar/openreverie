@@ -450,11 +450,47 @@ describe('reflection', () => {
       })
     })
 
-    it('does not rewrite a non-arc node document even when arcNarratives names it and it has a doc', async () => {
-      const personDocPath = join(paths.realmsDir, 'person.md')
+    it('does not rewrite an entity node document even when arcNarratives names it and it has a doc', async () => {
+      const entityDocPath = join(paths.realmsDir, 'entity.md')
+      await writeDocumentAtomic({
+        path: entityDocPath,
+        meta: { id: newId('doc'), name: 'Some Entity' },
+        body: 'Original entity notes.\n',
+      })
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'entity_thing',
+          type: 'entity',
+          label: 'Some Entity',
+          doc: entityDocPath,
+        },
+      ])
+
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('A session.'),
+        arcNarratives: [{ arcId: 'entity_thing', narrative: 'This should never land anywhere.' }],
+      }
+
+      const result = await applyReflection(paths, out, sessionId, [], now)
+      expect(result.skippedNarratives).toBe(1)
+
+      const entityDoc = await readDocument(entityDocPath)
+      expect(entityDoc.body).toBe('Original entity notes.\n')
+      expect(entityDoc.meta.updated).toBeUndefined()
+    })
+
+    it('rewrites a person node document when arcNarratives names it, the same as an arc', async () => {
+      const personDocPath = join(paths.peopleDir, 'sam.md')
       await writeDocumentAtomic({
         path: personDocPath,
-        meta: { id: newId('doc'), name: 'Sam' },
+        meta: {
+          id: newId('doc'),
+          name: 'Sam',
+          node: 'person_sam',
+          opened: '2026-08-01T00:00:00.000Z',
+        },
         body: 'Original person notes.\n',
       })
       await appendGraph(paths, [
@@ -469,16 +505,17 @@ describe('reflection', () => {
       ])
 
       const out: ReflectionOutput = {
-        ...emptyReflectionOutput('A session.'),
-        arcNarratives: [{ arcId: 'person_sam', narrative: 'This should never land anywhere.' }],
+        ...emptyReflectionOutput('A session about Sam.'),
+        arcNarratives: [{ arcId: 'person_sam', narrative: 'Sam and I caught up after months apart.' }],
       }
 
       const result = await applyReflection(paths, out, sessionId, [], now)
-      expect(result.skippedNarratives).toBe(1)
+      expect(result.skippedNarratives).toBe(0)
 
       const personDoc = await readDocument(personDocPath)
-      expect(personDoc.body).toBe('Original person notes.\n')
-      expect(personDoc.meta.updated).toBeUndefined()
+      expect(personDoc.body).toBe('Sam and I caught up after months apart.\n')
+      expect(personDoc.meta.updated).toBe(now.toISOString())
+      expect(personDoc.meta.name).toBe('Sam')
     })
 
     it('dedupes and bounds-checks itemIndexes, dropping any proposal that resolves to no items', async () => {

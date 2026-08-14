@@ -401,15 +401,15 @@ export async function applyReflection(
 
   const narrativeWrites: PendingWrite[] = []
   for (const narrative of out.arcNarratives) {
-    const arcNode = graphState.nodes.get(narrative.arcId)
-    if (arcNode?.type !== 'arc' || !arcNode.doc) {
+    const node = graphState.nodes.get(narrative.arcId)
+    if (node === undefined || (node.type !== 'arc' && node.type !== 'person') || !node.doc) {
       skippedNarratives += 1
       continue
     }
-    const arcDoc = await readDocument(arcNode.doc)
+    const doc = await readDocument(node.doc)
     narrativeWrites.push({
-      path: arcDoc.path,
-      meta: { ...arcDoc.meta, updated: nowIso },
+      path: doc.path,
+      meta: { ...doc.meta, updated: nowIso },
       body: narrative.narrative,
     })
   }
