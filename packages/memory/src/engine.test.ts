@@ -400,6 +400,46 @@ describe('MemoryEngine', () => {
       expect(filenames).toContain('marathon-training-2.md')
     })
 
+    it('materializes a new person as a page with a doc pointer set on the node', async () => {
+      const itemId = newId('item')
+      const proposal: Proposal = {
+        id: newId('prop'),
+        ts: new Date().toISOString(),
+        kind: 'new_person',
+        summary: 'Add Sam as someone in your life.',
+        payload: { name: 'Sam', itemIds: [itemId] },
+        source: 'session_seed',
+      }
+      await appendProposals(paths, [proposal])
+
+      await engine.resolveProposal(proposal.id, 'accepted')
+
+      const pending = await pendingProposals(paths)
+      expect(pending.find((p) => p.id === proposal.id)).toBeUndefined()
+
+      const graph = await readGraph(paths)
+      const personNode = [...graph.nodes.values()].find(
+        (n) => n.type === 'person' && n.label === 'Sam',
+      )
+      if (!personNode) throw new Error('expected a person node to be created')
+      if (!personNode.doc) throw new Error('expected the person node to carry a doc pointer')
+
+      expect(graph.edges.get(`involves:${itemId}:${personNode.id}`)).toMatchObject({
+        confirmed: true,
+        confidence: 1,
+      })
+
+      const personDoc = await readDocument(personNode.doc)
+      expect(personDoc.path).toBe(join(paths.peopleDir, 'sam.md'))
+      expect(personDoc.meta.name).toBe('Sam')
+      expect(personDoc.meta.node).toBe(personNode.id)
+      expect(typeof personDoc.meta.opened).toBe('string')
+      expect(personDoc.body).toBe('This page is new. It grows as we talk.\n')
+
+      const hits = await engine.search('grows as we talk')
+      expect(hits.some((h) => h.docId === personDoc.meta.id)).toBe(true)
+    })
+
     it('materializes a link proposal as a confirmed edge carrying its own confidence', async () => {
       const fromId = newId('item')
       const toId = newId('arc')

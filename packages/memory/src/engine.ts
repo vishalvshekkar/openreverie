@@ -85,6 +85,7 @@ export type GraphQuery =
 
 const REALM_STARTER_BODY = 'This realm is new. It grows as we talk.\n'
 const ARC_STARTER_BODY = 'This arc is new. It grows as we talk.\n'
+const PERSON_STARTER_BODY = 'This page is new. It grows as we talk.\n'
 
 export class MemoryEngine {
   private readonly paths: MemoryPaths
@@ -641,10 +642,8 @@ export class MemoryEngine {
 
     if (proposal.kind === 'new_person') {
       const payload = proposal.payload as { name: string; itemIds: string[] }
-      const personNodeId = newId('person')
-      const records: GraphRecord[] = [
-        { ts: nowIso, op: 'assert', node: personNodeId, type: 'person', label: payload.name },
-      ]
+      const { personNodeId } = await this.writePersonPage(payload.name, nowIso)
+      const records: GraphRecord[] = []
       for (const itemId of payload.itemIds) {
         records.push({
           ts: nowIso,
@@ -682,6 +681,32 @@ export class MemoryEngine {
       },
     ])
     await this.syncGraph()
+  }
+
+  // Writes a person's page and asserts their node with its doc pointer set
+  // to the page path, mirroring what resolveOrCreateRealm does for realms.
+  // Kept as its own method, not inlined into materializeProposal, because
+  // the direct-materialization move planned for reflection's newPersons
+  // will call this same helper instead of going through a proposal at all.
+  private async writePersonPage(
+    name: string,
+    nowIso: string,
+  ): Promise<{ personNodeId: string; doc: Document }> {
+    const personNodeId = newId('person')
+    const slug = await uniqueSlug(this.paths.peopleDir, name)
+    const personPath = join(this.paths.peopleDir, `${slug}.md`)
+    const doc: Document = {
+      path: personPath,
+      meta: { id: newId('doc'), name, node: personNodeId, opened: nowIso },
+      body: PERSON_STARTER_BODY,
+    }
+    await writeDocumentAtomic(doc)
+    await appendGraph(this.paths, [
+      { ts: nowIso, op: 'assert', node: personNodeId, type: 'person', label: name, doc: personPath },
+    ])
+    await this.syncGraph()
+    await this.reindexDocument(doc, 'person')
+    return { personNodeId, doc }
   }
 
   // Resolves a new_arc proposal's `realm` field to a realm node id. It
