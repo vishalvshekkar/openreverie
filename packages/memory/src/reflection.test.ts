@@ -294,14 +294,73 @@ describe('reflection', () => {
       expect(result.summaryDoc.body).toBe(`${out.summary}\n`)
       expect(result.autoAsserted).toBe(1)
 
+      // Summary document: kind, session, date, and the minted items.
+      expect(result.summaryDoc.meta.kind).toBe('summary')
+      expect(result.summaryDoc.meta.session).toBe(sessionId)
+      expect(result.summaryDoc.meta.date).toBe('2026-08-13')
+      const items = result.summaryDoc.meta.items as ReflectionItem[]
+      expect(items).toHaveLength(2)
+      expect(items[0]?.text).toBe('Went for a long run')
+      expect(items[0]?.kind).toBe('event')
+      expect(items[0]?.ts).toBe(now.toISOString())
+      expect(items[1]?.text).toBe('Feeling anxious about a work deadline')
+      expect(items[1]?.kind).toBe('feeling')
+      expect(items[1]?.ts).toBe(now.toISOString())
+
+      const onDisk = await readDocument(join(sessionDir, 'summary.md'))
+      expect(onDisk.body).toBe(result.summaryDoc.body)
+
+      // Graph: item nodes, from-edges, and the confidence split.
+      const graph = await readGraph(paths)
+      const runItem = items[0] as ReflectionItem
+      const deadlineItem = items[1] as ReflectionItem
+
+      expect(graph.nodes.get(runItem.id)).toMatchObject({
+        type: 'item',
+        label: 'Went for a long run',
+        doc: join(sessionDir, 'summary.md'),
+      })
+      expect(graph.edges.get(`from:${runItem.id}:${sessionId}`)).toMatchObject({ confirmed: true })
+
+      // The session node itself must be asserted, or the from-edge above
+      // is written to the log and then dropped by the index (dangling
+      // endpoint).
+      expect(graph.nodes.get(sessionId)).toMatchObject({
+        type: 'session',
+        label: '2026-08-13',
+        doc: join(sessionDir, 'summary.md'),
+      })
+
+      const partOfKey = `part_of:${runItem.id}:arc_health`
+      expect(graph.edges.get(partOfKey)).toMatchObject({
+        confidence: 0.9,
+        confirmed: false,
+      })
+
+      // Low confidence attribution is not asserted as an edge.
+      expect(graph.edges.get(`part_of:${deadlineItem.id}:arc_unknown`)).toBeUndefined()
+
+      // Proposals: the low-confidence link and the new arc, both with a
+      // non-empty summary sentence.
       const proposals = await pendingProposals(paths)
       expect(proposals).toHaveLength(3)
+
+      const linkProposal = proposals.find((p) => p.kind === 'link')
+      expect(linkProposal?.payload).toEqual({
+        edge: 'part_of',
+        from: deadlineItem.id,
+        to: 'arc_unknown',
+        confidence: 0.3,
+      })
+      expect(linkProposal?.summary.length).toBeGreaterThan(0)
+
       const newArcProposal = proposals.find((p) => p.kind === 'new_arc')
       expect(newArcProposal?.payload).toEqual({
         name: 'marathon training',
         realm: 'realm_health',
-        itemIds: [(result.summaryDoc.meta.items as ReflectionItem[])[0]?.id],
+        itemIds: [runItem.id],
       })
+      expect(newArcProposal?.summary.length).toBeGreaterThan(0)
 
       // arcUpdates carries no narrative prose in this task; applyReflection does
       // not touch the arc document for it. Pass two (Task 5) is what rewrites it.
