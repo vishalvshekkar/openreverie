@@ -830,7 +830,7 @@ it('lists known people by id and label, and states what makes someone worth a pe
   const prompt = chat.requests[0]?.messages[0]?.content ?? ''
   expect(prompt).toContain('Known people:')
   expect(prompt).toContain('person_sam: Sam')
-  expect(prompt).toContain("recur in this person's life")
+  expect(prompt).toContain("recurs in this person's life")
   expect(prompt).toContain('"arcUpdates": [{"arcId": string, "note": string}]')
   expect(prompt).toContain('"personUpdates": [{"personId": string, "note": string}]')
   expect(prompt).not.toContain('arcNarratives')
@@ -1757,7 +1757,7 @@ describe('narrative continuity across sessions', () => {
     await applyReflection(paths, firstOut, sessionId, [], now, firstNarratives)
 
     const afterFirst = await readDocument(arcDocPath)
-    expect(afterFirst.body).toBe(`${firstRewrittenBody}\n`)
+    expect(afterFirst.body).toBe(firstRewrittenBody)
 
     // Second session, same arc. Pass two must see the body the first pass
     // actually left on disk, not the original seed body from beforeEach.
@@ -1786,7 +1786,7 @@ describe('narrative continuity across sessions', () => {
     await applyReflection(paths, secondOut, secondSessionId, [], now, secondNarratives)
 
     const afterSecond = await readDocument(arcDocPath)
-    expect(afterSecond.body).toBe(`${secondRewrittenBody}\n`)
+    expect(afterSecond.body).toBe(secondRewrittenBody)
     expect(afterSecond.body).toContain('Ran a 5k to start marathon training')
     expect(afterSecond.body).toContain('Ran a 10k, building on the 5k')
   })
