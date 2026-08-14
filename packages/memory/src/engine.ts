@@ -548,6 +548,9 @@ export class MemoryEngine {
     for (const doc of await listDocuments(this.paths.arcsDir, this.onDocSkip)) {
       result.push({ doc, kind: 'arc' })
     }
+    for (const doc of await listDocuments(this.paths.peopleDir, this.onDocSkip)) {
+      result.push({ doc, kind: 'person' })
+    }
     for (const doc of await listDocuments(this.paths.rollupsDailyDir, this.onDocSkip)) {
       result.push({ doc, kind: 'rollup_daily' })
     }

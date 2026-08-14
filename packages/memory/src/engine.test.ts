@@ -460,6 +460,42 @@ describe('MemoryEngine', () => {
     })
   })
 
+  describe('peopleDir indexing', () => {
+    let dir: string
+    let paths: MemoryPaths
+    let engine: MemoryEngine
+
+    beforeEach(async () => {
+      dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-people-'))
+      paths = memoryPaths(dir)
+      await ensureMemoryTree(paths)
+      engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+    })
+
+    afterEach(async () => {
+      await engine.close()
+      await rm(dir, { recursive: true, force: true })
+    })
+
+    it('reindexAll walks peopleDir and indexes person pages under kind person', async () => {
+      const personDocId = newId('doc')
+      const personDocPath = join(paths.peopleDir, 'sam.md')
+      await writeDocumentAtomic({
+        path: personDocPath,
+        meta: { id: personDocId, name: 'Sam' },
+        body: 'Sam is a close friend who shows up in a lot of stories about kayaking.\n',
+      })
+
+      await engine.reindexAll()
+
+      const hits = await engine.search('kayaking')
+      expect(hits.some((h) => h.docId === personDocId && h.kind === 'person')).toBe(true)
+
+      const filteredHits = await engine.search('kayaking', { kinds: ['person'] })
+      expect(filteredHits.some((h) => h.docId === personDocId)).toBe(true)
+    })
+  })
+
   describe('endSession idempotency', () => {
     let dir: string
     let paths: MemoryPaths
