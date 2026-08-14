@@ -33,7 +33,7 @@ const GREETING_INSTRUCTION = `## Speak first
 
 You are opening this session before the user has said anything. Say something now, unprompted.
 
-If the guidance above is the first conversation guidance, follow it exactly: it already tells you how to open, so treat this as your instruction to do that now rather than wait to be spoken to.
+If the guidance above is the first conversation guidance, follow it exactly and ignore everything below in this section: it already tells you how to open, so treat this as your instruction to do that now rather than wait to be spoken to.
 
 Otherwise: always speak, even when nothing in particular needs raising. If nothing is pressing, one or two warm sentences with no agenda is enough.
 
@@ -51,19 +51,45 @@ How hard you reach for a thread depends on your configured engagement: following
 // a provider that stalls between chunks (or never yields at all) throws
 // instead of hanging forever. The timer is cleared after every step,
 // whether it wins or loses the race.
+//
+// When the timer wins, the underlying iterator is left parked mid-call
+// (an OpenAiChatProvider generator suspended at `await reader.read()`, for
+// example), and nobody will ever call next() on it again after this
+// function throws. Left alone, that generator's own finally (which
+// cancels the reader and releases its lock) never runs. iterator.return()
+// queues a request that the generator will service the next time it
+// reaches a yield or its own await settles, unwinding through that
+// finally instead of continuing normally.
+//
+// This is fire-and-forget, not awaited: measured against a generator
+// that is currently mid an unsettled await (not suspended at a yield),
+// a queued return() is not serviced until that specific await settles on
+// its own; there is no way to force it sooner. A provider stuck there
+// (there is no AbortController wired through ChatRequest to make it
+// settle) may never resolve at all, and awaiting return() here would
+// hang for exactly as long as this timeout exists to avoid. Any throw
+// from return() itself is swallowed: it must never replace or delay the
+// timeout error already propagating.
 async function* withTimeout<T>(iterable: AsyncIterable<T>, ms: number): AsyncGenerator<T> {
   const iterator = iterable[Symbol.asyncIterator]()
   while (true) {
     let timer: ReturnType<typeof setTimeout> | undefined
-    const timedOut = new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => reject(new Error('AgentSession: greeting timed out')), ms)
+    let timedOut = false
+    const timedOutPromise = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        timedOut = true
+        reject(new Error('AgentSession: greeting timed out'))
+      }, ms)
     })
     try {
-      const result = await Promise.race([iterator.next(), timedOut])
+      const result = await Promise.race([iterator.next(), timedOutPromise])
       if (result.done) return
       yield result.value
     } finally {
       clearTimeout(timer)
+      if (timedOut) {
+        iterator.return?.()?.catch(() => {})
+      }
     }
   }
 }
@@ -172,6 +198,7 @@ export class AgentSession {
 
   private async *runGreeting(): AsyncIterable<AgentEvent> {
     let text = ''
+    let errored = false
     try {
       const stream = this.chat.stream({
         model: this.model,
@@ -187,16 +214,27 @@ export class AgentSession {
       }
     } catch {
       // Any provider error, or the timeout above, abandons the greeting
-      // silently. Unlike runTurn's error handling, nothing streamed so
-      // far is appended to the transcript: the user never asked for this
-      // message, so a half-written greeting has no source to point back
-      // to. The user's first real message will surface a real provider
-      // problem clearly.
-      return
+      // silently. Nothing streamed so far is appended to the transcript:
+      // the user never asked for this message, so a half-written
+      // greeting has no source to point back to. The user's first real
+      // message will surface a real provider problem clearly.
+      errored = true
+    } finally {
+      // Reached on normal completion, on the catch above, and also when a
+      // consumer abandons the iterator mid stream (Ctrl-C while the
+      // greeting is still streaming): that early exit resumes here via
+      // the generator's own return(), bypassing the catch entirely, the
+      // same way a `for await` break resumes a `finally` around it.
+      // Persist whatever text was actually streamed to the caller in
+      // every case except the error path: text the user already saw on
+      // screen must not vanish from the record, but a message that never
+      // got past the provider, or never got past the timeout, must never
+      // appear at all.
+      if (!errored && text.length > 0) {
+        await this.appendBoth({ role: 'assistant', content: text })
+      }
     }
-    if (text.length > 0) {
-      await this.appendBoth({ role: 'assistant', content: text })
-    }
+    if (errored) return
     yield { type: 'done' }
   }
 

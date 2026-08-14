@@ -458,6 +458,39 @@ describe('AgentSession', () => {
     await engine.close()
   })
 
+  it('greet() writes no transcript line even when the provider streams text before it fails', async () => {
+    // Regression guard: FakeChatProvider's stream() calls next() before it
+    // ever returns a generator, so a provider that fails with nothing
+    // scripted (the test above) throws before withTimeout ever gets an
+    // iterator, and `text` in runGreeting is always empty on that path.
+    // That test alone cannot catch a bug where runGreeting's catch block
+    // appends whatever partial text had already streamed, the way
+    // runTurn's error handling deliberately does. This test streams real
+    // text first, then fails, so the transcript-stays-empty guarantee is
+    // actually exercised on a non-empty `text`.
+    const chat = new FakeChatProvider([
+      {
+        text: '',
+        toolCalls: [],
+        textChunks: ['Good to see', ' you again.'],
+        throwAfterTextEvents: 2,
+      },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const session = await AgentSession.start(engine, testConfig(), chat)
+
+    const events = await collect(session.greet())
+
+    expect(events).toEqual([
+      { type: 'text', text: 'Good to see' },
+      { type: 'text', text: ' you again.' },
+    ])
+    const transcript = await engine.readTranscript(session.sessionId)
+    expect(transcript).toEqual([])
+
+    await engine.close()
+  })
+
   it('greet() times out after 20 seconds without blocking, writing no transcript line', async () => {
     vi.useFakeTimers()
     try {
@@ -484,6 +517,94 @@ describe('AgentSession', () => {
       expect(events).toEqual([])
       const transcript = await engine.readTranscript(session.sessionId)
       expect(transcript).toEqual([])
+
+      await engine.close()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps the transcript coherent when a consumer abandons greet() mid stream, persisting only the text already yielded', async () => {
+    const chat = new FakeChatProvider([
+      { text: '', toolCalls: [], textChunks: ['Good to see you again.', ' How has today gone?'] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const session = await AgentSession.start(engine, testConfig(), chat)
+
+    for await (const event of session.greet()) {
+      if (event.type === 'text') break
+    }
+
+    const transcript = await engine.readTranscript(session.sessionId)
+    expect(transcript).toHaveLength(1)
+    expect(transcript[0]).toMatchObject({
+      role: 'assistant',
+      content: 'Good to see you again.',
+    })
+
+    await engine.close()
+  })
+
+  it('withTimeout asks the provider iterator to unwind on timeout, so its own cleanup eventually runs', async () => {
+    vi.useFakeTimers()
+    try {
+      let cleanedUp = false
+      let releaseHang: () => void = () => {}
+      const delayedCleanupChat: ChatProvider = {
+        name: 'delayed-cleanup',
+        async complete() {
+          throw new Error('not used in this test')
+        },
+        stream() {
+          // Shaped like OpenAiChatProvider's real read loop: a `while`
+          // loop that awaits the next chunk, then yields it. Suspending
+          // partway through an unsettled await (not at the yield) is
+          // what matters here: only a shape with an actual yield inside
+          // the loop can distinguish "the queued return() intercepted
+          // the next suspension point" from "the finally happened to
+          // run because the generator reached its own natural end
+          // anyway," which a body with no yield at all cannot do.
+          return (async function* () {
+            try {
+              while (true) {
+                // Simulates a provider whose connection is still open
+                // when the greeting times out and settles only later on
+                // its own, the way a stalled fetch might eventually
+                // produce more data or error once the OS or a proxy
+                // closes the idle socket.
+                await new Promise<void>((resolve) => {
+                  releaseHang = resolve
+                })
+                yield { type: 'text' as const, text: 'late chunk' }
+              }
+            } finally {
+              cleanedUp = true
+            }
+          })()
+        },
+      }
+      const engine = await MemoryEngine.open(dir, fakeDeps(delayedCleanupChat))
+      const session = await AgentSession.start(engine, testConfig(), delayedCleanupChat)
+
+      const resultPromise = collect(session.greet())
+      await vi.advanceTimersByTimeAsync(20_001)
+      const events = await resultPromise
+
+      expect(events).toEqual([])
+      expect(cleanedUp).toBe(false)
+
+      // The provider's connection finally settles, well after greet()
+      // already gave up on it. The return() request queued at timeout
+      // time is what makes the generator unwind straight to its own
+      // finally at that point, instead of yielding the late chunk to
+      // nobody and sitting suspended there forever.
+      releaseHang()
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+
+      expect(cleanedUp).toBe(true)
 
       await engine.close()
     } finally {
