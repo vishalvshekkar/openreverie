@@ -1504,6 +1504,118 @@ describe('MemoryEngine', () => {
     })
   })
 
+  describe('sessionContext recentSummaries', () => {
+    let dir: string
+    let paths: MemoryPaths
+
+    beforeEach(async () => {
+      dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-recent-'))
+      paths = memoryPaths(dir)
+      await ensureMemoryTree(paths)
+    })
+
+    afterEach(async () => {
+      await rm(dir, { recursive: true, force: true })
+    })
+
+    async function reflectedSessionOn(date: Date, body: string): Promise<void> {
+      const store = await SessionStore.start(paths, date)
+      await store.appendLine({ ts: date.toISOString(), role: 'user', content: body })
+      await writeDocumentAtomic({
+        path: join(store.dir, 'summary.md'),
+        meta: { id: newId('doc') },
+        body: `${body}\n`,
+      })
+    }
+
+    it('includes a session dated exactly seven days ago and excludes one dated eight days ago', async () => {
+      const now = new Date()
+      const sevenDaysAgo = new Date(
+        Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - 7),
+      )
+      const eightDaysAgo = new Date(
+        Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - 8),
+      )
+      await reflectedSessionOn(sevenDaysAgo, 'Right at the edge of the window.')
+      await reflectedSessionOn(eightDaysAgo, 'One day too old for the window.')
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const context = await engine.sessionContext(now)
+
+      const bodies = context.recentSummaries.map((s) => s.body.trim())
+      expect(bodies).toContain('Right at the edge of the window.')
+      expect(bodies).not.toContain('One day too old for the window.')
+
+      await engine.close()
+    })
+
+    it('caps recentSummaries at three, keeping the three most recent and dropping the oldest', async () => {
+      const now = new Date()
+      const daysAgo = (n: number) =>
+        new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - n))
+
+      await reflectedSessionOn(daysAgo(1), 'Most recent.')
+      await reflectedSessionOn(daysAgo(2), 'Second most recent.')
+      await reflectedSessionOn(daysAgo(3), 'Third most recent.')
+      await reflectedSessionOn(daysAgo(4), 'Oldest, should be dropped.')
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const context = await engine.sessionContext(now)
+
+      expect(context.recentSummaries).toHaveLength(3)
+      expect(context.recentSummaries.map((s) => s.body.trim())).toEqual([
+        'Most recent.',
+        'Second most recent.',
+        'Third most recent.',
+      ])
+
+      await engine.close()
+    })
+
+    it('orders recentSummaries most recent first', async () => {
+      const now = new Date()
+      const threeDaysAgo = new Date(
+        Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - 3),
+      )
+      const oneDayAgo = new Date(
+        Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - 1),
+      )
+      await reflectedSessionOn(threeDaysAgo, 'The older of the two.')
+      await reflectedSessionOn(oneDayAgo, 'The more recent of the two.')
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const context = await engine.sessionContext(now)
+
+      expect(context.recentSummaries.map((s) => s.body.trim())).toEqual([
+        'The more recent of the two.',
+        'The older of the two.',
+      ])
+
+      await engine.close()
+    })
+
+    it('excludes an unreflected session even when its date falls inside the window', async () => {
+      const now = new Date()
+      const twoDaysAgo = new Date(
+        Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - 2),
+      )
+      const store = await SessionStore.start(paths, twoDaysAgo)
+      await store.appendLine({
+        ts: twoDaysAgo.toISOString(),
+        role: 'user',
+        content: 'Never reflected.',
+      })
+      // No summary.md written: this session stays unreflected.
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const context = await engine.sessionContext(now)
+
+      expect(context.recentSummaries).toHaveLength(0)
+
+      await engine.close()
+    })
+  })
+
   describe('sessionContext isFirstSession', () => {
     let dir: string
     let paths: MemoryPaths

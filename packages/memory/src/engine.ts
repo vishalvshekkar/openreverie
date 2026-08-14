@@ -71,7 +71,7 @@ export interface SessionContext {
   realms: { id: string; name: string; firstLine: string }[]
   arcs: { id: string; name: string; status: string; lastTouched?: string }[]
   latestDailyRollup?: { date: string; body: string }
-  yesterdaySummaries: { sessionId: string; body: string }[]
+  recentSummaries: { sessionId: string; date: string; body: string }[]
   pendingProposals: Proposal[]
   // True when this memory has no reflected sessions and no arcs at all
   // (of any status), meaning the person has never actually talked with
@@ -102,6 +102,8 @@ export interface ForgetResult {
 
 const REALM_STARTER_BODY = 'This realm is new. It grows as we talk.\n'
 const ARC_STARTER_BODY = 'This arc is new. It grows as we talk.\n'
+const RECENT_SUMMARIES_WINDOW_DAYS = 7
+const RECENT_SUMMARIES_CAP = 3
 const PERSON_STARTER_BODY = 'This page is new. It grows as we talk.\n'
 
 export class MemoryEngine {
@@ -367,18 +369,29 @@ export class MemoryEngine {
       }
     }
 
-    const yesterday = addDaysUTC(now, -1)
     const sessions = await SessionStore.listSessions(this.paths)
-    const yesterdaySummaries: SessionContext['yesterdaySummaries'] = []
-    for (const session of sessions) {
-      if (session.date !== yesterday || !session.reflected) continue
+    const recentCutoff = addDaysUTC(now, -RECENT_SUMMARIES_WINDOW_DAYS)
+    // Sort by calendar date, most recent first. Session ids are ULIDs
+    // built from the wall clock at creation time, not from the session's
+    // own date, so they only break ties between two sessions that land on
+    // the same date; they cannot stand in for date order on their own.
+    const recentCandidates = sessions
+      .filter((session) => session.reflected && session.date >= recentCutoff)
+      .sort((a, b) => {
+        if (a.date !== b.date) return a.date < b.date ? 1 : -1
+        return a.sessionId < b.sessionId ? 1 : a.sessionId > b.sessionId ? -1 : 0
+      })
+      .slice(0, RECENT_SUMMARIES_CAP)
+
+    const recentSummaries: SessionContext['recentSummaries'] = []
+    for (const session of recentCandidates) {
       const summaryPath = join(
         this.paths.sessionsDir,
         `${session.date}-${session.sessionId}`,
         'summary.md',
       )
       const doc = await readDocument(summaryPath)
-      yesterdaySummaries.push({ sessionId: session.sessionId, body: doc.body })
+      recentSummaries.push({ sessionId: session.sessionId, date: session.date, body: doc.body })
     }
 
     const proposals = await pendingProposals(this.paths)
@@ -397,7 +410,7 @@ export class MemoryEngine {
       realms,
       arcs,
       ...(latestDailyRollup ? { latestDailyRollup } : {}),
-      yesterdaySummaries,
+      recentSummaries,
       pendingProposals: proposals,
       isFirstSession,
     }
