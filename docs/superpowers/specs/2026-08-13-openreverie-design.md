@@ -4,6 +4,8 @@ Date: 2026-08-13
 Status: approved (brainstormed and confirmed section by section with the project owner)
 Scope: sub-project 1 of the larger openreverie vision, the local-first memory engine and agent core behind a terminal CLI.
 
+Amended in part by [the Phase A companion quality spec](2026-08-14-phase-a-companion-quality-design.md), which replaces the confirmation flow described in sections 2, 3, and 6 with save-by-default plus an explicit forget. Everything else here still stands.
+
 ## 1. Overview
 
 openreverie is an open-source, self-hosted companion agent for personal reflection and mental wellbeing. The defining property is a layered memory that never forgets: verbatim transcripts at the bottom, extracted items and session summaries above them, daily and weekly rollups above those, and at the top a living constitution of the user, plus arcs (ongoing storylines) and realms (life domains) connected by an explicit graph. Every new conversation starts with this context already assembled, and the agent can reach deeper through retrieval tools.
