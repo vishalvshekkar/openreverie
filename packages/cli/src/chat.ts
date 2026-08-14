@@ -246,14 +246,15 @@ export async function openCliContext(deps: CliEngineDeps): Promise<CliContextRes
 }
 
 // Counts every prose document reverie knows about (constitution, realms,
-// arcs, rollups, and reflected session summaries), by walking the memory
-// folder the same way the engine does internally. Used to give the
+// arcs, people, rollups, and reflected session summaries), by walking the
+// memory folder the same way the engine does internally. Used to give the
 // `reindex` subcommand a concrete count line instead of a bare "done".
 export async function countMemoryDocuments(memoryDir: string): Promise<number> {
   const paths = memoryPaths(memoryDir)
   let count = 1 // constitution.md always exists once the memory tree is set up.
   count += (await listDocuments(paths.realmsDir)).length
   count += (await listDocuments(paths.arcsDir)).length
+  count += (await listDocuments(paths.peopleDir)).length
   count += (await listDocuments(paths.rollupsDailyDir)).length
   count += (await listDocuments(paths.rollupsWeeklyDir)).length
 

@@ -524,7 +524,7 @@ describe('openCliContext', () => {
 })
 
 describe('countMemoryDocuments', () => {
-  it('counts the constitution plus every realm and arc document', async () => {
+  it('counts the constitution plus every realm, arc, and person document', async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'openreverie-count-'))
     try {
       const paths = memoryPaths(dir)
@@ -539,9 +539,19 @@ describe('countMemoryDocuments', () => {
         meta: { id: newId('doc'), name: 'Checkup', status: 'active' },
         body: 'An arc.\n',
       })
+      await writeDocumentAtomic({
+        path: path.join(paths.peopleDir, 'alex.md'),
+        meta: {
+          id: newId('doc'),
+          name: 'Alex',
+          node: 'person_1',
+          opened: '2026-08-01T00:00:00.000Z',
+        },
+        body: 'This page is new. It grows as we talk.\n',
+      })
 
       const count = await countMemoryDocuments(dir)
-      expect(count).toBe(3) // constitution + 1 realm + 1 arc
+      expect(count).toBe(4) // constitution + 1 realm + 1 arc + 1 person
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
