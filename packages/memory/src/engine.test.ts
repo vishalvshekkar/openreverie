@@ -645,6 +645,79 @@ describe('MemoryEngine', () => {
     })
   })
 
+  describe('docIdForPath and graph_query docId', () => {
+    let dir: string
+    let paths: MemoryPaths
+
+    beforeEach(async () => {
+      dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-docid-'))
+      paths = memoryPaths(dir)
+      await ensureMemoryTree(paths)
+    })
+
+    afterEach(async () => {
+      await rm(dir, { recursive: true, force: true })
+    })
+
+    it('resolves a doc path to its document id, and carries docId on graph nodes that have a doc but not on ones that do not', async () => {
+      const arcDocId = newId('doc')
+      const arcDocPath = join(paths.arcsDir, 'health.md')
+      await writeDocumentAtomic({
+        path: arcDocPath,
+        meta: { id: arcDocId, name: 'Health', status: 'active' },
+        body: 'Original arc narrative.\n',
+      })
+      const itemId = newId('item')
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'arc_health',
+          type: 'arc',
+          label: 'Health',
+          doc: arcDocPath,
+        },
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: itemId,
+          type: 'item',
+          label: 'Went for a run',
+        },
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          edge: 'part_of',
+          from: itemId,
+          to: 'arc_health',
+          confidence: 1,
+          confirmed: true,
+        },
+      ])
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+
+      expect(engine.docIdForPath(arcDocPath)).toBe(arcDocId)
+
+      const neighbors = engine.graphQuery({ kind: 'neighbors', nodeId: itemId }) as {
+        edge: { edge: string }
+        node: { id: string; docId?: string }
+      }[]
+      const arcNeighbor = neighbors.find((n) => n.node.id === 'arc_health')
+      expect(arcNeighbor?.node.docId).toBe(arcDocId)
+
+      // The item node itself carries no doc in this fixture, so it must
+      // carry no docId either: docId is derived only from a present doc.
+      const itemsInArc = engine.graphQuery({ kind: 'items_in_arc', arcId: 'arc_health' }) as {
+        id: string
+        docId?: string
+      }[]
+      expect(itemsInArc[0]?.docId).toBeUndefined()
+
+      await engine.close()
+    })
+  })
+
   describe('endSession idempotency', () => {
     let dir: string
     let paths: MemoryPaths

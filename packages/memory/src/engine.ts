@@ -93,6 +93,7 @@ export class MemoryEngine {
   private readonly index: MemoryIndex
   private graphState: GraphState
   private docPaths = new Map<string, string>()
+  private docIdByPath = new Map<string, string>()
   private readonly liveItems = new Map<string, ReflectionItem[]>()
   readonly warnings: string[] = []
 
@@ -338,9 +339,26 @@ export class MemoryEngine {
   }
 
   graphQuery(query: GraphQuery): unknown[] {
-    if (query.kind === 'neighbors') return this.index.neighbors(query.nodeId)
-    if (query.kind === 'items_in_arc') return this.index.itemsInArc(query.arcId)
-    return this.index.arcsInvolvingPerson(query.personId)
+    if (query.kind === 'neighbors') {
+      return this.index.neighbors(query.nodeId).map(({ edge, node }) => ({
+        edge,
+        node: this.withDocId(node),
+      }))
+    }
+    if (query.kind === 'items_in_arc') {
+      return this.index.itemsInArc(query.arcId).map((node) => this.withDocId(node))
+    }
+    return this.index.arcsInvolvingPerson(query.personId).map((node) => this.withDocId(node))
+  }
+
+  docIdForPath(path: string): string | undefined {
+    return this.docIdByPath.get(path)
+  }
+
+  private withDocId(node: GraphNode): GraphNode & { docId?: string } {
+    if (!node.doc) return node
+    const docId = this.docIdByPath.get(node.doc)
+    return docId ? { ...node, docId } : node
   }
 
   async readDocumentById(docId: string): Promise<Document | null> {
@@ -484,6 +502,7 @@ export class MemoryEngine {
       await this.index.upsertDocument(doc, kind, embed)
     }
     this.docPaths = new Map(docs.map(({ doc }) => [doc.meta.id, doc.path]))
+    this.docIdByPath = new Map(docs.map(({ doc }) => [doc.path, doc.meta.id]))
     await this.syncGraph()
   }
 
@@ -511,6 +530,7 @@ export class MemoryEngine {
     const embed = (texts: string[]) => this.deps.embeddings.embed(this.deps.embeddingModel, texts)
     await this.index.upsertDocument(doc, kind, embed)
     this.docPaths.set(doc.meta.id, doc.path)
+    this.docIdByPath.set(doc.path, doc.meta.id)
   }
 
   // Ruling 4: reindex failures inside endSession/runMaintenance must not
@@ -538,6 +558,7 @@ export class MemoryEngine {
   private async refreshDocPaths(): Promise<void> {
     const docs = await this.walkAllDocuments()
     this.docPaths = new Map(docs.map(({ doc }) => [doc.meta.id, doc.path]))
+    this.docIdByPath = new Map(docs.map(({ doc }) => [doc.path, doc.meta.id]))
   }
 
   private async walkAllDocuments(): Promise<{ doc: Document; kind: DocKind }[]> {
