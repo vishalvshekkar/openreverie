@@ -16,8 +16,8 @@ Three statements in the original design no longer hold.
 
 | Original | Replacement |
 | --- | --- |
-| §2 goal: "A confirmation flow that keeps the user in control of how their record is structured." | Memory saves by default. The user removes what they do not want kept. |
-| §3 decisions log, Attribution: "Confidence split: auto-assert high-confidence links, queue proposals for new arcs and uncertain links." | Save by default: reflection asserts arcs, people, and links directly. A `forget` tool retracts and redacts on request. |
+| §2 goal: "A confirmation flow that keeps the user in control of how their record is structured." | Memory saves by default. Removal is parked: see the forget section below. |
+| §3 decisions log, Attribution: "Confidence split: auto-assert high-confidence links, queue proposals for new arcs and uncertain links." | Save by default: reflection asserts arcs, people, and links directly. |
 | §6: "New arcs, new persons of significance, and uncertain links go to `proposals.jsonl`." | Reflection writes them straight to the record. Nothing new is added to the proposal queue. |
 
 The reason: asking permission to remember does not fit a companion whose defining property is that
@@ -61,7 +61,29 @@ Removing the machinery is a roadmap item for after existing queues have drained.
 tidiness deferred, it is a compatibility guarantee: the owner's real memory folder predates this
 work, and a release that silently strands pending proposals would be a data-honesty failure.
 
-### The forget tool
+### The forget tool, parked
+
+**Status: parked during implementation, on the owner's decision. Not shipping in v0.3.0.**
+
+The design below was implemented and tested, then deliberately left unexposed. `MemoryEngine.forget`
+exists in the memory package with its tests; no tool, persona instruction, or CLI path reaches it.
+The companion has no way to remove anything, and does not claim otherwise.
+
+So v0.3.0 is remember-everything with no product removal path. The one way to take something out of
+the record is editing the markdown in the memory folder by hand, which works because the files are
+the user's and readable in any editor, but it is manual and the documentation must say so plainly
+rather than implying reverie can do it.
+
+Two gaps found in review must be resolved before this is ever exposed:
+
+- Retracting a node that has a page left the page on disk and fully searchable, so reverie would
+  report someone forgotten while their page still surfaced in the next conversation. Fixing it means
+  deciding whether forget may delete a prose file, which the index-rebuildable-from-the-folder rule
+  makes unavoidable: dropping index rows while leaving the file means `reverie reindex` resurrects it.
+- A partial multi document failure was not atomic. Graph retractions and earlier document writes had
+  already landed while the call reported failure and never committed.
+
+The original design follows, unchanged, as the starting point for whenever this is picked up.
 
 New tool, available to the companion:
 
