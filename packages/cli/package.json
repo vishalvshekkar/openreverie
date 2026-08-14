@@ -18,6 +18,8 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
-    "@openreverie/core": "workspace:*"
+    "@openreverie/core": "workspace:*",
+    "@openreverie/memory": "workspace:*",
+    "@openreverie/providers": "workspace:*"
   }
 }

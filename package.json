@@ -10,6 +10,11 @@
     "node": ">=22"
   },
   "packageManager": "pnpm@10.8.1",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "better-sqlite3"
+    ]
+  },
   "scripts": {
     "build": "tsc -b",
     "test": "vitest run --passWithNoTests",
@@ -19,6 +24,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.1.0",
+    "@types/node": "^22",
     "typescript": "^5.9.0",
     "vitest": "^3.2.0"
   }

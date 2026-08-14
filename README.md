@@ -8,9 +8,44 @@ Website: [reverie.my](https://reverie.my)
 
 ## Status
 
-**Design phase. Not usable yet.**
+**Usable as a terminal app. Everything else in the roadmap is still ahead.**
 
-The architecture and memory model are specified (see [the design spec](docs/superpowers/specs/2026-08-13-openreverie-design.md)). Implementation has not started. This README will be updated honestly as the project progresses; if this section says something works, it works.
+What works today:
+
+- Terminal chat with persistent, layered memory (constitution, realms, arcs, session transcripts)
+- Live capture during a conversation (the agent can call `remember` mid-session)
+- Post-session reflection: each session is summarized, filed into memory, and produces confidence-split proposals (high-confidence links are asserted automatically as unconfirmed; everything else waits for you to accept or reject it)
+- Lazy daily and weekly rollups, built the first time enough time has passed to need them
+- Both safety modes (companion and firewall)
+- A first-run setup wizard
+- The `reindex` and `reflect` CLI subcommands
+- The OpenAI provider
+
+What does not exist yet:
+
+- A web UI (terminal only, for now)
+- Providers other than OpenAI
+- Any deployment target beyond running it yourself (no Cloudflare or VPS packaging)
+- Graph visualization of realms, arcs, and their connections
+- Monthly and yearly rollups (only daily and weekly exist)
+
+The architecture and memory model are specified in full in [the design spec](docs/superpowers/specs/2026-08-13-openreverie-design.md). This README is updated honestly as the project progresses; if this section says something works, it works.
+
+## Usage
+
+```
+pnpm install
+pnpm build
+node packages/cli/dist/index.js setup
+node packages/cli/dist/index.js
+```
+
+`setup` runs a first-run wizard that asks for your provider API key, your safety mode, and where you want your memory folder to live, then writes a config file. Run it once before anything else.
+
+With no arguments, the same binary starts the terminal chat REPL, loading your existing memory (constitution, arcs, recent context) into the conversation. Two more subcommands are available:
+
+- `reindex`: rebuilds the SQLite search index from your memory folder from scratch. Safe to run any time; the index is always derived and disposable.
+- `reflect`: runs maintenance on demand (reflects any stale unreflected sessions, builds any daily or weekly rollups that are due) instead of waiting for it to happen automatically.
 
 ## Why this exists
 
