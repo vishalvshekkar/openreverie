@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, rm } from 'node:fs/promises'
+import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { loadConfig, type ReverieConfig, saveConfig } from '@openreverie/core'
@@ -160,6 +160,29 @@ async function sessionSummaryFiles(memoryDir: string): Promise<string[]> {
     if (files.includes('summary.md')) summaries.push(entry)
   }
   return summaries
+}
+
+// Reads the transcript.jsonl of the single session directory under
+// memoryDir/sessions, for tests that need to see what actually got
+// persisted rather than just the CLI's own terminal output.
+async function soleTranscript(
+  memoryDir: string,
+): Promise<Array<{ role: string; content: string }>> {
+  const sessionsDir = path.join(memoryDir, 'sessions')
+  const entries = await readdir(sessionsDir)
+  if (entries.length !== 1) {
+    throw new Error(
+      `soleTranscript: expected exactly one session directory, found ${entries.length}`,
+    )
+  }
+  const raw = await readFile(
+    path.join(sessionsDir, entries[0] as string, 'transcript.jsonl'),
+    'utf8',
+  )
+  return raw
+    .split('\n')
+    .filter((line) => line.length > 0)
+    .map((line) => JSON.parse(line))
 }
 
 describe('runChat', () => {
@@ -488,6 +511,96 @@ describe('runChat', () => {
     const joined = output.join('')
     expect(joined).toContain('you> ')
     expect(joined).not.toContain('reverie> ')
+
+    await engine.close()
+  })
+
+  it('shows the responding message, not the idle message, on the first Ctrl-C during a streaming greeting', async () => {
+    const chat = new FakeChatProvider([
+      { text: '', toolCalls: [], textChunks: ['Hel', 'lo the', 're.'] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const output: string[] = []
+    let handler: (() => void) | undefined
+    let fired = false
+    const io: ChatIo = {
+      async question(prompt) {
+        output.push(prompt)
+        return '/bye'
+      },
+      write(text) {
+        output.push(text)
+        // A response is actively streaming (the greeting), the same as a
+        // real turn: the first Ctrl-C here must say so, not the idle
+        // message meant for sitting at the prompt with nothing running.
+        if (text === 'Hel' && !fired) {
+          fired = true
+          handler?.()
+        }
+      },
+      onInterrupt(h) {
+        handler = h
+      },
+      cancelPending() {},
+    }
+
+    await runChat({ engine, config, chat, io })
+
+    const joined = output.join('').toLowerCase()
+    expect(joined).toContain('finishing this reply')
+
+    await engine.close()
+  })
+
+  it('actually stops the greeting on a second Ctrl-C, instead of hanging after saying it stopped', async () => {
+    const chat = new FakeChatProvider([
+      { text: '', toolCalls: [], textChunks: ['Hel', 'lo the', 're.'] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const output: string[] = []
+    let handler: (() => void) | undefined
+    let firedFirst = false
+    let firedSecond = false
+    const io: ChatIo = {
+      async question() {
+        // A double Ctrl-C during the greeting must end runChat before it
+        // ever asks a question; reaching this would mean the CLI said it
+        // stopped and then kept waiting anyway.
+        throw new Error('question() should not be called after a double Ctrl-C during the greeting')
+      },
+      write(text) {
+        output.push(text)
+        if (text === 'Hel' && !firedFirst) {
+          firedFirst = true
+          handler?.()
+        } else if (text === 'lo the' && !firedSecond) {
+          firedSecond = true
+          handler?.()
+        }
+      },
+      onInterrupt(h) {
+        handler = h
+      },
+      cancelPending() {},
+    }
+
+    await expect(runChat({ engine, config, chat, io })).resolves.toBeUndefined()
+
+    const joined = output.join('')
+    expect(joined).toContain('Hel')
+    expect(joined).toContain('lo the')
+    expect(joined).not.toContain('re.')
+    expect(joined.toLowerCase()).toContain('without reflecting')
+
+    // The text already streamed before the second Ctrl-C persists, per
+    // Task 10's abandonment guarantee (and the withTimeout fix that keeps
+    // the underlying provider iterator unwinding on that path); the chunk
+    // after the cutoff point does not.
+    const transcript = await soleTranscript(dir)
+    expect(transcript).toHaveLength(1)
+    expect(transcript[0]).toMatchObject({ role: 'assistant', content: 'Hello the' })
 
     await engine.close()
   })

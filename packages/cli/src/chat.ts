@@ -77,12 +77,28 @@ const LOST_IN_NOTES_MESSAGE =
 // never asked for and a visible error about it would be confusing rather
 // than honest. A real provider problem still surfaces normally on the
 // user's first actual message.
+//
+// Mirrors the main loop's own interrupt handling, which this needs just
+// as much as a real turn does: setResponding(true) around the loop so a
+// Ctrl-C that lands mid-greeting prints the "finishing this reply"
+// message instead of the idle one (nothing else marks a greeting as a
+// response actively streaming), and breaking on interruptLevel() >= 2 so
+// a second Ctrl-C actually ends the greeting rather than leaving it
+// running for up to 20 seconds after the CLI has already said it
+// stopped. Breaking the for-await loop calls .return() on session.greet()
+// the same way an abandoned real turn does, which is what persists the
+// text already streamed (Task 10) and unwinds the underlying provider
+// iterator instead of leaving it parked (the withTimeout fix this task
+// also makes).
 async function runGreeting(
   session: AgentSession,
   io: ChatIo,
   colorEnabled: boolean,
+  interruptLevel: () => number,
+  setResponding: (value: boolean) => void,
 ): Promise<void> {
   let tagged = false
+  setResponding(true)
   try {
     for await (const event of session.greet()) {
       if (event.type === 'text') {
@@ -94,9 +110,14 @@ async function runGreeting(
       } else if (event.type === 'done' && tagged) {
         io.write('\n')
       }
+      if (interruptLevel() >= 2) {
+        break
+      }
     }
   } catch {
     // Silent abandon, per the greeting's own degradation rule.
+  } finally {
+    setResponding(false)
   }
 }
 
@@ -141,7 +162,19 @@ export async function runChat(deps: {
     }
   })
 
-  await runGreeting(session, io, colorEnabled)
+  await runGreeting(
+    session,
+    io,
+    colorEnabled,
+    () => interruptLevel,
+    (value) => {
+      responding = value
+    },
+  )
+
+  if (interruptLevel >= 2) {
+    return
+  }
 
   for (;;) {
     let line: string
