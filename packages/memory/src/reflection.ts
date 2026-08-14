@@ -46,9 +46,16 @@ export interface ReflectionOutput {
   summary: string
   items: { text: string; kind: ReflectionItemKind }[]
   attributions: { itemIndex: number; arcId: string; confidence: number }[]
-  newArcs: { name: string; realm: string; reason: string; itemIndexes: number[] }[]
-  newPersons: { name: string; reason: string; itemIndexes: number[] }[]
-  arcNarratives: { arcId: string; narrative: string }[]
+  newArcs: {
+    name: string
+    realm: string
+    reason: string
+    itemIndexes: number[]
+    narrative: string
+  }[]
+  newPersons: { name: string; reason: string; itemIndexes: number[]; narrative: string }[]
+  arcUpdates: { arcId: string; note: string }[]
+  personUpdates: { personId: string; note: string }[]
   constitutionUpdate: string | null
 }
 
@@ -56,6 +63,7 @@ export interface ReflectionContext {
   constitution: string
   arcs: GraphNode[]
   realms: GraphNode[]
+  people: GraphNode[]
 }
 
 const reflectionItemKindSchema = z.enum(['observation', 'feeling', 'event', 'intention'])
@@ -72,12 +80,19 @@ export const reflectionOutputSchema: z.ZodType<ReflectionOutput> = z.object({
       realm: z.string(),
       reason: z.string(),
       itemIndexes: z.array(z.number()),
+      narrative: z.string(),
     }),
   ),
   newPersons: z.array(
-    z.object({ name: z.string(), reason: z.string(), itemIndexes: z.array(z.number()) }),
+    z.object({
+      name: z.string(),
+      reason: z.string(),
+      itemIndexes: z.array(z.number()),
+      narrative: z.string(),
+    }),
   ),
-  arcNarratives: z.array(z.object({ arcId: z.string(), narrative: z.string() })),
+  arcUpdates: z.array(z.object({ arcId: z.string(), note: z.string() })),
+  personUpdates: z.array(z.object({ personId: z.string(), note: z.string() })),
   constitutionUpdate: z.string().nullable(),
 })
 
@@ -96,9 +111,10 @@ const RESPONSE_SHAPE = `{
   "summary": string,
   "items": [{"text": string, "kind": "observation" | "feeling" | "event" | "intention"}],
   "attributions": [{"itemIndex": number, "arcId": string, "confidence": number}],
-  "newArcs": [{"name": string, "realm": string, "reason": string, "itemIndexes": number[]}],
-  "newPersons": [{"name": string, "reason": string, "itemIndexes": number[]}],
-  "arcNarratives": [{"arcId": string, "narrative": string}],
+  "newArcs": [{"name": string, "realm": string, "reason": string, "itemIndexes": number[], "narrative": string}],
+  "newPersons": [{"name": string, "reason": string, "itemIndexes": number[], "narrative": string}],
+  "arcUpdates": [{"arcId": string, "note": string}],
+  "personUpdates": [{"personId": string, "note": string}],
   "constitutionUpdate": string | null
 }`
 
@@ -115,10 +131,19 @@ function buildReflectionPrompt(context: ReflectionContext, transcript: Transcrip
     'Known realms:',
     renderListing(context.realms),
     '',
+    'Known people:',
+    renderListing(context.people),
+    '',
     'Transcript:',
     renderTranscript(transcript),
     '',
     'When updating the constitution: basic identity facts about the user (their name, pronouns, where they live, their timezone, their occupation or work situation) always belong in the constitution when first learned or when they change. Do not wait for these facts to feel weighty; update the constitution to include them immediately.',
+    '',
+    "When deciding whether someone deserves a person page, in newPersons: a person page is for someone who recurs in this person's life and whom they actually talk about, not for every name that appears in a sentence. A partner, a close friend, a sibling, a therapist seen regularly: those recur. A coworker mentioned once in passing, a stranger from a single story, a public figure named in the news: those do not. When you are not sure someone recurs, do not add them yet.",
+    '',
+    'For each entry in newArcs and newPersons, narrative is the first paragraph of that document, written as if this session is the first time anything has been recorded about it.',
+    '',
+    'For each entry in arcUpdates and personUpdates, note is a short line describing what this session added or changed about an arc or person that already exists. Do not write full narrative prose in note; a separate pass uses it to rewrite the document.',
     '',
     'Respond with only JSON matching this shape, no other text:',
     RESPONSE_SHAPE,
@@ -275,7 +300,6 @@ export async function applyReflection(
   autoAsserted: number
   proposals: Proposal[]
   droppedProposals: number
-  skippedNarratives: number
 }> {
   const nowIso = now.toISOString()
 
@@ -293,7 +317,6 @@ export async function applyReflection(
   const proposals: Proposal[] = []
   let autoAsserted = 0
   let droppedProposals = 0
-  let skippedNarratives = 0
 
   // Assert the session node itself before any item's `from` edge points at
   // it: MemoryIndex.replaceGraph skips edges whose endpoints are not both
@@ -399,21 +422,6 @@ export async function applyReflection(
     })
   }
 
-  const narrativeWrites: PendingWrite[] = []
-  for (const narrative of out.arcNarratives) {
-    const node = graphState.nodes.get(narrative.arcId)
-    if (node === undefined || (node.type !== 'arc' && node.type !== 'person') || !node.doc) {
-      skippedNarratives += 1
-      continue
-    }
-    const doc = await readDocument(node.doc)
-    narrativeWrites.push({
-      path: doc.path,
-      meta: { ...doc.meta, updated: nowIso },
-      body: narrative.narrative,
-    })
-  }
-
   let constitutionWrite: PendingWrite | null = null
   if (out.constitutionUpdate !== null) {
     const constitutionDoc = await readDocument(paths.constitution)
@@ -438,10 +446,6 @@ export async function applyReflection(
   await appendGraph(paths, graphRecords)
   await appendProposals(paths, proposals)
 
-  for (const write of narrativeWrites) {
-    await writeDocumentAtomic(write)
-  }
-
   if (constitutionWrite) {
     await writeDocumentAtomic(constitutionWrite)
   }
@@ -459,5 +463,5 @@ export async function applyReflection(
   })
   const summaryDoc = await readDocument(summaryPath)
 
-  return { summaryDoc, autoAsserted, proposals, droppedProposals, skippedNarratives }
+  return { summaryDoc, autoAsserted, proposals, droppedProposals }
 }
