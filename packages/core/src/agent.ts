@@ -27,6 +27,47 @@ export type AgentEvent =
 
 const MAX_TOOL_ROUNDS = 8
 
+const GREETING_TIMEOUT_MS = 20_000
+
+const GREETING_INSTRUCTION = `## Speak first
+
+You are opening this session before the user has said anything. Say something now, unprompted.
+
+If the guidance above is the first conversation guidance, follow it exactly: it already tells you how to open, so treat this as your instruction to do that now rather than wait to be spoken to.
+
+Otherwise: always speak, even when nothing in particular needs raising. If nothing is pressing, one or two warm sentences with no agenda is enough.
+
+If there is something worth opening with, choose exactly one, in this order, and lead with only that:
+1. Something left unresolved from the most recent session.
+2. Something notable in the recent record: a day that sounded hard, a milestone coming up.
+3. Nothing. A short hello.
+
+Never open with a list. Never summarize the record. Never give a status report. Say the one thing you picked the way you would say it out loud to someone you know, not the way you would write a briefing.
+
+How hard you reach for a thread depends on your configured engagement: following stays light, leading is more willing to name one directly.`
+
+// A single-use, per-call timeout wrapper around an async iterable: each
+// call to the underlying iterator races against a fresh ms-long timer, so
+// a provider that stalls between chunks (or never yields at all) throws
+// instead of hanging forever. The timer is cleared after every step,
+// whether it wins or loses the race.
+async function* withTimeout<T>(iterable: AsyncIterable<T>, ms: number): AsyncGenerator<T> {
+  const iterator = iterable[Symbol.asyncIterator]()
+  while (true) {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timedOut = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error('AgentSession: greeting timed out')), ms)
+    })
+    try {
+      const result = await Promise.race([iterator.next(), timedOut])
+      if (result.done) return
+      yield result.value
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+}
+
 // A message this session ever appends is always user, assistant, or tool,
 // never system (the system prompt is passed separately on every request).
 // This narrower type is what both the in-memory history and the on-disk
@@ -105,6 +146,58 @@ export class AgentSession {
     } finally {
       release()
     }
+  }
+
+  // Opens a session before the user has said anything: streams a model
+  // turn using the system prompt plus GREETING_INSTRUCTION, with no user
+  // message and no tools, and appends the result as a single assistant
+  // transcript line. Queued on the same sendChain as send(), so a greeting
+  // and a send() (or end()) never race each other's transcript writes.
+  async *greet(): AsyncIterable<AgentEvent> {
+    if (this.ended) {
+      throw new Error('AgentSession: greet() called after end()')
+    }
+    const previous = this.sendChain
+    let release: () => void = () => {}
+    this.sendChain = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    try {
+      await previous
+      yield* this.runGreeting()
+    } finally {
+      release()
+    }
+  }
+
+  private async *runGreeting(): AsyncIterable<AgentEvent> {
+    let text = ''
+    try {
+      const stream = this.chat.stream({
+        model: this.model,
+        system: `${this.system}\n\n${GREETING_INSTRUCTION}`,
+        messages: [],
+        tools: [],
+      })
+      for await (const event of withTimeout(stream, GREETING_TIMEOUT_MS)) {
+        if (event.type === 'text' && event.text.length > 0) {
+          text += event.text
+          yield { type: 'text', text: event.text }
+        }
+      }
+    } catch {
+      // Any provider error, or the timeout above, abandons the greeting
+      // silently. Unlike runTurn's error handling, nothing streamed so
+      // far is appended to the transcript: the user never asked for this
+      // message, so a half-written greeting has no source to point back
+      // to. The user's first real message will surface a real provider
+      // problem clearly.
+      return
+    }
+    if (text.length > 0) {
+      await this.appendBoth({ role: 'assistant', content: text })
+    }
+    yield { type: 'done' }
   }
 
   private async *runTurn(userText: string): AsyncIterable<AgentEvent> {

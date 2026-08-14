@@ -2,8 +2,8 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { type EngineDeps, MemoryEngine } from '@openreverie/memory'
-import { FakeChatProvider, FakeEmbeddingProvider } from '@openreverie/providers'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { type ChatProvider, FakeChatProvider, FakeEmbeddingProvider } from '@openreverie/providers'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { type AgentEvent, AgentSession } from './agent.js'
 import { defaultCrisisResources, type ReverieConfig } from './config.js'
 
@@ -27,7 +27,7 @@ function testConfig(): ReverieConfig {
   }
 }
 
-function fakeDeps(chat: FakeChatProvider): EngineDeps {
+function fakeDeps(chat: ChatProvider): EngineDeps {
   return {
     chat,
     embeddings: new FakeEmbeddingProvider(),
@@ -388,5 +388,106 @@ describe('AgentSession', () => {
     expect(secondSystemPrompt).toContain('Your configured tone is warm')
 
     await engine.close()
+  })
+
+  it('greet() streams the greeting and appends it as a single assistant line, with no user line', async () => {
+    const chat = new FakeChatProvider([
+      { text: 'Good to see you again. How has the week been?', toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const session = await AgentSession.start(engine, testConfig(), chat)
+
+    const events = await collect(session.greet())
+
+    expect(events).toEqual([
+      { type: 'text', text: 'Good to see you again. How has the week been?' },
+      { type: 'done' },
+    ])
+
+    const transcript = await engine.readTranscript(session.sessionId)
+    expect(transcript.map((l) => l.role)).toEqual(['assistant'])
+    expect(transcript[0]).toMatchObject({
+      role: 'assistant',
+      content: 'Good to see you again. How has the week been?',
+    })
+
+    expect(chat.requests[0]?.messages).toEqual([])
+    expect(chat.requests[0]?.tools).toEqual([])
+
+    // The greeting request must carry today's date and the greeting
+    // instruction, both folded into the session's system prompt: today's
+    // date is the only way the model can tell a recent-sessions entry
+    // dated five days ago from one dated yesterday.
+    const today = new Date().toISOString().slice(0, 10)
+    expect(chat.requests[0]?.system).toContain(today)
+    expect(chat.requests[0]?.system).toContain('## Speak first')
+
+    await engine.close()
+  })
+
+  it('greet() writes a transcript line in the same shape as a normal assistant line', async () => {
+    const chat = new FakeChatProvider([{ text: 'Hello again.', toolCalls: [] }])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const session = await AgentSession.start(engine, testConfig(), chat)
+
+    await collect(session.greet())
+
+    const transcript = await engine.readTranscript(session.sessionId)
+    expect(transcript).toHaveLength(1)
+    const [line] = transcript
+    expect(line?.role).toBe('assistant')
+    expect(line?.content).toBe('Hello again.')
+    expect(typeof line?.ts).toBe('string')
+    expect(line?.toolCalls).toBeUndefined()
+    expect(line?.toolCallId).toBeUndefined()
+
+    await engine.close()
+  })
+
+  it('greet() abandons silently, writing no transcript line, when the provider fails', async () => {
+    const chat = new FakeChatProvider([])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const session = await AgentSession.start(engine, testConfig(), chat)
+
+    const events = await collect(session.greet())
+
+    expect(events).toEqual([])
+    const transcript = await engine.readTranscript(session.sessionId)
+    expect(transcript).toEqual([])
+
+    await engine.close()
+  })
+
+  it('greet() times out after 20 seconds without blocking, writing no transcript line', async () => {
+    vi.useFakeTimers()
+    try {
+      const hangingChat: ChatProvider = {
+        name: 'hanging',
+        async complete() {
+          throw new Error('not used in this test')
+        },
+        stream() {
+          return (async function* () {
+            await new Promise<never>(() => {
+              // Never resolves: simulates a provider that stalls forever.
+            })
+          })()
+        },
+      }
+      const engine = await MemoryEngine.open(dir, fakeDeps(hangingChat))
+      const session = await AgentSession.start(engine, testConfig(), hangingChat)
+
+      const resultPromise = collect(session.greet())
+      await vi.advanceTimersByTimeAsync(20_001)
+      const events = await resultPromise
+
+      expect(events).toEqual([])
+      const transcript = await engine.readTranscript(session.sessionId)
+      expect(transcript).toEqual([])
+
+      await engine.close()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
