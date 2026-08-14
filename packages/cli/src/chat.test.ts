@@ -908,8 +908,17 @@ describe('runChat status line', () => {
     })
 
     const joined = output.join('')
-    expect(joined).toContain('searching memory')
+    // The permanent, dim, bracketed notice line: printed once and left on
+    // screen.
     expect(joined).toContain('[searching memory]')
+    // The status line's own bare, spinner-framed render of the same label,
+    // distinct from the notice above: with the tick fake here never firing,
+    // start() renders exactly once, on the first frame, so the full frame
+    // is asserted rather than just the word "searching memory" (which the
+    // bracketed notice above already contains as a substring and would let
+    // this assertion pass even with the status line never wired to tool
+    // calls at all).
+    expect(joined).toContain('\r\x1b[2m| searching memory\x1b[0m\x1b[K')
 
     await engine.close()
   })
