@@ -58,12 +58,22 @@ export async function runRead(args: string[], deps: ReadDeps): Promise<number> {
   return printSearchAllKinds(paths, name, deps)
 }
 
+// A memory folder made before people/ existed (or a memoryDir that is not
+// there at all) has no arcs, realms, or people directory to scandir. Since
+// runRead never runs ensureMemoryTree (that would mean touching the
+// filesystem beyond a plain read), a missing directory here is treated as
+// an empty one rather than left to throw a raw ENOENT at the caller.
 async function loadCandidates(
   paths: ReturnType<typeof memoryPaths>,
   kind: NamedKind,
 ): Promise<Candidate[]> {
   const dir = kind === 'arc' ? paths.arcsDir : kind === 'realm' ? paths.realmsDir : paths.peopleDir
-  const docs = await listDocuments(dir)
+  let docs: Document[]
+  try {
+    docs = await listDocuments(dir)
+  } catch {
+    return []
+  }
   return docs.map((doc) => ({
     name: typeof doc.meta.name === 'string' ? doc.meta.name : '(untitled)',
     path: doc.path,
@@ -144,7 +154,13 @@ async function printConstitution(
   paths: ReturnType<typeof memoryPaths>,
   deps: ReadDeps,
 ): Promise<number> {
-  const doc = await readDocument(paths.constitution)
+  let doc: Document
+  try {
+    doc = await readDocument(paths.constitution)
+  } catch {
+    deps.write(`No memory folder found at ${paths.root}. Run: reverie setup\n`)
+    return 1
+  }
   printDocument(deps, 'Constitution', doc)
   return 0
 }

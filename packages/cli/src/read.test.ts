@@ -211,4 +211,49 @@ describe('runRead', () => {
     expect(exitCode).toBe(1)
     expect(output.join('')).toContain('No config found. Run: reverie setup')
   })
+
+  it('shows an empty people section instead of crashing when a memory folder predates the people directory', async () => {
+    const paths = memoryPaths(dir)
+    await ensureMemoryTree(paths)
+    await writeDocumentAtomic({
+      path: join(paths.arcsDir, 'marathon.md'),
+      meta: { id: newId('doc'), name: 'Marathon training', status: 'active' },
+      body: 'Training for the spring marathon.\n',
+    })
+    // Simulate a memory folder created before the people directory existed.
+    await rm(paths.peopleDir, { recursive: true, force: true })
+
+    const output: string[] = []
+    const exitCode = await runRead([], fakeDeps(dir, output))
+
+    expect(exitCode).toBe(0)
+    const joined = output.join('')
+    expect(joined).not.toContain('ENOENT')
+    expect(joined).toContain('Marathon training')
+    expect(joined).toContain('People')
+    expect(joined).toContain('(none yet)')
+  })
+
+  it('reports plainly and exits non-zero, without an ENOENT string, when the memory folder itself does not exist', async () => {
+    const missingDir = join(dir, 'never-created')
+
+    const output: string[] = []
+    const exitCode = await runRead(['arc', 'marathon'], fakeDeps(missingDir, output))
+
+    expect(exitCode).not.toBe(0)
+    const joined = output.join('')
+    expect(joined).not.toContain('ENOENT')
+    expect(joined.toLowerCase()).toContain('no arc')
+  })
+
+  it('reports plainly, without an ENOENT string, when constitution is read against a memory folder that does not exist', async () => {
+    const missingDir = join(dir, 'never-created-either')
+
+    const output: string[] = []
+    const exitCode = await runRead(['constitution'], fakeDeps(missingDir, output))
+
+    expect(exitCode).not.toBe(0)
+    const joined = output.join('')
+    expect(joined).not.toContain('ENOENT')
+  })
 })
