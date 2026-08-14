@@ -62,12 +62,11 @@ function emptyReflectionOutput(summary: string) {
 }
 
 describe('toolDefinitions', () => {
-  it('lists exactly the ten memory and style tools with non-empty descriptions and a JSON schema', () => {
+  it('lists exactly the nine memory and style tools with non-empty descriptions and a JSON schema', () => {
     const defs = toolDefinitions()
     const names = defs.map((d) => d.name).sort()
     expect(names).toEqual(
       [
-        'forget',
         'graph_query',
         'list_arcs',
         'list_realms',
@@ -99,6 +98,15 @@ describe('toolDefinitions', () => {
     const kinds = (searchMemory.parameters as { properties: { kinds: { description: string } } })
       .properties.kinds
     expect(kinds.description).toContain('person')
+  })
+
+  // The forget feature is parked: MemoryEngine.forget still exists as
+  // dormant code, but no tool exposes it. This guards against it coming
+  // back on the tool list by accident, unnoticed, in some later change.
+  it('does not list a forget tool: the feature is parked, not shipped', () => {
+    const defs = toolDefinitions()
+    const names = defs.map((d) => d.name)
+    expect(names).not.toContain('forget')
   })
 })
 
@@ -607,63 +615,6 @@ describe('dispatchTool', () => {
       const result = await dispatchTool(engine, sessionId, call('update_style', { tone: 'direct' }))
 
       expect(typeof JSON.parse(result).error).toBe('string')
-
-      await engine.close()
-    })
-  })
-
-  describe('forget', () => {
-    it('retracts a node and reports what actually changed', async () => {
-      const paths = memoryPaths(dir)
-      await MemoryEngine.open(dir, fakeDeps()).then((e) => e.close())
-
-      await appendGraph(paths, [
-        {
-          ts: '2026-08-01T00:00:00.000Z',
-          op: 'assert',
-          node: 'person_d',
-          type: 'person',
-          label: 'Drew',
-        },
-      ])
-
-      const engine = await MemoryEngine.open(dir, fakeDeps())
-      const sessionId = await engine.startSession()
-
-      const result = await dispatchTool(
-        engine,
-        sessionId,
-        call('forget', { what: 'a person who does not belong here', nodeIds: ['person_d'] }),
-      )
-      expect(JSON.parse(result)).toEqual({
-        ok: true,
-        retractedNodes: 1,
-        retractedEdges: 0,
-        rewrittenDocuments: [],
-      })
-
-      await engine.close()
-    })
-
-    it('returns a JSON error, not a throw, when a document body would be empty', async () => {
-      const paths = memoryPaths(dir)
-      const docId = newId('doc')
-      const docPath = join(paths.arcsDir, 'health.md')
-
-      const engine = await MemoryEngine.open(dir, fakeDeps())
-      await writeDocumentAtomic({
-        path: docPath,
-        meta: { id: docId, name: 'Health', status: 'active' },
-        body: 'Original arc narrative.\n',
-      })
-      const sessionId = await engine.startSession()
-
-      const result = await dispatchTool(
-        engine,
-        sessionId,
-        call('forget', { what: 'the health narrative', documents: [{ docId, body: '  ' }] }),
-      )
-      expect(JSON.parse(result).error).toMatch(/empty|whitespace/)
 
       await engine.close()
     })

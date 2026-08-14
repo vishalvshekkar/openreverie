@@ -10,7 +10,7 @@
 // model, so the model sees its own mistake in the transcript and can
 // correct it, rather than the whole session crashing on a bad call.
 
-import type { DocKind, ForgetInput, GraphQuery, MemoryEngine } from '@openreverie/memory'
+import type { DocKind, GraphQuery, MemoryEngine } from '@openreverie/memory'
 import type { ToolCall, ToolDefinition } from '@openreverie/providers'
 import { z } from 'zod'
 import type { StyleConfig } from './config.js'
@@ -69,21 +69,6 @@ const updateStyleArgs = z
       value.engagement !== undefined || value.tone !== undefined || value.orientation !== undefined,
     { message: 'at least one of engagement, tone, or orientation is required' },
   )
-
-const forgetArgs = z.strictObject({
-  what: z.string(),
-  nodeIds: z.array(z.string()).optional(),
-  edges: z
-    .array(
-      z.strictObject({
-        edge: z.enum(['part_of', 'in', 'from', 'involves', 'relates_to']),
-        from: z.string(),
-        to: z.string(),
-      }),
-    )
-    .optional(),
-  documents: z.array(z.strictObject({ docId: z.string(), body: z.string() })).optional(),
-})
 
 export function toolDefinitions(): ToolDefinition[] {
   return [
@@ -290,66 +275,6 @@ export function toolDefinitions(): ToolDefinition[] {
         additionalProperties: false,
       },
     },
-    {
-      name: 'forget',
-      description:
-        'Remove or correct something from the record: retract a node or edge from the graph, rewrite a ' +
-        'document to no longer state something, or both, in one call. Use this only when the user has actually ' +
-        'asked you to forget, remove, or correct something, never on your own judgment. Read a document first if ' +
-        'you plan to rewrite it: the body you supply replaces it completely, and an empty or whitespace-only body ' +
-        'is refused. This never touches the transcript of any conversation; transcripts are permanent and are ' +
-        'never edited by this or any other tool.',
-      parameters: {
-        type: 'object',
-        properties: {
-          what: {
-            type: 'string',
-            description:
-              'A short, plain description of what is being forgotten. Used as the git commit message.',
-          },
-          nodeIds: {
-            type: 'array',
-            items: { type: 'string' },
-            description: 'Ids of person, arc, or entity nodes to retract from the graph.',
-          },
-          edges: {
-            type: 'array',
-            items: {
-              type: 'object',
-              properties: {
-                edge: {
-                  type: 'string',
-                  enum: ['part_of', 'in', 'from', 'involves', 'relates_to'],
-                },
-                from: { type: 'string' },
-                to: { type: 'string' },
-              },
-              required: ['edge', 'from', 'to'],
-              additionalProperties: false,
-            },
-            description:
-              'Specific edges to retract, each naming the edge type and the two node ids it connects.',
-          },
-          documents: {
-            type: 'array',
-            items: {
-              type: 'object',
-              properties: {
-                docId: { type: 'string' },
-                body: { type: 'string' },
-              },
-              required: ['docId', 'body'],
-              additionalProperties: false,
-            },
-            description:
-              'Documents to rewrite in full, with the fact removed. The body you provide replaces the ' +
-              'document completely; an empty or whitespace-only body is refused.',
-          },
-        },
-        required: ['what'],
-        additionalProperties: false,
-      },
-    },
   ]
 }
 
@@ -384,8 +309,6 @@ export async function dispatchTool(
         return await dispatchResolveProposal(engine, parsedArgs.value)
       case 'update_style':
         return await dispatchUpdateStyle(deps, parsedArgs.value)
-      case 'forget':
-        return await dispatchForget(engine, parsedArgs.value)
       default:
         return errorJson(`unknown tool: ${call.name}`)
     }
@@ -504,24 +427,6 @@ async function dispatchUpdateStyle(deps: ToolDeps | undefined, value: unknown): 
     message:
       'These settings apply from this moment onward in this conversation, and persist into future sessions.',
   })
-}
-
-async function dispatchForget(engine: MemoryEngine, value: unknown): Promise<string> {
-  const parsed = forgetArgs.safeParse(value)
-  if (!parsed.success) return errorJson(zodErrorMessage('forget', parsed.error))
-
-  // Same reasoning as dispatchUpdateStyle's patch above: zod's .optional()
-  // fields type as `T | undefined` even when the key itself is absent from
-  // parsed.data, and exactOptionalPropertyTypes distinguishes "absent" from
-  // "present and undefined". Rebuilt key-by-key so ForgetInput's optional
-  // fields are only ever set when a value is actually present.
-  const input: ForgetInput = { what: parsed.data.what }
-  if (parsed.data.nodeIds !== undefined) input.nodeIds = parsed.data.nodeIds
-  if (parsed.data.edges !== undefined) input.edges = parsed.data.edges
-  if (parsed.data.documents !== undefined) input.documents = parsed.data.documents
-
-  const result = await engine.forget(input)
-  return JSON.stringify({ ok: true, ...result })
 }
 
 function parseArguments(raw: string): { ok: true; value: unknown } | { ok: false; error: string } {

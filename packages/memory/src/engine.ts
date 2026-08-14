@@ -479,6 +479,19 @@ export class MemoryEngine {
     await commitMemory(this.paths.root, `proposal: ${resolution} ${id}`)
   }
 
+  // Parked, not shipped. Nothing in core or cli calls this: no tool
+  // exposes it to the model, and no persona text promises it. It stays
+  // here as dormant code, kept working and kept tested, because the
+  // project intends to offer a forget path eventually and does not want
+  // to rebuild this from scratch when it does. Two known gaps must be
+  // closed before this is ever wired back up to a tool: retracting a node
+  // does not remove the page it points at, so a person or arc's page
+  // stays on disk and fully searchable after their node is gone, and a
+  // multi document forget call is not atomic, so a failure partway
+  // through can leave the graph and some documents already changed while
+  // still reporting failure, with no commit. Do not expose this to a tool
+  // or a persona without fixing both first.
+  //
   // Retracts requested nodes and edges by appending op: 'retract' records
   // (both the original assertion and the retraction stay in graph.jsonl;
   // nothing is ever erased) and rewrites documents in full through

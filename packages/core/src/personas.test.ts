@@ -100,11 +100,12 @@ describe('buildPersona', () => {
     }
   })
 
-  it('instructs using the forget tool and always saying the transcript itself is unchanged', () => {
+  // The forget feature is parked: reverie must not claim a capability it
+  // does not currently offer. No persona text should mention forgetting.
+  it('never mentions a forget capability: the feature is parked, not shipped', () => {
     for (const mode of ['companion', 'firewall'] as const) {
       const text = buildPersona(mode, resources, defaultStyle)
-      expect(text.toLowerCase()).toContain('forget')
-      expect(text.toLowerCase()).toMatch(/transcript[^.]*unchanged|unchanged[^.]*transcript/)
+      expect(text.toLowerCase()).not.toContain('forget')
     }
   })
 

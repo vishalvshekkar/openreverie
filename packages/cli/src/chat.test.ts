@@ -564,7 +564,6 @@ describe('color helpers', () => {
 describe('toolNotice', () => {
   it('maps each known tool to its honest, specific notice', () => {
     expect(toolNotice('remember')).toBe('[remembering]')
-    expect(toolNotice('forget')).toBe('[forgetting]')
     expect(toolNotice('resolve_proposal')).toBe('[updating memory]')
     expect(toolNotice('update_style')).toBe('[adjusting style]')
     expect(toolNotice('search_memory')).toBe('[searching memory]')
@@ -577,6 +576,12 @@ describe('toolNotice', () => {
 
   it('falls back to a plain, truthful notice for an unknown tool', () => {
     expect(toolNotice('some_future_tool')).toBe('[using: some_future_tool]')
+  })
+
+  // forget is parked, not shipped: it has no notice of its own and falls
+  // back to the same plain, truthful default as any other unlisted tool.
+  it('has no notice of its own for forget, since the feature is parked', () => {
+    expect(toolNotice('forget')).toBe('[using: forget]')
   })
 })
 

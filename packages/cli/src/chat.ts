@@ -64,7 +64,6 @@ export function magenta(text: string, enabled: boolean): string {
 // fallback instead of silence or a crash.
 const TOOL_NOTICES: Record<string, string> = {
   remember: 'remembering',
-  forget: 'forgetting',
   resolve_proposal: 'updating memory',
   update_style: 'adjusting style',
   search_memory: 'searching memory',
