@@ -315,6 +315,75 @@ describe('MemoryEngine', () => {
     })
   })
 
+  describe('empty session skip', () => {
+    let dir: string
+    let paths: MemoryPaths
+
+    beforeEach(async () => {
+      dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-empty-'))
+      paths = memoryPaths(dir)
+      await ensureMemoryTree(paths)
+    })
+
+    afterEach(async () => {
+      await rm(dir, { recursive: true, force: true })
+    })
+
+    it('skips a session with only an assistant greeting, and never retries it across two runMaintenance calls', async () => {
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      const now = new Date()
+      const store = await SessionStore.start(paths, now)
+      await store.appendLine({
+        ts: now.toISOString(),
+        role: 'assistant',
+        content: 'Good to see you.',
+      })
+
+      await engine.runMaintenance(now)
+      const sessionsAfterFirst = await SessionStore.listSessions(paths)
+      expect(sessionsAfterFirst.find((s) => s.sessionId === store.sessionId)?.reflected).toBe(
+        true,
+      )
+      expect(chat.requests).toHaveLength(0)
+
+      await engine.runMaintenance(now)
+      expect(chat.requests).toHaveLength(0)
+
+      const summary = await readDocument(join(store.dir, 'summary.md'))
+      expect(summary.meta.skipped).toBe(true)
+      expect(typeof summary.meta.reason).toBe('string')
+
+      await engine.close()
+    })
+
+    it('reflects normally through runMaintenance when the transcript has at least one user line', async () => {
+      const chat = new FakeChatProvider([
+        { text: JSON.stringify(emptyReflectionOutput('Said hello back.')), toolCalls: [] },
+      ])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      const now = new Date()
+      const store = await SessionStore.start(paths, now)
+      await store.appendLine({
+        ts: now.toISOString(),
+        role: 'assistant',
+        content: 'Good to see you.',
+      })
+      await store.appendLine({ ts: now.toISOString(), role: 'user', content: 'Hi.' })
+
+      await engine.runMaintenance(now)
+
+      expect(chat.requests).toHaveLength(1)
+      const summary = await readDocument(join(store.dir, 'summary.md'))
+      expect(summary.meta.skipped).toBeUndefined()
+      expect(summary.body.trim()).toBe('Said hello back.')
+
+      await engine.close()
+    })
+  })
+
   describe('resolveProposal materialization', () => {
     let dir: string
     let paths: MemoryPaths

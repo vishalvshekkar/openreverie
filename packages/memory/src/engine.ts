@@ -215,6 +215,13 @@ export class MemoryEngine {
     // is responsible for warning lifecycle.
     const now = new Date()
     const transcript = await SessionStore.readTranscript(this.paths, sessionId)
+
+    if (!transcript.some((line) => line.role === 'user')) {
+      await this.writeSkippedSummary(sessionId, now)
+      this.liveItems.delete(sessionId)
+      return
+    }
+
     const context = await this.buildReflectionContext()
     const raw = await reflectSession(
       { chat: this.deps.chat, model: this.deps.reflectionModel },
@@ -746,6 +753,49 @@ export class MemoryEngine {
         `Failed to index ${description} (${doc.path}): ${errorMessage(err)}. ` +
           'Content is durably written but missing from search until reindexAll() runs; it is not automatically retried.',
       )
+    }
+  }
+
+  // A session with no user line at all (an abandoned session that only
+  // ever got as far as the proactive greeting) is not worth a reflection
+  // call. It still needs a summary.md: that file's presence is what
+  // SessionStore.listSessions() reads as "reflected", so without one this
+  // session would be retried by every future runMaintenance() call
+  // forever.
+  private async writeSkippedSummary(sessionId: string, now: Date): Promise<void> {
+    const sessions = await SessionStore.listSessions(this.paths)
+    const session = sessions.find((s) => s.sessionId === sessionId)
+    const date = session?.date ?? formatDateUTC(now)
+    const dir = join(this.paths.sessionsDir, `${date}-${sessionId}`)
+    const summaryPath = join(dir, 'summary.md')
+
+    await writeDocumentAtomic({
+      path: summaryPath,
+      meta: {
+        id: newId('doc'),
+        kind: 'summary',
+        session: sessionId,
+        date,
+        skipped: true,
+        reason: 'no user messages in this session',
+        items: [],
+      },
+      body: 'This session had no user messages, so there was nothing to reflect on.\n',
+    })
+
+    const summaryDoc = await readDocument(summaryPath)
+    await this.reindexOrWarn(
+      summaryDoc,
+      'summary',
+      `session ${sessionId} summary (skipped, empty)`,
+    )
+
+    const commitResult = await commitMemory(
+      this.paths.root,
+      `reflect: session ${sessionId} skipped, no user messages`,
+    )
+    if (!commitResult.ok && commitResult.warning) {
+      this.warnings.push(commitResult.warning)
     }
   }
 
