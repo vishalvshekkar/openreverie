@@ -4,7 +4,7 @@ import { createStatusLine } from './status.js'
 function fakeDeps(colorEnabled = true) {
   const output: string[] = []
   const intervals: Array<() => void> = []
-  let clearedCount = 0
+  const clearedHandles: unknown[] = []
   let nowValue = 0
   return {
     output,
@@ -15,16 +15,19 @@ function fakeDeps(colorEnabled = true) {
     tick: (index = 0) => {
       intervals[index]?.()
     },
-    clearedCount: () => clearedCount,
+    clearedHandles,
     deps: {
       write: (text: string) => output.push(text),
       colorEnabled,
       setInterval: (fn: () => void, _ms: number) => {
         intervals.push(fn)
+        // A distinguishable handle per call (1, 2, 3, ...), not a constant,
+        // so a test can assert exactly which registration was cleared
+        // instead of only how many times clearInterval ran.
         return intervals.length
       },
-      clearInterval: (_handle: unknown) => {
-        clearedCount += 1
+      clearInterval: (handle: unknown) => {
+        clearedHandles.push(handle)
       },
       now: () => nowValue,
     },
@@ -83,15 +86,21 @@ describe('createStatusLine', () => {
     expect(output[output.length - 1]).toBe('\r\x1b[K')
   })
 
-  it('clears the previous interval before registering a new one when start() is called twice without an intervening stop()', () => {
-    const { deps, clearedCount } = fakeDeps()
+  it('clears the exact handle the first start() registered, not just some handle, when start() is called twice without an intervening stop()', () => {
+    const { deps, clearedHandles } = fakeDeps()
     const status = createStatusLine(deps)
 
     status.start('thinking')
     status.start('searching memory')
 
-    expect(clearedCount()).toBe(1)
+    // Handle 1 is the first start()'s interval; an implementation that
+    // cleared the wrong one (for instance the handle it is about to
+    // register next, which does not exist yet) would leak the first
+    // interval and this would not catch it if it only counted calls.
+    expect(clearedHandles).toEqual([1])
 
     status.stop()
+
+    expect(clearedHandles).toEqual([1, 2])
   })
 })

@@ -11,8 +11,8 @@ import {
   readDocument,
   writeDocumentAtomic,
 } from '@openreverie/memory'
-import { FakeChatProvider, FakeEmbeddingProvider } from '@openreverie/providers'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { type ChatProvider, FakeChatProvider, FakeEmbeddingProvider } from '@openreverie/providers'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   type ChatIo,
   countMemoryDocuments,
@@ -939,6 +939,150 @@ describe('runChat status line', () => {
     expect(joined).not.toContain('\x1b[')
 
     await engine.close()
+  })
+
+  // The status line has zero coverage of its stop-on-error invariant: if
+  // an error path never stops it, the spinner keeps animating forever
+  // over the next prompt, since neither error path (the provider throwing
+  // mid turn, or either way the greeting can fail) ever emits a 'done'
+  // event, which is the only other thing that stops it. Each of the three
+  // tests below was confirmed to fail when its corresponding stop() call
+  // was removed (see task-13-report.md for the exact failure output),
+  // then confirmed to pass again once restored.
+
+  it('clears the status line before the error message when the provider throws mid turn, in the main send loop', async () => {
+    const chat = new FakeChatProvider([
+      { text: 'Good to see you.', toolCalls: [] },
+      // No text at all before the throw (throwAfterTextEvents: 0 fires
+      // right after the one, empty, always-yielded chunk): the 'thinking'
+      // frame is still the last thing on screen when the error hits, so
+      // only the catch block's own statusLine.stop() (not the 'text'
+      // branch, which never runs on this path) can clear it.
+      { text: '', toolCalls: [], throwAfterTextEvents: 0 },
+      { text: emptyReflectionJson('Hit a snag.'), toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const { io, output } = scriptedIo(['hello', '/bye'])
+
+    await runChat({
+      engine,
+      config,
+      chat,
+      io,
+      colorEnabled: true,
+      setInterval: () => 1,
+      clearInterval: () => {},
+      now: () => 0,
+    })
+
+    const joined = output.join('')
+    const errorIndex = output.findIndex((chunk) => chunk.includes('could not reach the model'))
+    expect(errorIndex).toBeGreaterThan(0)
+    // The write immediately before the error message must be the bare
+    // clear, not a stranded animated frame: the frame is only ever
+    // written by start()/tick, and the clear is only ever written by
+    // stop(), so this is the direct proof the line was actually stopped
+    // before the error text landed, in the correct order, not merely
+    // stopped at some later point.
+    expect(output[errorIndex - 1]).toBe('\r\x1b[K')
+    expect(joined).toContain('thinking')
+
+    await engine.close()
+  })
+
+  it('clears the status line when the greeting fails outright, even though that path never emits a done event', async () => {
+    const chat = new FakeChatProvider([
+      // Fails before yielding any real text: greet() sees only 'thinking'
+      // and then ends, with no 'text' or 'done' event ever reaching
+      // chat.ts's runGreeting. Only its unconditional finally can clear
+      // the line.
+      { text: '', toolCalls: [], throwAfterTextEvents: 0 },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const { io, output } = scriptedIo(['/bye'])
+
+    await runChat({
+      engine,
+      config,
+      chat,
+      io,
+      colorEnabled: true,
+      setInterval: () => 1,
+      clearInterval: () => {},
+      now: () => 0,
+    })
+
+    const promptIndex = output.findIndex((chunk) => chunk.includes('you> '))
+    expect(promptIndex).toBeGreaterThan(0)
+    expect(output[promptIndex - 1]).toBe('\r\x1b[K')
+
+    await engine.close()
+  })
+
+  it('clears the status line when the greeting times out, even though that path never emits a done event', async () => {
+    vi.useFakeTimers()
+    try {
+      const hangingChat: ChatProvider = {
+        name: 'hanging',
+        async complete() {
+          throw new Error('not used in this test')
+        },
+        stream() {
+          // Never yields and never settles: the same shape core's own
+          // agent.test.ts uses to force the greeting's 20 second timeout.
+          return (async function* () {
+            await new Promise<never>(() => {})
+          })()
+        },
+      }
+      const engine = await MemoryEngine.open(dir, {
+        chat: hangingChat,
+        embeddings: new FakeEmbeddingProvider(),
+        reflectionModel: 'fake-reflect',
+        embeddingModel: 'fake-embed',
+      })
+      const config = testConfig(dir)
+      const { io, output } = scriptedIo(['/bye'])
+
+      const done = runChat({
+        engine,
+        config,
+        chat: hangingChat,
+        io,
+        colorEnabled: true,
+        setInterval: () => 1,
+        clearInterval: () => {},
+        now: () => 0,
+      })
+      let settled = false
+      done.then(() => {
+        settled = true
+      })
+
+      // Advancing the fake clock in one single 20,001ms jump races ahead
+      // of runChat's own real (unfaked) async setup, MemoryEngine.open()'s
+      // session bookkeeping, assembling the system prompt: that work has
+      // not even reached the point of registering the timeout's setTimeout
+      // yet when a single advance call returns, so the jump finds nothing
+      // to fire and the greeting never times out. Advancing in many small
+      // steps, checked against the real event loop between each one,
+      // lets that real setup interleave normally while still accumulating
+      // well past the 20 second threshold.
+      for (let i = 0; i < 500 && !settled; i++) {
+        await vi.advanceTimersByTimeAsync(100)
+      }
+      await done
+
+      const promptIndex = output.findIndex((chunk) => chunk.includes('you> '))
+      expect(promptIndex).toBeGreaterThan(0)
+      expect(output[promptIndex - 1]).toBe('\r\x1b[K')
+
+      await engine.close()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('stops the status line before writing the interrupt message, so no frame is left stranded in scrollback', async () => {
