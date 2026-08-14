@@ -14,14 +14,14 @@ What works today:
 
 - Terminal chat with persistent, layered memory (constitution, realms, arcs, people, session transcripts)
 - Live capture during a conversation (the agent can call `remember` mid-session)
-- Reverie speaks first. A session opens with a short, contextually written hello instead of waiting for you to type. If something is left unresolved from last time, or notable in the recent record, that is what it opens with; otherwise it is just a short hello. A first conversation still gets the guided flow, not this.
+- Reverie speaks first. A session opens with a short, model-written hello instead of waiting for you to type. Reverie is instructed to lead with anything left unresolved from last time or notable in the recent record, and to keep it to a plain hello otherwise, but that is guidance to the model, not a guarantee of what it actually says. If the model is unreachable or the call times out, the greeting is skipped silently and the session just opens at the prompt. A first conversation still gets the guided flow, not this.
 - Person pages: people who recur get a narrative document under `people/` that reflection maintains, the same way it maintains arc narratives.
-- Post-session reflection: each session is summarized and filed into memory directly. New arcs, new people, and every attribution (whatever the model's confidence) are saved right away, unconfirmed but not held back for approval. A memory folder from an earlier release may still carry pending proposals from before this changed; those still surface and can still be accepted or rejected with `resolve_proposal`
+- Post-session reflection: each session is summarized and filed into memory directly. New arcs, new people, and every attribution (whatever the model's confidence) are saved right away: nothing is held back for your review, and nothing saved this way can be undone through the product (see below). A memory folder from an earlier release may still carry pending proposals from before this changed; those still surface and can still be accepted or rejected with `resolve_proposal`
 - Lazy daily and weekly rollups, built the first time enough time has passed to need them
 - Both safety modes (companion and firewall)
 - A first-run setup wizard
 - The `reindex`, `reflect`, and `read` CLI subcommands. `read` works with no network call and no API key: it is a plain filesystem read of your memory record
-- A status line while the model or a tool is working, so a slow call looks slow rather than stuck
+- A status line while the model or a tool is working, so a slow call looks slow rather than stuck. It only appears when the terminal supports color; a piped or non-interactive session gets none.
 - Opening a session and leaving without typing anything costs nothing: no reflection call, no rollup
 - The OpenAI provider
 
@@ -32,7 +32,7 @@ What does not exist yet:
 - Any deployment target beyond running it yourself (no Cloudflare or VPS packaging)
 - Graph visualization of realms, arcs, and their connections
 - Monthly and yearly rollups (only daily and weekly exist)
-- Any way to make reverie forget. The feature exists in code and is tested, but it is deliberately unexposed: no tool, no persona instruction, and no CLI command reaches it. Nothing in the product removes anything from your memory record. If you want something out, you edit or delete the markdown in your memory folder yourself; the files are plain text you own, readable in any editor. Reverie cannot do it for you.
+- Any way to make reverie forget. The feature exists in code and is tested, but it is deliberately unexposed: no tool, no persona instruction, and no CLI command reaches it. Deleting or editing a page under `people/` or `arcs/` removes the prose, but not the record: the node it corresponds to, its edges, and every attribution that named it still live in `graph.jsonl`, nothing in the product retracts them, and the agent can still surface what the graph knows about a person or arc whose page you deleted. Running `reindex` does clear the deleted page's stale rows out of the search index, so it stops turning up in `search_memory` hits, but `reindex` rebuilds the graph from `graph.jsonl` exactly as it already was, so the node and its edges come straight back. There is currently no user-accessible way to remove a node, an edge, or an attribution at all.
 
 The architecture and memory model are specified in full in [the design spec](docs/superpowers/specs/2026-08-13-openreverie-design.md). This README is updated honestly as the project progresses; if this section says something works, it works.
 

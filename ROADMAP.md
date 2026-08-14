@@ -2,13 +2,13 @@
 
 This file tracks what openreverie can do, what is being worked on, and where help is welcome. It is kept honest the same way the README is: nothing here is claimed as done unless it works.
 
-## Done (v0.1.0)
+## Done (v0.1.0 through v0.3.0)
 
 Sub-project 1 of 5: the local-first memory engine and agent core, usable as a terminal app. See the README for the full capability list and the [design spec](docs/superpowers/specs/2026-08-13-openreverie-design.md) for how it all fits together.
 
 v0.2.0 added, from the first round of real dogfooding: a close-friend conversational voice replacing the consultant register, three style preferences (engagement, tone, orientation) chosen at setup and changeable mid-conversation with immediate effect, a guided first conversation, speaker colors in the terminal, honest tool notices, and reliable capture of basic identity facts into the constitution.
 
-v0.3.0 removed the confirmation step from reflection, because asking permission to remember does not fit a companion whose defining property is that it remembers: new arcs, new people, and every attribution are now saved right away instead of waiting in a proposal queue, person pages joined arcs as a narrative document reflection maintains, reverie speaks first at the start of a session instead of waiting to be spoken to, a status line shows when the model or a tool is working, and an abandoned session with no typing costs nothing (no reflection call, no rollup). This release also fixed a real defect: reflection used to overwrite an arc's narrative without reading the one already there, replacing accumulated narrative every session instead of growing it; it now reads the current body first and carries it forward. A forget feature (retracting a node or edge and rewriting the documents it touches) was built and tested this release, then deliberately held back by the owner's decision until two gaps close; see the deferred list below.
+v0.3.0 removed the confirmation step from reflection. Asking permission to remember does not fit a companion whose defining property is that it remembers, so new arcs, new people, and every attribution are now saved right away instead of waiting in a proposal queue. Person pages joined arcs as a narrative document reflection maintains. Reverie now speaks first at the start of a session instead of waiting to be spoken to, a status line shows when the model or a tool is working, and an abandoned session with no typing costs nothing (no reflection call, no rollup). This release also fixed a real defect: reflection used to overwrite an arc's narrative without reading the one already there, replacing accumulated narrative every session instead of growing it; it now reads the current body first and carries it forward. A forget feature (retracting a node or edge and rewriting the documents it touches) was built and tested this release, then deliberately held back by the owner's decision until two gaps close; see the deferred list below.
 
 ## Up next (sub-projects, in intended order)
 
