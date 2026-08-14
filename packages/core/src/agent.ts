@@ -43,7 +43,7 @@ export class AgentSession {
   private readonly engine: MemoryEngine
   private readonly chat: ChatProvider
   private readonly model: string
-  private readonly system: string
+  private system: string
   private readonly history: SessionMessage[] = []
   private ended = false
   // Concurrent send() calls are serialized behind this promise chain: the
@@ -55,6 +55,7 @@ export class AgentSession {
   private sendChain: Promise<void> = Promise.resolve()
 
   private readonly toolDeps: ToolDeps | undefined
+  private readonly config: ReverieConfig
 
   private constructor(
     engine: MemoryEngine,
@@ -63,6 +64,7 @@ export class AgentSession {
     system: string,
     sessionId: string,
     toolDeps: ToolDeps | undefined,
+    config: ReverieConfig,
   ) {
     this.engine = engine
     this.chat = chat
@@ -70,6 +72,7 @@ export class AgentSession {
     this.system = system
     this.sessionId = sessionId
     this.toolDeps = toolDeps
+    this.config = config
   }
 
   static async start(
@@ -80,7 +83,7 @@ export class AgentSession {
   ): Promise<AgentSession> {
     const system = await assembleSystemPrompt(engine, config)
     const sessionId = await engine.startSession()
-    return new AgentSession(engine, chat, config.models.chat, system, sessionId, toolDeps)
+    return new AgentSession(engine, chat, config.models.chat, system, sessionId, toolDeps, config)
   }
 
   async *send(userText: string): AsyncIterable<AgentEvent> {
@@ -167,6 +170,15 @@ export class AgentSession {
         yield { type: 'tool', name: toolCall.name }
 
         const result = await dispatchTool(this.engine, this.sessionId, toolCall, this.toolDeps)
+
+        // If update_style succeeds, reassemble the system prompt so the new
+        // style applies immediately to subsequent requests.
+        if (toolCall.name === 'update_style' && !this.resultHasError(result)) {
+          const resultData = JSON.parse(result)
+          this.config.style = resultData.style
+          this.system = await assembleSystemPrompt(this.engine, this.config)
+        }
+
         await this.appendBoth({ role: 'tool', content: result, toolCallId: toolCall.id })
       }
     }
@@ -199,5 +211,14 @@ export class AgentSession {
       ...(message.toolCallId ? { toolCallId: message.toolCallId } : {}),
     })
     this.history.push(message)
+  }
+
+  private resultHasError(result: string): boolean {
+    try {
+      const parsed = JSON.parse(result)
+      return 'error' in parsed
+    } catch {
+      return false
+    }
   }
 }
