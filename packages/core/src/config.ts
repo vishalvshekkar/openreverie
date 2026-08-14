@@ -20,11 +20,18 @@ export const defaultCrisisResources: CrisisResource[] = [
   { label: 'Find A Helpline (international)', contact: 'findahelpline.com' },
 ]
 
+export interface StyleConfig {
+  engagement: 'leading' | 'balanced' | 'following'
+  tone: 'warm' | 'playful' | 'snarky' | 'direct' | 'formal'
+  orientation: 'listening' | 'balanced' | 'solutions'
+}
+
 export interface ReverieConfig {
   memoryDir: string
   provider: { name: 'openai'; apiKeyEnv?: string; apiKey?: string; baseUrl?: string }
   models: { chat: string; reflection: string; embeddings: string }
   safety: { mode: 'companion' | 'firewall'; resources: CrisisResource[] }
+  style: StyleConfig
 }
 
 function defaultMemoryDir(): string {
@@ -56,21 +63,31 @@ const safetySchema = z.strictObject({
     .default(() => defaultCrisisResources.map((resource) => ({ ...resource }))),
 })
 
+const styleSchema = z.strictObject({
+  engagement: z.enum(['leading', 'balanced', 'following']).default('balanced'),
+  tone: z.enum(['warm', 'playful', 'snarky', 'direct', 'formal']).default('warm'),
+  orientation: z.enum(['listening', 'balanced', 'solutions']).default('listening'),
+})
+
 const configSchema = z.strictObject({
   memoryDir: z.string().default(defaultMemoryDir),
   provider: providerSchema,
   models: modelsSchema,
   safety: safetySchema,
+  style: styleSchema,
 })
 
 // zod's object-level .default() only applies when a key is entirely absent,
 // and it does not re-run the value through the nested schema. To get
-// field-level defaults inside an omitted "models" section, we make sure the
-// key is present (as an empty table) before validating.
+// field-level defaults inside an omitted "models" or "style" section, we
+// make sure the key is present (as an empty table) before validating.
 function withNestedDefaultsFillable(raw: Record<string, unknown>): Record<string, unknown> {
   const filled = { ...raw }
   if (filled.models === undefined) {
     filled.models = {}
+  }
+  if (filled.style === undefined) {
+    filled.style = {}
   }
   return filled
 }
@@ -121,6 +138,7 @@ export async function loadConfig(configPath?: string): Promise<ReverieConfig> {
     provider,
     models: parsed.models,
     safety: parsed.safety,
+    style: parsed.style,
   }
 }
 

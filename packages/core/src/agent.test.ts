@@ -23,6 +23,7 @@ function testConfig(): ReverieConfig {
     provider: { name: 'openai', apiKeyEnv: 'OPENREVERIE_TEST_KEY' },
     models: { chat: 'gpt-5', reflection: 'gpt-5-mini', embeddings: 'text-embedding-3-small' },
     safety: { mode: 'companion', resources: defaultCrisisResources },
+    style: { engagement: 'balanced', tone: 'warm', orientation: 'listening' },
   }
 }
 

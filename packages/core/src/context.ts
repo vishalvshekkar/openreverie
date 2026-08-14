@@ -16,7 +16,11 @@ export async function assembleSystemPrompt(
   config: ReverieConfig,
 ): Promise<string> {
   const context = await engine.sessionContext()
-  const persona = buildPersona(config.safety.mode, config.safety.resources)
+  const persona = buildPersona(config.safety.mode, config.safety.resources, config.style)
+
+  if (context.isFirstSession) {
+    return [persona, firstConversationSection()].join('\n\n')
+  }
 
   const sections = [
     persona,
@@ -29,6 +33,20 @@ export async function assembleSystemPrompt(
   ].filter((section): section is string => section !== undefined)
 
   return sections.join('\n\n')
+}
+
+// Replaces every usual optional section when this is the first conversation
+// this memory has ever had: there is no constitution worth reciting, no
+// realms, no arcs, nothing yesterday, nothing pending. Instead of any of
+// that, guide a short, warm, unhurried onboarding.
+function firstConversationSection(): string {
+  return `## First conversation
+
+This is the very first conversation in this memory. Open with a short, warm welcome, two or three sentences: reverie is private and runs entirely on their own machine, and it remembers what they tell it so future conversations start with real context instead of from scratch. Include one clause making clear you are not a therapist, just so that is said plainly from the start.
+
+Then get to know them gently, one question at a time, waiting for their answer before moving to the next: first their name and how they would like to be addressed (pronouns included), then where they live and their timezone, then one thing currently going on in their life, small or large, whatever comes to mind first. Do not stack these into one message. Ask, wait, listen, then ask the next.
+
+The memory is empty right now: there is nothing to search, nothing to retrieve, no earlier session to reference. Do not call a memory tool looking for history that is not there. Do not tell them you can continue where an earlier conversation left off, or greet them as though you already know them. There is no earlier conversation. This is the first one.`
 }
 
 function constitutionSection(context: SessionContext): string | undefined {

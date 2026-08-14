@@ -18,7 +18,7 @@ import type { MemoryEngine } from '@openreverie/memory'
 import type { ChatProvider, ToolCall } from '@openreverie/providers'
 import type { ReverieConfig } from './config.js'
 import { assembleSystemPrompt } from './context.js'
-import { dispatchTool, toolDefinitions } from './tools.js'
+import { dispatchTool, type ToolDeps, toolDefinitions } from './tools.js'
 
 export type AgentEvent =
   | { type: 'text'; text: string }
@@ -54,28 +54,33 @@ export class AgentSession {
   // round is still being written.
   private sendChain: Promise<void> = Promise.resolve()
 
+  private readonly toolDeps: ToolDeps | undefined
+
   private constructor(
     engine: MemoryEngine,
     chat: ChatProvider,
     model: string,
     system: string,
     sessionId: string,
+    toolDeps: ToolDeps | undefined,
   ) {
     this.engine = engine
     this.chat = chat
     this.model = model
     this.system = system
     this.sessionId = sessionId
+    this.toolDeps = toolDeps
   }
 
   static async start(
     engine: MemoryEngine,
     config: ReverieConfig,
     chat: ChatProvider,
+    toolDeps?: ToolDeps,
   ): Promise<AgentSession> {
     const system = await assembleSystemPrompt(engine, config)
     const sessionId = await engine.startSession()
-    return new AgentSession(engine, chat, config.models.chat, system, sessionId)
+    return new AgentSession(engine, chat, config.models.chat, system, sessionId, toolDeps)
   }
 
   async *send(userText: string): AsyncIterable<AgentEvent> {
@@ -161,7 +166,7 @@ export class AgentSession {
         first = false
         yield { type: 'tool', name: toolCall.name }
 
-        const result = await dispatchTool(this.engine, this.sessionId, toolCall)
+        const result = await dispatchTool(this.engine, this.sessionId, toolCall, this.toolDeps)
         await this.appendBoth({ role: 'tool', content: result, toolCallId: toolCall.id })
       }
     }

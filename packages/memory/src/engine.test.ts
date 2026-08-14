@@ -680,6 +680,95 @@ describe('MemoryEngine', () => {
     })
   })
 
+  describe('sessionContext isFirstSession', () => {
+    let dir: string
+    let paths: MemoryPaths
+
+    beforeEach(async () => {
+      dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-firstsession-'))
+      paths = memoryPaths(dir)
+      await ensureMemoryTree(paths)
+    })
+
+    afterEach(async () => {
+      await rm(dir, { recursive: true, force: true })
+    })
+
+    it('is true on a completely fresh memory folder with no reflected sessions and no arcs', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+
+      const context = await engine.sessionContext()
+
+      expect(context.isFirstSession).toBe(true)
+
+      await engine.close()
+    })
+
+    it('is not turned false merely by starting a new, still-unreflected session', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const sessionId = await engine.startSession()
+      await engine.appendTranscript(sessionId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'Hello there.',
+      })
+
+      const context = await engine.sessionContext()
+
+      expect(context.isFirstSession).toBe(true)
+
+      await engine.close()
+    })
+
+    it('is false once a session has been reflected', async () => {
+      const chat = new FakeChatProvider([
+        { text: JSON.stringify(emptyReflectionOutput('A quiet first hello.')), toolCalls: [] },
+      ])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      const sessionId = await engine.startSession()
+      await engine.appendTranscript(sessionId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'Hello there.',
+      })
+      await engine.endSession(sessionId)
+
+      const context = await engine.sessionContext()
+
+      expect(context.isFirstSession).toBe(false)
+
+      await engine.close()
+    })
+
+    it('is false when an arc exists, even a dormant one, with no reflected sessions', async () => {
+      const dormantArcPath = join(paths.arcsDir, 'dormant-arc.md')
+      await writeDocumentAtomic({
+        path: dormantArcPath,
+        meta: { id: newId('doc'), name: 'Dormant Arc', status: 'dormant' },
+        body: 'On pause.\n',
+      })
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'arc_dormant',
+          type: 'arc',
+          label: 'Dormant Arc',
+          doc: dormantArcPath,
+        },
+      ])
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+
+      const context = await engine.sessionContext()
+
+      expect(context.isFirstSession).toBe(false)
+
+      await engine.close()
+    })
+  })
+
   describe('warnings', () => {
     let dir: string
     let paths: MemoryPaths

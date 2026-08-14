@@ -26,6 +26,7 @@ function testConfig(overrides: Partial<ReverieConfig> = {}): ReverieConfig {
     provider: { name: 'openai', apiKeyEnv: 'OPENREVERIE_TEST_KEY' },
     models: { chat: 'gpt-5', reflection: 'gpt-5-mini', embeddings: 'text-embedding-3-small' },
     safety: { mode: 'companion', resources: defaultCrisisResources },
+    style: { engagement: 'balanced', tone: 'warm', orientation: 'listening' },
     ...overrides,
   }
 }
@@ -134,7 +135,7 @@ describe('assembleSystemPrompt', () => {
 
     const prompt = await assembleSystemPrompt(engine, config)
 
-    const persona = buildPersona(config.safety.mode, config.safety.resources)
+    const persona = buildPersona(config.safety.mode, config.safety.resources, config.style)
     expect(prompt.startsWith(persona)).toBe(true)
 
     expect(prompt).toContain('## Constitution')
@@ -180,11 +181,33 @@ describe('assembleSystemPrompt', () => {
   })
 
   it('omits sections with no content instead of leaving empty headers', async () => {
+    // A dormant arc (not active, so it never populates "## Active arcs")
+    // is enough to make this memory not a first session, so the normal
+    // optional-section rendering (rather than the first-conversation
+    // flow) is what is under test here.
+    const dormantArcPath = join(paths.arcsDir, 'dormant-arc.md')
+    await writeDocumentAtomic({
+      path: dormantArcPath,
+      meta: { id: newId('doc'), name: 'Dormant Arc', status: 'dormant' },
+      body: 'On pause.\n',
+    })
+    await appendGraph(paths, [
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'arc_dormant',
+        type: 'arc',
+        label: 'Dormant Arc',
+        doc: dormantArcPath,
+      },
+    ])
+
     const config = testConfig()
     const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
 
     const prompt = await assembleSystemPrompt(engine, config)
 
+    expect(prompt).not.toContain('## First conversation')
     expect(prompt).toContain('## Constitution')
     expect(prompt).not.toContain('## Realms')
     expect(prompt).not.toContain('## Active arcs')
@@ -210,6 +233,25 @@ describe('assembleSystemPrompt', () => {
         type: 'realm',
         label: 'Fitness',
         doc: realmPath,
+      },
+    ])
+    // An arc (any status) is enough to make this not a first session, so
+    // the normal optional-section rendering applies here rather than the
+    // first-conversation flow.
+    const arcPath = join(paths.arcsDir, 'marathon.md')
+    await writeDocumentAtomic({
+      path: arcPath,
+      meta: { id: newId('doc'), name: 'Marathon Training', status: 'active' },
+      body: 'Training for the fall marathon.\n',
+    })
+    await appendGraph(paths, [
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'arc_marathon',
+        type: 'arc',
+        label: 'Marathon Training',
+        doc: arcPath,
       },
     ])
 
@@ -267,10 +309,90 @@ describe('assembleSystemPrompt', () => {
 
     const prompt = await assembleSystemPrompt(engine, config)
 
-    const persona = buildPersona('firewall', defaultCrisisResources)
+    const persona = buildPersona('firewall', defaultCrisisResources, config.style)
     expect(prompt.startsWith(persona)).toBe(true)
 
     await engine.close()
+  })
+
+  describe('first conversation', () => {
+    it('renders a First conversation section instead of the usual optional sections on a completely fresh engine', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const prompt = await assembleSystemPrompt(engine, testConfig())
+
+      expect(prompt).toContain('## First conversation')
+      expect(prompt).not.toContain('## Constitution')
+      expect(prompt).not.toContain('## Realms')
+      expect(prompt).not.toContain('## Active arcs')
+      expect(prompt).not.toContain('## Latest daily rollup')
+      expect(prompt).not.toContain('## Yesterday')
+      expect(prompt).not.toContain('## Pending proposals')
+
+      const lower = prompt.toLowerCase()
+      // Guardrail: memory is empty, so nothing to search, and never offer
+      // to pick up from before (a brand-new user has no "before").
+      expect(lower).toContain('nothing to search')
+      expect(lower).not.toContain('pick up')
+
+      // A short warm welcome: private, runs on their machine, remembers so
+      // future sessions start with context, and one clause that it is not
+      // a therapist.
+      expect(lower).toContain('private')
+      expect(lower).toContain('own machine')
+      expect(lower).toContain('not a therapist')
+
+      // Gentle, one-question-at-a-time onboarding.
+      expect(lower).toContain('name')
+      expect(lower).toContain('pronoun')
+      expect(lower).toContain('timezone')
+      expect(lower).toContain('one question at a time')
+
+      await engine.close()
+    })
+
+    it('omits the First conversation section once a session has been reflected', async () => {
+      const startedAt = new Date(Date.now() - 24 * 60 * 60 * 1000)
+      const store = await SessionStore.start(paths, startedAt)
+      await store.appendLine({ ts: startedAt.toISOString(), role: 'user', content: 'Hello.' })
+      await writeDocumentAtomic({
+        path: join(store.dir, 'summary.md'),
+        meta: { id: newId('doc') },
+        body: 'A first, brief hello.\n',
+      })
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const prompt = await assembleSystemPrompt(engine, testConfig())
+
+      expect(prompt).not.toContain('## First conversation')
+
+      await engine.close()
+    })
+
+    it('omits the First conversation section when an arc already exists, even with no reflected sessions', async () => {
+      const arcPath = join(paths.arcsDir, 'marathon.md')
+      await writeDocumentAtomic({
+        path: arcPath,
+        meta: { id: newId('doc'), name: 'Marathon Training', status: 'active' },
+        body: 'Training for the fall marathon.\n',
+      })
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'arc_marathon',
+          type: 'arc',
+          label: 'Marathon Training',
+          doc: arcPath,
+        },
+      ])
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const prompt = await assembleSystemPrompt(engine, testConfig())
+
+      expect(prompt).not.toContain('## First conversation')
+
+      await engine.close()
+    })
   })
 
   it('never contains an em dash character', async () => {

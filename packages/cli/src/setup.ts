@@ -116,6 +116,10 @@ export async function runSetup(io: SetupIo, configPath?: string): Promise<void> 
     provider,
     models: { chat: chatModel, reflection: reflectionModel, embeddings: embeddingsModel },
     safety: { mode, resources: defaultCrisisResources.map((resource) => ({ ...resource })) },
+    // Wizard questions for style land in a later task; balanced/warm/listening
+    // matches the zod defaults in @openreverie/core so this is a no-op for
+    // anyone who has not been asked yet.
+    style: { engagement: 'balanced', tone: 'warm', orientation: 'listening' },
   }
 
   const resolvedPath = configPath ?? defaultConfigPath()

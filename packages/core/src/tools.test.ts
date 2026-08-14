@@ -15,7 +15,8 @@ import {
 } from '@openreverie/memory'
 import { FakeChatProvider, FakeEmbeddingProvider, type ToolCall } from '@openreverie/providers'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { dispatchTool, toolDefinitions } from './tools.js'
+import type { StyleConfig } from './config.js'
+import { dispatchTool, type ToolDeps, toolDefinitions } from './tools.js'
 
 let dir: string
 
@@ -60,7 +61,7 @@ function emptyReflectionOutput(summary: string) {
 }
 
 describe('toolDefinitions', () => {
-  it('lists exactly the eight memory tools with non-empty descriptions and a JSON schema', () => {
+  it('lists exactly the nine memory and style tools with non-empty descriptions and a JSON schema', () => {
     const defs = toolDefinitions()
     const names = defs.map((d) => d.name).sort()
     expect(names).toEqual(
@@ -73,6 +74,7 @@ describe('toolDefinitions', () => {
         'remember',
         'resolve_proposal',
         'search_memory',
+        'update_style',
       ].sort(),
     )
     for (const def of defs) {
@@ -479,5 +481,123 @@ describe('dispatchTool', () => {
     expect(typeof JSON.parse(unknownResult).error).toBe('string')
 
     await engine.close()
+  })
+
+  describe('update_style', () => {
+    const initialStyle: StyleConfig = {
+      engagement: 'balanced',
+      tone: 'warm',
+      orientation: 'listening',
+    }
+
+    function fakeStyleDeps(initial: StyleConfig): {
+      deps: ToolDeps
+      calls: Partial<StyleConfig>[]
+    } {
+      let current = { ...initial }
+      const calls: Partial<StyleConfig>[] = []
+      const deps: ToolDeps = {
+        updateStyle: async (patch) => {
+          calls.push(patch)
+          current = { ...current, ...patch }
+          return { ...current }
+        },
+      }
+      return { deps, calls }
+    }
+
+    it('applies a full patch and reports that it applies now and persists', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps())
+      const sessionId = await engine.startSession()
+      const { deps } = fakeStyleDeps(initialStyle)
+
+      const result = await dispatchTool(
+        engine,
+        sessionId,
+        call('update_style', { engagement: 'leading', tone: 'playful', orientation: 'solutions' }),
+        deps,
+      )
+      const parsed = JSON.parse(result)
+
+      expect(parsed.ok).toBe(true)
+      expect(parsed.style).toEqual({
+        engagement: 'leading',
+        tone: 'playful',
+        orientation: 'solutions',
+      })
+      expect(String(parsed.message).toLowerCase()).toMatch(/from this moment/)
+      expect(String(parsed.message).toLowerCase()).toMatch(/persist/)
+
+      await engine.close()
+    })
+
+    it('applies a partial patch, passing only the provided fields to the persister', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps())
+      const sessionId = await engine.startSession()
+      const { deps, calls } = fakeStyleDeps(initialStyle)
+
+      const result = await dispatchTool(
+        engine,
+        sessionId,
+        call('update_style', { engagement: 'following' }),
+        deps,
+      )
+      const parsed = JSON.parse(result)
+
+      expect(parsed.ok).toBe(true)
+      expect(calls).toEqual([{ engagement: 'following' }])
+      expect(parsed.style).toEqual({
+        engagement: 'following',
+        tone: 'warm',
+        orientation: 'listening',
+      })
+
+      await engine.close()
+    })
+
+    it('returns a JSON error, not a throw, when no fields are given', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps())
+      const sessionId = await engine.startSession()
+      const { deps, calls } = fakeStyleDeps(initialStyle)
+
+      const result = await dispatchTool(engine, sessionId, call('update_style', {}), deps)
+
+      expect(JSON.parse(result).error).toMatch(/update_style/)
+      expect(calls).toEqual([])
+
+      await engine.close()
+    })
+
+    it('returns a JSON error, not a throw, when the persister rejects', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps())
+      const sessionId = await engine.startSession()
+      const deps: ToolDeps = {
+        updateStyle: async () => {
+          throw new Error('could not write config file')
+        },
+      }
+
+      const result = await dispatchTool(
+        engine,
+        sessionId,
+        call('update_style', { tone: 'direct' }),
+        deps,
+      )
+
+      expect(JSON.parse(result).error).toMatch(/could not write config file/)
+
+      await engine.close()
+    })
+
+    it('returns a JSON error, not a throw, when no persister is wired up for this session', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps())
+      const sessionId = await engine.startSession()
+
+      const result = await dispatchTool(engine, sessionId, call('update_style', { tone: 'direct' }))
+
+      expect(typeof JSON.parse(result).error).toBe('string')
+
+      await engine.close()
+    })
   })
 })
