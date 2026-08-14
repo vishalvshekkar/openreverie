@@ -702,7 +702,14 @@ export class MemoryEngine {
     }
     await writeDocumentAtomic(doc)
     await appendGraph(this.paths, [
-      { ts: nowIso, op: 'assert', node: personNodeId, type: 'person', label: name, doc: personPath },
+      {
+        ts: nowIso,
+        op: 'assert',
+        node: personNodeId,
+        type: 'person',
+        label: name,
+        doc: personPath,
+      },
     ])
     await this.syncGraph()
     await this.reindexDocument(doc, 'person')

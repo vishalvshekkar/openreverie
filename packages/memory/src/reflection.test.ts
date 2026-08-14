@@ -506,7 +506,9 @@ describe('reflection', () => {
 
       const out: ReflectionOutput = {
         ...emptyReflectionOutput('A session about Sam.'),
-        arcNarratives: [{ arcId: 'person_sam', narrative: 'Sam and I caught up after months apart.' }],
+        arcNarratives: [
+          { arcId: 'person_sam', narrative: 'Sam and I caught up after months apart.' },
+        ],
       }
 
       const result = await applyReflection(paths, out, sessionId, [], now)
