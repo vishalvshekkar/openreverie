@@ -11,6 +11,7 @@ export interface MemoryPaths {
   constitution: string
   realmsDir: string
   arcsDir: string
+  peopleDir: string
   sessionsDir: string
   rollupsDailyDir: string
   rollupsWeeklyDir: string
@@ -25,6 +26,7 @@ export function memoryPaths(root: string): MemoryPaths {
     constitution: join(root, 'constitution.md'),
     realmsDir: join(root, 'realms'),
     arcsDir: join(root, 'arcs'),
+    peopleDir: join(root, 'people'),
     sessionsDir: join(root, 'sessions'),
     rollupsDailyDir: join(root, 'rollups', 'daily'),
     rollupsWeeklyDir: join(root, 'rollups', 'weekly'),
@@ -41,6 +43,7 @@ export async function ensureMemoryTree(paths: MemoryPaths): Promise<void> {
   for (const dir of [
     paths.realmsDir,
     paths.arcsDir,
+    paths.peopleDir,
     paths.sessionsDir,
     paths.rollupsDailyDir,
     paths.rollupsWeeklyDir,
