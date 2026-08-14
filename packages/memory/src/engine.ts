@@ -784,11 +784,7 @@ export class MemoryEngine {
     })
 
     const summaryDoc = await readDocument(summaryPath)
-    await this.reindexOrWarn(
-      summaryDoc,
-      'summary',
-      `session ${sessionId} summary (skipped, empty)`,
-    )
+    await this.reindexOrWarn(summaryDoc, 'summary', `session ${sessionId} summary (skipped, empty)`)
 
     const commitResult = await commitMemory(
       this.paths.root,

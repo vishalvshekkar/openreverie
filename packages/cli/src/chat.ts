@@ -77,7 +77,11 @@ const LOST_IN_NOTES_MESSAGE =
 // never asked for and a visible error about it would be confusing rather
 // than honest. A real provider problem still surfaces normally on the
 // user's first actual message.
-async function runGreeting(session: AgentSession, io: ChatIo, colorEnabled: boolean): Promise<void> {
+async function runGreeting(
+  session: AgentSession,
+  io: ChatIo,
+  colorEnabled: boolean,
+): Promise<void> {
   let tagged = false
   try {
     for await (const event of session.greet()) {

@@ -269,7 +269,9 @@ describe('runChat', () => {
     expect(joined).toContain('reflecting on this session...')
     const summaries = await sessionSummaryFiles(dir)
     expect(summaries).toHaveLength(1)
-    const summary = await readDocument(path.join(dir, 'sessions', summaries[0] as string, 'summary.md'))
+    const summary = await readDocument(
+      path.join(dir, 'sessions', summaries[0] as string, 'summary.md'),
+    )
     expect(summary.meta.skipped).toBe(true)
     expect(chat.requests).toHaveLength(1)
 

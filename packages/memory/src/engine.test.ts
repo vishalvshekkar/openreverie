@@ -343,9 +343,7 @@ describe('MemoryEngine', () => {
 
       await engine.runMaintenance(now)
       const sessionsAfterFirst = await SessionStore.listSessions(paths)
-      expect(sessionsAfterFirst.find((s) => s.sessionId === store.sessionId)?.reflected).toBe(
-        true,
-      )
+      expect(sessionsAfterFirst.find((s) => s.sessionId === store.sessionId)?.reflected).toBe(true)
       expect(chat.requests).toHaveLength(0)
 
       await engine.runMaintenance(now)
