@@ -137,9 +137,17 @@ sentence. If dogfooding shows `people/` filling with one-line pages, a determini
 (for example, items from at least two distinct sessions) is the fallback, recorded on the roadmap
 rather than built now.
 
-`newPersons` gains an optional `narrative` field so the reflection that creates a person can also
-write the first draft of their page, instead of the page sitting on a starter sentence until the
+`newPersons` gains a required `narrative` field so the reflection that creates a person also
+writes the first draft of their page, instead of the page sitting on a starter sentence until the
 next session. `newArcs` gains the same field for the same reason.
+
+This field was specified as optional in the first draft of this spec, and was made required
+during implementation. Required is correct: section 4 has new arcs and people skip the second
+pass entirely, on the grounds that their pass-one narrative is their whole first body. That only
+holds if the field is always populated, so optional would have left a new page sitting on its
+starter sentence exactly in the case the field exists to prevent. Because a required string can
+still arrive empty, a narrative that is empty or whitespace only falls back to the starter body
+rather than writing a blank page.
 
 ### Maintenance
 
