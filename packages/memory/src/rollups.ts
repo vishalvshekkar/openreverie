@@ -108,7 +108,12 @@ const WEEKLY_ROLLUP_PROMPT =
  */
 export async function buildDailyRollup(deps: RollupDeps, date: string): Promise<Document> {
   const sessions = await SessionStore.listSessions(deps.paths)
-  const daySessions = sessions.filter((session) => session.date === date && session.reflected)
+  // A skipped session has no content to synthesize: excluded here too,
+  // defensively, even though the caller (MemoryEngine.runMaintenance) is
+  // expected to never pass a date whose only sessions are skipped.
+  const daySessions = sessions.filter(
+    (session) => session.date === date && session.reflected && !session.skipped,
+  )
   if (daySessions.length === 0) {
     throw new Error(
       `No reflected session summaries found for ${date}; cannot build a daily rollup.`,

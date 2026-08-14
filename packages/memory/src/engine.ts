@@ -389,7 +389,7 @@ export class MemoryEngine {
     // own date, so they only break ties between two sessions that land on
     // the same date; they cannot stand in for date order on their own.
     const recentCandidates = sessions
-      .filter((session) => session.reflected && session.date >= recentCutoff)
+      .filter((session) => session.reflected && !session.skipped && session.date >= recentCutoff)
       .sort((a, b) => {
         if (a.date !== b.date) return a.date < b.date ? 1 : -1
         return a.sessionId < b.sessionId ? 1 : a.sessionId > b.sessionId ? -1 : 0
@@ -415,7 +415,10 @@ export class MemoryEngine {
     // above, which is filtered down to active arcs only: a memory with
     // only a dormant or closed arc is still not a first session.
     const hasAnyArc = [...this.graphState.nodes.values()].some((node) => node.type === 'arc')
-    const hasReflectedSession = sessions.some((session) => session.reflected)
+    // A skipped session never happened as far as this check is concerned:
+    // it carries no content, so it must not be able to consume someone's
+    // guided first-conversation flow by itself.
+    const hasReflectedSession = sessions.some((session) => session.reflected && !session.skipped)
     const isFirstSession = !hasAnyArc && !hasReflectedSession
 
     return {
@@ -631,7 +634,13 @@ export class MemoryEngine {
 
     const today = formatDateUTC(now)
 
-    const reflected = (await SessionStore.listSessions(this.paths)).filter((s) => s.reflected)
+    // A date whose only session was skipped has no content to roll up:
+    // excluding skipped sessions here means such a date never becomes
+    // "pending" in the first place, so buildDailyRollup below is never
+    // asked to synthesize a rollup out of nothing but a placeholder line.
+    const reflected = (await SessionStore.listSessions(this.paths)).filter(
+      (s) => s.reflected && !s.skipped,
+    )
     const sessionDates = reflected.map((s) => s.date)
     const existingDailies = stringMeta(
       await listDocuments(this.paths.rollupsDailyDir, this.onDocSkip),
@@ -761,7 +770,19 @@ export class MemoryEngine {
   // call. It still needs a summary.md: that file's presence is what
   // SessionStore.listSessions() reads as "reflected", so without one this
   // session would be retried by every future runMaintenance() call
-  // forever.
+  // forever. SessionStore.listSessions() also reads this summary's own
+  // `skipped: true` back out, which is what lets every downstream
+  // consumer (recentSummaries, isFirstSession, the daily/weekly rollup
+  // date lists) tell this session apart from a real reflection.
+  //
+  // Deliberately never indexed: unlike every other summary.md, this one
+  // is not passed to reindexOrWarn. Its body is a fixed placeholder
+  // sentence with no content of the person's own in it, so there is
+  // nothing here worth retrieving through search_memory, and indexing it
+  // would only let a search surface a session where nothing happened.
+  // walkAllDocuments (used by both reindexAll and the docId cache) skips
+  // any summary carrying skipped: true for the same reason, so a full
+  // index rebuild never reintroduces it either.
   private async writeSkippedSummary(sessionId: string, now: Date): Promise<void> {
     const sessions = await SessionStore.listSessions(this.paths)
     const session = sessions.find((s) => s.sessionId === sessionId)
@@ -782,9 +803,6 @@ export class MemoryEngine {
       },
       body: 'This session had no user messages, so there was nothing to reflect on.\n',
     })
-
-    const summaryDoc = await readDocument(summaryPath)
-    await this.reindexOrWarn(summaryDoc, 'summary', `session ${sessionId} summary (skipped, empty)`)
 
     const commitResult = await commitMemory(
       this.paths.root,
@@ -846,7 +864,12 @@ export class MemoryEngine {
     for (const name of sessionEntries) {
       const summaryPath = join(this.paths.sessionsDir, name, 'summary.md')
       try {
-        result.push({ doc: await readDocument(summaryPath), kind: 'summary' })
+        const doc = await readDocument(summaryPath)
+        // A skipped summary is never indexed, on the initial write path
+        // (writeSkippedSummary) or here on a full rebuild: its body is a
+        // fixed placeholder with nothing of the person's own in it.
+        if (doc.meta.skipped === true) continue
+        result.push({ doc, kind: 'summary' })
       } catch {
         // No summary.md yet: session is not reflected. Nothing to index.
       }

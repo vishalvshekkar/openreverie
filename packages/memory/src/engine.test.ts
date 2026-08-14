@@ -313,6 +313,43 @@ describe('MemoryEngine', () => {
 
       await engine.close()
     })
+
+    it('does not build a daily rollup for a day whose only session was skipped, and never calls the model', async () => {
+      const now = new Date()
+      const yesterday = new Date(
+        Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - 1),
+      )
+
+      // A greeting-only session from yesterday, never reflected yet: on
+      // MemoryEngine.open's own runMaintenance pass, this must be skipped
+      // (no reflection call), and yesterday must never be treated as a
+      // date with real content to roll up (no daily rollup call either).
+      // An empty scripted chat provider means either LLM call would throw
+      // "scripted results exhausted", which is exactly what this guards.
+      const store = await SessionStore.start(paths, yesterday)
+      await store.appendLine({
+        ts: yesterday.toISOString(),
+        role: 'assistant',
+        content: 'Good to see you.',
+      })
+
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      expect(chat.requests).toHaveLength(0)
+
+      const yesterdayDate = isoDate(yesterday)
+      await expect(
+        readDocument(join(paths.rollupsDailyDir, `${yesterdayDate}.md`)),
+      ).rejects.toThrow()
+
+      const sessions = await SessionStore.listSessions(paths)
+      const session = sessions.find((s) => s.sessionId === store.sessionId)
+      expect(session?.reflected).toBe(true)
+      expect(session?.skipped).toBe(true)
+
+      await engine.close()
+    })
   })
 
   describe('empty session skip', () => {
@@ -377,6 +414,58 @@ describe('MemoryEngine', () => {
       const summary = await readDocument(join(store.dir, 'summary.md'))
       expect(summary.meta.skipped).toBeUndefined()
       expect(summary.body.trim()).toBe('Said hello back.')
+
+      await engine.close()
+    })
+
+    it('never indexes a skipped summary for search, and reindexAll does not reintroduce it', async () => {
+      const chat = new FakeChatProvider([])
+      let engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      const now = new Date()
+      const store = await SessionStore.start(paths, now)
+      await store.appendLine({
+        ts: now.toISOString(),
+        role: 'assistant',
+        content: 'Good to see you.',
+      })
+
+      await engine.runMaintenance(now)
+
+      const skippedSummary = await readDocument(join(store.dir, 'summary.md'))
+      const skippedDocId = skippedSummary.meta.id as string
+
+      // The fake embedding provider returns a nonzero, if weak, cosine
+      // similarity against anything once there is any content indexed at
+      // all (the constitution, at minimum), so a plain "hits is empty"
+      // assertion would be testing the fake, not this guarantee. What
+      // must hold is that the skipped summary's own document id never
+      // shows up among the results, on a query built from its own exact
+      // placeholder body text.
+      const noSkippedDocId = (hits: { docId: string }[]) =>
+        expect(hits.some((h) => h.docId === skippedDocId)).toBe(false)
+
+      const hits = await engine.search('nothing to reflect on')
+      noSkippedDocId(hits)
+
+      // Nor should a full index rebuild reintroduce it: walkAllDocuments
+      // (which both reindexAll and the docId cache read from) must skip
+      // it exactly the same way the initial write path does.
+      await engine.reindexAll()
+      noSkippedDocId(await engine.search('nothing to reflect on'))
+
+      // Same guarantee from a truly empty index.db, not just a wipe-and-
+      // reinsert on top of an existing one.
+      await engine.close()
+      await rm(paths.indexDb)
+      engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      await engine.reindexAll()
+      noSkippedDocId(await engine.search('nothing to reflect on'))
+
+      // And the docId cache used by readDocumentById never resolves to
+      // it either: it was never added to docPaths/docIdByPath in the
+      // first place.
+      expect(engine.docIdForPath(skippedSummary.path)).toBeUndefined()
 
       await engine.close()
     })
@@ -1681,6 +1770,34 @@ describe('MemoryEngine', () => {
 
       await engine.close()
     })
+
+    it('excludes a skipped session even when its date falls inside the window', async () => {
+      const now = new Date()
+      const twoDaysAgo = new Date(
+        Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - 2),
+      )
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      // A greeting-only session, ended with no user line: this is the
+      // exact shape a proactive greeting followed by an abandoned session
+      // produces, reflected via the real skip path (not hand-written),
+      // so this test fails if listSessions or the recentSummaries filter
+      // ever stops reading the skipped flag it depends on.
+      const store = await SessionStore.start(paths, twoDaysAgo)
+      await store.appendLine({
+        ts: twoDaysAgo.toISOString(),
+        role: 'assistant',
+        content: 'Good to see you.',
+      })
+      await engine.endSession(store.sessionId)
+
+      const context = await engine.sessionContext(now)
+
+      expect(context.recentSummaries).toHaveLength(0)
+
+      await engine.close()
+    })
   })
 
   describe('sessionContext isFirstSession', () => {
@@ -1740,6 +1857,28 @@ describe('MemoryEngine', () => {
       const context = await engine.sessionContext()
 
       expect(context.isFirstSession).toBe(false)
+
+      await engine.close()
+    })
+
+    it('stays true after a session that was skipped (greeting only, no user message)', async () => {
+      // The exact scenario this guards: a user opens the app once, the
+      // proactive greeting streams, and they close it without ever
+      // typing anything. That session is skipped, not reflected, and
+      // must not cost this person their guided first-conversation flow
+      // the next time they actually do open up.
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const sessionId = await engine.startSession()
+      await engine.appendTranscript(sessionId, {
+        ts: new Date().toISOString(),
+        role: 'assistant',
+        content: 'Good to see you.',
+      })
+      await engine.endSession(sessionId)
+
+      const context = await engine.sessionContext()
+
+      expect(context.isFirstSession).toBe(true)
 
       await engine.close()
     })
