@@ -30,7 +30,8 @@ function emptyReflectionOutput(summary: string): ReflectionOutput {
     attributions: [],
     newArcs: [],
     newPersons: [],
-    arcNarratives: [],
+    arcUpdates: [],
+    personUpdates: [],
     constitutionUpdate: null,
   }
 }
@@ -112,10 +113,12 @@ describe('MemoryEngine', () => {
             realm: 'realm_health',
             reason: 'mentioned a big presentation looming',
             itemIndexes: [1],
+            narrative: 'Presentation prep starts here.',
           },
         ],
         newPersons: [],
-        arcNarratives: [],
+        arcUpdates: [],
+        personUpdates: [],
         constitutionUpdate: null,
       }
       const chat = new FakeChatProvider([
@@ -1150,5 +1153,50 @@ describe('MemoryEngine', () => {
 
       await engine.close()
     })
+  })
+})
+
+describe('buildReflectionContext people wiring', () => {
+  let dir: string
+  let paths: MemoryPaths
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-people-'))
+    paths = memoryPaths(dir)
+    await ensureMemoryTree(paths)
+  })
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  it('includes existing people in the reflection prompt built by the engine', async () => {
+    await appendGraph(paths, [
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'person_sam',
+        type: 'person',
+        label: 'Sam',
+      },
+    ])
+
+    const chat = new FakeChatProvider([
+      { text: JSON.stringify(emptyReflectionOutput('A session.')), toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+    const sessionId = await engine.startSession()
+    await engine.appendTranscript(sessionId, {
+      ts: new Date().toISOString(),
+      role: 'user',
+      content: 'Hello there.',
+    })
+    await engine.endSession(sessionId)
+
+    const prompt = chat.requests[0]?.messages[0]?.content ?? ''
+    expect(prompt).toContain('person_sam: Sam')
+
+    await engine.close()
   })
 })

@@ -207,7 +207,8 @@ export class MemoryEngine {
           attributions: [],
           newArcs: [],
           newPersons: [],
-          arcNarratives: [],
+          arcUpdates: [],
+          personUpdates: [],
           constitutionUpdate: null,
         }
       : raw
@@ -226,16 +227,7 @@ export class MemoryEngine {
         `session ${sessionId} constitution update`,
       )
     }
-    for (const narrative of out.arcNarratives) {
-      const arcNode = this.graphState.nodes.get(narrative.arcId)
-      if (arcNode?.type === 'arc' && arcNode.doc) {
-        await this.reindexOrWarn(
-          await readDocument(arcNode.doc),
-          'arc',
-          `session ${sessionId} arc narrative for ${narrative.arcId}`,
-        )
-      }
-    }
+    // Pass two (next task) will reindex any document it actually rewrites.
 
     const commitResult = await commitMemory(this.paths.root, `reflect: session ${sessionId}`)
     if (!commitResult.ok && commitResult.warning) {
@@ -512,7 +504,8 @@ export class MemoryEngine {
     const constitutionDoc = await readDocument(this.paths.constitution)
     const arcs = [...this.graphState.nodes.values()].filter((node) => node.type === 'arc')
     const realms = [...this.graphState.nodes.values()].filter((node) => node.type === 'realm')
-    return { constitution: constitutionDoc.body, arcs, realms }
+    const people = [...this.graphState.nodes.values()].filter((node) => node.type === 'person')
+    return { constitution: constitutionDoc.body, arcs, realms, people }
   }
 
   private async syncGraph(): Promise<void> {
