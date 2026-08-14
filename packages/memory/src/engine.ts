@@ -5,11 +5,12 @@
 //
 // Two pieces of state are cached in memory for cheap synchronous reads:
 // the folded graph (`graphState`, source of truth is graph.jsonl) and a
-// document id to path map (`docPaths`, source of truth is the folder
-// itself, since MemoryIndex exposes no lookup by document id). Both are
-// rebuilt from disk on open() and reindexAll(), and kept in sync after
-// every write that touches the graph or adds a document, so a lost or
-// deleted index.db never loses information, only the SQL projection of it.
+// pair of document id/path maps (`docPaths` id to path, and its sibling
+// `docIdByPath` path to id, source of truth is the folder itself, since
+// MemoryIndex exposes no lookup by document id). All three are rebuilt
+// from disk on open() and reindexAll(), and kept in sync after every write
+// that touches the graph or adds a document, so a lost or deleted index.db
+// never loses information, only the SQL projection of it.
 
 import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -24,6 +25,7 @@ import {
 import { commitMemory } from './gitSync.js'
 import {
   appendGraph,
+  edgeKey,
   type EdgeType,
   type GraphNode,
   type GraphRecord,
@@ -84,6 +86,19 @@ export type GraphQuery =
   | { kind: 'neighbors'; nodeId: string }
   | { kind: 'items_in_arc'; arcId: string }
   | { kind: 'arcs_involving_person'; personId: string }
+
+export interface ForgetInput {
+  what: string
+  nodeIds?: string[]
+  edges?: { edge: EdgeType; from: string; to: string }[]
+  documents?: { docId: string; body: string }[]
+}
+
+export interface ForgetResult {
+  retractedNodes: number
+  retractedEdges: number
+  rewrittenDocuments: string[]
+}
 
 const REALM_STARTER_BODY = 'This realm is new. It grows as we talk.\n'
 const ARC_STARTER_BODY = 'This arc is new. It grows as we talk.\n'
@@ -464,6 +479,90 @@ export class MemoryEngine {
     await commitMemory(this.paths.root, `proposal: ${resolution} ${id}`)
   }
 
+  // Retracts requested nodes and edges by appending op: 'retract' records
+  // (both the original assertion and the retraction stay in graph.jsonl;
+  // nothing is ever erased) and rewrites documents in full through
+  // writeDocumentAtomic. Every document rewrite is validated before any
+  // write happens: a body that would leave the file empty or whitespace
+  // only is rejected, and a rejection here changes nothing on disk, in the
+  // graph, or anywhere else. This never touches a transcript or a session
+  // summary; the only files it can write are the graph log and prose
+  // documents outside the sessions folder.
+  async forget(input: ForgetInput): Promise<ForgetResult> {
+    const targets: { path: string; doc: Document; kind: DocKind }[] = []
+    for (const { docId, body } of input.documents ?? []) {
+      if (body.trim().length === 0) {
+        throw new Error(
+          `forget: the new body for ${docId} is empty or whitespace only; refusing to write it`,
+        )
+      }
+      let path = this.docPaths.get(docId)
+      if (!path) {
+        await this.refreshDocPaths()
+        path = this.docPaths.get(docId)
+      }
+      if (!path) {
+        throw new Error(`forget: no document found for id ${docId}`)
+      }
+      const current = await readDocument(path)
+      targets.push({ path, doc: { ...current, body }, kind: this.kindForDocumentPath(path) })
+    }
+
+    const now = new Date().toISOString()
+    const records: GraphRecord[] = []
+    let retractedNodes = 0
+    let retractedEdges = 0
+
+    for (const nodeId of input.nodeIds ?? []) {
+      const node = this.graphState.nodes.get(nodeId)
+      if (!node) continue
+      records.push({
+        ts: now,
+        op: 'retract',
+        node: nodeId,
+        type: node.type,
+        label: node.label,
+        ...(node.doc !== undefined ? { doc: node.doc } : {}),
+      })
+      retractedNodes += 1
+    }
+
+    for (const e of input.edges ?? []) {
+      const edge = this.graphState.edges.get(edgeKey(e))
+      if (!edge) continue
+      records.push({
+        ts: now,
+        op: 'retract',
+        edge: e.edge,
+        from: e.from,
+        to: e.to,
+        confidence: edge.confidence,
+        confirmed: edge.confirmed,
+        ...(edge.source !== undefined ? { source: edge.source } : {}),
+      })
+      retractedEdges += 1
+    }
+
+    if (records.length > 0) {
+      await appendGraph(this.paths, records)
+      await this.syncGraph()
+    }
+
+    const rewrittenDocuments: string[] = []
+    for (const target of targets) {
+      await writeDocumentAtomic(target.doc)
+      await this.reindexOrWarn(target.doc, target.kind, `forget: ${input.what}`)
+      rewrittenDocuments.push(target.path)
+    }
+
+    const commitResult = await commitMemory(this.paths.root, `forget: ${input.what}`)
+    if (!commitResult.ok && commitResult.warning) {
+      this.warnings.push(commitResult.warning)
+    }
+
+    return { retractedNodes, retractedEdges, rewrittenDocuments }
+  }
+
   async runMaintenance(now: Date = new Date()): Promise<void> {
     this.clearWarnings()
 
@@ -615,6 +714,18 @@ export class MemoryEngine {
           'Content is durably written but missing from search until reindexAll() runs; it is not automatically retried.',
       )
     }
+  }
+
+  // forget is only ever allowed to rewrite prose that is not a transcript
+  // or a session summary: the constitution, an arc, a realm, or a person
+  // page. Anything else is a programming error in the caller, not a case
+  // to degrade quietly.
+  private kindForDocumentPath(path: string): DocKind {
+    if (path === this.paths.constitution) return 'constitution'
+    if (path.startsWith(this.paths.realmsDir)) return 'realm'
+    if (path.startsWith(this.paths.arcsDir)) return 'arc'
+    if (path.startsWith(this.paths.peopleDir)) return 'person'
+    throw new Error(`forget: ${path} is not a document kind forget is allowed to rewrite`)
   }
 
   private clearWarnings(): void {

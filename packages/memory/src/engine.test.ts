@@ -1717,6 +1717,160 @@ describe('MemoryEngine', () => {
       await engine.close()
     })
   })
+
+  describe('forget', () => {
+    let forgetDir: string
+    let forgetPaths: MemoryPaths
+
+    beforeEach(async () => {
+      forgetDir = await mkdtemp(join(tmpdir(), 'openreverie-engine-forget-'))
+      forgetPaths = memoryPaths(forgetDir)
+    })
+
+    afterEach(async () => {
+      await rm(forgetDir, { recursive: true, force: true })
+    })
+
+    it('retracts requested nodes and edges: foldGraph drops them, and the tool reports what actually changed', async () => {
+      await ensureMemoryTree(forgetPaths)
+      await appendGraph(forgetPaths, [
+        { ts: '2026-08-01T00:00:00.000Z', op: 'assert', node: 'person_x', type: 'person', label: 'Alex' },
+        { ts: '2026-08-01T00:00:00.000Z', op: 'assert', node: 'item_x', type: 'item', label: 'A note' },
+        {
+          ts: '2026-08-01T00:00:01.000Z',
+          op: 'assert',
+          edge: 'involves',
+          from: 'item_x',
+          to: 'person_x',
+          confidence: 0.8,
+          confirmed: false,
+        },
+      ])
+
+      const engine = await MemoryEngine.open(forgetDir, fakeDeps(new FakeChatProvider([])))
+      const result = await engine.forget({
+        what: 'a person who does not belong in this record',
+        nodeIds: ['person_x'],
+        edges: [{ edge: 'involves', from: 'item_x', to: 'person_x' }],
+      })
+
+      expect(result).toEqual({ retractedNodes: 1, retractedEdges: 1, rewrittenDocuments: [] })
+
+      const state = await readGraph(forgetPaths)
+      expect(state.nodes.has('person_x')).toBe(false)
+      expect(state.edges.has('involves:item_x:person_x')).toBe(false)
+
+      await engine.close()
+    })
+
+    it('preserves history: the original assert lines stay in graph.jsonl alongside the new retract lines', async () => {
+      await ensureMemoryTree(forgetPaths)
+      await appendGraph(forgetPaths, [
+        { ts: '2026-08-01T00:00:00.000Z', op: 'assert', node: 'person_y', type: 'person', label: 'Sam' },
+      ])
+
+      const engine = await MemoryEngine.open(forgetDir, fakeDeps(new FakeChatProvider([])))
+      await engine.forget({ what: 'a contact who moved away', nodeIds: ['person_y'] })
+
+      const raw = await readFile(forgetPaths.graphLog, 'utf8')
+      const records = raw
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line) as { node?: string; op: string })
+      const forPersonY = records.filter((r) => r.node === 'person_y')
+      expect(forPersonY.map((r) => r.op)).toEqual(['assert', 'retract'])
+
+      await engine.close()
+    })
+
+    it('rejects a document rewrite with an empty or whitespace-only body, changing nothing on disk', async () => {
+      await ensureMemoryTree(forgetPaths)
+      const docId = newId('doc')
+      const docPath = join(forgetPaths.arcsDir, 'marathon.md')
+      await writeDocumentAtomic({
+        path: docPath,
+        meta: { id: docId, name: 'Marathon training', status: 'active' },
+        body: 'Training for the spring marathon.\n',
+      })
+
+      const engine = await MemoryEngine.open(forgetDir, fakeDeps(new FakeChatProvider([])))
+
+      await expect(
+        engine.forget({ what: 'the marathon plan', documents: [{ docId, body: '   \n  ' }] }),
+      ).rejects.toThrow(/empty|whitespace/)
+
+      const stillThere = await readDocument(docPath)
+      expect(stillThere.body).toBe('Training for the spring marathon.\n')
+
+      await engine.close()
+    })
+
+    it('rewrites a document atomically when the new body is real content', async () => {
+      await ensureMemoryTree(forgetPaths)
+      const docId = newId('doc')
+      const docPath = join(forgetPaths.arcsDir, 'marathon.md')
+      await writeDocumentAtomic({
+        path: docPath,
+        meta: { id: docId, name: 'Marathon training', status: 'active' },
+        body: 'Training for the spring marathon, with a friend named Alex.\n',
+      })
+
+      const engine = await MemoryEngine.open(forgetDir, fakeDeps(new FakeChatProvider([])))
+      const result = await engine.forget({
+        what: "Alex's name out of the marathon arc",
+        documents: [{ docId, body: 'Training for the spring marathon.\n' }],
+      })
+
+      expect(result.rewrittenDocuments).toEqual([docPath])
+      const rewritten = await readDocument(docPath)
+      expect(rewritten.body).toBe('Training for the spring marathon.\n')
+
+      await engine.close()
+    })
+
+    it('never writes to a transcript or a session summary', async () => {
+      await ensureMemoryTree(forgetPaths)
+      await appendGraph(forgetPaths, [
+        { ts: '2026-08-01T00:00:00.000Z', op: 'assert', node: 'person_z', type: 'person', label: 'Jo' },
+      ])
+
+      const engine = await MemoryEngine.open(forgetDir, fakeDeps(new FakeChatProvider([])))
+      const startedAt = new Date()
+      const sessionId = await engine.startSession(startedAt)
+      await engine.appendTranscript(sessionId, {
+        ts: startedAt.toISOString(),
+        role: 'user',
+        content: 'Jo and I had a falling out.',
+      })
+
+      const sessionDir = join(forgetPaths.sessionsDir, `${isoDate(startedAt)}-${sessionId}`)
+      const transcriptPath = join(sessionDir, 'transcript.jsonl')
+      const before = await readFile(transcriptPath, 'utf8')
+
+      await engine.forget({ what: 'the falling out with Jo', nodeIds: ['person_z'] })
+
+      const after = await readFile(transcriptPath, 'utf8')
+      expect(after).toBe(before)
+      await expect(readDocument(join(sessionDir, 'summary.md'))).rejects.toThrow()
+
+      await engine.close()
+    })
+
+    it('commits the change with message "forget: <what>"', async () => {
+      await ensureMemoryTree(forgetPaths)
+      await appendGraph(forgetPaths, [
+        { ts: '2026-08-01T00:00:00.000Z', op: 'assert', node: 'person_w', type: 'person', label: 'Pat' },
+      ])
+      const engine = await MemoryEngine.open(forgetDir, fakeDeps(new FakeChatProvider([])))
+
+      await engine.forget({ what: 'an old contact named Pat', nodeIds: ['person_w'] })
+
+      const { stdout } = await execFileAsync('git', ['log', '-1', '--format=%s'], { cwd: forgetDir })
+      expect(stdout.trim()).toBe('forget: an old contact named Pat')
+
+      await engine.close()
+    })
+  })
 })
 
 describe('buildReflectionContext people wiring', () => {
