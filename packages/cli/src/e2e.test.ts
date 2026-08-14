@@ -227,9 +227,9 @@ describe('end-to-end harness', () => {
       for await (const event of session.send(presentDayQuestion)) {
         events.push(event)
       }
-      expect(events.map((e) => e.type)).toEqual(['tool', 'text', 'done'])
-      expect(events[0]).toMatchObject({ type: 'tool', name: 'search_memory' })
-      expect(events[1]).toMatchObject({ type: 'text', text: presentDayAnswer })
+      expect(events.map((e) => e.type)).toEqual(['thinking', 'tool', 'thinking', 'text', 'done'])
+      expect(events[1]).toMatchObject({ type: 'tool', name: 'search_memory' })
+      expect(events[3]).toMatchObject({ type: 'text', text: presentDayAnswer })
 
       script.push({ text: JSON.stringify(presentDayReflection()), toolCalls: [] })
       await session.end()

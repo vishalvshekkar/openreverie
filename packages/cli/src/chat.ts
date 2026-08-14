@@ -12,6 +12,7 @@ import type { EngineDeps, MemoryEngine } from '@openreverie/memory'
 import { listDocuments, memoryPaths, readDocument } from '@openreverie/memory'
 import type { ChatProvider, EmbeddingProvider } from '@openreverie/providers'
 import { cyan, dim, magenta } from './colors.js'
+import { createStatusLine, type StatusLine } from './status.js'
 
 export interface ChatIo {
   question(prompt: string): Promise<string>
@@ -46,6 +47,14 @@ const TOOL_NOTICES: Record<string, string> = {
 export function toolNotice(name: string): string {
   const label = TOOL_NOTICES[name]
   return label !== undefined ? `[${label}]` : `[using: ${name}]`
+}
+
+// The status line's label for a tool call in flight: the same honest
+// wording as toolNotice, but bare, since the status line's own frame and
+// dim styling already carry the "this is a transient status" signal that
+// toolNotice's brackets exist to provide for the permanent notice line.
+function toolStatusLabel(name: string): string {
+  return TOOL_NOTICES[name] ?? `using: ${name}`
 }
 
 function errorMessage(err: unknown): string {
@@ -96,18 +105,23 @@ async function runGreeting(
   colorEnabled: boolean,
   interruptLevel: () => number,
   setResponding: (value: boolean) => void,
+  statusLine: StatusLine,
 ): Promise<void> {
   let tagged = false
   setResponding(true)
   try {
     for await (const event of session.greet()) {
-      if (event.type === 'text') {
+      if (event.type === 'thinking') {
+        statusLine.start('thinking')
+      } else if (event.type === 'text') {
+        statusLine.stop()
         if (!tagged) {
           io.write(magenta('reverie> ', colorEnabled))
           tagged = true
         }
         io.write(event.text)
       } else if (event.type === 'done' && tagged) {
+        statusLine.stop()
         io.write('\n')
       }
       if (interruptLevel() >= 2) {
@@ -117,6 +131,10 @@ async function runGreeting(
   } catch {
     // Silent abandon, per the greeting's own degradation rule.
   } finally {
+    // Neither the catch above nor a plain abandon (break on the second
+    // Ctrl-C) ever emits 'done', so the line can only be relied on to stop
+    // here, never by keying off 'done' alone.
+    statusLine.stop()
     setResponding(false)
   }
 }
@@ -128,8 +146,30 @@ export async function runChat(deps: {
   io: ChatIo
   toolDeps?: ToolDeps
   colorEnabled?: boolean
+  setInterval?: (fn: () => void, ms: number) => unknown
+  clearInterval?: (handle: unknown) => void
+  now?: () => number
 }): Promise<void> {
-  const { engine, config, chat, io, toolDeps, colorEnabled = false } = deps
+  const {
+    engine,
+    config,
+    chat,
+    io,
+    toolDeps,
+    colorEnabled = false,
+    setInterval: setIntervalDep = (fn: () => void, ms: number) => setInterval(fn, ms),
+    clearInterval: clearIntervalDep = (handle: unknown) =>
+      clearInterval(handle as Parameters<typeof clearInterval>[0]),
+    now = () => Date.now(),
+  } = deps
+
+  const statusLine = createStatusLine({
+    write: io.write,
+    colorEnabled,
+    setInterval: setIntervalDep,
+    clearInterval: clearIntervalDep,
+    now,
+  })
 
   io.write(`Memory folder: ${config.memoryDir}. Safety mode: ${config.safety.mode}.\n\n`)
 
@@ -170,6 +210,7 @@ export async function runChat(deps: {
     (value) => {
       responding = value
     },
+    statusLine,
   )
 
   if (interruptLevel >= 2) {
@@ -206,7 +247,10 @@ export async function runChat(deps: {
     responding = true
     try {
       for await (const event of session.send(line)) {
-        if (event.type === 'text') {
+        if (event.type === 'thinking') {
+          statusLine.start('thinking')
+        } else if (event.type === 'text') {
+          statusLine.stop()
           sawText = true
           if (!taggedThisTurn) {
             io.write(magenta('reverie> ', colorEnabled))
@@ -214,8 +258,11 @@ export async function runChat(deps: {
           }
           io.write(event.text)
         } else if (event.type === 'tool') {
+          statusLine.stop()
           io.write(`${dim(toolNotice(event.name), colorEnabled)}\n`)
+          statusLine.start(toolStatusLabel(event.name))
         } else if (event.type === 'done') {
+          statusLine.stop()
           io.write('\n')
           if (!sawText) {
             if (!taggedThisTurn) {
@@ -230,10 +277,15 @@ export async function runChat(deps: {
         }
       }
     } catch (err) {
+      statusLine.stop()
       io.write(
         `\nI could not reach the model: ${errorMessage(err)}. Your message is saved; try again, or type /bye.\n`,
       )
     } finally {
+      // Neither error path above (the catch here, or runTurn rethrowing
+      // out of it) ever emits 'done', so the line is stopped here
+      // unconditionally rather than relying on ever seeing that event.
+      statusLine.stop()
       responding = false
     }
 

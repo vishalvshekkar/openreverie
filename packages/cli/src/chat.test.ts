@@ -838,6 +838,101 @@ describe('runChat speaker rendering', () => {
   })
 })
 
+describe('runChat status line', () => {
+  let dir: string
+
+  beforeEach(async () => {
+    dir = await mkdtemp(path.join(tmpdir(), 'openreverie-chat-status-'))
+  })
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  it('shows an animated thinking line that clears before the reply text, when colorEnabled is true', async () => {
+    const chat = new FakeChatProvider([
+      { text: 'Good to see you.', toolCalls: [] },
+      { text: 'Hi there.', toolCalls: [] },
+      { text: emptyReflectionJson('Said hi.'), toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const { io, output } = scriptedIo(['hello', '/bye'])
+
+    await runChat({
+      engine,
+      config,
+      chat,
+      io,
+      colorEnabled: true,
+      setInterval: () => 1,
+      clearInterval: () => {},
+      now: () => 0,
+    })
+
+    const joined = output.join('')
+    const clearIndex = joined.indexOf('\r\x1b[K')
+    const textIndex = joined.indexOf('Hi there.')
+    expect(clearIndex).toBeGreaterThanOrEqual(0)
+    expect(clearIndex).toBeLessThan(textIndex)
+    expect(joined).toContain('thinking')
+
+    await engine.close()
+  })
+
+  it('shows the honest tool label while a tool call runs, distinct from the permanent bracketed notice', async () => {
+    const chat = new FakeChatProvider([
+      { text: 'Good to see you.', toolCalls: [] },
+      {
+        text: '',
+        toolCalls: [
+          { id: 'call_1', name: 'search_memory', arguments: JSON.stringify({ query: 'run' }) },
+        ],
+      },
+      { text: 'Found something.', toolCalls: [] },
+      { text: emptyReflectionJson('Looked something up.'), toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const { io, output } = scriptedIo(['what did we talk about', '/bye'])
+
+    await runChat({
+      engine,
+      config,
+      chat,
+      io,
+      colorEnabled: true,
+      setInterval: () => 1,
+      clearInterval: () => {},
+      now: () => 0,
+    })
+
+    const joined = output.join('')
+    expect(joined).toContain('searching memory')
+    expect(joined).toContain('[searching memory]')
+
+    await engine.close()
+  })
+
+  it('stays completely silent when colorEnabled is false, matching the existing no-escape guarantee', async () => {
+    const chat = new FakeChatProvider([
+      { text: 'Good to see you.', toolCalls: [] },
+      { text: 'Hi there.', toolCalls: [] },
+      { text: emptyReflectionJson('Said hi.'), toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const { io, output } = scriptedIo(['hello', '/bye'])
+
+    await runChat({ engine, config, chat, io })
+
+    const joined = output.join('')
+    expect(joined).not.toContain('\x1b[')
+
+    await engine.close()
+  })
+})
+
 describe('createStylePersister', () => {
   it('patches only the given axes and persists the result atomically to the same path', async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'openreverie-style-persist-'))
