@@ -39,6 +39,11 @@ function emptyReflectionOutput(summary: string): ReflectionOutput {
   }
 }
 
+// Most tests in this file exercise the graph/summary/narrative machinery,
+// not materialization itself (that is MemoryEngine's job, tested at the
+// engine level), so they pass this no-op in as materializeNew.
+async function noopMaterialize(): Promise<void> {}
+
 describe('reflection', () => {
   let dir: string
   let paths: MemoryPaths
@@ -417,7 +422,7 @@ describe('reflection', () => {
       const out = emptyReflectionOutput('A session.')
       const narratives = new Map([['arc_health', 'Rewritten by pass two.']])
 
-      await applyReflection(paths, out, sessionId, [], now, narratives)
+      await applyReflection(paths, out, sessionId, [], now, narratives, noopMaterialize)
 
       const arcDoc = await readDocument(arcDocPath)
       expect(arcDoc.body).toBe('Rewritten by pass two.\n')
@@ -428,7 +433,7 @@ describe('reflection', () => {
       const out = emptyReflectionOutput('A session.')
       const before = await readDocument(arcDocPath)
 
-      await applyReflection(paths, out, sessionId, [], now, new Map())
+      await applyReflection(paths, out, sessionId, [], now, new Map(), noopMaterialize)
 
       const after = await readDocument(arcDocPath)
       expect(after.body).toBe(before.body)
@@ -453,7 +458,15 @@ describe('reflection', () => {
         constitutionUpdate: null,
       }
 
-      const result = await applyReflection(paths, out, sessionId, [], now, new Map())
+      const result = await applyReflection(
+        paths,
+        out,
+        sessionId,
+        [],
+        now,
+        new Map(),
+        noopMaterialize,
+      )
 
       const runItem = result.mintedItems[0]
       const deadlineItem = result.mintedItems[1]
@@ -537,7 +550,7 @@ describe('reflection', () => {
         ],
       }
 
-      await applyReflection(paths, out, sessionId, [], now, new Map())
+      await applyReflection(paths, out, sessionId, [], now, new Map(), noopMaterialize)
 
       const pending = await pendingProposals(paths)
       expect(pending).toHaveLength(0)
@@ -550,7 +563,7 @@ describe('reflection', () => {
         constitutionUpdate: 'Updated constitution body.',
       }
 
-      await applyReflection(paths, out, sessionId, [], now, new Map())
+      await applyReflection(paths, out, sessionId, [], now, new Map(), noopMaterialize)
 
       const constitutionDoc = await readDocument(paths.constitution)
       expect(constitutionDoc.body).toBe('Updated constitution body.\n')
@@ -574,7 +587,15 @@ describe('reflection', () => {
       // The engine wraps a degraded result into a full ReflectionOutput before
       // calling applyReflection; this test exercises that wrapped shape.
       const wrapped = emptyReflectionOutput((degraded as { summary: string }).summary)
-      const result = await applyReflection(paths, wrapped, sessionId, [], now, new Map())
+      const result = await applyReflection(
+        paths,
+        wrapped,
+        sessionId,
+        [],
+        now,
+        new Map(),
+        noopMaterialize,
+      )
 
       expect(result.summaryDoc.body).toBe('still nope\n')
       expect(result.summaryDoc.meta.items).toEqual([])
@@ -599,7 +620,15 @@ describe('reflection', () => {
         { id: newId('item'), text: 'Called mom', kind: 'event', ts: '2026-08-13T08:05:00.000Z' },
       ]
 
-      const result = await applyReflection(paths, out, sessionId, liveItems, now, new Map())
+      const result = await applyReflection(
+        paths,
+        out,
+        sessionId,
+        liveItems,
+        now,
+        new Map(),
+        noopMaterialize,
+      )
 
       const items = result.summaryDoc.meta.items as ReflectionItem[]
       expect(items).toHaveLength(2)
@@ -623,11 +652,42 @@ describe('reflection', () => {
       // lives outside the session dir) still succeeds.
       await chmod(sessionDir, 0o500)
       try {
-        await expect(applyReflection(paths, out, sessionId, [], now, new Map())).rejects.toThrow()
+        await expect(
+          applyReflection(paths, out, sessionId, [], now, new Map(), noopMaterialize),
+        ).rejects.toThrow()
       } finally {
         await chmod(sessionDir, 0o700)
       }
 
+      const graph = await readGraph(paths)
+      const itemNodes = [...graph.nodes.values()].filter((node) => node.type === 'item')
+      expect(itemNodes).toHaveLength(1)
+
+      await expect(readDocument(join(sessionDir, 'summary.md'))).rejects.toThrow()
+    })
+
+    it('runs materializeNew before the summary write, and leaves the session unreflected and retryable if it throws', async () => {
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('Should not fully persist either.'),
+        items: [{ text: 'Went for a run', kind: 'event' }],
+      }
+      let calledWith: ReflectionItem[] | undefined
+      const failingMaterialize = async (mintedItems: ReflectionItem[]): Promise<void> => {
+        calledWith = mintedItems
+        throw new Error('materialization failed')
+      }
+
+      await expect(
+        applyReflection(paths, out, sessionId, [], now, new Map(), failingMaterialize),
+      ).rejects.toThrow('materialization failed')
+
+      // It was actually invoked, with the minted item, before the throw.
+      expect(calledWith).toHaveLength(1)
+      expect(calledWith?.[0]?.text).toBe('Went for a run')
+
+      // Graph writes made before materializeNew still landed (harmless on
+      // retry), but the summary write after it never ran: the session is
+      // still unreflected.
       const graph = await readGraph(paths)
       const itemNodes = [...graph.nodes.values()].filter((node) => node.type === 'item')
       expect(itemNodes).toHaveLength(1)
@@ -661,7 +721,7 @@ describe('reflection', () => {
       )
       expect(firstNarratives.get('arc_health')).toBe(firstRewrittenBody)
 
-      await applyReflection(paths, firstOut, sessionId, [], now, firstNarratives)
+      await applyReflection(paths, firstOut, sessionId, [], now, firstNarratives, noopMaterialize)
 
       const afterFirst = await readDocument(arcDocPath)
       expect(afterFirst.body).toBe(firstRewrittenBody)
@@ -696,7 +756,15 @@ describe('reflection', () => {
       const secondPrompt = secondChat.requests[0]?.messages[0]?.content ?? ''
       expect(secondPrompt).toContain('Ran a 5k to start marathon training')
 
-      await applyReflection(paths, secondOut, secondSessionId, [], now, secondNarratives)
+      await applyReflection(
+        paths,
+        secondOut,
+        secondSessionId,
+        [],
+        now,
+        secondNarratives,
+        noopMaterialize,
+      )
 
       const afterSecond = await readDocument(arcDocPath)
       expect(afterSecond.body).toBe(secondRewrittenBody)
@@ -722,7 +790,7 @@ describe('reflection', () => {
       const narratives = await resolveNarratives(paths, graphState, out, chat, 'fake-model')
       expect(narratives.has('arc_health')).toBe(false)
 
-      await applyReflection(paths, out, sessionId, [], now, narratives)
+      await applyReflection(paths, out, sessionId, [], now, narratives, noopMaterialize)
 
       const after = await readDocument(arcDocPath)
       expect(after.body).toBe(before.body)

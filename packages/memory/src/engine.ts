@@ -223,7 +223,58 @@ export class MemoryEngine {
       this.deps.chat,
       this.deps.reflectionModel,
     )
-    const result = await applyReflection(this.paths, out, sessionId, liveItems, now, narratives)
+
+    // Reflection no longer proposes new arcs or persons; it saves them
+    // directly, using the itemIds applyReflection mints. This runs as a
+    // callback INSIDE applyReflection's phase two, before the summary
+    // write, not after applyReflection returns: summary.md's presence is
+    // what marks a session reflected, so materialization must complete
+    // before that write or a crash here would permanently mark the session
+    // reflected while the arc or person it should have created never
+    // materializes, with no retry path left. An entry whose itemIndexes
+    // resolve to no items is dropped silently rather than materializing an
+    // arc or person with nothing attached to it. Nothing here was
+    // affirmed by the user, so confirmed is false on every edge, unlike
+    // materializeProposal's confirmed: true for an accepted proposal.
+    const materializeNew = async (mintedItems: ReflectionItem[]): Promise<void> => {
+      for (const arc of out.newArcs) {
+        const itemIds = resolveItemIds(arc.itemIndexes, mintedItems)
+        if (itemIds.length === 0) {
+          continue
+        }
+        await this.createArc({
+          name: arc.name,
+          realm: arc.realm,
+          itemIds,
+          narrative: arc.narrative,
+          source: sessionId,
+          confirmed: false,
+        })
+      }
+      for (const person of out.newPersons) {
+        const itemIds = resolveItemIds(person.itemIndexes, mintedItems)
+        if (itemIds.length === 0) {
+          continue
+        }
+        await this.createPersonPage({
+          name: person.name,
+          itemIds,
+          narrative: person.narrative,
+          source: sessionId,
+          confirmed: false,
+        })
+      }
+    }
+
+    const result = await applyReflection(
+      this.paths,
+      out,
+      sessionId,
+      liveItems,
+      now,
+      narratives,
+      materializeNew,
+    )
     this.liveItems.delete(sessionId)
 
     await this.syncGraph()
@@ -245,37 +296,6 @@ export class MemoryEngine {
           `session ${sessionId} narrative rewrite for ${id}`,
         )
       }
-    }
-
-    // Reflection no longer proposes new arcs or persons; it saves them
-    // directly, right here, using the itemIds applyReflection already
-    // minted. An entry whose itemIndexes resolve to no items is dropped
-    // silently rather than materializing an arc or person with nothing
-    // attached to it.
-    for (const arc of out.newArcs) {
-      const itemIds = resolveItemIds(arc.itemIndexes, result.mintedItems)
-      if (itemIds.length === 0) {
-        continue
-      }
-      await this.createArc({
-        name: arc.name,
-        realm: arc.realm,
-        itemIds,
-        narrative: arc.narrative,
-        source: sessionId,
-      })
-    }
-    for (const person of out.newPersons) {
-      const itemIds = resolveItemIds(person.itemIndexes, result.mintedItems)
-      if (itemIds.length === 0) {
-        continue
-      }
-      await this.createPersonPage({
-        name: person.name,
-        itemIds,
-        narrative: person.narrative,
-        source: sessionId,
-      })
     }
 
     const commitResult = await commitMemory(this.paths.root, `reflect: session ${sessionId}`)
@@ -458,11 +478,15 @@ export class MemoryEngine {
       try {
         await this._doEndSession(session.sessionId)
       } catch {
-        // reflectSession/applyReflection failed before summary.md was
-        // written (_doEndSession's own reindex and commit steps no longer
-        // throw; see reindexOrWarn below), so the session stays
-        // unreflected in its frontmatter and is retried on the next pass.
-        // The transcript itself is never at risk.
+        // reflectSession, applyReflection's own writes, or the
+        // materializeNew callback it invokes (creating a new arc or
+        // person) all failed before summary.md was written (_doEndSession's
+        // own reindex and commit steps no longer throw; see reindexOrWarn
+        // below), so the session stays unreflected in its frontmatter and
+        // is retried on the next pass. The transcript itself is never at
+        // risk. This is caught silently, with no warning recorded, the
+        // same way every other pre-summary failure here always has been:
+        // the retry on the next pass is the recovery, not a warning.
       }
     }
 
@@ -650,6 +674,10 @@ export class MemoryEngine {
         itemIds: payload.itemIds,
         narrative: '',
         source: proposal.source,
+        // The user explicitly accepted this proposal, so every edge it
+        // creates is confirmed, unlike the direct materialization path in
+        // _doEndSession where nothing was ever put in front of anyone.
+        confirmed: true,
       })
       return
     }
@@ -661,6 +689,7 @@ export class MemoryEngine {
         itemIds: payload.itemIds,
         narrative: '',
         source: proposal.source,
+        confirmed: true,
       })
       return
     }
@@ -700,6 +729,10 @@ export class MemoryEngine {
     itemIds: string[]
     narrative: string
     source: string
+    // Whether the user explicitly affirmed this arc, not whether it is
+    // "approved": true for an accepted proposal, false for reflection's
+    // direct materialization, which nobody has seen yet.
+    confirmed: boolean
   }): Promise<GraphNode> {
     const now = new Date()
     const nowIso = now.toISOString()
@@ -734,7 +767,7 @@ export class MemoryEngine {
         from: arcNodeId,
         to: realmNodeId,
         confidence: 1,
-        confirmed: true,
+        confirmed: input.confirmed,
         source: input.source,
       },
     ]
@@ -746,7 +779,7 @@ export class MemoryEngine {
         from: itemId,
         to: arcNodeId,
         confidence: 1,
-        confirmed: true,
+        confirmed: input.confirmed,
         source: input.source,
       })
     }
@@ -771,6 +804,9 @@ export class MemoryEngine {
     itemIds: string[]
     narrative: string
     source: string
+    // Same meaning as createArc's confirmed: true for an accepted
+    // proposal, false for reflection's direct materialization.
+    confirmed: boolean
   }): Promise<GraphNode> {
     const now = new Date()
     const nowIso = now.toISOString()
@@ -807,7 +843,7 @@ export class MemoryEngine {
         from: itemId,
         to: personNodeId,
         confidence: 1,
-        confirmed: true,
+        confirmed: input.confirmed,
         source: input.source,
       })
     }
@@ -854,7 +890,11 @@ export class MemoryEngine {
       { ts: nowIso, op: 'assert', node: realmNodeId, type: 'realm', label: realm, doc: realmPath },
     ])
     await this.syncGraph()
-    await this.reindexDocument(realmDoc, 'realm')
+    // reindexOrWarn, not reindexDocument: this runs inside createArc, which
+    // runs inside both materializeProposal and reflection's direct
+    // materialization, neither of which may let an indexing failure throw
+    // out and abort an otherwise-successful arc creation.
+    await this.reindexOrWarn(realmDoc, 'realm', `realm page for ${realm}`)
     return realmNodeId
   }
 }

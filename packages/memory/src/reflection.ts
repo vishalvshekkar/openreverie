@@ -7,10 +7,12 @@
 // applyReflection is the deterministic half: it takes a ReflectionOutput and
 // writes the session summary, mints item ids, and appends graph records.
 // Every attribution becomes a part_of edge carrying the model's confidence,
-// whatever it is; the caller (MemoryEngine) is responsible for materializing
-// newArcs and newPersons directly, using the mintedItems this function
-// returns. It never touches the network, and it never writes to
-// proposals.jsonl.
+// whatever it is. newArcs and newPersons are materialized by the
+// materializeNew callback the caller (MemoryEngine) injects, invoked here
+// before the summary write so a failure inside it leaves the session
+// unreflected and retryable rather than silently losing the new arc or
+// person. applyReflection itself never touches the network (the callback is
+// a plain function, not a ChatProvider) and never writes to proposals.jsonl.
 
 import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -445,6 +447,7 @@ export async function applyReflection(
   liveItems: ReflectionItem[],
   now: Date,
   narratives: Map<string, string>,
+  materializeNew: (mintedItems: ReflectionItem[]) => Promise<void>,
 ): Promise<{
   summaryDoc: Document
   autoAsserted: number
@@ -515,10 +518,13 @@ export async function applyReflection(
     autoAsserted += 1
   }
 
-  // newArcs and newPersons are materialized directly by the caller (see
-  // MemoryEngine.createArc / createPersonPage), using mintedItems returned
-  // below. applyReflection itself never creates a proposal for them, and it
-  // never writes to proposals.jsonl at all.
+  // newArcs and newPersons are materialized by the injected materializeNew
+  // callback (see MemoryEngine.createArc / createPersonPage), invoked below
+  // in phase 2, before the summary write. applyReflection itself never
+  // creates a proposal for them, and it never writes to proposals.jsonl at
+  // all. The callback is a plain function, not a ChatProvider: reflection
+  // stays free of any model dependency, which is what keeps this function
+  // testable without a fake chat script for every case.
 
   let constitutionWrite: PendingWrite | null = null
   if (out.constitutionUpdate !== null) {
@@ -554,8 +560,12 @@ export async function applyReflection(
   // duplicate item nodes; that is visible in the graph and harmless.
   // Writing summary.md first would be worse: a crash after it would
   // permanently mark the session reflected while silently dropping graph
-  // edges and document rewrites, with nothing left to notice the loss or
-  // retry it.
+  // edges, document rewrites, and any new arc or person materializeNew was
+  // about to create, with nothing left to notice the loss or retry it.
+  // materializeNew therefore runs here too, before the summary write, not
+  // after applyReflection returns: a failure inside it must leave the
+  // session unreflected and retryable, the same guarantee every other
+  // phase-2 write already has.
   await appendGraph(paths, graphRecords)
 
   for (const write of narrativeWrites) {
@@ -565,6 +575,8 @@ export async function applyReflection(
   if (constitutionWrite) {
     await writeDocumentAtomic(constitutionWrite)
   }
+
+  await materializeNew(mintedItems)
 
   await writeDocumentAtomic({
     path: summaryPath,

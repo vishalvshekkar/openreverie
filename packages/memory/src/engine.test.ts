@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -174,9 +174,11 @@ describe('MemoryEngine', () => {
       expect(await readDocument(newArc.doc)).toMatchObject({
         body: 'Presentation prep starts here.\n',
       })
+      // Direct materialization from reflection: nobody affirmed this arc,
+      // so confirmed is false, unlike an accepted proposal's confirmed: true.
       expect(graph.edges.get(`part_of:${anxiousItem.id}:${newArc.id}`)).toMatchObject({
         confidence: 1,
-        confirmed: true,
+        confirmed: false,
       })
       expect(engine.listArcs()).toHaveLength(2)
       expect(engine.listRealms()).toHaveLength(1)
@@ -274,6 +276,7 @@ describe('MemoryEngine', () => {
         [],
         yesterday,
         new Map(),
+        async () => {},
       )
 
       // Enough scripted replies for: the stale session's reflection call,
@@ -421,6 +424,61 @@ describe('MemoryEngine', () => {
       const filenames = arcDocs.map((d) => d.path.split('/').pop())
       expect(filenames).toContain('marathon-training.md')
       expect(filenames).toContain('marathon-training-2.md')
+    })
+
+    it('resolves a new_arc proposal and keeps its edges even when reindexing the new arc page fails', async () => {
+      // Symmetric with 'resolves a new_person proposal and keeps its edges
+      // even when reindexing the new page fails' below: swap in an engine
+      // backed by an embeddings provider that always throws, so createArc's
+      // reindexOrWarn call fails. resolveProposal must still complete: the
+      // proposal must clear, the arc and realm nodes and their pages must
+      // exist, and the part_of/in edges must be appended, none of which
+      // should depend on the arc page ever making it into search.
+      await engine.close()
+      engine = await MemoryEngine.open(dir, {
+        chat: new FakeChatProvider([]),
+        embeddings: new ThrowingEmbeddingProvider(),
+        reflectionModel: 'fake-reflect',
+        embeddingModel: 'fake-embed',
+      })
+
+      const itemId = newId('item')
+      const proposal: Proposal = {
+        id: newId('prop'),
+        ts: new Date().toISOString(),
+        kind: 'new_arc',
+        summary: 'Track marathon training as an arc.',
+        payload: { name: 'Marathon Training', realm: 'Fitness', itemIds: [itemId] },
+        source: 'session_seed',
+      }
+      await appendProposals(paths, [proposal])
+
+      await expect(engine.resolveProposal(proposal.id, 'accepted')).resolves.toBeUndefined()
+
+      const pending = await pendingProposals(paths)
+      expect(pending.find((p) => p.id === proposal.id)).toBeUndefined()
+
+      const graph = await readGraph(paths)
+      const arcNode = [...graph.nodes.values()].find(
+        (n) => n.type === 'arc' && n.label === 'Marathon Training',
+      )
+      const realmNode = [...graph.nodes.values()].find(
+        (n) => n.type === 'realm' && n.label === 'Fitness',
+      )
+      if (!arcNode || !realmNode) throw new Error('expected arc and realm nodes to be created')
+      if (!arcNode.doc) throw new Error('expected the arc node to carry a doc pointer')
+
+      expect(graph.edges.get(`in:${arcNode.id}:${realmNode.id}`)).toMatchObject({
+        confirmed: true,
+        confidence: 1,
+      })
+      expect(graph.edges.get(`part_of:${itemId}:${arcNode.id}`)).toMatchObject({
+        confirmed: true,
+        confidence: 1,
+      })
+
+      const arcDoc = await readDocument(arcNode.doc)
+      expect(arcDoc.body).toBe('This arc is new. It grows as we talk.\n')
     })
 
     it('materializes a new person as a page with a doc pointer set on the node', async () => {
@@ -667,6 +725,29 @@ describe('MemoryEngine', () => {
       )
       expect(arcDoc.meta.status).toBe('active')
 
+      // Direct materialization from reflection: nobody affirmed this arc,
+      // so confirmed is false on both its edges, unlike an accepted
+      // proposal's confirmed: true (see 'materializes a new arc together
+      // with a brand-new realm...' in the resolveProposal block above,
+      // which is otherwise identical: same node shape, same starter-body
+      // fallback rule, same one-appendGraph-call structure).
+      const itemNode = [...graph.nodes.values()].find(
+        (n) => n.type === 'item' && n.label === 'Went for a long run',
+      )
+      if (!itemNode) throw new Error('expected the minted item node')
+      expect(graph.edges.get(`part_of:${itemNode.id}:${arcNode.id}`)).toMatchObject({
+        confidence: 1,
+        confirmed: false,
+      })
+      const realmNode = [...graph.nodes.values()].find(
+        (n) => n.type === 'realm' && n.label === 'Fitness',
+      )
+      if (!realmNode) throw new Error('expected a realm node to be created')
+      expect(graph.edges.get(`in:${arcNode.id}:${realmNode.id}`)).toMatchObject({
+        confidence: 1,
+        confirmed: false,
+      })
+
       const pending = await pendingProposals(paths)
       expect(pending).toHaveLength(0)
 
@@ -710,13 +791,16 @@ describe('MemoryEngine', () => {
 
       // The involves edge for the item that mentioned Sam must exist too,
       // asserted in the same appendGraph call as the person node itself.
+      // Direct materialization from reflection: nobody affirmed this
+      // person, so confirmed is false, unlike an accepted proposal's
+      // confirmed: true (see 'materializes a new person as a page...' above).
       const itemNode = [...graph.nodes.values()].find(
         (n) => n.type === 'item' && n.label === 'Ran with Sam again',
       )
       if (!itemNode) throw new Error('expected the minted item node')
       expect(graph.edges.get(`involves:${itemNode.id}:${personNode.id}`)).toMatchObject({
         confidence: 1,
-        confirmed: true,
+        confirmed: false,
       })
 
       const pending = await pendingProposals(paths)
@@ -953,6 +1037,139 @@ describe('MemoryEngine', () => {
       // existing body before asking the model to rewrite it.
       const rewritePrompt = chat.requests[1]?.messages[0]?.content ?? ''
       expect(rewritePrompt).toContain('Ran a 5k last week')
+
+      await engine.close()
+    })
+
+    it('leaves the session unreflected and retryable if direct arc materialization fails, with summary.md never written', async () => {
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('Started training for a marathon.'),
+        items: [{ text: 'Went for a long run', kind: 'event' }],
+        newArcs: [
+          {
+            name: 'Marathon Training',
+            realm: 'Fitness',
+            reason: 'mentioned training for a marathon',
+            itemIndexes: [0],
+            narrative: 'Training for a marathon this fall.',
+          },
+        ],
+      }
+      const chat = new FakeChatProvider([
+        { text: JSON.stringify(out), toolCalls: [] },
+        { text: JSON.stringify(out), toolCalls: [] },
+      ])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      const sessionId = await engine.startSession()
+      await engine.appendTranscript(sessionId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'Went for a long run, training for a marathon this fall.',
+      })
+
+      // Remove write permission on arcsDir so createArc's writeDocumentAtomic
+      // call, invoked as the materializeNew callback inside applyReflection's
+      // phase two, fails partway through endSession. Without Finding 2's
+      // fix this would still leave summary.md written and the session
+      // permanently marked reflected, with the arc it should have created
+      // gone for good.
+      await chmod(paths.arcsDir, 0o500)
+      try {
+        await expect(engine.endSession(sessionId)).rejects.toThrow()
+      } finally {
+        await chmod(paths.arcsDir, 0o700)
+      }
+
+      const sessionDir = join(paths.sessionsDir, `${isoDate(new Date())}-${sessionId}`)
+      await expect(readDocument(join(sessionDir, 'summary.md'))).rejects.toThrow()
+
+      const graph = await readGraph(paths)
+      expect([...graph.nodes.values()].some((n) => n.label === 'Marathon Training')).toBe(false)
+
+      // Retryable: with the permission restored, endSession on the same
+      // sessionId (still unreflected, since summary.md never landed) now
+      // succeeds and actually creates the arc.
+      await engine.endSession(sessionId)
+      const summaryDoc = await readDocument(join(sessionDir, 'summary.md'))
+      expect(summaryDoc.body.length).toBeGreaterThan(0)
+      const graphAfterRetry = await readGraph(paths)
+      expect([...graphAfterRetry.nodes.values()].some((n) => n.label === 'Marathon Training')).toBe(
+        true,
+      )
+
+      await engine.close()
+    })
+
+    it('runMaintenance over a stale session whose direct materialization fails leaves it unreflected with no warning, and reflects it once retryable', async () => {
+      const now = new Date()
+      const twoDaysAgo = new Date(
+        Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - 2),
+      )
+
+      const staleStore = await SessionStore.start(paths, twoDaysAgo)
+      await staleStore.appendLine({
+        ts: twoDaysAgo.toISOString(),
+        role: 'user',
+        content: 'Went for a long run, training for a marathon this fall.',
+      })
+
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('Started training for a marathon.'),
+        items: [{ text: 'Went for a long run', kind: 'event' }],
+        newArcs: [
+          {
+            name: 'Marathon Training',
+            realm: 'Fitness',
+            reason: 'mentioned training for a marathon',
+            itemIndexes: [0],
+            narrative: 'Training for a marathon this fall.',
+          },
+        ],
+      }
+      // A mutable script array, like the e2e harness uses: FakeChatProvider
+      // holds this same array by reference, so pushing another scripted
+      // reply after construction lets a later runMaintenance retry draw it.
+      const script = [{ text: JSON.stringify(out), toolCalls: [] }]
+      const chat = new FakeChatProvider(script)
+
+      // runMaintenance's own _doEndSession call runs inside MemoryEngine.open
+      // (via open's own call to runMaintenance), so arcsDir must already be
+      // read-only before open() rather than after.
+      await chmod(paths.arcsDir, 0o500)
+      let engine: MemoryEngine
+      try {
+        engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      } finally {
+        await chmod(paths.arcsDir, 0o700)
+      }
+
+      // Caught silently, exactly like every other pre-summary failure
+      // runMaintenance's loop has always swallowed: no warning is recorded,
+      // and the retry on the next pass is the recovery.
+      expect(engine.warnings).toEqual([])
+
+      const staleSessionDir = join(
+        paths.sessionsDir,
+        `${isoDate(twoDaysAgo)}-${staleStore.sessionId}`,
+      )
+      await expect(readDocument(join(staleSessionDir, 'summary.md'))).rejects.toThrow()
+
+      const graph = await readGraph(paths)
+      expect([...graph.nodes.values()].some((n) => n.label === 'Marathon Training')).toBe(false)
+
+      // arcsDir is writable again now; a second scripted reflection lets
+      // the retry actually succeed.
+      script.push({ text: JSON.stringify(out), toolCalls: [] })
+      await engine.runMaintenance()
+
+      expect(engine.warnings).toEqual([])
+      const summaryDoc = await readDocument(join(staleSessionDir, 'summary.md'))
+      expect(summaryDoc.body.length).toBeGreaterThan(0)
+      const graphAfterRetry = await readGraph(paths)
+      expect([...graphAfterRetry.nodes.values()].some((n) => n.label === 'Marathon Training')).toBe(
+        true,
+      )
 
       await engine.close()
     })
