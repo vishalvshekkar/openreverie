@@ -270,6 +270,7 @@ describe('MemoryEngine', () => {
         yesterdayStore.sessionId,
         [],
         yesterday,
+        new Map(),
       )
 
       // Enough scripted replies for: the stale session's reflection call,

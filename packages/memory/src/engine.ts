@@ -44,6 +44,7 @@ import {
   type ReflectionItemKind,
   type ReflectionOutput,
   reflectSession,
+  resolveNarratives,
 } from './reflection.js'
 import { type SearchFilters, searchMemory } from './retrieval.js'
 import {
@@ -214,7 +215,14 @@ export class MemoryEngine {
       : raw
 
     const liveItems = this.liveItems.get(sessionId) ?? []
-    const result = await applyReflection(this.paths, out, sessionId, liveItems, now)
+    const narratives = await resolveNarratives(
+      this.paths,
+      this.graphState,
+      out,
+      this.deps.chat,
+      this.deps.reflectionModel,
+    )
+    const result = await applyReflection(this.paths, out, sessionId, liveItems, now, narratives)
     this.liveItems.delete(sessionId)
 
     await this.syncGraph()
@@ -227,7 +235,16 @@ export class MemoryEngine {
         `session ${sessionId} constitution update`,
       )
     }
-    // Pass two (next task) will reindex any document it actually rewrites.
+    for (const [id] of narratives) {
+      const node = this.graphState.nodes.get(id)
+      if (node?.doc) {
+        await this.reindexOrWarn(
+          await readDocument(node.doc),
+          node.type === 'person' ? 'person' : 'arc',
+          `session ${sessionId} narrative rewrite for ${id}`,
+        )
+      }
+    }
 
     const commitResult = await commitMemory(this.paths.root, `reflect: session ${sessionId}`)
     if (!commitResult.ok && commitResult.warning) {
