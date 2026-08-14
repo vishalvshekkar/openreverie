@@ -1,6 +1,6 @@
 {
   "name": "@openreverie/core",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "The openreverie agent core: conversation loop, context assembly, tool dispatch, and safety mode enforcement.",
   "homepage": "https://reverie.my",
   "license": "AGPL-3.0-only",

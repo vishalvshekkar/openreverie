@@ -85,11 +85,13 @@ TypeScript monorepo, four packages, strict downward-only dependencies:
 
 ## Roadmap
 
-1. Memory engine and agent core behind a terminal CLI (current)
+1. Memory engine and agent core behind a terminal CLI (done, v0.1.0)
 2. Web interface and local auth
 3. More provider adapters (Anthropic, OpenRouter, Cloudflare AI Gateway, DeepSeek, local models)
 4. Alternate deployment targets (Cloudflare, VPS)
 5. Graph visualization of realms, arcs, and their connections
+
+Ongoing work, remaining tasks, and contributor-friendly starting points live in [ROADMAP.md](ROADMAP.md).
 
 ## Development
 

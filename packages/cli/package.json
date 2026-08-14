@@ -1,6 +1,6 @@
 {
   "name": "openreverie",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "A self-hosted companion agent with a memory that does not forget. Terminal chat interface.",
   "homepage": "https://reverie.my",
   "license": "AGPL-3.0-only",
