@@ -312,6 +312,67 @@ describe('runRead', () => {
     expect(joined.toLowerCase()).toContain('no id')
   })
 
+  // Before this fix, loadCandidates called listDocuments(dir) with no
+  // onSkip: a hand-edited arcs/grief.md with broken frontmatter would drop
+  // out of the array silently, and "reverie read" would list the person's
+  // arcs with grief simply absent, no different from a memory that never
+  // had one.
+  it('reports a broken arc file plainly in the overview listing, instead of omitting it as if it did not exist', async () => {
+    const paths = memoryPaths(dir)
+    await ensureMemoryTree(paths)
+    await writeDocumentAtomic({
+      path: join(paths.arcsDir, 'marathon.md'),
+      meta: { id: newId('doc'), name: 'Marathon training', status: 'active' },
+      body: 'Training for the spring marathon.\n',
+    })
+    // A person hand-edits arcs/grief.md into broken frontmatter. The file
+    // is still on disk; it just no longer parses.
+    await writeFile(join(paths.arcsDir, 'grief.md'), '---\nname: Grief\n---\nBody text.\n', 'utf8')
+
+    const output: string[] = []
+    const exitCode = await runRead([], fakeDeps(dir, output))
+
+    expect(exitCode).toBe(0)
+    const joined = output.join('')
+    expect(joined).toContain('Marathon training')
+    expect(joined).toContain(join(paths.arcsDir, 'grief.md'))
+    expect(joined.toLowerCase()).toContain('no id')
+  })
+
+  // Same defect, the sharper case the reviewer named directly: the person
+  // asks for the exact broken page by name and, before this fix, got told
+  // "no arc found" about a file sitting right there on disk.
+  it('reports the broken file plainly for a named lookup, instead of saying no arc was found', async () => {
+    const paths = memoryPaths(dir)
+    await ensureMemoryTree(paths)
+    await writeFile(join(paths.arcsDir, 'grief.md'), '---\nname: Grief\n---\nBody text.\n', 'utf8')
+
+    const output: string[] = []
+    const exitCode = await runRead(['arc', 'grief'], fakeDeps(dir, output))
+
+    expect(exitCode).not.toBe(0)
+    const joined = output.join('')
+    expect(joined.toLowerCase()).not.toContain('no arc found')
+    expect(joined).toContain(join(paths.arcsDir, 'grief.md'))
+    expect(joined.toLowerCase()).toContain('no id')
+  })
+
+  // Same case again through the bare, search-all-kinds path (no kind given).
+  it('reports the broken file plainly for a bare search-all-kinds lookup, instead of saying nothing matched', async () => {
+    const paths = memoryPaths(dir)
+    await ensureMemoryTree(paths)
+    await writeFile(join(paths.peopleDir, 'sam.md'), '---\nname: Sam\n---\nBody text.\n', 'utf8')
+
+    const output: string[] = []
+    const exitCode = await runRead(['sam'], fakeDeps(dir, output))
+
+    expect(exitCode).not.toBe(0)
+    const joined = output.join('')
+    expect(joined.toLowerCase()).not.toContain('no arc, realm, or person found')
+    expect(joined).toContain(join(paths.peopleDir, 'sam.md'))
+    expect(joined.toLowerCase()).toContain('no id')
+  })
+
   it('finds a bare name that matches both an arc and a person, and reports it as ambiguous across kinds', async () => {
     const paths = memoryPaths(dir)
     await ensureMemoryTree(paths)

@@ -1,7 +1,7 @@
 import { chmod, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { FakeChatProvider } from '@openreverie/providers'
+import { type ChatProvider, FakeChatProvider } from '@openreverie/providers'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { newId, readDocument, writeDocumentAtomic } from './documents.js'
 import { appendGraph, readGraph } from './graph.js'
@@ -361,10 +361,33 @@ describe('reflection', () => {
       expect(chat.requests).toHaveLength(0)
     })
 
-    it('drops an update entry that resolves to a node that is neither arc nor person', async () => {
+    it('drops an update entry that resolves to a node that is neither arc nor person, isolated from the no-doc case by giving that node a real doc', async () => {
+      // realm_health in beforeEach has no doc at all, which would drop this
+      // update on the missing-doc check alone and prove nothing about the
+      // type check. Giving this realm its own doc means the only reason
+      // left for the drop is that a realm is not a valid pass two target,
+      // which is the actual rule this test exists to cover.
+      const realmDocPath = join(paths.realmsDir, 'health.md')
+      await writeDocumentAtomic({
+        path: realmDocPath,
+        meta: { id: newId('doc'), name: 'Health' },
+        body: 'A realm page, not an arc or person page.\n',
+      })
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'realm_health_with_doc',
+          type: 'realm',
+          label: 'Health',
+          doc: realmDocPath,
+        },
+      ])
       const out: ReflectionOutput = {
         ...emptyReflectionOutput('A session.'),
-        arcUpdates: [{ arcId: 'realm_health', note: 'A realm is not a valid pass two target.' }],
+        arcUpdates: [
+          { arcId: 'realm_health_with_doc', note: 'A realm is not a valid pass two target.' },
+        ],
       }
       const chat = new FakeChatProvider([])
 
@@ -411,6 +434,44 @@ describe('reflection', () => {
       const narratives = await resolveNarratives(paths, graphState, out, chat, 'fake-model')
 
       expect(narratives.has('arc_health')).toBe(false)
+      expect(chat.requests).toHaveLength(0)
+    })
+
+    it('drops the personUpdates entry for a person also named in newPersons this session', async () => {
+      const personDocPath = join(paths.peopleDir, 'sam.md')
+      await writeDocumentAtomic({
+        path: personDocPath,
+        meta: { id: newId('doc'), name: 'Sam' },
+        body: 'Original person narrative.\n',
+      })
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'person_sam',
+          type: 'person',
+          label: 'Sam',
+          doc: personDocPath,
+        },
+      ])
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('A session with a person naming collision.'),
+        newPersons: [
+          {
+            name: 'Sam',
+            reason: 'mistakenly proposed again',
+            itemIndexes: [],
+            narrative: 'unused',
+          },
+        ],
+        personUpdates: [{ personId: 'person_sam', note: 'Should be dropped due to overlap.' }],
+      }
+      const chat = new FakeChatProvider([])
+
+      const graphState = await readGraph(paths)
+      const narratives = await resolveNarratives(paths, graphState, out, chat, 'fake-model')
+
+      expect(narratives.has('person_sam')).toBe(false)
       expect(chat.requests).toHaveLength(0)
     })
   })
@@ -795,6 +856,155 @@ describe('reflection', () => {
       const after = await readDocument(arcDocPath)
       expect(after.body).toBe(before.body)
       expect(after.meta.updated).toBeUndefined()
+    })
+
+    it('completes reflection when readDocument throws for one arc mid pass two, a hand-deleted page while its graph node stays live, still rewriting the other arc and writing summary.md', async () => {
+      const now = new Date('2026-08-13T10:00:00.000Z')
+
+      const workDocPath = join(paths.arcsDir, 'work.md')
+      await writeDocumentAtomic({
+        path: workDocPath,
+        meta: { id: newId('doc'), name: 'Work' },
+        body: 'Original work narrative.\n',
+      })
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'arc_work',
+          type: 'arc',
+          label: 'Work',
+          doc: workDocPath,
+        },
+      ])
+
+      // The user hand-deletes arcs/health.md; the graph node and its doc
+      // pointer both stay exactly as they were.
+      await rm(arcDocPath)
+
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('A session touching two arcs, one of them missing its page.'),
+        arcUpdates: [
+          { arcId: 'arc_health', note: 'Should be skipped, the page is gone.' },
+          { arcId: 'arc_work', note: 'Should still be rewritten.' },
+        ],
+      }
+      const chat = new FakeChatProvider([
+        { text: JSON.stringify({ body: 'Rewritten work body.' }), toolCalls: [] },
+      ])
+
+      const graphState = await readGraph(paths)
+      const failures: { id: string; label: string; reason: string }[] = []
+      const narratives = await resolveNarratives(
+        paths,
+        graphState,
+        out,
+        chat,
+        'fake-model',
+        (id, label, reason) => {
+          failures.push({ id, label, reason })
+        },
+      )
+
+      expect(narratives.has('arc_health')).toBe(false)
+      expect(narratives.get('arc_work')).toBe('Rewritten work body.')
+      expect(failures).toHaveLength(1)
+      expect(failures[0]?.id).toBe('arc_health')
+      expect(failures[0]?.reason).toContain('ENOENT')
+
+      await applyReflection(paths, out, sessionId, [], now, narratives, noopMaterialize)
+
+      // Reflection completed: summary.md exists, which is the only thing
+      // SessionStore reads as "this session is reflected".
+      const summaryDoc = await readDocument(join(sessionDir, 'summary.md'))
+      expect(summaryDoc.body).toBe(`${out.summary}\n`)
+
+      const workDoc = await readDocument(workDocPath)
+      expect(workDoc.body).toBe('Rewritten work body.\n')
+
+      // The failed document is untouched, not papered over: nothing here
+      // recreated a fresh page at the path the person deleted.
+      await expect(readDocument(arcDocPath)).rejects.toThrow()
+    })
+
+    it('completes reflection when the chat provider throws mid pass two, still rewriting the other update and writing summary.md', async () => {
+      const now = new Date('2026-08-13T10:00:00.000Z')
+
+      const workDocPath = join(paths.arcsDir, 'work.md')
+      await writeDocumentAtomic({
+        path: workDocPath,
+        meta: { id: newId('doc'), name: 'Work' },
+        body: 'Original work narrative.\n',
+      })
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'arc_work',
+          type: 'arc',
+          label: 'Work',
+          doc: workDocPath,
+        },
+      ])
+
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('A session touching two arcs, one hitting a provider error.'),
+        // Work first, Health second: this is the exact shape of the
+        // reported failure, a 429 on the second of several calls that
+        // must not throw away a pass one that already succeeded and was
+        // already paid for.
+        arcUpdates: [
+          { arcId: 'arc_work', note: 'Should still be rewritten.' },
+          { arcId: 'arc_health', note: 'Should be skipped, the provider failed.' },
+        ],
+      }
+
+      // A transient provider error (a 429 or 500) on the Health call, after
+      // a Work pass that already succeeded: the throw must not discard the
+      // pass that was already paid for.
+      const flakyChat: ChatProvider = {
+        name: 'flaky',
+        async complete(req) {
+          const prompt = req.messages[0]?.content ?? ''
+          if (prompt.includes('"Health"')) {
+            throw new Error('provider error: 429 Too Many Requests')
+          }
+          return { text: JSON.stringify({ body: 'Rewritten work body.' }), toolCalls: [] }
+        },
+        stream() {
+          throw new Error('stream is not used in this test')
+        },
+      }
+
+      const graphState = await readGraph(paths)
+      const failures: { id: string; label: string; reason: string }[] = []
+      const narratives = await resolveNarratives(
+        paths,
+        graphState,
+        out,
+        flakyChat,
+        'fake-model',
+        (id, label, reason) => {
+          failures.push({ id, label, reason })
+        },
+      )
+
+      expect(narratives.has('arc_health')).toBe(false)
+      expect(narratives.get('arc_work')).toBe('Rewritten work body.')
+      expect(failures).toHaveLength(1)
+      expect(failures[0]?.id).toBe('arc_health')
+      expect(failures[0]?.reason).toContain('429')
+
+      await applyReflection(paths, out, sessionId, [], now, narratives, noopMaterialize)
+
+      const summaryDoc = await readDocument(join(sessionDir, 'summary.md'))
+      expect(summaryDoc.body).toBe(`${out.summary}\n`)
+
+      const healthDoc = await readDocument(arcDocPath)
+      expect(healthDoc.body).toBe('Original arc narrative.\n')
+
+      const workDoc = await readDocument(workDocPath)
+      expect(workDoc.body).toBe('Rewritten work body.\n')
     })
   })
 })

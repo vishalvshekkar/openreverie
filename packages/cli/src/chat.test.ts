@@ -1,8 +1,9 @@
-import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { loadConfig, type ReverieConfig, saveConfig } from '@openreverie/core'
 import {
+  appendGraph,
   type EngineDeps,
   ensureMemoryTree,
   MemoryEngine,
@@ -299,6 +300,130 @@ describe('runChat', () => {
     expect(chat.requests).toHaveLength(1)
 
     await engine.close()
+  })
+
+  // Before this fix, session.end() had no try/catch here: a reflection
+  // failure on /bye (a provider error, or any other throw inside
+  // MemoryEngine.endSession) propagated out of runChat entirely, past
+  // index.ts, into main().catch(), and printed a raw stack trace with exit
+  // code 1 instead of the plain message every other failure path in this
+  // loop already gives.
+  it('does not crash on /bye when reflection fails, and tells the user their conversation is saved and will be retried', async () => {
+    const chat = new FakeChatProvider([
+      { text: 'Good to see you.', toolCalls: [] },
+      { text: 'Hi there.', toolCalls: [] },
+      // No third scripted reply: reflectSession's chat.complete() call
+      // inside session.end() throws when the fake provider's script runs
+      // out, standing in for a real provider error (a 429 or 500).
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const { io, output } = scriptedIo(['hello', '/bye'])
+
+    await expect(runChat({ engine, config, chat, io })).resolves.toBeUndefined()
+
+    const joined = output.join('')
+    expect(joined).toContain('reflecting on this session...')
+    expect(joined).toContain('could not finish reflecting')
+    expect(joined).toContain('reflected the next time reverie starts')
+    expect(joined).not.toContain('Saved and reflected.')
+
+    // The session is genuinely unreflected, not just reported that way:
+    // no summary.md exists yet, so a future runMaintenance() will retry it.
+    const summaries = await sessionSummaryFiles(dir)
+    expect(summaries).toHaveLength(0)
+
+    await engine.close()
+  })
+
+  // The first version of the /bye fix wrapped session.end() in try/catch
+  // but only called printWarnings() on the success branch, so a warning
+  // resolveNarratives had already recorded earlier in the same reflection
+  // (the arc page skipped below) would be silently dropped if something
+  // later in that same reflection then threw. This proves both halves are
+  // covered: the skip is recorded as a warning, and it still reaches the
+  // screen even though the reflection as a whole fails.
+  //
+  // The later throw is arcsDir itself being unwritable, not a timing-based
+  // interruption of the hello turn: chmod happens once, before the engine
+  // ever opens, and arcsDir is not touched by the hello turn at all, so
+  // there is no race with any in-flight write to synchronize against. The
+  // scripted reflection reply both fails to update the (deleted) Health
+  // page and proposes a genuinely new arc, whose page write into the now
+  // read-only arcsDir is what throws.
+  it('still prints a warning recorded earlier in reflection when reflection later fails outright on /bye', async () => {
+    const paths = memoryPaths(dir)
+    await ensureMemoryTree(paths)
+
+    const arcDocPath = path.join(paths.arcsDir, 'health.md')
+    await writeDocumentAtomic({
+      path: arcDocPath,
+      meta: { id: newId('doc'), name: 'Health' },
+      body: 'Original arc narrative.\n',
+    })
+    await appendGraph(paths, [
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'arc_health',
+        type: 'arc',
+        label: 'Health',
+        doc: arcDocPath,
+      },
+    ])
+    // The user hand-deletes the page; the graph node and its doc pointer
+    // both stay exactly as they were.
+    await rm(arcDocPath)
+
+    // Revoking write on arcsDir up front does not disturb anything before
+    // materializeNew's createArc call: reading the existing Health arc
+    // only needs read and execute, and the hello turn never touches
+    // arcsDir at all.
+    await chmod(paths.arcsDir, 0o500)
+
+    const chat = new FakeChatProvider([
+      { text: 'Good to see you.', toolCalls: [] },
+      { text: 'Hi there.', toolCalls: [] },
+      {
+        text: JSON.stringify({
+          summary: 'Talked about health and started running.',
+          items: [{ text: 'Started running', kind: 'event' }],
+          attributions: [],
+          newArcs: [
+            {
+              name: 'Running',
+              realm: 'Fitness',
+              reason: 'mentioned starting a new habit',
+              itemIndexes: [0],
+              narrative: 'Just started running.',
+            },
+          ],
+          newPersons: [],
+          arcUpdates: [{ arcId: 'arc_health', note: 'Should be skipped, the page is gone.' }],
+          personUpdates: [],
+          constitutionUpdate: null,
+        }),
+        toolCalls: [],
+      },
+    ])
+
+    let engine: MemoryEngine
+    try {
+      engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const config = testConfig(dir)
+      const { io, output } = scriptedIo(['hello', '/bye'])
+
+      await expect(runChat({ engine, config, chat, io })).resolves.toBeUndefined()
+
+      const joined = output.join('')
+      expect(joined).toContain('could not finish reflecting')
+      expect(joined).toContain('note:')
+      expect(joined).toContain('Health')
+
+      await engine.close()
+    } finally {
+      await chmod(paths.arcsDir, 0o700)
+    }
   })
 
   it('reminds about /bye without hanging or aborting on the first Ctrl-C while idle at the prompt', async () => {
@@ -724,6 +849,49 @@ describe('countMemoryDocuments', () => {
 
       const count = await countMemoryDocuments(dir)
       expect(count).toBe(4) // constitution + 1 realm + 1 arc + 1 person
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('does not count a skipped session summary, matching what reindex actually indexes', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'openreverie-count-skip-'))
+    try {
+      const paths = memoryPaths(dir)
+      await ensureMemoryTree(paths)
+
+      const reflectedDir = path.join(paths.sessionsDir, '2026-08-01-session_reflected')
+      await mkdir(reflectedDir, { recursive: true })
+      await writeDocumentAtomic({
+        path: path.join(reflectedDir, 'summary.md'),
+        meta: {
+          id: newId('doc'),
+          kind: 'summary',
+          session: 'session_reflected',
+          date: '2026-08-01',
+        },
+        body: 'A real session summary.\n',
+      })
+
+      const skippedDir = path.join(paths.sessionsDir, '2026-08-02-session_skipped')
+      await mkdir(skippedDir, { recursive: true })
+      await writeDocumentAtomic({
+        path: path.join(skippedDir, 'summary.md'),
+        meta: {
+          id: newId('doc'),
+          kind: 'summary',
+          session: 'session_skipped',
+          date: '2026-08-02',
+          skipped: true,
+          reason: 'no user messages in this session',
+        },
+        body: 'This session had no user messages, so there was nothing to reflect on.\n',
+      })
+
+      const count = await countMemoryDocuments(dir)
+      // constitution + 1 reflected session summary; the skipped session's
+      // summary is not indexed by reindexAll and must not be counted here.
+      expect(count).toBe(2)
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

@@ -366,6 +366,21 @@ export async function rewriteNarrative(
 // dropped the same way, so the map simply lacks that key and the caller
 // leaves the document on disk untouched.
 //
+// A thrown error is dropped the same way, not just a null result: readDocument
+// can throw (the file behind node.doc was deleted or its frontmatter is
+// broken, and a memory folder made of hand-editable markdown makes both of
+// those things a user can actually do) and chat.complete can throw (a
+// provider error). Either one is caught per document here so it degrades
+// exactly like a failed parse: this one document is skipped and left
+// untouched, and the rest of pass two, and reflection as a whole, still
+// completes. Without this, one failure would escape resolveNarratives,
+// escape the caller's _doEndSession, and abort reflection entirely before
+// applyReflection ever ran, silently, for every future session that touches
+// the same arc or person. onFailure is an optional, best-effort hook for the
+// caller to record what was skipped and why; it is not the fix, the
+// containment above is. A caller must not treat the absence of an onFailure
+// call as the absence of a failure.
+//
 // The first parameter is accepted for signature symmetry with the rest of
 // this module's public functions and for a possible future disk-backed
 // lookup; the current implementation resolves documents through
@@ -376,6 +391,7 @@ export async function resolveNarratives(
   out: ReflectionOutput,
   chat: ChatProvider,
   model: string,
+  onFailure?: (id: string, label: string, reason: string) => void,
 ): Promise<Map<string, string>> {
   const newArcNames = new Set(out.newArcs.map((a) => a.name.toLowerCase()))
   const newPersonNames = new Set(out.newPersons.map((p) => p.name.toLowerCase()))
@@ -390,20 +406,24 @@ export async function resolveNarratives(
     if (newArcNames.has(node.label.toLowerCase())) {
       continue
     }
-    const itemTexts = out.attributions
-      .filter((a) => a.arcId === update.arcId)
-      .map((a) => out.items[a.itemIndex]?.text)
-      .filter((text): text is string => typeof text === 'string')
-    const currentDoc = await readDocument(node.doc)
-    const result = await rewriteNarrative(chat, model, {
-      name: node.label,
-      currentBody: currentDoc.body,
-      summary: out.summary,
-      itemTexts,
-      note: update.note,
-    })
-    if (result) {
-      narratives.set(update.arcId, result.body)
+    try {
+      const itemTexts = out.attributions
+        .filter((a) => a.arcId === update.arcId)
+        .map((a) => out.items[a.itemIndex]?.text)
+        .filter((text): text is string => typeof text === 'string')
+      const currentDoc = await readDocument(node.doc)
+      const result = await rewriteNarrative(chat, model, {
+        name: node.label,
+        currentBody: currentDoc.body,
+        summary: out.summary,
+        itemTexts,
+        note: update.note,
+      })
+      if (result) {
+        narratives.set(update.arcId, result.body)
+      }
+    } catch (err) {
+      onFailure?.(update.arcId, node.label, errorMessage(err))
     }
   }
 
@@ -415,23 +435,31 @@ export async function resolveNarratives(
     if (newPersonNames.has(node.label.toLowerCase())) {
       continue
     }
-    // ReflectionOutput carries per-item attribution only for arcs
-    // (out.attributions). There is no equivalent for people, so a person's
-    // pass two call gets no item texts; its note still says what changed.
-    const currentDoc = await readDocument(node.doc)
-    const result = await rewriteNarrative(chat, model, {
-      name: node.label,
-      currentBody: currentDoc.body,
-      summary: out.summary,
-      itemTexts: [],
-      note: update.note,
-    })
-    if (result) {
-      narratives.set(update.personId, result.body)
+    try {
+      // ReflectionOutput carries per-item attribution only for arcs
+      // (out.attributions). There is no equivalent for people, so a person's
+      // pass two call gets no item texts; its note still says what changed.
+      const currentDoc = await readDocument(node.doc)
+      const result = await rewriteNarrative(chat, model, {
+        name: node.label,
+        currentBody: currentDoc.body,
+        summary: out.summary,
+        itemTexts: [],
+        note: update.note,
+      })
+      if (result) {
+        narratives.set(update.personId, result.body)
+      }
+    } catch (err) {
+      onFailure?.(update.personId, node.label, errorMessage(err))
     }
   }
 
   return narratives
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
 }
 
 interface PendingWrite {

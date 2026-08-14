@@ -246,12 +246,24 @@ export class MemoryEngine {
       : raw
 
     const liveItems = this.liveItems.get(sessionId) ?? []
+    // onFailure here is a best-effort note, not the containment: resolveNarratives
+    // itself already skips a document that fails and keeps going (see the
+    // comment above it in reflection.ts), which is what lets this session
+    // still reflect. This callback only tries to make that skip visible; a
+    // warning pushed here can still be cleared before anyone reads it (by
+    // a later clearWarnings() in the same process, before printWarnings ever
+    // runs), so its absence is not proof nothing was skipped.
     const narratives = await resolveNarratives(
       this.paths,
       this.graphState,
       out,
       this.deps.chat,
       this.deps.reflectionModel,
+      (id, label, reason) => {
+        this.warnings.push(
+          `Could not update the page for "${label}" (${id}) this session: ${reason}. The page was left as it was; this session's note about it was not saved to prose.`,
+        )
+      },
     )
 
     // Reflection no longer proposes new arcs or persons; it saves them

@@ -2067,6 +2067,65 @@ describe('MemoryEngine', () => {
 
       await engine.close()
     })
+
+    // Engine-level probe for the resolveNarratives containment fix: a page
+    // the user hand-deleted, with its graph node and doc pointer still
+    // live, must not abort reflection. This proves both halves of that fix
+    // at the engine boundary, not just at resolveNarratives/applyReflection
+    // directly: the session actually ends up reflected, and the onFailure
+    // callback wired in engine.ts actually reaches engine.warnings, naming
+    // the arc, rather than being dropped or left untested.
+    it('reflects a session and records a warning naming the arc when its page was hand-deleted before endSession runs', async () => {
+      const arcDocPath = join(paths.arcsDir, 'health.md')
+      await writeDocumentAtomic({
+        path: arcDocPath,
+        meta: { id: newId('doc'), name: 'Health' },
+        body: 'Original arc narrative.\n',
+      })
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'arc_health',
+          type: 'arc',
+          label: 'Health',
+          doc: arcDocPath,
+        },
+      ])
+      // The user hand-deletes the page; the graph node and its doc pointer
+      // both stay exactly as they were.
+      await rm(arcDocPath)
+
+      const chat = new FakeChatProvider([
+        {
+          text: JSON.stringify({
+            ...emptyReflectionOutput('Talked about health.'),
+            arcUpdates: [{ arcId: 'arc_health', note: 'Should be skipped, the page is gone.' }],
+          }),
+          toolCalls: [],
+        },
+      ])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      const startedAt = new Date()
+      const sessionId = await engine.startSession(startedAt)
+      await engine.appendTranscript(sessionId, {
+        ts: startedAt.toISOString(),
+        role: 'user',
+        content: 'Talked about health today.',
+      })
+
+      await engine.endSession(sessionId)
+
+      const sessions = await SessionStore.listSessions(paths)
+      const session = sessions.find((s) => s.sessionId === sessionId)
+      expect(session?.reflected).toBe(true)
+
+      expect(engine.warnings.some((w) => w.includes('Health'))).toBe(true)
+      expect(engine.warnings.some((w) => w.includes('arc_health'))).toBe(true)
+
+      await engine.close()
+    })
   })
 
   describe('forget', () => {

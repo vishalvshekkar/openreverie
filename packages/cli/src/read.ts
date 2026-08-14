@@ -11,6 +11,7 @@
 // whole path free of the graph and the index.
 
 import { stat } from 'node:fs/promises'
+import { basename } from 'node:path'
 import type { ReverieConfig } from '@openreverie/core'
 import { type Document, listDocuments, memoryPaths, readDocument } from '@openreverie/memory'
 import { magenta } from './colors.js'
@@ -99,14 +100,21 @@ export async function runRead(args: string[], deps: ReadDeps): Promise<number> {
 // as an empty one rather than left to throw a raw ENOENT at the caller.
 // The root itself not existing at all is handled separately, up front in
 // runRead, precisely so it is never confused with this case.
+//
+// onSkip is listDocuments' own skip-and-report hook (see documents.ts):
+// every caller of loadCandidates must pass one, the same way the engine
+// passes onDocSkip everywhere. Dropping it here was the defect: a file a
+// person hand-edited into broken frontmatter would silently vanish from
+// every read.ts listing and lookup instead of being reported.
 async function loadCandidates(
   paths: ReturnType<typeof memoryPaths>,
   kind: NamedKind,
+  onSkip: (path: string, reason: string) => void,
 ): Promise<Candidate[]> {
   const dir = kind === 'arc' ? paths.arcsDir : kind === 'realm' ? paths.realmsDir : paths.peopleDir
   let docs: Document[]
   try {
-    docs = await listDocuments(dir)
+    docs = await listDocuments(dir, onSkip)
   } catch {
     return []
   }
@@ -120,16 +128,40 @@ function matches(name: string, query: string): boolean {
   return name.toLowerCase().includes(query.toLowerCase())
 }
 
+// A file that failed to parse has no readable name field to match a query
+// against, only a path. Its filename (without .md) is the next best thing:
+// it is what the person actually typed to create the page in the first
+// place, and it is what they are most likely to type again when reading it
+// back. This is only ever used once name-matching against real candidates
+// has already come up empty.
+function matchesSkippedPath(path: string, query: string): boolean {
+  return matches(basename(path, '.md'), query)
+}
+
 async function printOneOfKind(
   paths: ReturnType<typeof memoryPaths>,
   kind: NamedKind,
   name: string,
   deps: ReadDeps,
 ): Promise<number> {
-  const candidates = await loadCandidates(paths, kind)
+  const skips: { path: string; reason: string }[] = []
+  const candidates = await loadCandidates(paths, kind, (path, reason) => {
+    skips.push({ path, reason })
+  })
   const found = candidates.filter((c) => matches(c.name, name))
 
   if (found.length === 0) {
+    // Before reporting nothing found, check whether the query actually
+    // names a page that is sitting right there on disk, just broken.
+    // Reporting "no arc found" about that page would be the same defect
+    // as treating a broken read as an empty one: it tells the person
+    // reverie is keeping nothing, when the truth is reverie could not
+    // read what it has.
+    const skip = skips.find((s) => matchesSkippedPath(s.path, name))
+    if (skip) {
+      deps.write(`${skip.reason}\n`)
+      return 1
+    }
     deps.write(`No ${kind} found matching "${name}".\n`)
     return 1
   }
@@ -162,14 +194,26 @@ async function printSearchAllKinds(
     { kind: 'person', label: 'person' },
   ]
   const found: { name: string; path: string; label: string }[] = []
+  const skips: { path: string; reason: string }[] = []
   for (const { kind, label } of kinds) {
-    const candidates = await loadCandidates(paths, kind)
+    const candidates = await loadCandidates(paths, kind, (path, reason) => {
+      skips.push({ path, reason })
+    })
     for (const candidate of candidates) {
       if (matches(candidate.name, name)) found.push({ ...candidate, label })
     }
   }
 
   if (found.length === 0) {
+    // Same reasoning as printOneOfKind: a broken page whose filename
+    // matches what was typed must be reported, not folded into "nothing
+    // matches at all", which is the search-all-kinds equivalent of the
+    // same defect.
+    const skip = skips.find((s) => matchesSkippedPath(s.path, name))
+    if (skip) {
+      deps.write(`${skip.reason}\n`)
+      return 1
+    }
     deps.write(`No arc, realm, or person found matching "${name}".\n`)
     return 1
   }
@@ -229,20 +273,29 @@ async function listOverview(
 ): Promise<number> {
   deps.write(`${magenta('Constitution', deps.colorEnabled)}\n`)
 
-  const arcs = await loadCandidates(paths, 'arc')
+  const arcSkips: string[] = []
+  const arcs = await loadCandidates(paths, 'arc', (_path, reason) => arcSkips.push(reason))
   deps.write(`\n${magenta('Arcs', deps.colorEnabled)}\n`)
-  if (arcs.length === 0) deps.write('  (none yet)\n')
+  // A directory with nothing readable in it is not the same as a directory
+  // with nothing in it at all: (none yet) must only say the first of those
+  // two things, or a broken page reads as if it were never written.
+  if (arcs.length === 0 && arcSkips.length === 0) deps.write('  (none yet)\n')
   for (const arc of arcs) deps.write(`  - ${arc.name}\n`)
+  for (const reason of arcSkips) deps.write(`  ! ${reason}\n`)
 
-  const realms = await loadCandidates(paths, 'realm')
+  const realmSkips: string[] = []
+  const realms = await loadCandidates(paths, 'realm', (_path, reason) => realmSkips.push(reason))
   deps.write(`\n${magenta('Realms', deps.colorEnabled)}\n`)
-  if (realms.length === 0) deps.write('  (none yet)\n')
+  if (realms.length === 0 && realmSkips.length === 0) deps.write('  (none yet)\n')
   for (const realm of realms) deps.write(`  - ${realm.name}\n`)
+  for (const reason of realmSkips) deps.write(`  ! ${reason}\n`)
 
-  const people = await loadCandidates(paths, 'person')
+  const peopleSkips: string[] = []
+  const people = await loadCandidates(paths, 'person', (_path, reason) => peopleSkips.push(reason))
   deps.write(`\n${magenta('People', deps.colorEnabled)}\n`)
-  if (people.length === 0) deps.write('  (none yet)\n')
+  if (people.length === 0 && peopleSkips.length === 0) deps.write('  (none yet)\n')
   for (const person of people) deps.write(`  - ${person.name}\n`)
+  for (const reason of peopleSkips) deps.write(`  ! ${reason}\n`)
 
   deps.write(
     '\nUse: reverie read constitution, reverie read arc <name>, reverie read realm <name>, ' +

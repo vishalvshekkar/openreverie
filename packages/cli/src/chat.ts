@@ -237,9 +237,21 @@ export async function runChat(deps: {
     const trimmed = line.trim()
     if (trimmed === '/bye') {
       io.write('reflecting on this session...\n')
-      await session.end()
-      printWarnings(io, engine, colorEnabled)
-      io.write('Saved and reflected. See you next time.\n')
+      try {
+        await session.end()
+        printWarnings(io, engine, colorEnabled)
+        io.write('Saved and reflected. See you next time.\n')
+      } catch (err) {
+        // Any warning the engine accumulated before the throw (a page
+        // resolveNarratives had to skip, a git commit that failed) belongs
+        // on screen either way; losing it here would be the same silent
+        // drop this whole fix exists to close.
+        printWarnings(io, engine, colorEnabled)
+        io.write(
+          `\nI could not finish reflecting: ${errorMessage(err)}. Your conversation is saved; ` +
+            'it will be reflected the next time reverie starts.\n',
+        )
+      }
       return
     }
     if (trimmed === '') {
@@ -281,14 +293,21 @@ export async function runChat(deps: {
         }
       }
     } catch (err) {
+      // This stop() is the one the ordering invariant actually depends on:
+      // it clears the frame before the error message below is written, so
+      // the message never lands after a stale frame stranded in scrollback.
+      // Do not remove it on the assumption that the finally below covers
+      // the same guarantee; the finally runs after this whole block,
+      // which is too late to protect the write order here.
       statusLine.stop()
       io.write(
         `\nI could not reach the model: ${errorMessage(err)}. Your message is saved; try again, or type /bye.\n`,
       )
     } finally {
-      // Neither error path above (the catch here, or runTurn rethrowing
-      // out of it) ever emits 'done', so the line is stopped here
-      // unconditionally rather than relying on ever seeing that event.
+      // A backstop, not the ordering guarantor above: this covers the path
+      // that exits the loop without ever emitting 'done' and without
+      // throwing (a break on the second Ctrl-C mid response), which the
+      // catch block above never sees.
       statusLine.stop()
       responding = false
     }
@@ -389,7 +408,12 @@ export async function countMemoryDocuments(memoryDir: string): Promise<number> {
   }
   for (const name of sessionDirs) {
     try {
-      await readDocument(join(paths.sessionsDir, name, 'summary.md'))
+      const doc = await readDocument(join(paths.sessionsDir, name, 'summary.md'))
+      // A skipped summary (no user messages in that session) is never
+      // indexed by walkAllDocuments/reindexAll either; counting it here
+      // would report a document count higher than what reindex actually
+      // indexes, growing by one for every skipped session.
+      if (doc.meta.skipped === true) continue
       count += 1
     } catch {
       // No summary.md yet: this session has not been reflected.
