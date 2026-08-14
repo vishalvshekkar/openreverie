@@ -152,7 +152,7 @@ describe('assembleSystemPrompt', () => {
     expect(prompt).toContain('## Latest daily rollup')
     expect(prompt).toContain('A steady day of small wins.')
 
-    expect(prompt).toContain('## Yesterday')
+    expect(prompt).toContain('## Recent sessions')
     expect(prompt).toContain('Talked through a quiet, low-key evening.')
 
     expect(prompt).toContain('## Pending proposals')
@@ -163,14 +163,14 @@ describe('assembleSystemPrompt', () => {
     expect(prompt).toContain(`[${proposal.id}]`)
 
     // Every populated section appears in the order specified by the brief:
-    // constitution, realms, active arcs, latest daily rollup, yesterday,
-    // pending proposals.
+    // constitution, realms, active arcs, latest daily rollup, recent
+    // sessions, pending proposals.
     const headers = [
       '## Constitution',
       '## Realms',
       '## Active arcs',
       '## Latest daily rollup',
-      '## Yesterday',
+      '## Recent sessions',
       '## Pending proposals',
     ]
     const positions = headers.map((header) => prompt.indexOf(header))
@@ -212,7 +212,7 @@ describe('assembleSystemPrompt', () => {
     expect(prompt).not.toContain('## Realms')
     expect(prompt).not.toContain('## Active arcs')
     expect(prompt).not.toContain('## Latest daily rollup')
-    expect(prompt).not.toContain('## Yesterday')
+    expect(prompt).not.toContain('## Recent sessions')
     expect(prompt).not.toContain('## Pending proposals')
 
     await engine.close()
@@ -267,7 +267,7 @@ describe('assembleSystemPrompt', () => {
     await engine.close()
   })
 
-  it('includes the latest daily rollup and yesterday summaries when present', async () => {
+  it('includes the latest daily rollup and recent session summaries when present', async () => {
     const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)
 
     // Seed a reflected session dated yesterday by writing summary.md
@@ -297,8 +297,33 @@ describe('assembleSystemPrompt', () => {
     expect(prompt).toContain('## Latest daily rollup')
     expect(prompt).toContain('A steady day of small wins.')
 
-    expect(prompt).toContain('## Yesterday')
+    expect(prompt).toContain('## Recent sessions')
     expect(prompt).toContain('Talked through a quiet, low-key evening.')
+
+    await engine.close()
+  })
+
+  it('shows the date of each recent session next to its summary', async () => {
+    const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000)
+    const store = await SessionStore.start(paths, twoDaysAgo)
+    await store.appendLine({
+      ts: twoDaysAgo.toISOString(),
+      role: 'user',
+      content: 'A short, uneventful check-in.',
+    })
+    const dateString = twoDaysAgo.toISOString().slice(0, 10)
+    await writeDocumentAtomic({
+      path: join(store.dir, 'summary.md'),
+      meta: { id: newId('doc') },
+      body: 'Checked in briefly, nothing pressing.\n',
+    })
+
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+    const prompt = await assembleSystemPrompt(engine, testConfig())
+
+    expect(prompt).toContain('## Recent sessions')
+    expect(prompt).toContain(dateString)
+    expect(prompt).toContain('Checked in briefly, nothing pressing.')
 
     await engine.close()
   })
@@ -325,7 +350,7 @@ describe('assembleSystemPrompt', () => {
       expect(prompt).not.toContain('## Realms')
       expect(prompt).not.toContain('## Active arcs')
       expect(prompt).not.toContain('## Latest daily rollup')
-      expect(prompt).not.toContain('## Yesterday')
+      expect(prompt).not.toContain('## Recent sessions')
       expect(prompt).not.toContain('## Pending proposals')
 
       const lower = prompt.toLowerCase()

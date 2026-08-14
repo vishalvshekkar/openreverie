@@ -2,7 +2,7 @@
 // at the start of a session. It is the persona for the configured safety
 // mode, followed by a snapshot of memory state pulled from
 // MemoryEngine.sessionContext(): the constitution, realms, active arcs, the
-// latest daily rollup, yesterday's session summaries, and pending
+// latest daily rollup, session summaries from the last week, and pending
 // proposals. A section with nothing to say is left out entirely rather than
 // rendered as an empty header, so the model never sees "## Realms" with
 // nothing under it.
@@ -28,7 +28,7 @@ export async function assembleSystemPrompt(
     realmsSection(context),
     arcsSection(context),
     latestDailyRollupSection(context),
-    yesterdaySection(context),
+    recentSummariesSection(context),
     pendingProposalsSection(context),
   ].filter((section): section is string => section !== undefined)
 
@@ -37,7 +37,7 @@ export async function assembleSystemPrompt(
 
 // Replaces every usual optional section when this is the first conversation
 // this memory has ever had: there is no constitution worth reciting, no
-// realms, no arcs, nothing yesterday, nothing pending. Instead of any of
+// realms, no arcs, nothing recent, nothing pending. Instead of any of
 // that, guide a short, warm, unhurried onboarding.
 function firstConversationSection(): string {
   return `## First conversation
@@ -80,10 +80,10 @@ function latestDailyRollupSection(context: SessionContext): string | undefined {
   return `## Latest daily rollup\n\nDate: ${context.latestDailyRollup.date}\n\n${body}`
 }
 
-function yesterdaySection(context: SessionContext): string | undefined {
-  if (context.yesterdaySummaries.length === 0) return undefined
-  const parts = context.yesterdaySummaries.map((summary) => summary.body.trim())
-  return `## Yesterday\n\n${parts.join('\n\n')}`
+function recentSummariesSection(context: SessionContext): string | undefined {
+  if (context.recentSummaries.length === 0) return undefined
+  const parts = context.recentSummaries.map((summary) => `${summary.date}: ${summary.body.trim()}`)
+  return `## Recent sessions\n\n${parts.join('\n\n')}`
 }
 
 function pendingProposalsSection(context: SessionContext): string | undefined {
