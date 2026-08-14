@@ -712,7 +712,7 @@ export class MemoryEngine {
       },
     ])
     await this.syncGraph()
-    await this.reindexDocument(doc, 'person')
+    await this.reindexOrWarn(doc, 'person', `person page for ${name}`)
     return { personNodeId, doc }
   }
 

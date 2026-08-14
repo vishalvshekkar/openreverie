@@ -3,7 +3,11 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
-import { FakeChatProvider, FakeEmbeddingProvider } from '@openreverie/providers'
+import {
+  type EmbeddingProvider,
+  FakeChatProvider,
+  FakeEmbeddingProvider,
+} from '@openreverie/providers'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { listDocuments, newId, readDocument, writeDocumentAtomic } from './documents.js'
 import { type EngineDeps, MemoryEngine } from './engine.js'
@@ -37,6 +41,18 @@ function fakeDeps(chat: FakeChatProvider): EngineDeps {
     embeddings: new FakeEmbeddingProvider(),
     reflectionModel: 'fake-reflect',
     embeddingModel: 'fake-embed',
+  }
+}
+
+// An EmbeddingProvider that always fails, used to prove that a document's
+// caller (e.g. writePersonPage) survives an indexing failure instead of
+// throwing out of it, the same guarantee reindexOrWarn gives every other
+// caller.
+class ThrowingEmbeddingProvider implements EmbeddingProvider {
+  readonly name = 'throwing'
+
+  async embed(_model: string, _texts: string[]): Promise<number[][]> {
+    throw new Error('embeddings unavailable')
   }
 }
 
@@ -438,6 +454,99 @@ describe('MemoryEngine', () => {
 
       const hits = await engine.search('grows as we talk')
       expect(hits.some((h) => h.docId === personDoc.meta.id)).toBe(true)
+    })
+
+    it('resolves a new_person proposal and keeps its edges even when reindexing the new page fails', async () => {
+      // Swap in an engine backed by an embeddings provider that always
+      // throws, so writePersonPage's reindex call fails. resolveProposal
+      // must still complete: the proposal must clear, the person node and
+      // page must exist, and the involves edges must be appended, none of
+      // which should depend on the page ever making it into search.
+      await engine.close()
+      engine = await MemoryEngine.open(dir, {
+        chat: new FakeChatProvider([]),
+        embeddings: new ThrowingEmbeddingProvider(),
+        reflectionModel: 'fake-reflect',
+        embeddingModel: 'fake-embed',
+      })
+
+      const itemId = newId('item')
+      const proposal: Proposal = {
+        id: newId('prop'),
+        ts: new Date().toISOString(),
+        kind: 'new_person',
+        summary: 'Add Sam as someone in your life.',
+        payload: { name: 'Sam', itemIds: [itemId] },
+        source: 'session_seed',
+      }
+      await appendProposals(paths, [proposal])
+
+      await expect(engine.resolveProposal(proposal.id, 'accepted')).resolves.toBeUndefined()
+
+      const pending = await pendingProposals(paths)
+      expect(pending.find((p) => p.id === proposal.id)).toBeUndefined()
+
+      const graph = await readGraph(paths)
+      const personNodes = [...graph.nodes.values()].filter(
+        (n) => n.type === 'person' && n.label === 'Sam',
+      )
+      expect(personNodes).toHaveLength(1)
+      const personNode = personNodes[0]
+      if (!personNode) throw new Error('expected a person node to be created')
+      if (!personNode.doc) throw new Error('expected the person node to carry a doc pointer')
+
+      expect(graph.edges.get(`involves:${itemId}:${personNode.id}`)).toMatchObject({
+        confirmed: true,
+        confidence: 1,
+      })
+
+      const personDoc = await readDocument(personNode.doc)
+      expect(personDoc.body).toBe('This page is new. It grows as we talk.\n')
+    })
+
+    it('gives two same-named people distinct pages instead of overwriting the first', async () => {
+      const firstItemId = newId('item')
+      const first: Proposal = {
+        id: newId('prop'),
+        ts: new Date().toISOString(),
+        kind: 'new_person',
+        summary: 'Add Sam as someone in your life.',
+        payload: { name: 'Sam', itemIds: [firstItemId] },
+        source: 'session_one',
+      }
+      await appendProposals(paths, [first])
+      await engine.resolveProposal(first.id, 'accepted')
+
+      const secondItemId = newId('item')
+      const second: Proposal = {
+        id: newId('prop'),
+        ts: new Date().toISOString(),
+        kind: 'new_person',
+        summary: 'Add another Sam as someone in your life.',
+        payload: { name: 'Sam', itemIds: [secondItemId] },
+        source: 'session_two',
+      }
+      await appendProposals(paths, [second])
+      await engine.resolveProposal(second.id, 'accepted')
+
+      const graph = await readGraph(paths)
+      const personNodes = [...graph.nodes.values()].filter(
+        (n) => n.type === 'person' && n.label === 'Sam',
+      )
+      expect(personNodes).toHaveLength(2)
+
+      const [firstNode, secondNode] = personNodes
+      if (!firstNode?.doc || !secondNode?.doc) {
+        throw new Error('expected both person nodes to carry distinct doc pointers')
+      }
+      expect(firstNode.doc).not.toBe(secondNode.doc)
+
+      const firstDoc = await readDocument(firstNode.doc)
+      const secondDoc = await readDocument(secondNode.doc)
+      expect(firstDoc.path).toBe(join(paths.peopleDir, 'sam.md'))
+      expect(secondDoc.path).toBe(join(paths.peopleDir, 'sam-2.md'))
+      expect(firstDoc.body).toBe('This page is new. It grows as we talk.\n')
+      expect(secondDoc.body).toBe('This page is new. It grows as we talk.\n')
     })
 
     it('materializes a link proposal as a confirmed edge carrying its own confidence', async () => {
