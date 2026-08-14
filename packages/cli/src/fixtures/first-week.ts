@@ -60,16 +60,19 @@ export function dayOneReflection(): ReflectionOutput {
         realm: WOODWORKING_REALM_NAME,
         reason: 'bought tools and started a first woodworking project',
         itemIndexes: [0],
+        narrative: 'Started a first woodworking project after buying a secondhand table saw.',
       },
       {
         name: JOB_SEARCH_ARC_NAME,
         realm: JOB_SEARCH_REALM_NAME,
         reason: 'quietly started job hunting after feeling stuck at the current job',
         itemIndexes: [1],
+        narrative: 'Quietly started a job search after feeling stuck at the current job.',
       },
     ],
     newPersons: [],
-    arcNarratives: [],
+    arcUpdates: [],
+    personUpdates: [],
     constitutionUpdate: null,
   }
 }
@@ -100,7 +103,8 @@ export function dayTwoReflection(arcIds: ArcIds): ReflectionOutput {
     ],
     newArcs: [],
     newPersons: [],
-    arcNarratives: [],
+    arcUpdates: [],
+    personUpdates: [],
     constitutionUpdate: null,
   }
 }
@@ -131,7 +135,8 @@ export function dayThreeReflection(arcIds: ArcIds): ReflectionOutput {
     ],
     newArcs: [],
     newPersons: [],
-    arcNarratives: [],
+    arcUpdates: [],
+    personUpdates: [],
     constitutionUpdate: null,
   }
 }
@@ -155,7 +160,8 @@ export function presentDayReflection(): ReflectionOutput {
     attributions: [],
     newArcs: [],
     newPersons: [],
-    arcNarratives: [],
+    arcUpdates: [],
+    personUpdates: [],
     constitutionUpdate: null,
   }
 }

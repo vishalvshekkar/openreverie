@@ -50,7 +50,8 @@ function emptyReflectionJson(summary: string): string {
     attributions: [],
     newArcs: [],
     newPersons: [],
-    arcNarratives: [],
+    arcUpdates: [],
+    personUpdates: [],
     constitutionUpdate: null,
   })
 }
