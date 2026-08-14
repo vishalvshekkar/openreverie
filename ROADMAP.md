@@ -35,6 +35,9 @@ Good first contributions, roughly ordered by usefulness. Read [CONTRIBUTING.md](
 - **Merging person aliases.** If the same human ends up with more than one person node (different names or spellings across sessions), there is no way yet to merge them.
 - **A duplicate arc from a retried reflection.** If reflection's document writes partly fail and the session is retried, the retry can create a second arc with a `-2` suffixed page rather than resuming the first. This is a deliberate trade: a visible duplicate you can merge by hand beats a silent, permanent loss of what reflection found.
 - **Warnings dropped mid-session.** A failed reindex during a live conversation (for instance, from a `remember` call) is pushed to the engine's warning list, but nothing drains that list before session end clears it, so the warning never reaches you. This is a systemic gap in how warnings are surfaced, not something specific to this release.
+- **Reflection's per-document error guard is one statement too wide.** `resolveNarratives` in `packages/memory/src/reflection.ts` wraps a pure in-memory computation inside the same `try` that guards the file read and the model call, so a programming error there would be treated as "skip this document" instead of surfacing. The guard should cover only the two operations that can genuinely fail on a user's machine.
+- **`reverie read` reports only the first unreadable file** that matches what you typed. If two pages are broken and both match, you hear about one of them.
+- **The `/bye` message can be slightly wrong in a narrow window.** If reflection fails after the session summary has already been written (during the graph sync, the constitution read, or an arc read), reverie says the session will be reflected next time it starts, when in fact it already counts as reflected. Nothing is lost either way and what is on disk is correct, but the sentence is not true in that case.
 
 ## How work happens here
 
