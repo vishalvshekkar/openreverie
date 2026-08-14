@@ -14,13 +14,28 @@
 
 import { createInterface } from 'node:readline/promises'
 import type { ReverieConfig } from '@openreverie/core'
-import { loadConfig, resolveApiKey } from '@openreverie/core'
+import { defaultConfigPath, loadConfig, resolveApiKey } from '@openreverie/core'
 import { MemoryEngine } from '@openreverie/memory'
 import type { ProviderSelection } from '@openreverie/providers'
 import { createChatProvider, createEmbeddingProvider } from '@openreverie/providers'
 import type { ChatIo } from './chat.js'
-import { countMemoryDocuments, openCliContext, printWarnings, runChat } from './chat.js'
+import {
+  countMemoryDocuments,
+  createStylePersister,
+  openCliContext,
+  printWarnings,
+  runChat,
+} from './chat.js'
 import { runSetup } from './setup.js'
+
+// Colors are read from real process state exactly once, here at the edge:
+// disabled when stdout is not a TTY (piped, redirected, or captured by a
+// test harness) or when NO_COLOR is set, per the NO_COLOR convention. Every
+// function downstream of this takes the resulting boolean explicitly
+// rather than sniffing process state itself.
+function colorsEnabled(): boolean {
+  return process.stdout.isTTY === true && process.env.NO_COLOR === undefined
+}
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
@@ -85,8 +100,11 @@ async function main(): Promise<void> {
     return
   }
 
+  const colorEnabled = colorsEnabled()
+  const configPath = defaultConfigPath()
+
   const context = await openCliContext({
-    loadConfig: () => loadConfig(),
+    loadConfig: () => loadConfig(configPath),
     buildChat: (config) => createChatProvider(providerSelection(config)),
     buildEmbeddings: (config) => createEmbeddingProvider(providerSelection(config)),
     openEngine: (config, deps) => MemoryEngine.open(config.memoryDir, deps),
@@ -99,7 +117,7 @@ async function main(): Promise<void> {
   }
 
   const { engine, config, chat } = context
-  printWarnings(stdout, engine)
+  printWarnings(stdout, engine, colorEnabled)
 
   try {
     if (subcommand === 'reindex') {
@@ -108,12 +126,13 @@ async function main(): Promise<void> {
       stdout.write(`Reindexed ${count} documents.\n`)
     } else if (subcommand === 'reflect') {
       await engine.runMaintenance()
-      printWarnings(stdout, engine)
+      printWarnings(stdout, engine, colorEnabled)
       stdout.write('Reflection is up to date.\n')
     } else {
       const io = readlineChatIo()
+      const toolDeps = { updateStyle: createStylePersister(config, configPath) }
       try {
-        await runChat({ engine, config, chat, io })
+        await runChat({ engine, config, chat, io, toolDeps, colorEnabled })
       } finally {
         io.close()
       }

@@ -6,8 +6,8 @@
 
 import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
-import type { ReverieConfig } from '@openreverie/core'
-import { AgentSession } from '@openreverie/core'
+import type { ReverieConfig, StyleConfig, ToolDeps } from '@openreverie/core'
+import { AgentSession, saveConfig } from '@openreverie/core'
 import type { EngineDeps, MemoryEngine } from '@openreverie/memory'
 import { listDocuments, memoryPaths, readDocument } from '@openreverie/memory'
 import type { ChatProvider, EmbeddingProvider } from '@openreverie/providers'
@@ -25,11 +25,58 @@ export interface ChatIo {
   cancelPending(): void
 }
 
-const ANSI_DIM = '\x1b[2m'
+// --- Terminal colors ----------------------------------------------------
+// Raw ANSI escapes, no dependency. Every helper here takes an explicit
+// `enabled` flag rather than sniffing process.stdout.isTTY or NO_COLOR
+// itself: that sniffing happens once, at the edge, in index.ts, and gets
+// threaded down as a plain boolean. That keeps these functions (and the
+// tests that exercise them) free of any dependency on real process state.
 const ANSI_RESET = '\x1b[0m'
+const ANSI_DIM = '\x1b[2m'
+const ANSI_CYAN = '\x1b[36m'
+const ANSI_MAGENTA = '\x1b[35m'
 
-function dim(text: string): string {
-  return `${ANSI_DIM}${text}${ANSI_RESET}`
+function colorize(code: string, text: string, enabled: boolean): string {
+  return enabled ? `${code}${text}${ANSI_RESET}` : text
+}
+
+// Tool notices and warning notes: dim gray, easy to skim past.
+function dim(text: string, enabled = false): string {
+  return colorize(ANSI_DIM, text, enabled)
+}
+
+// The user's own prompt.
+export function cyan(text: string, enabled: boolean): string {
+  return colorize(ANSI_CYAN, text, enabled)
+}
+
+// reverie's speaker tag. Soft magenta rather than a bright or bold color,
+// so it reads clearly without fighting the terminal's own foreground on
+// either a light or a dark background.
+export function magenta(text: string, enabled: boolean): string {
+  return colorize(ANSI_MAGENTA, text, enabled)
+}
+
+// One honest, specific notice per tool, so the person watching the
+// terminal knows what reverie is actually doing rather than a generic
+// "searching memory" for everything. A tool this list has never heard of
+// (a future addition, or a stale build) still gets a plain, truthful
+// fallback instead of silence or a crash.
+const TOOL_NOTICES: Record<string, string> = {
+  remember: 'remembering',
+  resolve_proposal: 'updating memory',
+  update_style: 'adjusting style',
+  search_memory: 'searching memory',
+  read_document: 'reading memory',
+  read_transcript: 'reading memory',
+  graph_query: 'checking connections',
+  list_arcs: 'checking memory',
+  list_realms: 'checking memory',
+}
+
+export function toolNotice(name: string): string {
+  const label = TOOL_NOTICES[name]
+  return label !== undefined ? `[${label}]` : `[using: ${name}]`
 }
 
 function errorMessage(err: unknown): string {
@@ -43,9 +90,10 @@ function errorMessage(err: unknown): string {
 export function printWarnings(
   io: { write(text: string): void },
   engine: { readonly warnings: readonly string[] },
+  colorEnabled = false,
 ): void {
   for (const warning of engine.warnings) {
-    io.write(`${dim(`note: ${warning}`)}\n`)
+    io.write(`${dim(`note: ${warning}`, colorEnabled)}\n`)
   }
 }
 
@@ -57,12 +105,14 @@ export async function runChat(deps: {
   config: ReverieConfig
   chat: ChatProvider
   io: ChatIo
+  toolDeps?: ToolDeps
+  colorEnabled?: boolean
 }): Promise<void> {
-  const { engine, config, chat, io } = deps
+  const { engine, config, chat, io, toolDeps, colorEnabled = false } = deps
 
   io.write(`Memory folder: ${config.memoryDir}. Safety mode: ${config.safety.mode}.\n\n`)
 
-  const session = await AgentSession.start(engine, config, chat)
+  const session = await AgentSession.start(engine, config, chat, toolDeps)
 
   // 0 = no interrupt yet, 1 = one Ctrl-C seen (reminded about /bye), 2+ =
   // a second Ctrl-C seen (exit without reflecting). The handler itself
@@ -94,7 +144,7 @@ export async function runChat(deps: {
   for (;;) {
     let line: string
     try {
-      line = await io.question('you> ')
+      line = await io.question(cyan('you> ', colorEnabled))
     } catch {
       // readline closed (EOF): treat exactly like /bye.
       line = '/bye'
@@ -108,7 +158,7 @@ export async function runChat(deps: {
     if (trimmed === '/bye') {
       io.write('reflecting on this session...\n')
       await session.end()
-      printWarnings(io, engine)
+      printWarnings(io, engine, colorEnabled)
       io.write('Saved and reflected. See you next time.\n')
       return
     }
@@ -117,17 +167,26 @@ export async function runChat(deps: {
     }
 
     let sawText = false
+    let taggedThisTurn = false
     responding = true
     try {
       for await (const event of session.send(line)) {
         if (event.type === 'text') {
           sawText = true
+          if (!taggedThisTurn) {
+            io.write(magenta('reverie> ', colorEnabled))
+            taggedThisTurn = true
+          }
           io.write(event.text)
         } else if (event.type === 'tool') {
-          io.write(`${dim(`[searching memory: ${event.name}]`)}\n`)
+          io.write(`${dim(toolNotice(event.name), colorEnabled)}\n`)
         } else if (event.type === 'done') {
           io.write('\n')
           if (!sawText) {
+            if (!taggedThisTurn) {
+              io.write(magenta('reverie> ', colorEnabled))
+              taggedThisTurn = true
+            }
             io.write(LOST_IN_NOTES_MESSAGE)
           }
         }
@@ -146,6 +205,25 @@ export async function runChat(deps: {
     if (interruptLevel >= 2) {
       return
     }
+  }
+}
+
+// Builds the persister the update_style tool needs. Core never knows
+// config file paths or how style is saved (that is the point of ToolDeps);
+// this is the CLI's one implementation of it. Patches `config.style` in
+// place, in the same ReverieConfig object the running session was started
+// with, then writes the whole config back to the exact path it was loaded
+// from, atomically (saveConfig writes to a temp file and renames over the
+// target).
+export function createStylePersister(
+  config: ReverieConfig,
+  configPath: string,
+): (patch: Partial<StyleConfig>) => Promise<StyleConfig> {
+  return async (patch: Partial<StyleConfig>) => {
+    const nextStyle: StyleConfig = { ...config.style, ...patch }
+    config.style = nextStyle
+    await saveConfig(config, configPath)
+    return nextStyle
   }
 }
 

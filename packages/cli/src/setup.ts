@@ -10,6 +10,7 @@ import {
   defaultConfigPath,
   defaultCrisisResources,
   type ReverieConfig,
+  type StyleConfig,
   saveConfig,
 } from '@openreverie/core'
 
@@ -91,6 +92,119 @@ async function askSafetyMode(io: SetupIo): Promise<'companion' | 'firewall'> {
   }
 }
 
+export interface StyleOption<T extends string> {
+  value: T
+  label: string
+}
+
+// One numbered choice per style axis, with a plain one-line, honest
+// description per option and a sensible default that pressing enter
+// accepts. Kept generic so the three axes below share one prompt-and-parse
+// loop instead of three near-duplicates.
+async function askStyleAxis<T extends string>(
+  io: SetupIo,
+  intro: string,
+  options: StyleOption<T>[],
+  defaultValue: T,
+): Promise<T> {
+  const defaultIndex = options.findIndex((option) => option.value === defaultValue) + 1
+  const menu = options.map((option, i) => `  ${i + 1}. ${option.label}`).join('\n')
+  io.write(`${intro}\n${menu}\n`)
+
+  for (;;) {
+    const choice = await ask(io, `Choice [${defaultIndex}]: `)
+    if (choice === '') return defaultValue
+
+    const index = Number.parseInt(choice, 10)
+    if (Number.isInteger(index) && index >= 1 && index <= options.length) {
+      const chosen = options[index - 1]
+      if (chosen) return chosen.value
+    }
+    io.write(`Enter a number from 1 to ${options.length}, or press enter for the default.\n`)
+  }
+}
+
+async function askStyle(io: SetupIo): Promise<StyleConfig> {
+  io.write(
+    '\nA few quick questions about how reverie talks with you. These are starting points, not ' +
+      'fixed forever: you can change any of them later just by telling reverie in conversation, ' +
+      'something like "be more direct with me" or "let me lead more."\n',
+  )
+
+  const engagement = await askStyleAxis<StyleConfig['engagement']>(
+    io,
+    '\nHow much should reverie initiate versus wait for you to bring things up?',
+    [
+      {
+        value: 'leading',
+        label:
+          'Leading. reverie brings things up on its own and follows threads from earlier without being asked.',
+      },
+      {
+        value: 'balanced',
+        label:
+          'Balanced (suggested). reverie mostly follows your lead, but will bring something back up if it seems worth it.',
+      },
+      {
+        value: 'following',
+        label:
+          'Following. reverie waits for you to bring things up and rarely initiates on its own.',
+      },
+    ],
+    'balanced',
+  )
+
+  const tone = await askStyleAxis<StyleConfig['tone']>(
+    io,
+    '\nWhat register should reverie speak in?',
+    [
+      {
+        value: 'warm',
+        label: 'Warm (suggested). Caring and gentle, the register of a close friend.',
+      },
+      {
+        value: 'playful',
+        label: 'Playful. Light and a little teasing when the moment allows it.',
+      },
+      {
+        value: 'snarky',
+        label: 'Snarky. Dry and a bit sharp-tongued, still on your side.',
+      },
+      {
+        value: 'direct',
+        label: 'Direct. Plain and to the point, little cushioning.',
+      },
+      {
+        value: 'formal',
+        label: 'Formal. More measured and reserved, less familiar.',
+      },
+    ],
+    'warm',
+  )
+
+  const orientation = await askStyleAxis<StyleConfig['orientation']>(
+    io,
+    '\nWhen you bring something up, should reverie mostly listen or mostly offer next steps?',
+    [
+      {
+        value: 'listening',
+        label: 'Listening (suggested). Mostly reflects and asks questions, does not rush to solve.',
+      },
+      {
+        value: 'balanced',
+        label: 'Balanced. A mix of listening and offering a next step when that seems useful.',
+      },
+      {
+        value: 'solutions',
+        label: 'Solutions. Leans toward offering next steps and suggestions.',
+      },
+    ],
+    'listening',
+  )
+
+  return { engagement, tone, orientation }
+}
+
 export async function runSetup(io: SetupIo, configPath?: string): Promise<void> {
   io.write('Setting up reverie.\n\n')
 
@@ -107,6 +221,8 @@ export async function runSetup(io: SetupIo, configPath?: string): Promise<void> 
       'Edit safety.resources in the config file to add local or trusted contacts.\n',
   )
 
+  const style = await askStyle(io)
+
   const provider: ReverieConfig['provider'] = { name: 'openai' }
   if (keyChoice.apiKeyEnv !== undefined) provider.apiKeyEnv = keyChoice.apiKeyEnv
   if (keyChoice.apiKey !== undefined) provider.apiKey = keyChoice.apiKey
@@ -116,10 +232,7 @@ export async function runSetup(io: SetupIo, configPath?: string): Promise<void> 
     provider,
     models: { chat: chatModel, reflection: reflectionModel, embeddings: embeddingsModel },
     safety: { mode, resources: defaultCrisisResources.map((resource) => ({ ...resource })) },
-    // Wizard questions for style land in a later task; balanced/warm/listening
-    // matches the zod defaults in @openreverie/core so this is a no-op for
-    // anyone who has not been asked yet.
-    style: { engagement: 'balanced', tone: 'warm', orientation: 'listening' },
+    style,
   }
 
   const resolvedPath = configPath ?? defaultConfigPath()
