@@ -29,6 +29,7 @@ Good first contributions, roughly ordered by usefulness. Read [CONTRIBUTING.md](
 - **Skip reflection for empty sessions.** A session with no user messages still spends a reflection call.
 - **Local embedding option.** An `EmbeddingProvider` backed by a local model would keep the search index fully offline.
 - **Person pages.** People get graph nodes and involves-edges today, but no narrative page the way arcs have; a per-person document the agent maintains would make "what's been going on with X" richer.
+- **Proactive session greeting.** Reverie currently waits for the user's first message. A session should open with a short, contextually written hello from reverie itself, and when something is pressing (a pending proposal, a thread left mid-air last time, a day that sounded hard), gently kick the conversation off with it.
 
 ## How work happens here
 
