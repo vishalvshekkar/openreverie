@@ -69,6 +69,33 @@ export function printWarnings(
 const LOST_IN_NOTES_MESSAGE =
   'I got lost in my notes there and did not get to an answer. Ask me again?\n'
 
+// Streams AgentSession.greet() the same way the main loop streams a
+// reply: the reverie> tag before the first chunk of text, plain writes
+// after that. Error handling deliberately differs from a normal turn:
+// any failure inside greet() (a provider error, or its own 20 second
+// timeout) is swallowed here without a word, because the greeting was
+// never asked for and a visible error about it would be confusing rather
+// than honest. A real provider problem still surfaces normally on the
+// user's first actual message.
+async function runGreeting(session: AgentSession, io: ChatIo, colorEnabled: boolean): Promise<void> {
+  let tagged = false
+  try {
+    for await (const event of session.greet()) {
+      if (event.type === 'text') {
+        if (!tagged) {
+          io.write(magenta('reverie> ', colorEnabled))
+          tagged = true
+        }
+        io.write(event.text)
+      } else if (event.type === 'done' && tagged) {
+        io.write('\n')
+      }
+    }
+  } catch {
+    // Silent abandon, per the greeting's own degradation rule.
+  }
+}
+
 export async function runChat(deps: {
   engine: MemoryEngine
   config: ReverieConfig
@@ -109,6 +136,8 @@ export async function runChat(deps: {
       io.cancelPending()
     }
   })
+
+  await runGreeting(session, io, colorEnabled)
 
   for (;;) {
     let line: string
