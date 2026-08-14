@@ -89,6 +89,16 @@ describe('toolDefinitions', () => {
       expect(def.description).not.toContain(emDash)
     }
   })
+
+  it('lists person among the valid kinds for search_memory', () => {
+    const defs = toolDefinitions()
+    const searchMemory = defs.find((d) => d.name === 'search_memory')
+    if (!searchMemory) throw new Error('expected a search_memory tool definition')
+    const kinds = (
+      searchMemory.parameters as { properties: { kinds: { description: string } } }
+    ).properties.kinds
+    expect(kinds.description).toContain('person')
+  })
 })
 
 describe('dispatchTool', () => {
