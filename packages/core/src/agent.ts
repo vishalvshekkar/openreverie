@@ -23,6 +23,7 @@ import { dispatchTool, type ToolDeps, toolDefinitions } from './tools.js'
 export type AgentEvent =
   | { type: 'text'; text: string }
   | { type: 'tool'; name: string }
+  | { type: 'thinking' }
   | { type: 'done' }
 
 const MAX_TOOL_ROUNDS = 8
@@ -215,6 +216,7 @@ export class AgentSession {
   }
 
   private async *runGreeting(): AsyncIterable<AgentEvent> {
+    yield { type: 'thinking' }
     let text = ''
     let errored = false
     try {
@@ -260,6 +262,7 @@ export class AgentSession {
     await this.appendBoth({ role: 'user', content: userText })
 
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+      yield { type: 'thinking' }
       let text = ''
       const toolCalls: ToolCall[] = []
 

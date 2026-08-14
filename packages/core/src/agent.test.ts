@@ -58,6 +58,46 @@ async function collect(events: AsyncIterable<AgentEvent>): Promise<AgentEvent[]>
 }
 
 describe('AgentSession', () => {
+  it('yields thinking at the start of every round, including after a tool call resumes the model', async () => {
+    const chat = new FakeChatProvider([
+      {
+        text: '',
+        toolCalls: [{ id: 'call_1', name: 'list_arcs', arguments: '{}' }],
+      },
+      { text: 'Here is what I found.', toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const session = await AgentSession.start(engine, testConfig(), chat)
+
+    const events = await collect(session.send('What is going on?'))
+
+    expect(events).toEqual([
+      { type: 'thinking' },
+      { type: 'tool', name: 'list_arcs' },
+      { type: 'thinking' },
+      { type: 'text', text: 'Here is what I found.' },
+      { type: 'done' },
+    ])
+
+    await engine.close()
+  })
+
+  it('greet() also yields thinking before the greeting text', async () => {
+    const chat = new FakeChatProvider([{ text: 'Hello again.', toolCalls: [] }])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const session = await AgentSession.start(engine, testConfig(), chat)
+
+    const events = await collect(session.greet())
+
+    expect(events).toEqual([
+      { type: 'thinking' },
+      { type: 'text', text: 'Hello again.' },
+      { type: 'done' },
+    ])
+
+    await engine.close()
+  })
+
   it('runs a tool round then a final text round, forwarding events and the transcript in order', async () => {
     const chat = new FakeChatProvider([
       {
@@ -74,7 +114,9 @@ describe('AgentSession', () => {
     const events = await collect(session.send('Did we ever go kayaking?'))
 
     expect(events).toEqual([
+      { type: 'thinking' },
       { type: 'tool', name: 'search_memory' },
+      { type: 'thinking' },
       { type: 'text', text: 'We went kayaking last spring, on the lake near your place.' },
       { type: 'done' },
     ])
@@ -187,8 +229,16 @@ describe('AgentSession', () => {
       collect(session.send('Message B')),
     ])
 
-    expect(eventsA).toEqual([{ type: 'text', text: 'Reply A' }, { type: 'done' }])
-    expect(eventsB).toEqual([{ type: 'text', text: 'Reply B' }, { type: 'done' }])
+    expect(eventsA).toEqual([
+      { type: 'thinking' },
+      { type: 'text', text: 'Reply A' },
+      { type: 'done' },
+    ])
+    expect(eventsB).toEqual([
+      { type: 'thinking' },
+      { type: 'text', text: 'Reply B' },
+      { type: 'done' },
+    ])
 
     const transcript = await engine.readTranscript(session.sessionId)
     expect(transcript.map((l) => l.role)).toEqual(['user', 'assistant', 'user', 'assistant'])
@@ -324,7 +374,9 @@ describe('AgentSession', () => {
     const events = await collect(session.send('Change how you talk to me.'))
 
     expect(events).toEqual([
+      { type: 'thinking' },
       { type: 'tool', name: 'update_style' },
+      { type: 'thinking' },
       { type: 'text', text: 'Now speaking playfully.' },
       { type: 'done' },
     ])
@@ -374,7 +426,9 @@ describe('AgentSession', () => {
     const events = await collect(session.send('Try to change how you talk.'))
 
     expect(events).toEqual([
+      { type: 'thinking' },
       { type: 'tool', name: 'update_style' },
+      { type: 'thinking' },
       { type: 'text', text: 'Still warm.' },
       { type: 'done' },
     ])
@@ -400,6 +454,7 @@ describe('AgentSession', () => {
     const events = await collect(session.greet())
 
     expect(events).toEqual([
+      { type: 'thinking' },
       { type: 'text', text: 'Good to see you again. How has the week been?' },
       { type: 'done' },
     ])
@@ -451,7 +506,7 @@ describe('AgentSession', () => {
 
     const events = await collect(session.greet())
 
-    expect(events).toEqual([])
+    expect(events).toEqual([{ type: 'thinking' }])
     const transcript = await engine.readTranscript(session.sessionId)
     expect(transcript).toEqual([])
 
@@ -482,6 +537,7 @@ describe('AgentSession', () => {
     const events = await collect(session.greet())
 
     expect(events).toEqual([
+      { type: 'thinking' },
       { type: 'text', text: 'Good to see' },
       { type: 'text', text: ' you again.' },
     ])
@@ -514,7 +570,7 @@ describe('AgentSession', () => {
       await vi.advanceTimersByTimeAsync(20_001)
       const events = await resultPromise
 
-      expect(events).toEqual([])
+      expect(events).toEqual([{ type: 'thinking' }])
       const transcript = await engine.readTranscript(session.sessionId)
       expect(transcript).toEqual([])
 
@@ -590,7 +646,7 @@ describe('AgentSession', () => {
       await vi.advanceTimersByTimeAsync(20_001)
       const events = await resultPromise
 
-      expect(events).toEqual([])
+      expect(events).toEqual([{ type: 'thinking' }])
       expect(cleanedUp).toBe(false)
 
       // The provider's connection finally settles, well after greet()
