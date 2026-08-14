@@ -387,8 +387,17 @@ The owner's memory folder predates this work, so:
 
 Recorded rather than built:
 
+- Exposing the forget feature at all. It is implemented and tested but parked and unreachable
+  (section 2), and two gaps must close first: retracting a person's node leaves their page on disk
+  and searchable, and a partial multi document failure is not atomic.
+- Extending `forget` to session summaries and the items inside them, once it is exposed.
+- Purging forgotten content from the memory folder's git history, once it is exposed.
 - Removing the proposal machinery once existing queues have drained.
-- Extending `forget` to session summaries and the items inside them.
-- A deterministic significance threshold for person pages, if LLM judgment proves too loose.
+- A deterministic significance threshold for person pages, if letting reflection judge proves too
+  loose.
 - Merging person aliases when the same human ends up with more than one node.
-- Purging forgotten content from the memory folder's git history.
+- A partial materialization failure during reflection causes a retry that can create a duplicate
+  arc with a slug suffixed page. The trade was deliberate: a visible duplicate beats a silent
+  permanent loss.
+- Warnings raised mid session by a failed reindex are discarded, because nothing drains them
+  before the end of the session clears them. Systemic, not specific to this work.
