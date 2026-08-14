@@ -13,6 +13,8 @@ import {
   type ReflectionItem,
   type ReflectionOutput,
   reflectSession,
+  resolveNarratives,
+  rewriteNarrative,
 } from './reflection.js'
 import type { TranscriptLine } from './transcripts.js'
 
@@ -253,8 +255,176 @@ describe('reflection', () => {
     })
   })
 
+  describe('rewriteNarrative', () => {
+    it('returns the parsed body on the first valid reply', async () => {
+      const chat = new FakeChatProvider([{ text: JSON.stringify({ body: 'Updated body.' }), toolCalls: [] }])
+
+      const result = await rewriteNarrative(chat, 'fake-model', {
+        name: 'Health',
+        currentBody: 'Original arc narrative.\n',
+        summary: 'A quiet session.',
+        itemTexts: ['Went for a run'],
+        note: 'Went for another run.',
+      })
+
+      expect(result).toEqual({ body: 'Updated body.' })
+      expect(chat.requests).toHaveLength(1)
+      const prompt = chat.requests[0]?.messages[0]?.content ?? ''
+      expect(prompt).toContain('Original arc narrative.')
+      expect(prompt).toContain('Went for another run.')
+    })
+
+    it('retries once on malformed JSON, then returns null if the retry also fails', async () => {
+      const chat = new FakeChatProvider([
+        { text: 'not json', toolCalls: [] },
+        { text: 'still not json', toolCalls: [] },
+      ])
+
+      const result = await rewriteNarrative(chat, 'fake-model', {
+        name: 'Health',
+        currentBody: 'Original arc narrative.\n',
+        summary: 'A quiet session.',
+        itemTexts: [],
+        note: 'Went for another run.',
+      })
+
+      expect(result).toBeNull()
+      expect(chat.requests).toHaveLength(2)
+      const retryPrompt = chat.requests[1]?.messages[0]?.content ?? ''
+      expect(retryPrompt).toContain('failed validation')
+      expect(retryPrompt).toContain('not json')
+    })
+  })
+
+  describe('resolveNarratives', () => {
+    it('calls rewriteNarrative once per arcUpdates entry that resolves to an existing arc with a doc', async () => {
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('A session.'),
+        items: [{ text: 'Went for a run', kind: 'event' }],
+        attributions: [{ itemIndex: 0, arcId: 'arc_health', confidence: 0.9 }],
+        arcUpdates: [{ arcId: 'arc_health', note: 'Went for another run.' }],
+      }
+      const chat = new FakeChatProvider([{ text: JSON.stringify({ body: 'New body.' }), toolCalls: [] }])
+
+      const graphState = await readGraph(paths)
+      const narratives = await resolveNarratives(paths, graphState, out, chat, 'fake-model')
+
+      expect(narratives.get('arc_health')).toBe('New body.')
+      expect(chat.requests).toHaveLength(1)
+      const prompt = chat.requests[0]?.messages[0]?.content ?? ''
+      expect(prompt).toContain('Original arc narrative.')
+      expect(prompt).toContain('Went for a run')
+    })
+
+    it('drops an arcUpdates entry whose id does not resolve to an existing node', async () => {
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('A session.'),
+        arcUpdates: [{ arcId: 'arc_does_not_exist', note: 'Should be dropped.' }],
+      }
+      const chat = new FakeChatProvider([])
+
+      const graphState = await readGraph(paths)
+      const narratives = await resolveNarratives(paths, graphState, out, chat, 'fake-model')
+
+      expect(narratives.size).toBe(0)
+      expect(chat.requests).toHaveLength(0)
+    })
+
+    it('drops a personUpdates entry that resolves to a node with no doc', async () => {
+      await appendGraph(paths, [
+        { ts: '2026-08-01T00:00:00.000Z', op: 'assert', node: 'person_sam', type: 'person', label: 'Sam' },
+      ])
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('A session.'),
+        personUpdates: [{ personId: 'person_sam', note: 'Should be dropped, no doc.' }],
+      }
+      const chat = new FakeChatProvider([])
+
+      const graphState = await readGraph(paths)
+      const narratives = await resolveNarratives(paths, graphState, out, chat, 'fake-model')
+
+      expect(narratives.size).toBe(0)
+      expect(chat.requests).toHaveLength(0)
+    })
+
+    it('drops an update entry that resolves to a node that is neither arc nor person', async () => {
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('A session.'),
+        arcUpdates: [{ arcId: 'realm_health', note: 'A realm is not a valid pass two target.' }],
+      }
+      const chat = new FakeChatProvider([])
+
+      const graphState = await readGraph(paths)
+      const narratives = await resolveNarratives(paths, graphState, out, chat, 'fake-model')
+
+      expect(narratives.size).toBe(0)
+      expect(chat.requests).toHaveLength(0)
+    })
+
+    it('drops the map entry when rewriteNarrative itself returns null', async () => {
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('A session.'),
+        arcUpdates: [{ arcId: 'arc_health', note: 'Went for another run.' }],
+      }
+      const chat = new FakeChatProvider([
+        { text: 'not json', toolCalls: [] },
+        { text: 'still not json', toolCalls: [] },
+      ])
+
+      const graphState = await readGraph(paths)
+      const narratives = await resolveNarratives(paths, graphState, out, chat, 'fake-model')
+
+      expect(narratives.has('arc_health')).toBe(false)
+    })
+
+    it('drops the arcUpdates entry for an arc also named in newArcs this session', async () => {
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('A session with a naming collision.'),
+        newArcs: [
+          {
+            name: 'Health',
+            realm: 'realm_health',
+            reason: 'mistakenly proposed again',
+            itemIndexes: [],
+            narrative: 'unused',
+          },
+        ],
+        arcUpdates: [{ arcId: 'arc_health', note: 'Should be dropped due to overlap.' }],
+      }
+      const chat = new FakeChatProvider([])
+
+      const graphState = await readGraph(paths)
+      const narratives = await resolveNarratives(paths, graphState, out, chat, 'fake-model')
+
+      expect(narratives.has('arc_health')).toBe(false)
+      expect(chat.requests).toHaveLength(0)
+    })
+  })
+
   describe('applyReflection', () => {
     const now = new Date('2026-08-13T10:00:00.000Z')
+
+    it('writes a narrative document only for ids present in the narratives map', async () => {
+      const out = emptyReflectionOutput('A session.')
+      const narratives = new Map([['arc_health', 'Rewritten by pass two.']])
+
+      await applyReflection(paths, out, sessionId, [], now, narratives)
+
+      const arcDoc = await readDocument(arcDocPath)
+      expect(arcDoc.body).toBe('Rewritten by pass two.\n')
+      expect(arcDoc.meta.updated).toBe(now.toISOString())
+    })
+
+    it('leaves the arc document byte for byte unchanged when the narratives map has no entry for it', async () => {
+      const out = emptyReflectionOutput('A session.')
+      const before = await readDocument(arcDocPath)
+
+      await applyReflection(paths, out, sessionId, [], now, new Map())
+
+      const after = await readDocument(arcDocPath)
+      expect(after.body).toBe(before.body)
+      expect(after.meta.updated).toBeUndefined()
+    })
 
     it('writes the summary, splits attributions by confidence, and queues proposals for new arcs and persons', async () => {
       const out: ReflectionOutput = {
@@ -289,7 +459,7 @@ describe('reflection', () => {
         constitutionUpdate: null,
       }
 
-      const result = await applyReflection(paths, out, sessionId, [], now)
+      const result = await applyReflection(paths, out, sessionId, [], now, new Map())
 
       expect(result.summaryDoc.body).toBe(`${out.summary}\n`)
       expect(result.autoAsserted).toBe(1)
@@ -375,7 +545,7 @@ describe('reflection', () => {
         constitutionUpdate: 'Updated constitution body.',
       }
 
-      await applyReflection(paths, out, sessionId, [], now)
+      await applyReflection(paths, out, sessionId, [], now, new Map())
 
       const constitutionDoc = await readDocument(paths.constitution)
       expect(constitutionDoc.body).toBe('Updated constitution body.\n')
@@ -399,7 +569,7 @@ describe('reflection', () => {
       // The engine wraps a degraded result into a full ReflectionOutput before
       // calling applyReflection; this test exercises that wrapped shape.
       const wrapped = emptyReflectionOutput((degraded as { summary: string }).summary)
-      const result = await applyReflection(paths, wrapped, sessionId, [], now)
+      const result = await applyReflection(paths, wrapped, sessionId, [], now, new Map())
 
       expect(result.summaryDoc.body).toBe('still nope\n')
       expect(result.summaryDoc.meta.items).toEqual([])
@@ -425,7 +595,7 @@ describe('reflection', () => {
         { id: newId('item'), text: 'Called mom', kind: 'event', ts: '2026-08-13T08:05:00.000Z' },
       ]
 
-      const result = await applyReflection(paths, out, sessionId, liveItems, now)
+      const result = await applyReflection(paths, out, sessionId, liveItems, now, new Map())
 
       const items = result.summaryDoc.meta.items as ReflectionItem[]
       expect(items).toHaveLength(2)
@@ -445,7 +615,7 @@ describe('reflection', () => {
         attributions: [{ itemIndex: 0, arcId: 'realm_health', confidence: 0.95 }],
       }
 
-      const result = await applyReflection(paths, out, sessionId, [], now)
+      const result = await applyReflection(paths, out, sessionId, [], now, new Map())
       expect(result.autoAsserted).toBe(0)
 
       const item = (result.summaryDoc.meta.items as ReflectionItem[])[0] as ReflectionItem
@@ -493,7 +663,7 @@ describe('reflection', () => {
         ],
       }
 
-      const result = await applyReflection(paths, out, sessionId, [], now)
+      const result = await applyReflection(paths, out, sessionId, [], now, new Map())
 
       expect(result.droppedProposals).toBe(2)
       expect(result.proposals).toHaveLength(1)
@@ -520,7 +690,7 @@ describe('reflection', () => {
       // lives outside the session dir) still succeeds.
       await chmod(sessionDir, 0o500)
       try {
-        await expect(applyReflection(paths, out, sessionId, [], now)).rejects.toThrow()
+        await expect(applyReflection(paths, out, sessionId, [], now, new Map())).rejects.toThrow()
       } finally {
         await chmod(sessionDir, 0o700)
       }

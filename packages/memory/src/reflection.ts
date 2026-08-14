@@ -283,6 +283,164 @@ function resolveItemIds(indexes: number[], mintedItems: ReflectionItem[]): strin
   return ids
 }
 
+export const narrativeRewriteSchema: z.ZodType<{ body: string }> = z.object({ body: z.string() })
+
+interface NarrativeParseSuccess {
+  success: true
+  data: { body: string }
+}
+interface NarrativeParseFailure {
+  success: false
+  error: string
+}
+
+function parseNarrativeRewrite(raw: string): NarrativeParseSuccess | NarrativeParseFailure {
+  let json: unknown
+  try {
+    json = JSON.parse(raw)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    return { success: false, error: `response is not valid JSON: ${message}` }
+  }
+  const result = narrativeRewriteSchema.safeParse(json)
+  if (result.success) {
+    return { success: true, data: result.data }
+  }
+  return { success: false, error: result.error.message }
+}
+
+function buildNarrativeRewritePrompt(input: {
+  name: string
+  currentBody: string
+  summary: string
+  itemTexts: string[]
+  note: string
+}): string {
+  return [
+    `You are rewriting the memory page for "${input.name}". This page already has a body; you are updating it, not starting over.`,
+    '',
+    'Current body:',
+    input.currentBody,
+    '',
+    'Session summary:',
+    input.summary,
+    '',
+    'Items from this session relevant to this page:',
+    input.itemTexts.length > 0 ? input.itemTexts.map((t) => `- ${t}`).join('\n') : '(none)',
+    '',
+    'What this session added or changed:',
+    input.note,
+    '',
+    'Rewrite the body so it carries forward everything in the current body that still matters, changing only what this session actually changed. The body you return replaces the file entirely, so do not drop anything that still matters just because this session did not mention it again.',
+    '',
+    'Respond with only JSON matching this shape, no other text:',
+    '{"body": string}',
+  ].join('\n')
+}
+
+export async function rewriteNarrative(
+  chat: ChatProvider,
+  model: string,
+  input: { name: string; currentBody: string; summary: string; itemTexts: string[]; note: string },
+): Promise<{ body: string } | null> {
+  const prompt = buildNarrativeRewritePrompt(input)
+
+  const first = await chat.complete({ model, messages: [{ role: 'user', content: prompt }] })
+  const firstParse = parseNarrativeRewrite(first.text)
+  if (firstParse.success) {
+    return firstParse.data
+  }
+
+  const retryPrompt = [
+    prompt,
+    '',
+    `Your previous response failed validation: ${firstParse.error}`,
+    '',
+    'Previous response:',
+    first.text,
+    '',
+    'Respond again with only corrected JSON matching the shape above.',
+  ].join('\n')
+
+  const second = await chat.complete({ model, messages: [{ role: 'user', content: retryPrompt }] })
+  const secondParse = parseNarrativeRewrite(second.text)
+  if (secondParse.success) {
+    return secondParse.data
+  }
+  return null
+}
+
+// Runs pass two once per arc or person update that still has something to
+// rewrite: an id that no longer resolves to a node, a node with no doc, a
+// node that is neither arc nor person, or an update for something also
+// proposed as new this same session, are all dropped silently rather than
+// treated as errors. A rewriteNarrative call that fails its one retry is
+// dropped the same way, so the map simply lacks that key and the caller
+// leaves the document on disk untouched.
+export async function resolveNarratives(
+  paths: MemoryPaths,
+  graphState: GraphState,
+  out: ReflectionOutput,
+  chat: ChatProvider,
+  model: string,
+): Promise<Map<string, string>> {
+  const newArcNames = new Set(out.newArcs.map((a) => a.name.toLowerCase()))
+  const newPersonNames = new Set(out.newPersons.map((p) => p.name.toLowerCase()))
+
+  const narratives = new Map<string, string>()
+
+  for (const update of out.arcUpdates) {
+    const node = graphState.nodes.get(update.arcId)
+    if (!node || node.type !== 'arc' || !node.doc) {
+      continue
+    }
+    if (newArcNames.has(node.label.toLowerCase())) {
+      continue
+    }
+    const itemTexts = out.attributions
+      .filter((a) => a.arcId === update.arcId)
+      .map((a) => out.items[a.itemIndex]?.text)
+      .filter((text): text is string => typeof text === 'string')
+    const currentDoc = await readDocument(node.doc)
+    const result = await rewriteNarrative(chat, model, {
+      name: node.label,
+      currentBody: currentDoc.body,
+      summary: out.summary,
+      itemTexts,
+      note: update.note,
+    })
+    if (result) {
+      narratives.set(update.arcId, result.body)
+    }
+  }
+
+  for (const update of out.personUpdates) {
+    const node = graphState.nodes.get(update.personId)
+    if (!node || node.type !== 'person' || !node.doc) {
+      continue
+    }
+    if (newPersonNames.has(node.label.toLowerCase())) {
+      continue
+    }
+    // ReflectionOutput carries per-item attribution only for arcs
+    // (out.attributions). There is no equivalent for people, so a person's
+    // pass two call gets no item texts; its note still says what changed.
+    const currentDoc = await readDocument(node.doc)
+    const result = await rewriteNarrative(chat, model, {
+      name: node.label,
+      currentBody: currentDoc.body,
+      summary: out.summary,
+      itemTexts: [],
+      note: update.note,
+    })
+    if (result) {
+      narratives.set(update.personId, result.body)
+    }
+  }
+
+  return narratives
+}
+
 interface PendingWrite {
   path: string
   meta: DocumentMeta
@@ -295,6 +453,7 @@ export async function applyReflection(
   sessionId: string,
   liveItems: ReflectionItem[],
   now: Date,
+  narratives: Map<string, string>,
 ): Promise<{
   summaryDoc: Document
   autoAsserted: number
@@ -432,6 +591,21 @@ export async function applyReflection(
     }
   }
 
+  // Pass two already decided which ids get a rewritten body (resolveNarratives,
+  // called by the engine between reflectSession and applyReflection); this
+  // function only ever reads that decision, never calls a model. An id absent
+  // from the map (dropped for any reason on the way in) leaves its document
+  // on disk untouched.
+  const narrativeWrites: PendingWrite[] = []
+  for (const [id, body] of narratives) {
+    const node = graphState.nodes.get(id)
+    if (!node?.doc) {
+      continue
+    }
+    const doc = await readDocument(node.doc)
+    narrativeWrites.push({ path: doc.path, meta: { ...doc.meta, updated: nowIso }, body })
+  }
+
   // Phase 2: side effects, ordered so summary.md is written last. Its
   // presence is what flips a session from unreflected to reflected
   // (SessionStore reads it that way), so it doubles as the commit marker
@@ -445,6 +619,10 @@ export async function applyReflection(
   // the loss or retry it.
   await appendGraph(paths, graphRecords)
   await appendProposals(paths, proposals)
+
+  for (const write of narrativeWrites) {
+    await writeDocumentAtomic(write)
+  }
 
   if (constitutionWrite) {
     await writeDocumentAtomic(constitutionWrite)
