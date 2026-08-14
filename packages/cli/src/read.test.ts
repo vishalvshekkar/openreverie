@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ReverieConfig } from '@openreverie/core'
@@ -234,7 +234,7 @@ describe('runRead', () => {
     expect(joined).toContain('(none yet)')
   })
 
-  it('reports plainly and exits non-zero, without an ENOENT string, when the memory folder itself does not exist', async () => {
+  it('reports a missing memory folder plainly, not as zero arcs, for an arc lookup against a memoryDir that does not exist', async () => {
     const missingDir = join(dir, 'never-created')
 
     const output: string[] = []
@@ -243,7 +243,27 @@ describe('runRead', () => {
     expect(exitCode).not.toBe(0)
     const joined = output.join('')
     expect(joined).not.toContain('ENOENT')
-    expect(joined.toLowerCase()).toContain('no arc')
+    // This must not be confused with "no arc matches that name": the
+    // folder itself was never there, so reverie never got to look.
+    expect(joined.toLowerCase()).not.toContain('no arc found')
+    expect(joined).toContain('No memory folder found')
+    expect(joined).toContain(missingDir)
+  })
+
+  it('reports a missing memory folder plainly, not as an empty overview, for a bare read against a memoryDir that does not exist', async () => {
+    const missingDir = join(dir, 'never-created-overview')
+
+    const output: string[] = []
+    const exitCode = await runRead([], fakeDeps(missingDir, output))
+
+    expect(exitCode).not.toBe(0)
+    const joined = output.join('')
+    expect(joined).not.toContain('ENOENT')
+    // This must not be confused with a genuinely empty memory folder: no
+    // "(none yet)" sections, no exit 0, since reverie never got to look.
+    expect(joined).not.toContain('(none yet)')
+    expect(joined).toContain('No memory folder found')
+    expect(joined).toContain(missingDir)
   })
 
   it('reports plainly, without an ENOENT string, when constitution is read against a memory folder that does not exist', async () => {
@@ -255,5 +275,69 @@ describe('runRead', () => {
     expect(exitCode).not.toBe(0)
     const joined = output.join('')
     expect(joined).not.toContain('ENOENT')
+    expect(joined).toContain('No memory folder found')
+  })
+
+  it('reports a genuinely empty but existing memory folder as (none yet), exit 0, not as a missing folder', async () => {
+    const paths = memoryPaths(dir)
+    await ensureMemoryTree(paths)
+
+    const output: string[] = []
+    const exitCode = await runRead([], fakeDeps(dir, output))
+
+    expect(exitCode).toBe(0)
+    const joined = output.join('')
+    expect(joined).not.toContain('No memory folder found')
+    expect(joined).not.toContain('ENOENT')
+    expect(joined).toContain('Arcs')
+    expect(joined).toContain('(none yet)')
+  })
+
+  it('names the file and the reason, not "run setup", when constitution.md exists but fails to parse as a document', async () => {
+    const paths = memoryPaths(dir)
+    await ensureMemoryTree(paths)
+    // A person hand-editing their own memory folder can produce frontmatter
+    // with no id. That is a real, expected way for this file to be broken,
+    // and is a different problem than the folder not existing.
+    await writeFile(paths.constitution, '---\nname: Not valid\n---\nBody text.\n', 'utf8')
+
+    const output: string[] = []
+    const exitCode = await runRead(['constitution'], fakeDeps(dir, output))
+
+    expect(exitCode).not.toBe(0)
+    const joined = output.join('')
+    expect(joined).not.toContain('No memory folder found')
+    expect(joined).not.toContain('reverie setup')
+    expect(joined).toContain(paths.constitution)
+    expect(joined.toLowerCase()).toContain('no id')
+  })
+
+  it('finds a bare name that matches both an arc and a person, and reports it as ambiguous across kinds', async () => {
+    const paths = memoryPaths(dir)
+    await ensureMemoryTree(paths)
+    await writeDocumentAtomic({
+      path: join(paths.arcsDir, 'phoenix.md'),
+      meta: { id: newId('doc'), name: 'Phoenix', status: 'active' },
+      body: 'An arc named Phoenix.\n',
+    })
+    await writeDocumentAtomic({
+      path: join(paths.peopleDir, 'phoenix.md'),
+      meta: {
+        id: newId('doc'),
+        name: 'Phoenix',
+        node: 'person_1',
+        opened: '2026-08-01T00:00:00.000Z',
+      },
+      body: 'This page is new. It grows as we talk.\n',
+    })
+
+    const output: string[] = []
+    const exitCode = await runRead(['phoenix'], fakeDeps(dir, output))
+
+    expect(exitCode).not.toBe(0)
+    const joined = output.join('')
+    expect(joined).toContain('More than one match')
+    expect(joined).toContain('Phoenix (arc)')
+    expect(joined).toContain('Phoenix (person)')
   })
 })

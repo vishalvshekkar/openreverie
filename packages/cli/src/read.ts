@@ -10,6 +10,7 @@
 // Names come from document frontmatter, not the graph, which keeps this
 // whole path free of the graph and the index.
 
+import { stat } from 'node:fs/promises'
 import type { ReverieConfig } from '@openreverie/core'
 import { type Document, listDocuments, memoryPaths, readDocument } from '@openreverie/memory'
 import { magenta } from './colors.js'
@@ -27,6 +28,24 @@ interface Candidate {
   path: string
 }
 
+async function pathIsDirectory(path: string): Promise<boolean> {
+  try {
+    const info = await stat(path)
+    return info.isDirectory()
+  } catch {
+    return false
+  }
+}
+
+function isEnoent(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    'code' in err &&
+    (err as { code?: unknown }).code === 'ENOENT'
+  )
+}
+
 export async function runRead(args: string[], deps: ReadDeps): Promise<number> {
   let config: ReverieConfig
   try {
@@ -36,6 +55,21 @@ export async function runRead(args: string[], deps: ReadDeps): Promise<number> {
     return 1
   }
   const paths = memoryPaths(config.memoryDir)
+
+  // A memory root that is not there at all is a different situation from
+  // one that exists but happens to have nothing in it yet: the first is a
+  // configuration problem (wrong path, or setup never finished), the
+  // second is a genuinely empty, freshly usable memory folder. Checking
+  // the root once, up front, before any of the per-kind listing below
+  // (which treats a missing subdirectory as empty, not as an error) keeps
+  // those two states from being reported as the same thing. Reporting a
+  // missing root as "zero arcs, zero realms, zero people, exit 0" would
+  // read as confirmation that nothing is being kept, when the truth is
+  // that reverie could not look.
+  if (!(await pathIsDirectory(paths.root))) {
+    deps.write(`No memory folder found at ${paths.root}. Run: reverie setup\n`)
+    return 1
+  }
 
   if (args.length === 0) {
     return listOverview(paths, deps)
@@ -58,11 +92,13 @@ export async function runRead(args: string[], deps: ReadDeps): Promise<number> {
   return printSearchAllKinds(paths, name, deps)
 }
 
-// A memory folder made before people/ existed (or a memoryDir that is not
-// there at all) has no arcs, realms, or people directory to scandir. Since
+// A memory folder made before people/ existed has no people directory to
+// scandir, even though its root and its other directories are real. Since
 // runRead never runs ensureMemoryTree (that would mean touching the
-// filesystem beyond a plain read), a missing directory here is treated as
-// an empty one rather than left to throw a raw ENOENT at the caller.
+// filesystem beyond a plain read), a missing subdirectory here is treated
+// as an empty one rather than left to throw a raw ENOENT at the caller.
+// The root itself not existing at all is handled separately, up front in
+// runRead, precisely so it is never confused with this case.
 async function loadCandidates(
   paths: ReturnType<typeof memoryPaths>,
   kind: NamedKind,
@@ -157,8 +193,20 @@ async function printConstitution(
   let doc: Document
   try {
     doc = await readDocument(paths.constitution)
-  } catch {
-    deps.write(`No memory folder found at ${paths.root}. Run: reverie setup\n`)
+  } catch (err) {
+    // A missing constitution.md (the file itself, not the folder: runRead
+    // already checked the root exists before this runs) is reported the
+    // same way as a missing folder, since it needs the same fix. A file
+    // that exists but fails to parse, or is missing its id (both real
+    // possibilities: this is a plain markdown file a person can and is
+    // expected to hand-edit) is a different problem with a different fix,
+    // so it gets readDocument's own message verbatim, naming the file and
+    // the reason, instead of the wrong advice to re-run setup.
+    if (isEnoent(err)) {
+      deps.write(`No memory folder found at ${paths.root}. Run: reverie setup\n`)
+      return 1
+    }
+    deps.write(`${err instanceof Error ? err.message : String(err)}\n`)
     return 1
   }
   printDocument(deps, 'Constitution', doc)
