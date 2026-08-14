@@ -708,6 +708,17 @@ describe('MemoryEngine', () => {
       expect(personDoc.meta.name).toBe('Sam')
       expect(personDoc.meta.node).toBe(personNode.id)
 
+      // The involves edge for the item that mentioned Sam must exist too,
+      // asserted in the same appendGraph call as the person node itself.
+      const itemNode = [...graph.nodes.values()].find(
+        (n) => n.type === 'item' && n.label === 'Ran with Sam again',
+      )
+      if (!itemNode) throw new Error('expected the minted item node')
+      expect(graph.edges.get(`involves:${itemNode.id}:${personNode.id}`)).toMatchObject({
+        confidence: 1,
+        confirmed: true,
+      })
+
       const pending = await pendingProposals(paths)
       expect(pending).toHaveLength(0)
 
@@ -935,6 +946,13 @@ describe('MemoryEngine', () => {
       expect(arcDoc.body).toBe(rewrittenBody)
       // What was already on the page before this session carries forward.
       expect(arcDoc.body).toContain('Ran a 5k last week')
+
+      // The rewrite prompt itself must carry the body already on disk, or
+      // "carries forward" above is only true because the fake chat provider
+      // was scripted to say so, not because the engine actually read the
+      // existing body before asking the model to rewrite it.
+      const rewritePrompt = chat.requests[1]?.messages[0]?.content ?? ''
+      expect(rewritePrompt).toContain('Ran a 5k last week')
 
       await engine.close()
     })
