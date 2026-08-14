@@ -5,9 +5,12 @@
 // JSON twice in a row). It never touches the filesystem.
 //
 // applyReflection is the deterministic half: it takes a ReflectionOutput and
-// writes the session summary, mints item ids, appends graph records, and
-// queues proposals for anything that is not a high-confidence link to an
-// arc that already exists. It never touches the network.
+// writes the session summary, mints item ids, and appends graph records.
+// Every attribution becomes a part_of edge carrying the model's confidence,
+// whatever it is; the caller (MemoryEngine) is responsible for materializing
+// newArcs and newPersons directly, using the mintedItems this function
+// returns. It never touches the network, and it never writes to
+// proposals.jsonl.
 
 import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -28,10 +31,7 @@ import {
   readGraph,
 } from './graph.js'
 import type { MemoryPaths } from './paths.js'
-import { appendProposals, type Proposal } from './proposals.js'
 import type { TranscriptLine } from './transcripts.js'
-
-export const CONFIDENCE_THRESHOLD = 0.8
 
 export type ReflectionItemKind = 'observation' | 'feeling' | 'event' | 'intention'
 
@@ -250,21 +250,7 @@ async function findSessionDir(
   return { dir: join(paths.sessionsDir, match.name), date }
 }
 
-function linkProposalSummary(item: ReflectionItem, arcId: string, graph: GraphState): string {
-  const arc = graph.nodes.get(arcId)
-  const arcName = arc ? arc.label : 'that arc'
-  return `You mentioned "${item.text}"; want me to link it to ${arcName}?`
-}
-
-function newArcProposalSummary(name: string, realm: string): string {
-  return `You mentioned ${name} a few times; want me to track it as an arc in ${realm}?`
-}
-
-function newPersonProposalSummary(name: string): string {
-  return `You mentioned ${name}; want me to add them as someone in your life?`
-}
-
-function resolveItemIds(indexes: number[], mintedItems: ReflectionItem[]): string[] {
+export function resolveItemIds(indexes: number[], mintedItems: ReflectionItem[]): string[] {
   const ids: string[] = []
   const seen = new Set<number>()
   for (const index of indexes) {
@@ -462,13 +448,12 @@ export async function applyReflection(
 ): Promise<{
   summaryDoc: Document
   autoAsserted: number
-  proposals: Proposal[]
-  droppedProposals: number
+  mintedItems: ReflectionItem[]
 }> {
   const nowIso = now.toISOString()
 
   // Phase 1: validation and minting only, no filesystem writes. Every id is
-  // minted and every proposal/graph record is fully decided in memory before
+  // minted and every graph record is fully decided in memory before
   // anything touches disk, so a bad input never leaves partial state behind.
   const mintedItems = mintItems(out.items, now)
   const mergedItems = mergeLiveItems(mintedItems, liveItems)
@@ -478,9 +463,7 @@ export async function applyReflection(
 
   const graphState = await readGraph(paths)
   const graphRecords: GraphRecord[] = []
-  const proposals: Proposal[] = []
   let autoAsserted = 0
-  let droppedProposals = 0
 
   // Assert the session node itself before any item's `from` edge points at
   // it: MemoryIndex.replaceGraph skips edges whose endpoints are not both
@@ -520,71 +503,22 @@ export async function applyReflection(
     if (!item) {
       continue
     }
-    const arcNode = graphState.nodes.get(attribution.arcId)
-    const arcExists = arcNode?.type === 'arc'
-    if (attribution.confidence >= CONFIDENCE_THRESHOLD && arcExists) {
-      graphRecords.push({
-        ts: nowIso,
-        op: 'assert',
-        edge: 'part_of',
-        from: item.id,
-        to: attribution.arcId,
-        confidence: attribution.confidence,
-        confirmed: false,
-      })
-      autoAsserted += 1
-    } else {
-      // Unknown id or an id that resolves to a non-arc node (e.g. a realm)
-      // both fall through here: neither is a valid part_of target, so both
-      // become a link proposal for a human to confirm instead of a
-      // structurally invalid edge in the permanent graph log.
-      proposals.push({
-        id: newId('prop'),
-        ts: nowIso,
-        kind: 'link',
-        summary: linkProposalSummary(item, attribution.arcId, graphState),
-        payload: {
-          edge: 'part_of',
-          from: item.id,
-          to: attribution.arcId,
-          confidence: attribution.confidence,
-        },
-        source: sessionId,
-      })
-    }
+    graphRecords.push({
+      ts: nowIso,
+      op: 'assert',
+      edge: 'part_of',
+      from: item.id,
+      to: attribution.arcId,
+      confidence: attribution.confidence,
+      confirmed: false,
+    })
+    autoAsserted += 1
   }
 
-  for (const arc of out.newArcs) {
-    const itemIds = resolveItemIds(arc.itemIndexes, mintedItems)
-    if (itemIds.length === 0) {
-      droppedProposals += 1
-      continue
-    }
-    proposals.push({
-      id: newId('prop'),
-      ts: nowIso,
-      kind: 'new_arc',
-      summary: newArcProposalSummary(arc.name, arc.realm),
-      payload: { name: arc.name, realm: arc.realm, itemIds },
-      source: sessionId,
-    })
-  }
-
-  for (const person of out.newPersons) {
-    const itemIds = resolveItemIds(person.itemIndexes, mintedItems)
-    if (itemIds.length === 0) {
-      droppedProposals += 1
-      continue
-    }
-    proposals.push({
-      id: newId('prop'),
-      ts: nowIso,
-      kind: 'new_person',
-      summary: newPersonProposalSummary(person.name),
-      payload: { name: person.name, itemIds },
-      source: sessionId,
-    })
-  }
+  // newArcs and newPersons are materialized directly by the caller (see
+  // MemoryEngine.createArc / createPersonPage), using mintedItems returned
+  // below. applyReflection itself never creates a proposal for them, and it
+  // never writes to proposals.jsonl at all.
 
   let constitutionWrite: PendingWrite | null = null
   if (out.constitutionUpdate !== null) {
@@ -620,10 +554,9 @@ export async function applyReflection(
   // duplicate item nodes; that is visible in the graph and harmless.
   // Writing summary.md first would be worse: a crash after it would
   // permanently mark the session reflected while silently dropping graph
-  // edges, proposals, and document rewrites, with nothing left to notice
-  // the loss or retry it.
+  // edges and document rewrites, with nothing left to notice the loss or
+  // retry it.
   await appendGraph(paths, graphRecords)
-  await appendProposals(paths, proposals)
 
   for (const write of narrativeWrites) {
     await writeDocumentAtomic(write)
@@ -646,5 +579,5 @@ export async function applyReflection(
   })
   const summaryDoc = await readDocument(summaryPath)
 
-  return { summaryDoc, autoAsserted, proposals, droppedProposals }
+  return { summaryDoc, autoAsserted, mintedItems }
 }

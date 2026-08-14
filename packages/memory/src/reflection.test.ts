@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FakeChatProvider } from '@openreverie/providers'
@@ -9,7 +9,6 @@ import { ensureMemoryTree, type MemoryPaths, memoryPaths } from './paths.js'
 import { pendingProposals } from './proposals.js'
 import {
   applyReflection,
-  CONFIDENCE_THRESHOLD,
   type ReflectionItem,
   type ReflectionOutput,
   reflectSession,
@@ -436,7 +435,7 @@ describe('reflection', () => {
       expect(after.meta.updated).toBeUndefined()
     })
 
-    it('writes the summary, splits attributions by confidence, and queues proposals for new arcs and persons', async () => {
+    it('writes the summary and asserts every attribution as a part_of edge, appending nothing to proposals.jsonl', async () => {
       const out: ReflectionOutput = {
         summary: 'Talked about a morning run and an upcoming deadline.',
         items: [
@@ -447,32 +446,21 @@ describe('reflection', () => {
           { itemIndex: 0, arcId: 'arc_health', confidence: 0.9 },
           { itemIndex: 1, arcId: 'arc_unknown', confidence: 0.3 },
         ],
-        newArcs: [
-          {
-            name: 'marathon training',
-            realm: 'realm_health',
-            reason: 'mentioned running multiple times',
-            itemIndexes: [0],
-            narrative: 'Training for a marathon this fall.',
-          },
-        ],
-        newPersons: [
-          {
-            name: 'Sam',
-            reason: 'mentioned as a running partner',
-            itemIndexes: [1],
-            narrative: 'Sam is a running partner.',
-          },
-        ],
-        arcUpdates: [{ arcId: 'arc_health', note: 'Went for another run.' }],
+        newArcs: [],
+        newPersons: [],
+        arcUpdates: [],
         personUpdates: [],
         constitutionUpdate: null,
       }
 
       const result = await applyReflection(paths, out, sessionId, [], now, new Map())
 
+      const runItem = result.mintedItems[0]
+      const deadlineItem = result.mintedItems[1]
+      if (!runItem || !deadlineItem) throw new Error('expected two minted items')
+
       expect(result.summaryDoc.body).toBe(`${out.summary}\n`)
-      expect(result.autoAsserted).toBe(1)
+      expect(result.autoAsserted).toBe(2)
 
       // Summary document: kind, session, date, and the minted items.
       expect(result.summaryDoc.meta.kind).toBe('summary')
@@ -490,10 +478,8 @@ describe('reflection', () => {
       const onDisk = await readDocument(join(sessionDir, 'summary.md'))
       expect(onDisk.body).toBe(result.summaryDoc.body)
 
-      // Graph: item nodes, from-edges, and the confidence split.
+      // Graph: item nodes, from-edges, and every attribution asserted.
       const graph = await readGraph(paths)
-      const runItem = items[0] as ReflectionItem
-      const deadlineItem = items[1] as ReflectionItem
 
       expect(graph.nodes.get(runItem.id)).toMatchObject({
         type: 'item',
@@ -511,42 +497,51 @@ describe('reflection', () => {
         doc: join(sessionDir, 'summary.md'),
       })
 
-      const partOfKey = `part_of:${runItem.id}:arc_health`
-      expect(graph.edges.get(partOfKey)).toMatchObject({
+      expect(graph.edges.get(`part_of:${runItem.id}:arc_health`)).toMatchObject({
         confidence: 0.9,
         confirmed: false,
       })
 
-      // Low confidence attribution is not asserted as an edge.
-      expect(graph.edges.get(`part_of:${deadlineItem.id}:arc_unknown`)).toBeUndefined()
-
-      // Proposals: the low-confidence link and the new arc, both with a
-      // non-empty summary sentence.
-      const proposals = await pendingProposals(paths)
-      expect(proposals).toHaveLength(3)
-
-      const linkProposal = proposals.find((p) => p.kind === 'link')
-      expect(linkProposal?.payload).toEqual({
-        edge: 'part_of',
-        from: deadlineItem.id,
-        to: 'arc_unknown',
+      // Low confidence no longer routes to a proposal; it is asserted too,
+      // even though arc_unknown does not resolve to any real node.
+      expect(graph.edges.get(`part_of:${deadlineItem.id}:arc_unknown`)).toMatchObject({
         confidence: 0.3,
+        confirmed: false,
       })
-      expect(linkProposal?.summary.length).toBeGreaterThan(0)
 
-      const newArcProposal = proposals.find((p) => p.kind === 'new_arc')
-      expect(newArcProposal?.payload).toEqual({
-        name: 'marathon training',
-        realm: 'realm_health',
-        itemIds: [runItem.id],
-      })
-      expect(newArcProposal?.summary.length).toBeGreaterThan(0)
+      const pending = await pendingProposals(paths)
+      expect(pending).toHaveLength(0)
+      await expect(readFile(paths.proposals, 'utf8')).rejects.toThrow()
+    })
 
-      // arcUpdates carries no narrative prose in this task; applyReflection does
-      // not touch the arc document for it. Pass two (Task 5) is what rewrites it.
-      const arcDoc = await readDocument(arcDocPath)
-      expect(arcDoc.body).toBe('Original arc narrative.\n')
-      expect(arcDoc.meta.updated).toBeUndefined()
+    it('appends nothing to proposals.jsonl even for a session with new arcs and persons', async () => {
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('A session with new things to remember.'),
+        items: [{ text: 'Went for a long run', kind: 'event' }],
+        newArcs: [
+          {
+            name: 'marathon training',
+            realm: 'realm_health',
+            reason: 'mentioned running multiple times',
+            itemIndexes: [0],
+            narrative: 'Training for a marathon this fall.',
+          },
+        ],
+        newPersons: [
+          {
+            name: 'Sam',
+            reason: 'running partner',
+            itemIndexes: [0],
+            narrative: 'Sam runs with them.',
+          },
+        ],
+      }
+
+      await applyReflection(paths, out, sessionId, [], now, new Map())
+
+      const pending = await pendingProposals(paths)
+      expect(pending).toHaveLength(0)
+      await expect(readFile(paths.proposals, 'utf8')).rejects.toThrow()
     })
 
     it('rewrites the constitution when constitutionUpdate is set', async () => {
@@ -584,7 +579,6 @@ describe('reflection', () => {
       expect(result.summaryDoc.body).toBe('still nope\n')
       expect(result.summaryDoc.meta.items).toEqual([])
       expect(result.autoAsserted).toBe(0)
-      expect(result.proposals).toHaveLength(0)
 
       const onDisk = await readDocument(join(sessionDir, 'summary.md'))
       expect(onDisk.body).toBe('still nope\n')
@@ -616,77 +610,6 @@ describe('reflection', () => {
       expect(graph.nodes.has(liveItems[1]?.id as string)).toBe(true)
       // The duplicate live item never got its own node under a new id.
       expect(graph.nodes.has(liveItems[0]?.id as string)).toBe(false)
-    })
-
-    it('routes an attribution to an existing non-arc node into a link proposal, not an edge', async () => {
-      const out: ReflectionOutput = {
-        ...emptyReflectionOutput('Talked about health broadly.'),
-        items: [{ text: 'Thought about health goals', kind: 'observation' }],
-        attributions: [{ itemIndex: 0, arcId: 'realm_health', confidence: 0.95 }],
-      }
-
-      const result = await applyReflection(paths, out, sessionId, [], now, new Map())
-      expect(result.autoAsserted).toBe(0)
-
-      const item = (result.summaryDoc.meta.items as ReflectionItem[])[0] as ReflectionItem
-      const graph = await readGraph(paths)
-      expect(graph.edges.get(`part_of:${item.id}:realm_health`)).toBeUndefined()
-
-      const proposals = await pendingProposals(paths)
-      expect(proposals).toHaveLength(1)
-      expect(proposals[0]?.kind).toBe('link')
-      expect(proposals[0]?.payload).toEqual({
-        edge: 'part_of',
-        from: item.id,
-        to: 'realm_health',
-        confidence: 0.95,
-      })
-    })
-
-    it('dedupes and bounds-checks itemIndexes, dropping any proposal that resolves to no items', async () => {
-      const out: ReflectionOutput = {
-        ...emptyReflectionOutput('A session with messy indexes.'),
-        items: [{ text: 'Went for a run', kind: 'event' }],
-        newArcs: [
-          {
-            name: 'marathon training',
-            realm: 'realm_health',
-            reason: 'duplicate and valid indexes',
-            itemIndexes: [0, 0, 0],
-            narrative: 'Training for a marathon this fall.',
-          },
-          {
-            name: 'ghost arc',
-            realm: 'realm_health',
-            reason: 'only out-of-range indexes',
-            itemIndexes: [5, -1],
-            narrative: 'This arc should never be proposed.',
-          },
-        ],
-        newPersons: [
-          {
-            name: 'ghost person',
-            reason: 'only out-of-range indexes',
-            itemIndexes: [9],
-            narrative: 'This person should never be proposed.',
-          },
-        ],
-      }
-
-      const result = await applyReflection(paths, out, sessionId, [], now, new Map())
-
-      expect(result.droppedProposals).toBe(2)
-      expect(result.proposals).toHaveLength(1)
-
-      const proposals = await pendingProposals(paths)
-      expect(proposals).toHaveLength(1)
-      expect(proposals[0]?.kind).toBe('new_arc')
-      const item = (result.summaryDoc.meta.items as ReflectionItem[])[0] as ReflectionItem
-      expect(proposals[0]?.payload).toEqual({
-        name: 'marathon training',
-        realm: 'realm_health',
-        itemIds: [item.id],
-      })
     })
 
     it('leaves the session unreflected and retryable if the summary write fails after graph/proposal writes succeed', async () => {
@@ -805,9 +728,5 @@ describe('reflection', () => {
       expect(after.body).toBe(before.body)
       expect(after.meta.updated).toBeUndefined()
     })
-  })
-
-  it('CONFIDENCE_THRESHOLD is 0.8', () => {
-    expect(CONFIDENCE_THRESHOLD).toBe(0.8)
   })
 })
