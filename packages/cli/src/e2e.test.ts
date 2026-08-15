@@ -134,12 +134,10 @@ describe('end-to-end harness', () => {
 
       await engine.endSession(day1Id)
 
-      const contextAfterDay1 = await engine.sessionContext()
-      expect(contextAfterDay1.pendingProposals).toHaveLength(0)
-
-      // assembleSystemPrompt still reads engine.sessionContext() the same
-      // way; with nothing pending, it simply carries no proposals section.
-      // This does not consume a scripted chat result.
+      // assembleSystemPrompt reads engine.sessionContext(); proposals are
+      // never rendered into the prompt at all any more (asking is removed
+      // entirely, not just narrowed). This does not consume a scripted
+      // chat result.
       const promptWithNoPendingProposals = await assembleSystemPrompt(engine, testConfig())
       expect(promptWithNoPendingProposals).not.toContain('## Pending proposals')
 

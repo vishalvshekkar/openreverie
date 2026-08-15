@@ -51,6 +51,8 @@ function emptyReflectionJson(summary: string): string {
     attributions: [],
     newArcs: [],
     newPersons: [],
+    newEntities: [],
+    pagePromotions: [],
     arcUpdates: [],
     personUpdates: [],
     constitutionUpdate: null,
@@ -399,6 +401,8 @@ describe('runChat', () => {
             },
           ],
           newPersons: [],
+          newEntities: [],
+          pagePromotions: [],
           arcUpdates: [{ arcId: 'arc_health', note: 'Should be skipped, the page is gone.' }],
           personUpdates: [],
           constitutionUpdate: null,
@@ -913,7 +917,6 @@ describe('color helpers', () => {
 describe('toolNotice', () => {
   it('maps each known tool to its honest, specific notice', () => {
     expect(toolNotice('remember')).toBe('[remembering]')
-    expect(toolNotice('resolve_proposal')).toBe('[updating memory]')
     expect(toolNotice('update_style')).toBe('[adjusting style]')
     expect(toolNotice('search_memory')).toBe('[searching memory]')
     expect(toolNotice('read_document')).toBe('[reading memory]')

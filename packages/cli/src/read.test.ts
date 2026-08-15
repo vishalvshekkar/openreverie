@@ -2,7 +2,13 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ReverieConfig } from '@openreverie/core'
-import { ensureMemoryTree, memoryPaths, newId, writeDocumentAtomic } from '@openreverie/memory'
+import {
+  appendGraph,
+  ensureMemoryTree,
+  memoryPaths,
+  newId,
+  writeDocumentAtomic,
+} from '@openreverie/memory'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { type ReadDeps, runRead } from './read.js'
 
@@ -400,5 +406,151 @@ describe('runRead', () => {
     expect(joined).toContain('More than one match')
     expect(joined).toContain('Phoenix (arc)')
     expect(joined).toContain('Phoenix (person)')
+  })
+
+  it('lists a node-only person (no page yet) alongside paged people in the overview', async () => {
+    const paths = memoryPaths(dir)
+    await ensureMemoryTree(paths)
+    await writeDocumentAtomic({
+      path: join(paths.peopleDir, 'alex.md'),
+      meta: { id: newId('doc'), name: 'Alex', node: 'person_paged', opened: '2026-08-01' },
+      body: 'This page is new. It grows as we talk.\n',
+    })
+    await appendGraph(paths, [
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'person_paged',
+        type: 'person',
+        label: 'Alex',
+        doc: join(paths.peopleDir, 'alex.md'),
+      },
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'person_nodeonly',
+        type: 'person',
+        label: 'Renata',
+      },
+    ])
+
+    const output: string[] = []
+    const exitCode = await runRead([], fakeDeps(dir, output))
+
+    expect(exitCode).toBe(0)
+    const joined = output.join('')
+    expect(joined).toContain('Alex')
+    expect(joined).toContain('Renata (no page yet)')
+  })
+
+  // The exact defect this fix removes: before it, a person with a node but
+  // no page was invisible to `reverie read person <name>`, and this
+  // command claimed "No person found" about someone actually sitting in
+  // the graph, right after the same class of dishonesty had already been
+  // fixed once for a broken file on disk.
+  it('reports a node-only person as known with no page, instead of claiming not found', async () => {
+    const paths = memoryPaths(dir)
+    await ensureMemoryTree(paths)
+    await appendGraph(paths, [
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'person_nodeonly',
+        type: 'person',
+        label: 'Renata',
+      },
+    ])
+
+    const output: string[] = []
+    const exitCode = await runRead(['person', 'renata'], fakeDeps(dir, output))
+
+    expect(exitCode).toBe(0)
+    const joined = output.join('')
+    expect(joined.toLowerCase()).not.toContain('no person found')
+    expect(joined).toContain('Renata')
+    expect(joined.toLowerCase()).toContain('no page yet')
+  })
+
+  it('reports a node-only person as known through the bare, kindless search too', async () => {
+    const paths = memoryPaths(dir)
+    await ensureMemoryTree(paths)
+    await appendGraph(paths, [
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'person_nodeonly',
+        type: 'person',
+        label: 'Renata',
+      },
+    ])
+
+    const output: string[] = []
+    const exitCode = await runRead(['renata'], fakeDeps(dir, output))
+
+    expect(exitCode).toBe(0)
+    const joined = output.join('')
+    expect(joined.toLowerCase()).not.toContain('no arc, realm, person, or entity found')
+    expect(joined).toContain('Renata')
+    expect(joined.toLowerCase()).toContain('no page yet')
+  })
+
+  it('reports "No person found" for a name that matches nothing at all, paged or node-only', async () => {
+    const paths = memoryPaths(dir)
+    await ensureMemoryTree(paths)
+
+    const output: string[] = []
+    const exitCode = await runRead(['person', 'nobody'], fakeDeps(dir, output))
+
+    expect(exitCode).not.toBe(0)
+    expect(output.join('').toLowerCase()).toContain('no person found')
+  })
+
+  it('lists entities in the overview and looks one up by name, plainly noting entities have no page', async () => {
+    const paths = memoryPaths(dir)
+    await ensureMemoryTree(paths)
+    await appendGraph(paths, [
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'entity_1',
+        type: 'entity',
+        label: 'Dune',
+      },
+    ])
+
+    const overviewOutput: string[] = []
+    await runRead([], fakeDeps(dir, overviewOutput))
+    expect(overviewOutput.join('')).toContain('Dune')
+
+    const lookupOutput: string[] = []
+    const exitCode = await runRead(['entity', 'dune'], fakeDeps(dir, lookupOutput))
+    expect(exitCode).toBe(0)
+    const joined = lookupOutput.join('')
+    expect(joined).toContain('Dune')
+    expect(joined.toLowerCase()).toContain('no page')
+  })
+
+  it('reports "No entity found" for an entity name that matches nothing', async () => {
+    const paths = memoryPaths(dir)
+    await ensureMemoryTree(paths)
+
+    const output: string[] = []
+    const exitCode = await runRead(['entity', 'nothing-here'], fakeDeps(dir, output))
+
+    expect(exitCode).not.toBe(0)
+    expect(output.join('').toLowerCase()).toContain('no entity found')
+  })
+
+  it('does not crash and treats a missing or corrupt graph log as empty', async () => {
+    const paths = memoryPaths(dir)
+    await ensureMemoryTree(paths)
+    // No graph.jsonl written at all: ensureMemoryTree does not guarantee
+    // the file exists until something is appended to it.
+
+    const output: string[] = []
+    const exitCode = await runRead([], fakeDeps(dir, output))
+
+    expect(exitCode).toBe(0)
+    expect(output.join('')).toContain('(none yet)')
   })
 })

@@ -11,6 +11,7 @@ import {
   applyReflection,
   type ReflectionItem,
   type ReflectionOutput,
+  reflectionOutputSchema,
   reflectSession,
   resolveNarratives,
   rewriteNarrative,
@@ -33,6 +34,8 @@ function emptyReflectionOutput(summary: string): ReflectionOutput {
     attributions: [],
     newArcs: [],
     newPersons: [],
+    newEntities: [],
+    pagePromotions: [],
     arcUpdates: [],
     personUpdates: [],
     constitutionUpdate: null,
@@ -43,6 +46,60 @@ function emptyReflectionOutput(summary: string): ReflectionOutput {
 // not materialization itself (that is MemoryEngine's job, tested at the
 // engine level), so they pass this no-op in as materializeNew.
 async function noopMaterialize(): Promise<void> {}
+
+describe('reflectionOutputSchema', () => {
+  it('accepts a full newPersons entry with deservesPage true and a narrative', () => {
+    const out: ReflectionOutput = {
+      ...emptyReflectionOutput('A session.'),
+      newPersons: [
+        {
+          name: 'Sam',
+          reason: 'a close friend',
+          itemIndexes: [0],
+          deservesPage: true,
+          narrative: 'Sam.',
+        },
+      ],
+    }
+    const result = reflectionOutputSchema.safeParse(out)
+    expect(result.success).toBe(true)
+  })
+
+  it('accepts a newEntities entry, which carries no page-worthiness field at all', () => {
+    const out: ReflectionOutput = {
+      ...emptyReflectionOutput('A session.'),
+      newEntities: [{ name: 'A Favorite Film', reason: 'watched again', itemIndexes: [0] }],
+    }
+    const result = reflectionOutputSchema.safeParse(out)
+    expect(result.success).toBe(true)
+  })
+
+  it('accepts a pagePromotions entry', () => {
+    const out: ReflectionOutput = {
+      ...emptyReflectionOutput('A session.'),
+      pagePromotions: [
+        { nodeId: 'person_sam', reason: 'recurs now', itemIndexes: [0], narrative: 'Sam.' },
+      ],
+    }
+    const result = reflectionOutputSchema.safeParse(out)
+    expect(result.success).toBe(true)
+  })
+
+  it('rejects a newPersons entry missing deservesPage', () => {
+    const raw = {
+      ...emptyReflectionOutput('A session.'),
+      newPersons: [{ name: 'Sam', reason: 'a close friend', itemIndexes: [0], narrative: 'Sam.' }],
+    }
+    const result = reflectionOutputSchema.safeParse(raw)
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects a whole output missing newEntities or pagePromotions entirely', () => {
+    const { newEntities, pagePromotions, ...rest } = emptyReflectionOutput('A session.')
+    const result = reflectionOutputSchema.safeParse(rest)
+    expect(result.success).toBe(false)
+  })
+})
 
 describe('reflection', () => {
   let dir: string
@@ -101,6 +158,7 @@ describe('reflection', () => {
         arcs: [],
         realms: [],
         people: [],
+        entities: [],
       })
 
       expect(result).toEqual(out)
@@ -120,6 +178,7 @@ describe('reflection', () => {
         people: [
           { id: 'person_sam', type: 'person', label: 'Sam', ts: '2026-08-01T00:00:00.000Z' },
         ],
+        entities: [],
       })
 
       const prompt = chat.requests[0]?.messages[0]?.content ?? ''
@@ -134,7 +193,7 @@ describe('reflection', () => {
       expect(prompt).toContain('first learned or when they change')
     })
 
-    it('lists known people by id and label, and states what makes someone worth a person page', async () => {
+    it('lists known people by id, label, and page status, known entities by id and label only, and states what makes someone worth a person page', async () => {
       const out = emptyReflectionOutput('A session mentioning a few names.')
       const chat = new FakeChatProvider([{ text: JSON.stringify(out), toolCalls: [] }])
 
@@ -144,13 +203,37 @@ describe('reflection', () => {
         realms: [],
         people: [
           { id: 'person_sam', type: 'person', label: 'Sam', ts: '2026-08-01T00:00:00.000Z' },
+          {
+            id: 'person_alex',
+            type: 'person',
+            label: 'Alex',
+            doc: '/tmp/alex.md',
+            ts: '2026-08-01T00:00:00.000Z',
+          },
+        ],
+        entities: [
+          {
+            id: 'entity_film',
+            type: 'entity',
+            label: 'A Favorite Film',
+            ts: '2026-08-01T00:00:00.000Z',
+          },
         ],
       })
 
       const prompt = chat.requests[0]?.messages[0]?.content ?? ''
       expect(prompt).toContain('Known people:')
-      expect(prompt).toContain('person_sam: Sam')
+      expect(prompt).toContain('person_sam: Sam (no page yet)')
+      expect(prompt).toContain('person_alex: Alex (has a page)')
+      expect(prompt).toContain('Known entities:')
+      // Entities never get a page in this release, so their listing (unlike
+      // people's) carries no page-status suffix.
+      expect(prompt).toContain('entity_film: A Favorite Film')
+      expect(prompt).not.toContain('entity_film: A Favorite Film (no page yet)')
       expect(prompt).toContain("recurs in this person's life")
+      expect(prompt).toContain('pagePromotions')
+      expect(prompt).toContain('newEntities')
+      expect(prompt).toContain('deservesPage')
       expect(prompt).toContain('"arcUpdates": [{"arcId": string, "note": string}]')
       expect(prompt).toContain('"personUpdates": [{"personId": string, "note": string}]')
       expect(prompt).not.toContain('arcNarratives')
@@ -168,6 +251,7 @@ describe('reflection', () => {
         arcs: [],
         realms: [],
         people: [],
+        entities: [],
       })
 
       expect(result).toEqual(out)
@@ -194,6 +278,7 @@ describe('reflection', () => {
         arcs: [],
         realms: [],
         people: [],
+        entities: [],
       })
 
       expect(result).toEqual(goodOut)
@@ -214,6 +299,7 @@ describe('reflection', () => {
         arcs: [],
         realms: [],
         people: [],
+        entities: [],
       })
 
       expect(result).toEqual(out)
@@ -233,6 +319,7 @@ describe('reflection', () => {
         arcs: [],
         realms: [],
         people: [],
+        entities: [],
       })
 
       expect(result).toEqual({ summary: 'also not json', degraded: true })
@@ -250,6 +337,7 @@ describe('reflection', () => {
         arcs: [],
         realms: [],
         people: [],
+        entities: [],
       })
 
       expect(result).toEqual({
@@ -361,6 +449,36 @@ describe('reflection', () => {
       expect(chat.requests).toHaveLength(0)
     })
 
+    it('drops a personUpdates entry that resolves to an entity node, which is never a valid pass two target since entities get no page in this release', async () => {
+      // An entity node created node-only, exactly what newEntities produces:
+      // no doc, because entities never get a page in this release. A model
+      // mistakenly listing this id in personUpdates (entity ids are never
+      // shown as valid personUpdates targets, but nothing stops a model
+      // from trying) must be dropped safely, not throw or attempt a rewrite.
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'entity_film',
+          type: 'entity',
+          label: 'A Favorite Film',
+        },
+      ])
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('A session.'),
+        personUpdates: [
+          { personId: 'entity_film', note: 'Should be dropped, entities have no page.' },
+        ],
+      }
+      const chat = new FakeChatProvider([])
+
+      const graphState = await readGraph(paths)
+      const narratives = await resolveNarratives(paths, graphState, out, chat, 'fake-model')
+
+      expect(narratives.size).toBe(0)
+      expect(chat.requests).toHaveLength(0)
+    })
+
     it('drops an update entry that resolves to a node that is neither arc nor person, isolated from the no-doc case by giving that node a real doc', async () => {
       // realm_health in beforeEach has no doc at all, which would drop this
       // update on the missing-doc check alone and prove nothing about the
@@ -461,6 +579,7 @@ describe('reflection', () => {
             name: 'Sam',
             reason: 'mistakenly proposed again',
             itemIndexes: [],
+            deservesPage: true,
             narrative: 'unused',
           },
         ],
@@ -514,6 +633,8 @@ describe('reflection', () => {
         ],
         newArcs: [],
         newPersons: [],
+        newEntities: [],
+        pagePromotions: [],
         arcUpdates: [],
         personUpdates: [],
         constitutionUpdate: null,
@@ -606,6 +727,7 @@ describe('reflection', () => {
             name: 'Sam',
             reason: 'running partner',
             itemIndexes: [0],
+            deservesPage: true,
             narrative: 'Sam runs with them.',
           },
         ],
@@ -642,6 +764,7 @@ describe('reflection', () => {
         arcs: [],
         realms: [],
         people: [],
+        entities: [],
       })
       expect('degraded' in degraded && degraded.degraded).toBe(true)
 
