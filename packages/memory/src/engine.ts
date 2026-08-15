@@ -70,9 +70,22 @@ export interface SessionContext {
   constitution: string
   realms: { id: string; name: string; firstLine: string }[]
   arcs: { id: string; name: string; status: string; lastTouched?: string }[]
+  // Every person node, paged or not. This is what lets the model know a
+  // person exists in a later session without having to search for them:
+  // the actual fix for the failure that started this round of work.
+  people: { id: string; name: string; hasPage: boolean }[]
+  // Every entity node (a film, a book, a company, a place, a band, a work
+  // of fiction). Entities never get a page in this release, so there is no
+  // page status to carry alongside the name.
+  entities: { id: string; name: string }[]
+  // Item texts of kind 'intention', pulled from recent session summaries'
+  // own frontmatter (the same read sessionContext already does for
+  // recentSummaries below, not a second pass over disk). These are
+  // captured today and nothing ever surfaces them again, which is why the
+  // companion appears to forget what the person said they wanted to do.
+  recentIntentions: string[]
   latestDailyRollup?: { date: string; body: string }
   recentSummaries: { sessionId: string; date: string; body: string }[]
-  pendingProposals: Proposal[]
   // Today's date, in the same YYYY-MM-DD form used for recent session
   // dates and the daily rollup date, built from the same clock passed to
   // sessionContext. The model is never told the current date any other
@@ -110,6 +123,7 @@ const REALM_STARTER_BODY = 'This realm is new. It grows as we talk.\n'
 const ARC_STARTER_BODY = 'This arc is new. It grows as we talk.\n'
 const RECENT_SUMMARIES_WINDOW_DAYS = 7
 const RECENT_SUMMARIES_CAP = 3
+const RECENT_INTENTIONS_CAP = 5
 const PERSON_STARTER_BODY = 'This page is new. It grows as we talk.\n'
 
 export class MemoryEngine {
@@ -489,6 +503,7 @@ export class MemoryEngine {
       .slice(0, RECENT_SUMMARIES_CAP)
 
     const recentSummaries: SessionContext['recentSummaries'] = []
+    const recentIntentions: string[] = []
     for (const session of recentCandidates) {
       const summaryPath = join(
         this.paths.sessionsDir,
@@ -497,9 +512,34 @@ export class MemoryEngine {
       )
       const doc = await readDocument(summaryPath)
       recentSummaries.push({ sessionId: session.sessionId, date: session.date, body: doc.body })
+      // doc.meta.items is the same mergedItems array applyReflection wrote
+      // into this summary's frontmatter (see reflection.ts). A hand-written
+      // summary.md (several tests build one directly) has no items key at
+      // all, so every step here is a shape check, not a cast.
+      const items = doc.meta.items
+      if (Array.isArray(items)) {
+        for (const item of items) {
+          if (
+            item !== null &&
+            typeof item === 'object' &&
+            (item as { kind?: unknown }).kind === 'intention' &&
+            typeof (item as { text?: unknown }).text === 'string'
+          ) {
+            recentIntentions.push((item as { text: string }).text)
+          }
+        }
+      }
     }
 
-    const proposals = await pendingProposals(this.paths)
+    const people: SessionContext['people'] = []
+    const entities: SessionContext['entities'] = []
+    for (const node of this.graphState.nodes.values()) {
+      if (node.type === 'person') {
+        people.push({ id: node.id, name: node.label, hasPage: node.doc !== undefined })
+      } else if (node.type === 'entity') {
+        entities.push({ id: node.id, name: node.label })
+      }
+    }
 
     // Any arc at all (regardless of status) or any reflected session
     // (regardless of date) means this person has talked with reverie
@@ -517,9 +557,11 @@ export class MemoryEngine {
       constitution: constitutionDoc.body,
       realms,
       arcs,
+      people,
+      entities,
+      recentIntentions: recentIntentions.slice(0, RECENT_INTENTIONS_CAP),
       ...(latestDailyRollup ? { latestDailyRollup } : {}),
       recentSummaries,
-      pendingProposals: proposals,
       today: formatDateUTC(now),
       isFirstSession,
     }
