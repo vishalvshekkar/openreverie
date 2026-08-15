@@ -54,6 +54,13 @@
 
 ```ts
 // packages/memory/src/engine.ts
+export interface MemoryEngineOpenOptions {
+  maintenance?: boolean
+}
+// maintenance defaults to true, preserving current CLI behavior.
+export class MemoryEngine {
+  static open(root: string, deps: EngineDeps, options?: MemoryEngineOpenOptions): Promise<MemoryEngine>
+}
 export interface PublicDocumentRow {
   docId: string
   kind: DocKind
@@ -125,7 +132,7 @@ export interface ServerLaunchDeps {
   resolveApiKey(config: ReverieConfig): string
   createChat(selection: ProviderSelection): ChatProvider
   createEmbeddings(selection: ProviderSelection): EmbeddingProvider
-  openEngine(root: string, deps: EngineDeps): Promise<MemoryEngine>
+  openEngine(root: string, deps: EngineDeps, options?: { maintenance?: boolean }): Promise<MemoryEngine>
   resolveStaticDir(): Promise<string>
   assertStaticDirectory(path: string): Promise<void>
   createAuth(input: { origin: string; now: () => number }): { token: string; auth: BootstrapAuth }
@@ -201,6 +208,18 @@ it('does not alter the v0.3.1 SessionContext contract while adding read projecti
   })
 })
 
+it('opens provider-free projections without maintenance work when maintenance is false', async () => {
+  const chat = { complete: vi.fn(), stream: vi.fn() }
+  const embeddings = { embed: vi.fn() }
+  const engine = await MemoryEngine.open(paths.root, { chat, embeddings, reflectionModel: 'reflection', embeddingModel: 'embeddings' }, { maintenance: false })
+  expect(chat.complete).not.toHaveBeenCalled()
+  expect(chat.stream).not.toHaveBeenCalled()
+  expect(embeddings.embed).not.toHaveBeenCalled()
+  expect(await engine.readGraphHistory()).toEqual(expect.any(Array))
+  expect(await engine.listPublicDocuments()).toEqual(expect.any(Array))
+  expect(await engine.listStoredSessions()).toEqual(expect.any(Array))
+})
+
 it.each(['%', Buffer.from('{', 'utf8').toString('base64url')])(
   'maps malformed base64url or JSON cursor %j to cursor_invalid',
   (cursor) => {
@@ -232,6 +251,8 @@ Expected: FAIL because the memory projection methods and `packages/server/src/ap
 - [ ] **Step 3: Add package configuration and the smallest projection implementation**
 
 Create the two package manifests with explicit dependency boundaries. Do not add web dependencies to root or any engine package.
+
+Extend `MemoryEngine.open(root, deps, options?: { maintenance?: boolean })`, with `maintenance` defaulting to `true` so existing CLI calls remain unchanged. When `maintenance: false`, skip the legacy proposal drain and every other startup maintenance operation that could call `chat.complete`, `chat.stream`, or `embed`; still open the graph, documents, and SQLite-derived index projections so reads work. Legacy pending proposals remain visible to the compatibility route, and are not drained or rewritten in this mode. The test above must fail before the guard is implemented and must prove the graph, documents, and index projections open successfully.
 
 ```json
 // packages/server/package.json
@@ -816,7 +837,7 @@ it('composes config, fallback providers, MemoryEngine, auth, registry, and stati
   expect(opened).toEqual([running.bootstrapUrl])
   expect(deps.loadConfig).toHaveBeenCalledWith(configPath)
   expect(deps.resolveApiKey).toHaveBeenCalledWith(config)
-  expect(deps.openEngine).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ chat: expect.anything(), embeddings: expect.anything() }))
+  expect(deps.openEngine).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ chat: expect.anything(), embeddings: expect.anything() }), { maintenance: false })
   expect(deps.resolveStaticDir).toHaveBeenCalledOnce()
   expect(deps.assertStaticDirectory).toHaveBeenCalledWith(expect.any(String))
   expect(deps.createAuth).toHaveBeenCalledWith(expect.objectContaining({ origin: running.origin }))
@@ -842,7 +863,7 @@ Expected: FAIL because neither launch composition nor `web` command dispatch exi
 
 - [ ] **Step 3: Implement provider-optional composition and foreground CLI launch**
 
-Implement `createServerLauncher(deps)` as the test seam and make exported `launchServer` call it with the real dependencies. `ServerLaunchDeps` is fixed in the public interfaces above. Open the memory engine once. First attempt normal provider construction only after `loadConfig` has yielded `memoryDir`; if `resolveApiKey` or a factory fails, pass public-interface unavailable providers. They make no network calls and throw a typed local `ProviderUnavailableError` only if chat or embedding is actually requested.
+Implement `createServerLauncher(deps)` as the test seam and make exported `launchServer` call it with the real dependencies. `ServerLaunchDeps` is fixed in the public interfaces above. Open the one server-owned memory engine once, passing `{ maintenance: false }` as the third argument. This is required even when configured providers are available: server startup must not drain legacy proposals or perform provider-backed maintenance. Legacy pending proposals remain readable through the compatibility route. Existing CLI calls to `MemoryEngine.open` omit the option and retain default `maintenance: true` behavior. First attempt normal provider construction only after `loadConfig` has yielded `memoryDir`; if `resolveApiKey` or a factory fails, pass public-interface unavailable providers. They make no network calls and throw a typed local `ProviderUnavailableError` only if chat or embedding is actually requested.
 
 In `packages/server/src/index.ts`, construct the real launcher with explicit imports of `loadConfig` and `resolveApiKey` from core, provider factories from providers, `MemoryEngine.open`, `createBootstrapAuth`, `createLiveSessionRegistry`, `createApp`, Node's `createServer`, `listen`, `close`, and the server-owned static-directory resolver. No launch implementation may read a hidden module singleton for `auth`, `registry`, configuration, providers, engine, or web assets.
 
@@ -876,7 +897,7 @@ export function createServerLauncher(deps: ServerLaunchDeps) {
     const engine = await deps.openEngine(config.memoryDir, {
       chat: providers.chat, embeddings: providers.embeddings,
       reflectionModel: config.models.reflection, embeddingModel: config.models.embeddings,
-    })
+    }, { maintenance: false })
     const staticDir = await deps.resolveStaticDir()
     await deps.assertStaticDirectory(staticDir)
     let listener: http.RequestListener = (_req, res) => { res.statusCode = 503; res.end() }
@@ -916,7 +937,7 @@ Expected: PASS. Confirm a test where `resolveApiKey` throws still performs no pr
 
 - [ ] **Step 5: Review and commit Task 5**
 
-Reviewer independently runs full test suite, build, lint and falsifies named tests by removing the production fix, observing failure, restoring, rerunning. Falsify `starts read paths when API-key resolution fails` by replacing unavailable providers with an eager factory call, and `dispatches web only for reverie web` by moving the branch below normal chat context creation.
+Reviewer independently runs full test suite, build, lint and falsifies named tests by removing the production fix, observing failure, restoring, rerunning. Falsify `opens provider-free projections without maintenance work when maintenance is false` by deleting the `maintenance: false` guard or changing it to run maintenance, and observe a fake `complete`, `stream`, or `embed` call and/or a drained proposal. Falsify `starts read paths when API-key resolution fails` by replacing unavailable providers with an eager factory call, and `dispatches web only for reverie web` by moving the branch below normal chat context creation.
 
 ```bash
 git add package.json pnpm-lock.yaml tsconfig.json packages/server packages/cli
