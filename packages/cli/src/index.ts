@@ -14,11 +14,13 @@
 // and fakes instead of the real filesystem, terminal, and network.
 
 import { createInterface } from 'node:readline/promises'
+import { fileURLToPath } from 'node:url'
 import type { ReverieConfig } from '@openreverie/core'
 import { defaultConfigPath, loadConfig, resolveApiKey } from '@openreverie/core'
 import { MemoryEngine } from '@openreverie/memory'
 import type { ProviderSelection } from '@openreverie/providers'
 import { createChatProvider, createEmbeddingProvider } from '@openreverie/providers'
+import { launchServer } from '@openreverie/server'
 import type { ChatIo } from './chat.js'
 import {
   countMemoryDocuments,
@@ -29,6 +31,7 @@ import {
 } from './chat.js'
 import { runRead } from './read.js'
 import { runSetup } from './setup.js'
+import { runWebCommand } from './web.js'
 
 // Colors are read from real process state exactly once, here at the edge:
 // disabled when stdout is not a TTY (piped, redirected, or captured by a
@@ -94,57 +97,79 @@ async function runSetupCommand(): Promise<void> {
   }
 }
 
-async function main(): Promise<void> {
-  const subcommand = process.argv[2]
+export interface CliMainDeps {
+  runWeb: typeof runWebCommand
+  launchServer: typeof launchServer
+  runRead: typeof runRead
+  runSetupCommand: () => Promise<void>
+  openCliContext: typeof openCliContext
+  buildChat: (config: ReverieConfig) => ReturnType<typeof createChatProvider>
+  buildEmbeddings: (config: ReverieConfig) => ReturnType<typeof createEmbeddingProvider>
+  openEngine: typeof MemoryEngine.open
+  countMemoryDocuments: typeof countMemoryDocuments
+  runChat: typeof runChat
+  createStylePersister: typeof createStylePersister
+  loadConfig: (path: string) => Promise<ReverieConfig>
+  configPath: string
+  write: (text: string) => void
+  colorEnabled: () => boolean
+}
+
+export async function mainWith(args: string[], deps: CliMainDeps): Promise<void> {
+  const subcommand = args[0]
 
   if (subcommand === 'setup') {
-    await runSetupCommand()
+    await deps.runSetupCommand()
+    return
+  }
+
+  if (subcommand === 'web') {
+    await deps.runWeb({ launchServer: deps.launchServer, write: deps.write })
     return
   }
 
   if (subcommand === 'read') {
-    const exitCode = await runRead(process.argv.slice(3), {
-      loadConfig: () => loadConfig(defaultConfigPath()),
-      write: (text: string) => process.stdout.write(text),
-      colorEnabled: colorsEnabled(),
+    const exitCode = await deps.runRead(args.slice(1), {
+      loadConfig: () => deps.loadConfig(deps.configPath),
+      write: deps.write,
+      colorEnabled: deps.colorEnabled(),
     })
     process.exitCode = exitCode
     return
   }
 
-  const colorEnabled = colorsEnabled()
-  const configPath = defaultConfigPath()
+  const colorEnabled = deps.colorEnabled()
 
-  const context = await openCliContext({
-    loadConfig: () => loadConfig(configPath),
-    buildChat: (config) => createChatProvider(providerSelection(config)),
-    buildEmbeddings: (config) => createEmbeddingProvider(providerSelection(config)),
-    openEngine: (config, deps) => MemoryEngine.open(config.memoryDir, deps),
+  const context = await deps.openCliContext({
+    loadConfig: () => deps.loadConfig(deps.configPath),
+    buildChat: deps.buildChat,
+    buildEmbeddings: deps.buildEmbeddings,
+    openEngine: (config, engineDeps) => deps.openEngine(config.memoryDir, engineDeps),
   })
 
   if (!context.ok) {
-    stdout.write(`${context.message}\n`)
+    deps.write(`${context.message}\n`)
     process.exitCode = 1
     return
   }
 
   const { engine, config, chat } = context
-  printWarnings(stdout, engine, colorEnabled)
+  printWarnings({ write: deps.write }, engine, colorEnabled)
 
   try {
     if (subcommand === 'reindex') {
       await engine.reindexAll()
-      const count = await countMemoryDocuments(config.memoryDir)
-      stdout.write(`Reindexed ${count} documents.\n`)
+      const count = await deps.countMemoryDocuments(config.memoryDir)
+      deps.write(`Reindexed ${count} documents.\n`)
     } else if (subcommand === 'reflect') {
       await engine.runMaintenance()
-      printWarnings(stdout, engine, colorEnabled)
-      stdout.write('Reflection is up to date.\n')
+      printWarnings({ write: deps.write }, engine, colorEnabled)
+      deps.write('Reflection is up to date.\n')
     } else {
       const io = readlineChatIo()
-      const toolDeps = { updateStyle: createStylePersister(config, configPath) }
+      const toolDeps = { updateStyle: deps.createStylePersister(config, deps.configPath) }
       try {
-        await runChat({ engine, config, chat, io, toolDeps, colorEnabled })
+        await deps.runChat({ engine, config, chat, io, toolDeps, colorEnabled })
       } finally {
         io.close()
       }
@@ -154,7 +179,27 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err: unknown) => {
-  stdout.write(`${errorMessage(err)}\n`)
-  process.exitCode = 1
-})
+const defaultDeps: CliMainDeps = {
+  runWeb: runWebCommand,
+  launchServer,
+  runRead,
+  runSetupCommand,
+  openCliContext,
+  buildChat: (config) => createChatProvider(providerSelection(config)),
+  buildEmbeddings: (config) => createEmbeddingProvider(providerSelection(config)),
+  openEngine: MemoryEngine.open,
+  countMemoryDocuments,
+  runChat,
+  createStylePersister,
+  loadConfig,
+  configPath: defaultConfigPath(),
+  write: (text) => process.stdout.write(text),
+  colorEnabled: colorsEnabled,
+}
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  mainWith(process.argv.slice(2), defaultDeps).catch((err: unknown) => {
+    stdout.write(`${errorMessage(err)}\n`)
+    process.exitCode = 1
+  })
+}

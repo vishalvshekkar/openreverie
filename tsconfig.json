@@ -4,6 +4,8 @@
     { "path": "packages/providers" },
     { "path": "packages/memory" },
     { "path": "packages/core" },
-    { "path": "packages/cli" }
+    { "path": "packages/server" },
+    { "path": "packages/cli" },
+    { "path": "packages/web" }
   ]
 }

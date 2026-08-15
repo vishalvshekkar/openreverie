@@ -8,7 +8,7 @@ import {
   FakeChatProvider,
   FakeEmbeddingProvider,
 } from '@openreverie/providers'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { listDocuments, newId, readDocument, writeDocumentAtomic } from './documents.js'
 import { type EngineDeps, MemoryEngine } from './engine.js'
 import { appendGraph, readGraph } from './graph.js'
@@ -60,6 +60,152 @@ class ThrowingEmbeddingProvider implements EmbeddingProvider {
 }
 
 describe('MemoryEngine', () => {
+  describe('public read projections', () => {
+    let dir: string
+    let paths: MemoryPaths
+    let personPageId: string
+
+    beforeEach(async () => {
+      dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-public-projections-'))
+      paths = memoryPaths(dir)
+      await ensureMemoryTree(paths)
+      personPageId = newId('doc')
+      const personPagePath = join(paths.peopleDir, 'mina.md')
+      await writeDocumentAtomic({
+        path: personPagePath,
+        meta: { id: personPageId, name: 'Mina', updated: '2026-08-14T12:00:00.000Z' },
+        body: 'Mina is a person in this fixture.\n',
+      })
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-14T10:00:00.000Z',
+          op: 'assert',
+          node: 'person_no_page',
+          type: 'person',
+          label: 'Noor',
+        },
+        {
+          ts: '2026-08-14T11:00:00.000Z',
+          op: 'assert',
+          node: 'person_with_page',
+          type: 'person',
+          label: 'Mina',
+          doc: personPagePath,
+        },
+      ])
+    })
+
+    afterEach(async () => {
+      await rm(dir, { recursive: true, force: true })
+    })
+
+    it('projects node-only people and document-backed people without exposing paths', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])), {
+        maintenance: false,
+      })
+      const rows = await engine.listPublicDocuments()
+
+      expect(rows.every((row) => !('path' in row))).toBe(true)
+      expect(rows).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            docId: personPageId,
+            kind: 'person',
+            title: 'Mina',
+            readOnly: true,
+          }),
+        ]),
+      )
+      expect(engine.graphSnapshot().nodes).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ id: 'person_no_page', type: 'person', label: 'Noor' }),
+          expect.objectContaining({ id: 'person_with_page', docId: personPageId }),
+        ]),
+      )
+
+      await engine.close()
+    })
+
+    it('retains every raw graph operation with its one-based append sequence', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])), {
+        maintenance: false,
+      })
+      const records = await engine.readGraphHistory()
+
+      expect(records).toEqual([
+        expect.objectContaining({ sequence: 1 }),
+        expect.objectContaining({ sequence: 2 }),
+      ])
+
+      await engine.close()
+    })
+
+    it('omits active edges whose endpoints are no longer active from the graph snapshot', async () => {
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-14T12:00:00.000Z',
+          op: 'assert',
+          edge: 'in',
+          from: 'person_no_page',
+          to: 'missing_realm',
+          confidence: 0.7,
+          confirmed: false,
+        },
+      ])
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])), {
+        maintenance: false,
+      })
+
+      expect(engine.graphSnapshot().edges).toEqual([])
+
+      await engine.close()
+    })
+
+    it('does not alter the v0.3.1 SessionContext contract while adding read projections', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])), {
+        maintenance: false,
+      })
+
+      expect(await engine.sessionContext(new Date('2026-08-15T12:00:00.000Z'))).toMatchObject({
+        people: [
+          { id: 'person_with_page', name: 'Mina', hasPage: true },
+          { id: 'person_no_page', name: 'Noor', hasPage: false },
+        ],
+        peopleTruncated: false,
+        entities: [],
+        entitiesTruncated: false,
+      })
+
+      await engine.close()
+    })
+
+    it('opens provider-free projections without maintenance work when maintenance is false', async () => {
+      const session = await SessionStore.start(paths, new Date('2026-08-14T12:00:00.000Z'))
+      await session.appendLine({
+        ts: '2026-08-14T12:00:00.000Z',
+        role: 'user',
+        content: 'This stale session must not be reflected while browsing records.',
+      })
+      const chat = { name: 'test', complete: vi.fn(), stream: vi.fn() }
+      const embeddings = { name: 'test', embed: vi.fn() }
+
+      const engine = await MemoryEngine.open(
+        paths.root,
+        { chat, embeddings, reflectionModel: 'reflection', embeddingModel: 'embeddings' },
+        { maintenance: false },
+      )
+
+      expect(chat.complete).not.toHaveBeenCalled()
+      expect(chat.stream).not.toHaveBeenCalled()
+      expect(embeddings.embed).not.toHaveBeenCalled()
+      expect(await engine.readGraphHistory()).toEqual(expect.any(Array))
+      expect(await engine.listPublicDocuments()).toEqual(expect.any(Array))
+      expect(await engine.listStoredSessions()).toEqual(expect.any(Array))
+
+      await engine.close()
+    })
+  })
+
   describe('full session lifecycle', () => {
     let dir: string
     let paths: MemoryPaths

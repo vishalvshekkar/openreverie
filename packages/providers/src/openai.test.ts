@@ -3,7 +3,13 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { OpenAiChatProvider } from './openai.js'
-import type { ChatEvent, ChatRequest, FetchLike, ToolCall } from './types.js'
+import {
+  type ChatEvent,
+  type ChatRequest,
+  type FetchLike,
+  ProviderUnavailableError,
+  type ToolCall,
+} from './types.js'
 
 const fixtureDir = join(dirname(fileURLToPath(import.meta.url)), 'fixtures')
 const streamFixture = readFileSync(join(fixtureDir, 'openai-stream.txt'), 'utf8')
@@ -187,6 +193,23 @@ describe('OpenAiChatProvider.complete', () => {
       `openai: HTTP 401: ${longBody.slice(0, 200)}`,
     )
   })
+
+  it('classifies a socket error code as a provider outage', async () => {
+    const networkError = Object.assign(new Error('connection refused'), { code: 'ECONNREFUSED' })
+    const fetch: FetchLike = async () => {
+      throw networkError
+    }
+    const provider = new OpenAiChatProvider({ apiKey: 'sk-test' }, fetch)
+
+    await expect(provider.complete(baseRequest)).rejects.toBeInstanceOf(ProviderUnavailableError)
+  })
+
+  it('classifies a service response as a provider outage', async () => {
+    const { fetch } = fakeFetch(new Response('service unavailable', { status: 503 }))
+    const provider = new OpenAiChatProvider({ apiKey: 'sk-test' }, fetch)
+
+    await expect(provider.complete(baseRequest)).rejects.toBeInstanceOf(ProviderUnavailableError)
+  })
 })
 
 describe('OpenAiChatProvider.stream', () => {
@@ -234,7 +257,9 @@ describe('OpenAiChatProvider.stream', () => {
       }
     }
 
-    await expect(drain()).rejects.toThrow(`openai: HTTP 429: ${longBody.slice(0, 200)}`)
+    const error = await drain().catch((cause: unknown) => cause)
+    expect(error).toBeInstanceOf(ProviderUnavailableError)
+    expect((error as Error).message).toBe(`openai: HTTP 429: ${longBody.slice(0, 200)}`)
   })
 
   it('reassembles a data: line whose bytes are split across two read chunks', async () => {
