@@ -1098,9 +1098,6 @@ describe('MemoryEngine', () => {
       const pending = await pendingProposals(paths)
       expect(pending.find((p) => p.id === proposal.id)).toBeUndefined()
 
-      const context = await engine.sessionContext()
-      expect(context.pendingProposals).toHaveLength(0)
-
       // Silent: the resolution is recorded (proposals.jsonl keeps its
       // compatibility promise), but nothing about draining it is surfaced
       // as a warning.
@@ -2182,7 +2179,7 @@ describe('MemoryEngine', () => {
       await rm(dir, { recursive: true, force: true })
     })
 
-    it('includes only active arcs, alongside the constitution text and pending proposals', async () => {
+    it('includes only active arcs, alongside the constitution text', async () => {
       const activeArcId = 'arc_active'
       const dormantArcId = 'arc_dormant'
       const activeArcPath = join(paths.arcsDir, 'active-arc.md')
@@ -2221,8 +2218,9 @@ describe('MemoryEngine', () => {
       // Appended after open(), not before: a proposal present at open time
       // is drained silently now (see 'materializes a pre-existing pending
       // proposal silently on open...' above). Appending it here instead
-      // still exercises sessionContext's own pendingProposals wiring
-      // against whatever is actually sitting in proposals.jsonl.
+      // proves sessionContext no longer touches proposals.jsonl at all
+      // (there is no field on SessionContext to render it into any more):
+      // the file itself still carries it, untouched by sessionContext.
       const proposal: Proposal = {
         id: newId('prop'),
         ts: new Date().toISOString(),
@@ -2238,7 +2236,123 @@ describe('MemoryEngine', () => {
       expect(context.arcs.map((a) => a.id)).toEqual([activeArcId])
       expect(context.arcs[0]?.status).toBe('active')
       expect(context.constitution.length).toBeGreaterThan(0)
-      expect(context.pendingProposals.map((p) => p.id)).toContain(proposal.id)
+
+      const stillPending = await pendingProposals(paths)
+      expect(stillPending.map((p) => p.id)).toContain(proposal.id)
+
+      await engine.close()
+    })
+  })
+
+  describe('sessionContext people, entities, and recent intentions', () => {
+    let dir: string
+    let paths: MemoryPaths
+
+    beforeEach(async () => {
+      dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-people-context-'))
+      paths = memoryPaths(dir)
+      await ensureMemoryTree(paths)
+    })
+
+    afterEach(async () => {
+      await rm(dir, { recursive: true, force: true })
+    })
+
+    it('includes every person node, marking whether each one has a page', async () => {
+      const pagedPath = join(paths.peopleDir, 'priya.md')
+      await writeDocumentAtomic({
+        path: pagedPath,
+        meta: { id: newId('doc'), name: 'Priya', node: 'person_paged', opened: '2026-08-01' },
+        body: 'This page is new. It grows as we talk.\n',
+      })
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'person_paged',
+          type: 'person',
+          label: 'Priya',
+          doc: pagedPath,
+        },
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'person_nodeonly',
+          type: 'person',
+          label: 'Sam',
+        },
+      ])
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const context = await engine.sessionContext()
+
+      expect(context.people).toEqual(
+        expect.arrayContaining([
+          { id: 'person_paged', name: 'Priya', hasPage: true },
+          { id: 'person_nodeonly', name: 'Sam', hasPage: false },
+        ]),
+      )
+
+      await engine.close()
+    })
+
+    it('includes every entity node by name, with no page field at all', async () => {
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'entity_1',
+          type: 'entity',
+          label: 'Dune',
+        },
+      ])
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const context = await engine.sessionContext()
+
+      expect(context.entities).toEqual([{ id: 'entity_1', name: 'Dune' }])
+
+      await engine.close()
+    })
+
+    it('pulls intention item texts out of recent session summaries, skipping other kinds', async () => {
+      const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)
+      const store = await SessionStore.start(paths, yesterday)
+      await store.appendLine({ ts: yesterday.toISOString(), role: 'user', content: 'Hi.' })
+      await writeDocumentAtomic({
+        path: join(store.dir, 'summary.md'),
+        meta: {
+          id: newId('doc'),
+          items: [
+            { id: newId('item'), text: 'Call the dentist next week.', kind: 'intention', ts: '' },
+            { id: newId('item'), text: 'Felt tired all day.', kind: 'feeling', ts: '' },
+          ],
+        },
+        body: 'A quiet day.\n',
+      })
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const context = await engine.sessionContext()
+
+      expect(context.recentIntentions).toEqual(['Call the dentist next week.'])
+
+      await engine.close()
+    })
+
+    it('tolerates a hand-written summary.md with no items key at all, in the same recentSummaries window', async () => {
+      const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)
+      const store = await SessionStore.start(paths, yesterday)
+      await store.appendLine({ ts: yesterday.toISOString(), role: 'user', content: 'Hi.' })
+      await writeDocumentAtomic({
+        path: join(store.dir, 'summary.md'),
+        meta: { id: newId('doc') },
+        body: 'A quiet day, written by hand.\n',
+      })
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const context = await engine.sessionContext()
+
+      expect(context.recentIntentions).toEqual([])
 
       await engine.close()
     })
