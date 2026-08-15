@@ -53,11 +53,6 @@ const rememberArgs = z.strictObject({
 
 const noArgs = z.strictObject({})
 
-const resolveProposalArgs = z.strictObject({
-  proposalId: z.string(),
-  resolution: z.enum(['accepted', 'rejected']),
-})
-
 const updateStyleArgs = z
   .strictObject({
     engagement: z.enum(['leading', 'balanced', 'following']).optional(),
@@ -221,30 +216,6 @@ export function toolDefinitions(): ToolDefinition[] {
       },
     },
     {
-      name: 'resolve_proposal',
-      description:
-        "Record the user's decision on a pending proposal: a memory update drafted by reflection (a new arc, a new " +
-        'person, or a link between two existing things) but not yet confirmed. Use this only right after the user ' +
-        'has actually said yes or no to a specific proposal you raised with them. Never resolve a proposal on your ' +
-        'own judgment.',
-      parameters: {
-        type: 'object',
-        properties: {
-          proposalId: {
-            type: 'string',
-            description: 'The id of the proposal being resolved.',
-          },
-          resolution: {
-            type: 'string',
-            enum: ['accepted', 'rejected'],
-            description: 'Whether the user accepted or rejected the proposal.',
-          },
-        },
-        required: ['proposalId', 'resolution'],
-        additionalProperties: false,
-      },
-    },
-    {
       name: 'update_style',
       description:
         'Change how you converse with this person going forward: engagement (leading, balanced, following), tone ' +
@@ -305,8 +276,6 @@ export async function dispatchTool(
         return await dispatchListArcs(engine, parsedArgs.value)
       case 'list_realms':
         return await dispatchListRealms(engine, parsedArgs.value)
-      case 'resolve_proposal':
-        return await dispatchResolveProposal(engine, parsedArgs.value)
       case 'update_style':
         return await dispatchUpdateStyle(deps, parsedArgs.value)
       default:
@@ -392,14 +361,6 @@ async function dispatchListRealms(engine: MemoryEngine, value: unknown): Promise
   const parsed = noArgs.safeParse(value)
   if (!parsed.success) return errorJson(zodErrorMessage('list_realms', parsed.error))
   return JSON.stringify(engine.listRealms())
-}
-
-async function dispatchResolveProposal(engine: MemoryEngine, value: unknown): Promise<string> {
-  const parsed = resolveProposalArgs.safeParse(value)
-  if (!parsed.success) return errorJson(zodErrorMessage('resolve_proposal', parsed.error))
-
-  await engine.resolveProposal(parsed.data.proposalId, parsed.data.resolution)
-  return JSON.stringify({ ok: true })
 }
 
 async function dispatchUpdateStyle(deps: ToolDeps | undefined, value: unknown): Promise<string> {
