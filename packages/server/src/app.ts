@@ -51,10 +51,13 @@ interface PublicProposal {
 
 export function createApp(deps: CreateAppDeps): RequestListener {
   const canonical = parseCanonicalOrigin(deps.canonicalOrigin)
+  const proposalResolutionLocks = new Map<string, Promise<void>>()
   return (req, res) => {
-    void handle(req, res, deps.engine, deps.auth, canonical).catch((error: unknown) => {
-      writeError(res, toApiError(error))
-    })
+    void handle(req, res, deps.engine, deps.auth, canonical, proposalResolutionLocks).catch(
+      (error: unknown) => {
+        writeError(res, toApiError(error))
+      },
+    )
   }
 }
 
@@ -64,6 +67,7 @@ async function handle(
   engine: RecordEngine,
   auth: BootstrapAuth,
   canonical: CanonicalOrigin,
+  proposalResolutionLocks: Map<string, Promise<void>>,
 ): Promise<void> {
   const parsed = parseRequestUrl(req)
   const path = decodePath(parsed.pathname)
@@ -75,7 +79,7 @@ async function handle(
     if (!body.success) throw new ApiError(400, 'invalid_request', 'The request is invalid.')
     const session = auth.exchange(body.data.token)
     res.setHeader('set-cookie', `reverie_session=${session}; HttpOnly; SameSite=Strict; Path=/`)
-    writeJson(res, 200, envelope({ authenticated: true }, null))
+    writePublicJson(res, 200, bootstrapResponseSchema, { authenticated: true }, null)
     return
   }
 
@@ -90,7 +94,9 @@ async function handle(
   }
 
   if (method === 'GET' && path.length === 3 && path[2] === 'documents') {
-    const documents = (await engine.listPublicDocuments()).sort(compareDocuments)
+    const documents = publicDocumentRowsSchema
+      .parse(await engine.listPublicDocuments())
+      .sort(compareDocuments)
     const page = pageResource(documents, {
       resource: 'documents',
       query: parsed.searchParams,
@@ -98,23 +104,27 @@ async function handle(
       tuple: (document) => [document.kind, document.title, document.docId],
       byteLimit: undefined,
     })
-    writeJson(res, 200, envelope(page.data, page.nextCursor))
+    writePublicJson(res, 200, publicDocumentRowsSchema, page.data, page.nextCursor)
     return
   }
 
   if (method === 'GET' && path.length === 4 && path[2] === 'documents') {
     const docId = requiredId(path[3])
-    const document = await engine.getPublicDocument(docId)
-    if (!document) throw new ApiError(404, 'not_found', 'The requested resource was not found.')
+    const storedDocument = await engine.getPublicDocument(docId)
+    if (!storedDocument)
+      throw new ApiError(404, 'not_found', 'The requested resource was not found.')
+    const document = publicDocumentSchema.parse(storedDocument)
     if (Buffer.byteLength(document.body, 'utf8') > LIMITS.documentBytes) {
       throw new ApiError(413, 'resource_too_large', 'The requested resource is too large.')
     }
-    writeJson(res, 200, envelope(document, null))
+    writePublicJson(res, 200, publicDocumentSchema, document, null)
     return
   }
 
   if (method === 'GET' && path.length === 3 && path[2] === 'sessions') {
-    const sessions = (await engine.listStoredSessions()).sort(compareSessions)
+    const sessions = publicSessionsSchema
+      .parse(await engine.listStoredSessions())
+      .sort(compareSessions)
     const page = pageResource(sessions, {
       resource: 'sessions',
       query: parsed.searchParams,
@@ -122,23 +132,27 @@ async function handle(
       tuple: (session) => [session.createdAt, session.sessionId],
       byteLimit: undefined,
     })
-    writeJson(res, 200, envelope(page.data, page.nextCursor))
+    writePublicJson(res, 200, publicSessionsSchema, page.data, page.nextCursor)
     return
   }
 
   if (method === 'GET' && path.length === 4 && path[2] === 'sessions') {
     const sessionId = requiredId(path[3])
-    const session = (await engine.listStoredSessions()).find((item) => item.sessionId === sessionId)
+    const session = publicSessionsSchema
+      .parse(await engine.listStoredSessions())
+      .find((item) => item.sessionId === sessionId)
     if (!session) throw new ApiError(404, 'not_found', 'The requested resource was not found.')
-    writeJson(res, 200, envelope(session, null))
+    writePublicJson(res, 200, publicSessionSchema, session, null)
     return
   }
 
   if (method === 'GET' && path.length === 5 && path[2] === 'sessions' && path[4] === 'transcript') {
     const sessionId = requiredId(path[3])
-    const session = (await engine.listStoredSessions()).find((item) => item.sessionId === sessionId)
+    const session = publicSessionsSchema
+      .parse(await engine.listStoredSessions())
+      .find((item) => item.sessionId === sessionId)
     if (!session) throw new ApiError(404, 'not_found', 'The requested resource was not found.')
-    const transcript = await engine.readTranscriptPage(sessionId)
+    const transcript = publicTranscriptLinesSchema.parse(await engine.readTranscriptPage(sessionId))
     const page = pageResource(transcript, {
       resource: 'transcript',
       query: parsed.searchParams,
@@ -154,13 +168,20 @@ async function handle(
       maximum: 1000,
       recordTooLargeCode: 'record_too_large',
     })
-    writeJson(res, 200, envelope(page.data, page.nextCursor), LIMITS.transcriptPageBytes)
+    writePublicJson(
+      res,
+      200,
+      publicTranscriptLinesSchema,
+      page.data,
+      page.nextCursor,
+      LIMITS.transcriptPageBytes,
+    )
     return
   }
 
   if (method === 'GET' && path.length === 3 && path[2] === 'proposals') {
-    const proposals = (await engine.listPendingProposals())
-      .map(publicProposal)
+    const proposals = publicProposalsSchema
+      .parse((await engine.listPendingProposals()).map(publicProposal))
       .sort(compareProposals)
     const page = pageResource(proposals, {
       resource: 'proposals',
@@ -170,7 +191,14 @@ async function handle(
       byteLimit: LIMITS.proposalPageBytes,
       recordTooLargeCode: 'record_too_large',
     })
-    writeJson(res, 200, envelope(page.data, page.nextCursor), LIMITS.proposalPageBytes)
+    writePublicJson(
+      res,
+      200,
+      publicProposalsSchema,
+      page.data,
+      page.nextCursor,
+      LIMITS.proposalPageBytes,
+    )
     return
   }
 
@@ -178,12 +206,20 @@ async function handle(
     const proposalId = requiredId(path[3])
     const body = proposalResolutionSchema.safeParse(await readJson(req))
     if (!body.success) throw new ApiError(400, 'invalid_request', 'The request is invalid.')
-    const pending = await engine.listPendingProposals()
-    if (!pending.some((proposal) => proposal.id === proposalId)) {
-      throw new ApiError(404, 'not_found', 'The requested resource was not found.')
-    }
-    await engine.resolveProposal(proposalId, body.data.resolution)
-    writeJson(res, 200, envelope({ proposalId, resolution: body.data.resolution }, null))
+    await serializeProposalResolution(proposalResolutionLocks, proposalId, async () => {
+      const pending = await engine.listPendingProposals()
+      if (!pending.some((proposal) => proposal.id === proposalId)) {
+        throw new ApiError(404, 'not_found', 'The requested resource was not found.')
+      }
+      await engine.resolveProposal(proposalId, body.data.resolution)
+    })
+    writePublicJson(
+      res,
+      200,
+      proposalResolutionResponseSchema,
+      { proposalId, resolution: body.data.resolution },
+      null,
+    )
     return
   }
 
@@ -192,6 +228,90 @@ async function handle(
 
 const bootstrapSchema = z.strictObject({ token: z.string() })
 const proposalResolutionSchema = z.strictObject({ resolution: z.enum(['accepted', 'rejected']) })
+const documentKindSchema = z.enum([
+  'constitution',
+  'realm',
+  'arc',
+  'summary',
+  'rollup_daily',
+  'rollup_weekly',
+  'person',
+])
+const publicDocumentRowSchema = z.strictObject({
+  docId: z.string(),
+  kind: documentKindSchema,
+  title: z.string(),
+  updatedAt: z.string(),
+  readOnly: z.literal(true),
+})
+const publicDocumentRowsSchema = z.array(publicDocumentRowSchema)
+const publicDocumentSchema = publicDocumentRowSchema.extend({ body: z.string() })
+const publicSessionSchema = z.strictObject({
+  sessionId: z.string(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  status: z.enum(['live', 'ended', 'expired']),
+  readOnly: z.boolean(),
+  transcript: z.strictObject({
+    lineCount: z.number().int().nonnegative(),
+    userCount: z.number().int().nonnegative(),
+    assistantCount: z.number().int().nonnegative(),
+    toolCount: z.number().int().nonnegative(),
+  }),
+})
+const publicSessionsSchema = z.array(publicSessionSchema)
+const toolCallSchema = z.strictObject({
+  id: z.string(),
+  name: z.string(),
+  arguments: z.string(),
+})
+const publicTranscriptLineSchema = z.strictObject({
+  lineSequence: z.number().int().positive(),
+  ts: z.string(),
+  role: z.enum(['user', 'assistant', 'tool']),
+  content: z.string(),
+  toolCalls: z.array(toolCallSchema).optional(),
+  toolCallId: z.string().optional(),
+})
+const publicTranscriptLinesSchema = z.array(publicTranscriptLineSchema)
+const publicProposalSchema = z.strictObject({
+  proposalId: z.string(),
+  createdAt: z.string(),
+  kind: z.enum(['new_arc', 'new_person', 'link']),
+  summary: z.string(),
+  sourceSessionId: z.string(),
+})
+const publicProposalsSchema = z.array(publicProposalSchema)
+const bootstrapResponseSchema = z.strictObject({ authenticated: z.literal(true) })
+const proposalResolutionResponseSchema = z.strictObject({
+  proposalId: z.string(),
+  resolution: z.enum(['accepted', 'rejected']),
+})
+const responseMetaSchema = z.strictObject({ nextCursor: z.string().nullable() })
+
+function responseSchema<T extends z.ZodType>(data: T) {
+  return z.strictObject({ data, meta: responseMetaSchema })
+}
+
+async function serializeProposalResolution<T>(
+  locks: Map<string, Promise<void>>,
+  proposalId: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const previous = locks.get(proposalId) ?? Promise.resolve()
+  let release = (): void => undefined
+  const current = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  locks.set(proposalId, current)
+  await previous
+  try {
+    return await operation()
+  } finally {
+    release()
+    if (locks.get(proposalId) === current) locks.delete(proposalId)
+  }
+}
 
 function parseCanonicalOrigin(origin: string): CanonicalOrigin {
   const url = new URL(origin)
@@ -387,6 +507,21 @@ function compareTuple(left: readonly string[], right: readonly string[]): number
     if (a > b) return 1
   }
   return 0
+}
+
+function writePublicJson(
+  res: ServerResponse,
+  status: number,
+  dataSchema: z.ZodType,
+  data: unknown,
+  nextCursor: string | null,
+  maxBytes?: number,
+): void {
+  const payload = responseSchema(dataSchema).safeParse(envelope(data, nextCursor))
+  if (!payload.success) {
+    throw new ApiError(500, 'internal_error', 'The server could not process the request.')
+  }
+  writeJson(res, status, payload.data, maxBytes)
 }
 
 function writeJson(res: ServerResponse, status: number, payload: unknown, maxBytes?: number): void {

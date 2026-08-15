@@ -78,6 +78,19 @@ class FakeEngine implements RecordEngine {
     },
   ]
   resolved: string[] = []
+  resolveCalls = 0
+  private resolutionGate: Promise<void> | undefined
+  private releaseResolutionGate: (() => void) | undefined
+
+  pauseProposalResolution(): void {
+    this.resolutionGate = new Promise<void>((resolve) => {
+      this.releaseResolutionGate = resolve
+    })
+  }
+
+  resumeProposalResolution(): void {
+    this.releaseResolutionGate?.()
+  }
 
   async listPublicDocuments(): Promise<PublicDocumentRow[]> {
     return this.documents.map(({ body: _body, ...row }) => row)
@@ -96,6 +109,8 @@ class FakeEngine implements RecordEngine {
     return this.proposals
   }
   async resolveProposal(id: string, resolution: 'accepted' | 'rejected'): Promise<void> {
+    this.resolveCalls += 1
+    await this.resolutionGate
     this.resolved.push(`${id}:${resolution}`)
     this.proposals = this.proposals.filter((proposal) => proposal.id !== id)
   }
@@ -305,6 +320,82 @@ describe('record browsing app', () => {
     ])
   })
 
+  it('serializes concurrent proposal resolutions so only one can materialize a pending proposal', async () => {
+    engine.pauseProposalResolution()
+    const first = request(
+      'POST',
+      '/api/v1/proposals/prop_1/resolve',
+      { resolution: 'accepted' },
+      authenticated({ origin }),
+    )
+    const second = request(
+      'POST',
+      '/api/v1/proposals/prop_1/resolve',
+      { resolution: 'accepted' },
+      authenticated({ origin }),
+    )
+
+    await waitForResolveCall()
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    engine.resumeProposalResolution()
+
+    const responses = await Promise.all([first, second])
+    expect(responses.map((response) => response.status).sort()).toEqual([200, 404])
+    expect(engine.resolveCalls).toBe(1)
+    expect(engine.resolved).toEqual(['prop_1:accepted'])
+  })
+
+  it('rejects unexpected and malformed public projections before serializing them', async () => {
+    engine.documents[0] = {
+      ...engine.documents[0],
+      filesystemPath: '/private/reverie/people/mina.md',
+    } as PublicDocument
+    const unexpectedDocument = await getJson('/api/v1/documents')
+    expect(unexpectedDocument).toMatchObject({
+      status: 500,
+      json: {
+        schemaVersion: '1',
+        code: 'internal_error',
+        message: 'The server could not process the request.',
+      },
+    })
+    expect(JSON.stringify(unexpectedDocument.json)).not.toContain('/private/reverie')
+
+    const { filesystemPath: _filesystemPath, ...document } = engine
+      .documents[0] as PublicDocument & {
+      filesystemPath: string
+    }
+    engine.documents[0] = { ...document, body: 42 } as unknown as PublicDocument
+    await expect(getJson('/api/v1/documents/doc_one')).resolves.toMatchObject({
+      status: 500,
+      json: { code: 'internal_error' },
+    })
+
+    engine.sessions[0] = {
+      ...engine.sessions[0],
+      transcript: { ...engine.sessions[0]?.transcript, lineCount: 'two' },
+    } as unknown as PublicSession
+    await expect(getJson('/api/v1/sessions')).resolves.toMatchObject({
+      status: 500,
+      json: { code: 'internal_error' },
+    })
+
+    engine.lines[0] = {
+      ...engine.lines[0],
+      filesystemPath: '/private/reverie/sessions/transcript.jsonl',
+    } as TranscriptLine
+    await expect(getJson(`/api/v1/sessions/${sessionId}/transcript`)).resolves.toMatchObject({
+      status: 500,
+      json: { code: 'internal_error' },
+    })
+
+    engine.proposals[0] = { ...engine.proposals[0], kind: 'unsupported' } as never
+    await expect(getJson('/api/v1/proposals')).resolves.toMatchObject({
+      status: 500,
+      json: { code: 'internal_error' },
+    })
+  })
+
   async function requestWithAuth(
     method: string,
     path: string,
@@ -315,5 +406,11 @@ describe('record browsing app', () => {
     server.removeAllListeners('request')
     server.on('request', createApp({ engine, auth, canonicalOrigin: origin }))
     return request(method, path, body, headers)
+  }
+
+  async function waitForResolveCall(): Promise<void> {
+    while (engine.resolveCalls === 0) {
+      await new Promise<void>((resolve) => setImmediate(resolve))
+    }
   }
 })
