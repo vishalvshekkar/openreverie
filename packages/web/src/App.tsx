@@ -5,6 +5,7 @@ import {
   type AppApi,
   type Document,
   type DocumentRow,
+  type GraphSnapshot,
   IncompleteStreamError,
   isTerminalEvent,
   type Proposal,
@@ -12,6 +13,7 @@ import {
   type StreamEvent,
   type TranscriptLine,
 } from './api.js'
+import { Atlas } from './atlas.js'
 import { initialChatState, newTurnId, sessionReducer } from './session.js'
 
 function isResyncRequired(error: unknown): boolean {
@@ -64,15 +66,6 @@ function renderStreamEvent(event: StreamEvent) {
   }
 }
 
-function AtlasMountRegion() {
-  return (
-    <div className="atlas-mount-region">
-      <h2>Atlas</h2>
-      <p>The graph atlas will appear here in a later release.</p>
-    </div>
-  )
-}
-
 export function App({ api }: { api: AppApi }) {
   const [state, dispatch] = useReducer(sessionReducer, initialChatState)
   const [draft, setDraft] = useState('')
@@ -80,6 +73,7 @@ export function App({ api }: { api: AppApi }) {
   const [sessions, setSessions] = useState<Session[]>([])
   const [proposals, setProposals] = useState<Proposal[]>([])
   const [openDocument, setOpenDocument] = useState<Document | null>(null)
+  const [snapshot, setSnapshot] = useState<GraphSnapshot | null>(null)
   const lastSequenceRef = useRef(0)
 
   const startSession = useCallback(async () => {
@@ -116,6 +110,21 @@ export function App({ api }: { api: AppApi }) {
     void loadRecords()
     void startSession()
   }, [api, loadRecords, startSession])
+
+  useEffect(() => {
+    let active = true
+    api
+      .getGraphSnapshot()
+      .then((result) => {
+        if (active) setSnapshot(result)
+      })
+      .catch(() => {
+        // A missing graph leaves the atlas empty; chat and documents still work.
+      })
+    return () => {
+      active = false
+    }
+  }, [api])
 
   async function consumeEvents(stream: AsyncIterable<StreamEvent>): Promise<boolean> {
     let terminal = false
@@ -322,9 +331,14 @@ export function App({ api }: { api: AppApi }) {
           )}
         </section>
 
-        <section className="atlas-mount" aria-label="Atlas">
-          <AtlasMountRegion />
-        </section>
+        {snapshot === null ? (
+          <section className="atlas-mount" aria-label="Atlas">
+            <h2>Atlas</h2>
+            <p className="atlas-loading">Loading the graph.</p>
+          </section>
+        ) : (
+          <Atlas snapshot={snapshot} onOpenDocument={openDocumentById} />
+        )}
       </main>
     </div>
   )
