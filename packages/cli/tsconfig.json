@@ -5,5 +5,10 @@
     "outDir": "dist"
   },
   "include": ["src"],
-  "references": [{ "path": "../core" }, { "path": "../memory" }, { "path": "../providers" }]
+  "references": [
+    { "path": "../core" },
+    { "path": "../memory" },
+    { "path": "../providers" },
+    { "path": "../server" }
+  ]
 }

@@ -15,6 +15,7 @@
     "@openreverie/core": "workspace:*",
     "@openreverie/memory": "workspace:*",
     "@openreverie/providers": "workspace:*",
+    "@openreverie/web": "workspace:*",
     "zod": "^4.0.0"
   }
 }

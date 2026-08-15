@@ -462,6 +462,12 @@ export class LiveSessionRegistry {
   }
 }
 
+export function createLiveSessionRegistry(
+  options: LiveSessionRegistryOptions,
+): LiveSessionRegistry {
+  return new LiveSessionRegistry(options)
+}
+
 const nodeIntervalScheduler: RegistryScheduler = {
   schedule(callback, intervalMs) {
     const timer = setInterval(callback, intervalMs)

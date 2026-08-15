@@ -1,6 +1,9 @@
 import { Buffer } from 'node:buffer'
 import { createHash } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
 import type { IncomingMessage, RequestListener, ServerResponse } from 'node:http'
+import { extname, relative, resolve } from 'node:path'
+import type { ReverieConfig } from '@openreverie/core'
 import type {
   Proposal,
   PublicDocument,
@@ -42,8 +45,11 @@ export interface RecordEngine {
 export interface CreateAppDeps {
   engine: RecordEngine
   auth: BootstrapAuth
-  canonicalOrigin: string
+  config?: ReverieConfig
+  canonicalOrigin?: string
+  origin?: string
   registry?: LiveSessionRegistry
+  staticDir?: string
 }
 
 interface CanonicalOrigin {
@@ -60,7 +66,7 @@ interface PublicProposal {
 }
 
 export function createApp(deps: CreateAppDeps): RequestListener {
-  const canonical = parseCanonicalOrigin(deps.canonicalOrigin)
+  const canonical = parseCanonicalOrigin(deps.origin ?? deps.canonicalOrigin ?? '')
   const proposalResolutionLocks = new Map<string, Promise<void>>()
   return (req, res) => {
     void handle(
@@ -71,6 +77,7 @@ export function createApp(deps: CreateAppDeps): RequestListener {
       canonical,
       proposalResolutionLocks,
       deps.registry,
+      deps.staticDir,
     ).catch((error: unknown) => {
       writeError(res, toApiError(error))
     })
@@ -85,6 +92,7 @@ async function handle(
   canonical: CanonicalOrigin,
   proposalResolutionLocks: Map<string, Promise<void>>,
   registry: LiveSessionRegistry | undefined,
+  staticDir: string | undefined,
 ): Promise<void> {
   const parsed = parseRequestUrl(req)
   const path = decodePath(parsed.pathname)
@@ -100,7 +108,15 @@ async function handle(
     return
   }
 
-  if (path[0] !== 'api' || path[1] !== 'v1') {
+  if (path[0] !== 'api') {
+    if (staticDir) {
+      await serveStatic(res, staticDir, parsed.pathname)
+      return
+    }
+    throw new ApiError(404, 'not_found', 'The requested resource was not found.')
+  }
+
+  if (path[1] !== 'v1') {
     throw new ApiError(404, 'not_found', 'The requested resource was not found.')
   }
 
@@ -330,6 +346,62 @@ async function handle(
   }
 
   throw new ApiError(404, 'not_found', 'The requested resource was not found.')
+}
+
+const staticContentTypes: Readonly<Record<string, string>> = {
+  '.css': 'text/css; charset=utf-8',
+  '.gif': 'image/gif',
+  '.html': 'text/html; charset=utf-8',
+  '.ico': 'image/x-icon',
+  '.jpeg': 'image/jpeg',
+  '.jpg': 'image/jpeg',
+  '.js': 'text/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.svg': 'image/svg+xml',
+  '.webp': 'image/webp',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+}
+
+async function serveStatic(
+  res: ServerResponse,
+  staticDir: string,
+  pathname: string,
+): Promise<void> {
+  const decoded = decodeURIComponent(pathname)
+  const requested = decoded === '/' ? 'index.html' : decoded.replace(/^\/+/, '')
+  const file = resolve(staticDir, requested)
+  const withinStaticDir = relative(resolve(staticDir), file)
+  const extension = extname(requested).toLowerCase()
+  const contentType = staticContentTypes[extension]
+
+  if (withinStaticDir.startsWith('..') || withinStaticDir === '') {
+    throw new ApiError(404, 'not_found', 'The requested resource was not found.')
+  }
+  if (requested !== 'index.html' && extension === '') {
+    await serveStatic(res, staticDir, '/')
+    return
+  }
+  if (contentType === undefined)
+    throw new ApiError(404, 'not_found', 'The requested resource was not found.')
+
+  try {
+    const contents = await readFile(file)
+    res.writeHead(200, {
+      'content-type': contentType,
+      'content-length': contents.byteLength,
+      ...(requested === 'index.html' ? { 'cache-control': 'no-store' } : {}),
+    })
+    res.end(contents)
+  } catch (error) {
+    if (!isMissingFile(error)) throw error
+    throw new ApiError(404, 'not_found', 'The requested resource was not found.')
+  }
+}
+
+function isMissingFile(error: unknown): boolean {
+  return error instanceof Error && 'code' in error && error.code === 'ENOENT'
 }
 
 const bootstrapSchema = z.strictObject({ token: z.string() })
