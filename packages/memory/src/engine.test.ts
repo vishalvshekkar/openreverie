@@ -1145,6 +1145,68 @@ describe('MemoryEngine', () => {
       await engine.close()
     })
 
+    it('a legacy proposal with a malformed payload does not prevent open() from succeeding or the rest of the queue from draining', async () => {
+      const malformed: Proposal = {
+        id: newId('prop'),
+        ts: new Date().toISOString(),
+        kind: 'new_arc',
+        summary: 'A proposal written under a shape this release no longer produces.',
+        // itemIds is missing entirely: materializeProposal's unchecked cast
+        // to { name; realm; itemIds } lets this through, and createArc's
+        // `for (const itemId of input.itemIds)` throws a TypeError on it.
+        payload: { name: 'Malformed Arc', realm: 'Some Realm' },
+        source: 'session_legacy',
+      }
+      const good: Proposal = {
+        id: newId('prop'),
+        ts: new Date().toISOString(),
+        kind: 'new_arc',
+        summary: 'A proposal in the shape this release actually writes.',
+        payload: { name: 'Good Arc', realm: 'Some Realm', itemIds: [newId('item')] },
+        source: 'session_legacy',
+      }
+      await appendProposals(paths, [malformed, good])
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+
+      const graph = await readGraph(paths)
+      expect([...graph.nodes.values()].some((n) => n.label === 'Malformed Arc')).toBe(false)
+      expect(
+        [...graph.nodes.values()].some((n) => n.type === 'arc' && n.label === 'Good Arc'),
+      ).toBe(true)
+
+      const pending = await pendingProposals(paths)
+      expect(pending).toHaveLength(0)
+
+      expect(
+        engine.warnings.some(
+          (w) => w.includes(malformed.id) && w.toLowerCase().includes('materialize'),
+        ),
+      ).toBe(true)
+
+      await engine.close()
+    })
+
+    it('a legacy proposal with a malformed payload does not make a second open() throw either', async () => {
+      const malformed: Proposal = {
+        id: newId('prop'),
+        ts: new Date().toISOString(),
+        kind: 'new_arc',
+        summary: 'A proposal written under a shape this release no longer produces.',
+        payload: { name: 'Malformed Arc', realm: 'Some Realm' },
+        source: 'session_legacy',
+      }
+      await appendProposals(paths, [malformed])
+
+      const first = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      await first.close()
+
+      const second = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const pending = await pendingProposals(paths)
+      expect(pending).toHaveLength(0)
+      await second.close()
+    })
+
     it('a reflection run appends nothing to proposals.jsonl even with new arcs, new persons, and low-confidence attributions', async () => {
       const out: ReflectionOutput = {
         ...emptyReflectionOutput('A busy session.'),
