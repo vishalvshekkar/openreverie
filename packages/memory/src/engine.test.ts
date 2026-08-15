@@ -1207,6 +1207,40 @@ describe('MemoryEngine', () => {
       await second.close()
     })
 
+    it('a genuinely corrupt line in the proposal queue does not make open() throw', async () => {
+      // Not a malformed payload (valid JSON, wrong shape): a truncated line
+      // that is not valid JSON at all, the kind appendFile's lack of crash
+      // atomicity or a synced, hand-edited folder can produce.
+      await ensureMemoryTree(paths)
+      await writeFile(paths.proposals, '{"id":"prop_broken","kind":"new_arc"\n', 'utf8')
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+
+      expect(
+        engine.warnings.some(
+          (w) => w.includes(paths.proposals) || w.toLowerCase().includes('proposal queue'),
+        ),
+      ).toBe(true)
+
+      await engine.close()
+    })
+
+    it('a genuinely corrupt proposal queue does not block a second open() either, so reindex keeps working', async () => {
+      await ensureMemoryTree(paths)
+      await writeFile(paths.proposals, '{"id":"prop_broken","kind":"new_arc"\n', 'utf8')
+
+      const first = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      await first.close()
+
+      const second = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      expect(
+        second.warnings.some(
+          (w) => w.includes(paths.proposals) || w.toLowerCase().includes('proposal queue'),
+        ),
+      ).toBe(true)
+      await second.close()
+    })
+
     it('a reflection run appends nothing to proposals.jsonl even with new arcs, new persons, and low-confidence attributions', async () => {
       const out: ReflectionOutput = {
         ...emptyReflectionOutput('A busy session.'),
@@ -1897,6 +1931,70 @@ describe('MemoryEngine', () => {
       await engine.close()
     })
 
+    it('a newPersons entry with a distinguishing name does not merge into an existing person who happens to share a first name', async () => {
+      // The escape hatch: label dedup is exact (case-insensitive), so a
+      // second, different Priya captured under a distinguishing name (the
+      // prompt now tells the model to do this rather than merge two
+      // different people into one node) resolves as a brand-new node, not
+      // an attachment to the first Priya's.
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'person_priya',
+          type: 'person',
+          label: 'Priya',
+        },
+      ])
+
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('A different Priya, from the new team, came up this session.'),
+        items: [{ text: 'Met Priya from the new team', kind: 'event' }],
+        newPersons: [
+          {
+            name: 'Priya from the new team',
+            reason: 'a different person who shares a first name with a known person',
+            itemIndexes: [0],
+            deservesPage: false,
+            narrative: '',
+          },
+        ],
+      }
+      const chat = new FakeChatProvider([{ text: JSON.stringify(out), toolCalls: [] }])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      const sessionId = await engine.startSession()
+      await engine.appendTranscript(sessionId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'Met Priya from the new team today.',
+      })
+      await engine.endSession(sessionId)
+
+      const graph = await readGraph(paths)
+      const priyaNodes = [...graph.nodes.values()].filter(
+        (n) => n.type === 'person' && n.label === 'Priya',
+      )
+      expect(priyaNodes).toHaveLength(1)
+      const newPriyaNodes = [...graph.nodes.values()].filter(
+        (n) => n.type === 'person' && n.label === 'Priya from the new team',
+      )
+      expect(newPriyaNodes).toHaveLength(1)
+      expect(newPriyaNodes[0]?.id).not.toBe('person_priya')
+
+      // The original Priya's node carries no edge to this session's item:
+      // nothing from this session attached to her.
+      const itemNode2 = [...graph.nodes.values()].find((n) => n.type === 'item')
+      if (!itemNode2) throw new Error('expected the minted item node')
+      expect(graph.edges.get(`involves:${itemNode2.id}:person_priya`)).toBeUndefined()
+      expect(graph.edges.get(`involves:${itemNode2.id}:${newPriyaNodes[0]?.id}`)).toMatchObject({
+        confidence: 1,
+        confirmed: false,
+      })
+
+      await engine.close()
+    })
+
     it('resolves a newPersons entry that relists an already-paged known person by attaching items, not writing a second page', async () => {
       const personDocPath = join(paths.peopleDir, 'priya.md')
       await writeDocumentAtomic({
@@ -2437,6 +2535,7 @@ describe('MemoryEngine', () => {
           { id: 'person_nodeonly', name: 'Sam', hasPage: false },
         ]),
       )
+      expect(context.peopleTruncated).toBe(false)
 
       await engine.close()
     })
@@ -2456,6 +2555,85 @@ describe('MemoryEngine', () => {
       const context = await engine.sessionContext()
 
       expect(context.entities).toEqual([{ id: 'entity_1', name: 'Dune' }])
+      expect(context.entitiesTruncated).toBe(false)
+
+      await engine.close()
+    })
+
+    it('caps people at 40, keeping paged people over unpaged ones and, within each, the most recently created', async () => {
+      // 5 paged people, oldest first, plus 40 unpaged people, oldest
+      // first: 45 total, 5 over PEOPLE_CAP. All 5 paged must survive the
+      // cut (paged is kept over unpaged), and the 35 most recent of the 40
+      // unpaged ones fill the remaining slots, dropping the 5 oldest
+      // unpaged people.
+      const records: Parameters<typeof appendGraph>[1] = []
+      for (let i = 0; i < 5; i++) {
+        records.push({
+          ts: `2026-01-01T00:00:${String(i).padStart(2, '0')}.000Z`,
+          op: 'assert',
+          node: `person_paged_${i}`,
+          type: 'person',
+          label: `Paged ${i}`,
+          doc: join(paths.peopleDir, `paged-${i}.md`),
+        })
+      }
+      for (let i = 0; i < 40; i++) {
+        records.push({
+          ts: `2026-02-01T00:${String(i).padStart(2, '0')}:00.000Z`,
+          op: 'assert',
+          node: `person_unpaged_${i}`,
+          type: 'person',
+          label: `Unpaged ${i}`,
+        })
+      }
+      await appendGraph(paths, records)
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const context = await engine.sessionContext()
+
+      expect(context.people).toHaveLength(40)
+      expect(context.peopleTruncated).toBe(true)
+      for (let i = 0; i < 5; i++) {
+        expect(context.people.some((p) => p.id === `person_paged_${i}`)).toBe(true)
+      }
+      // The 5 oldest unpaged people (indexes 0 through 4) are dropped; the
+      // 35 most recent (indexes 5 through 39) survive.
+      for (let i = 0; i < 5; i++) {
+        expect(context.people.some((p) => p.id === `person_unpaged_${i}`)).toBe(false)
+      }
+      for (let i = 5; i < 40; i++) {
+        expect(context.people.some((p) => p.id === `person_unpaged_${i}`)).toBe(true)
+      }
+
+      await engine.close()
+    })
+
+    it('caps entities at 30, keeping the most recently created and dropping the oldest', async () => {
+      const records: Parameters<typeof appendGraph>[1] = []
+      for (let i = 0; i < 35; i++) {
+        records.push({
+          ts: `2026-02-01T00:${String(i).padStart(2, '0')}:00.000Z`,
+          op: 'assert',
+          node: `entity_${i}`,
+          type: 'entity',
+          label: `Entity ${i}`,
+        })
+      }
+      await appendGraph(paths, records)
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const context = await engine.sessionContext()
+
+      expect(context.entities).toHaveLength(30)
+      expect(context.entitiesTruncated).toBe(true)
+      // The 5 oldest (indexes 0 through 4) are dropped; the 30 most
+      // recent (indexes 5 through 34) survive.
+      for (let i = 0; i < 5; i++) {
+        expect(context.entities.some((e) => e.id === `entity_${i}`)).toBe(false)
+      }
+      for (let i = 5; i < 35; i++) {
+        expect(context.entities.some((e) => e.id === `entity_${i}`)).toBe(true)
+      }
 
       await engine.close()
     })
@@ -2479,7 +2657,9 @@ describe('MemoryEngine', () => {
       const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
       const context = await engine.sessionContext()
 
-      expect(context.recentIntentions).toEqual(['Call the dentist next week.'])
+      expect(context.recentIntentions).toEqual([
+        { text: 'Call the dentist next week.', date: isoDate(yesterday) },
+      ])
 
       await engine.close()
     })
@@ -3335,6 +3515,41 @@ describe('buildReflectionContext people and entities wiring', () => {
     const prompt = chat.requests[0]?.messages[0]?.content ?? ''
     expect(prompt).toContain('person_sam: Sam (no page yet)')
     expect(prompt).toContain('person_alex: Alex (has a page)')
+
+    await engine.close()
+  })
+
+  it('marks the known-entities listing as truncated in the reflection prompt once there are more entities than ENTITIES_CAP', async () => {
+    const records: Parameters<typeof appendGraph>[1] = []
+    for (let i = 0; i < 35; i++) {
+      records.push({
+        ts: `2026-02-01T00:${String(i).padStart(2, '0')}:00.000Z`,
+        op: 'assert',
+        node: `entity_${i}`,
+        type: 'entity',
+        label: `Entity ${i}`,
+      })
+    }
+    await appendGraph(paths, records)
+
+    const chat = new FakeChatProvider([
+      { text: JSON.stringify(emptyReflectionOutput('A session.')), toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+    const sessionId = await engine.startSession()
+    await engine.appendTranscript(sessionId, {
+      ts: new Date().toISOString(),
+      role: 'user',
+      content: 'Hello there.',
+    })
+    await engine.endSession(sessionId)
+
+    const prompt = chat.requests[0]?.messages[0]?.content ?? ''
+    expect(prompt).toContain('list truncated')
+    // Only 30 of the 35 entity lines actually appear (plus the note above).
+    expect(prompt).not.toContain('entity_0: Entity 0')
+    expect(prompt).toContain('entity_34: Entity 34')
 
     await engine.close()
   })

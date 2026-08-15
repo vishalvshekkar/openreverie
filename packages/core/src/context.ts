@@ -104,19 +104,31 @@ function recentSummariesSection(context: SessionContext): string | undefined {
 function peopleSection(context: SessionContext): string | undefined {
   if (context.people.length === 0) return undefined
   const lines = context.people.map(
-    (person) => `- ${person.name} (${person.hasPage ? 'has a page' : 'no page yet'})`,
+    (person) => `- ${person.name} (${person.id}, ${person.hasPage ? 'has a page' : 'no page yet'})`,
   )
+  if (context.peopleTruncated) {
+    lines.push(
+      '(list truncated: paged people are kept first, then the most recently created; older, unpaged people exist but are not shown here)',
+    )
+  }
   return `## People\n\n${lines.join('\n')}`
 }
 
 function entitiesSection(context: SessionContext): string | undefined {
   if (context.entities.length === 0) return undefined
   const lines = context.entities.map((entity) => `- ${entity.name}`)
+  if (context.entitiesTruncated) {
+    lines.push(
+      '(list truncated to the most recently created entries; older ones exist but are not shown here)',
+    )
+  }
   return `## Entities\n\n${lines.join('\n')}`
 }
 
 function recentIntentionsSection(context: SessionContext): string | undefined {
   if (context.recentIntentions.length === 0) return undefined
-  const lines = context.recentIntentions.map((text) => `- ${text}`)
+  const lines = context.recentIntentions.map(
+    (intention) => `- ${intention.date}: ${intention.text}`,
+  )
   return `## Recent intentions\n\n${lines.join('\n')}`
 }

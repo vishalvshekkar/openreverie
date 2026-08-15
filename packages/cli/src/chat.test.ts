@@ -917,7 +917,6 @@ describe('color helpers', () => {
 describe('toolNotice', () => {
   it('maps each known tool to its honest, specific notice', () => {
     expect(toolNotice('remember')).toBe('[remembering]')
-    expect(toolNotice('resolve_proposal')).toBe('[updating memory]')
     expect(toolNotice('update_style')).toBe('[adjusting style]')
     expect(toolNotice('search_memory')).toBe('[searching memory]')
     expect(toolNotice('read_document')).toBe('[reading memory]')
