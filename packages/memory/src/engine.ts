@@ -653,10 +653,54 @@ export class MemoryEngine {
   // there is exactly one implementation of "accept a proposal", not a
   // second one duplicated here for the silent case. A no-op when the queue
   // is empty, which is the common case: the owner's own queue already is.
+  //
+  // Each proposal is resolved independently, inside its own try/catch.
+  // materializeProposal does unchecked casts of a proposal's stored
+  // payload, so a proposal written under an older shape, or otherwise
+  // malformed, throws out of it (materializeProposal, not resolveProposal's
+  // own bookkeeping). That throw happens before resolveProposal records the
+  // resolution, so without this try/catch the proposal would stay pending
+  // and this same throw would happen again on every future open(),
+  // permanently wedging the folder shut: a regression from before this
+  // release, when such a folder simply opened with the proposal left
+  // sitting in the queue. On a materialization failure this still records
+  // the proposal as accepted (recordProposalResolution below, called
+  // directly rather than through resolveProposal, since resolveProposal
+  // already threw before reaching its own resolution step) so drain never
+  // retries something that can never materialize, and pushes a warning so
+  // the loss is not invisible. A folder that keeps opening for a real
+  // person matters more than one legacy proposal from before this release
+  // materializing cleanly. Note that materializeProposal's own writes are
+  // not transactional: a throw partway through (e.g. createArc's realm
+  // document and node already written before it throws on a missing
+  // itemIds) can leave a realm or an orphaned page behind, written but
+  // with no graph record completing it. This drain does not clean that up;
+  // it only guarantees the proposal queue itself stops blocking open().
   private async drainLegacyProposals(): Promise<void> {
     const proposals = await pendingProposals(this.paths)
     for (const proposal of proposals) {
-      await this.resolveProposal(proposal.id, 'accepted')
+      try {
+        await this.resolveProposal(proposal.id, 'accepted')
+      } catch (err) {
+        this.warnings.push(
+          `Could not fully materialize legacy proposal ${proposal.id} (${proposal.kind}): ${errorMessage(err)}. ` +
+            'Marked as resolved anyway so it does not block future launches. Its graph records were not written; ' +
+            'a page or realm it had already started writing may be left behind incomplete.',
+        )
+        try {
+          await recordProposalResolution(this.paths, proposal.id, 'accepted')
+        } catch {
+          // Already resolved, or the proposal queue itself is unreadable;
+          // either way there is nothing more this can do.
+        }
+        const commitResult = await commitMemory(
+          this.paths.root,
+          `proposal: accepted ${proposal.id} (materialization failed, resolved anyway)`,
+        )
+        if (!commitResult.ok && commitResult.warning) {
+          this.warnings.push(commitResult.warning)
+        }
+      }
     }
   }
 
