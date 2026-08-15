@@ -7,12 +7,22 @@
 // applyReflection is the deterministic half: it takes a ReflectionOutput and
 // writes the session summary, mints item ids, and appends graph records.
 // Every attribution becomes a part_of edge carrying the model's confidence,
-// whatever it is. newArcs and newPersons are materialized by the
-// materializeNew callback the caller (MemoryEngine) injects, invoked here
-// before the summary write so a failure inside it leaves the session
-// unreflected and retryable rather than silently losing the new arc or
-// person. applyReflection itself never touches the network (the callback is
-// a plain function, not a ChatProvider) and never writes to proposals.jsonl.
+// whatever it is. newArcs, newPersons, newEntities and pagePromotions are
+// materialized by the materializeNew callback the caller (MemoryEngine)
+// injects, invoked here before the summary write so a failure inside it
+// leaves the session unreflected and retryable rather than silently losing
+// the new arc, person, entity, or promoted page. applyReflection itself
+// never touches the network (the callback is a plain function, not a
+// ChatProvider) and never writes to proposals.jsonl.
+//
+// A node and a page are two different decisions. newPersons and newEntities
+// create a node, generously, on first mention. A page is a maintained
+// document a model call rewrites every session that touches it, and it is
+// only granted when earned: newPersons carries a deservesPage flag for a
+// person who recurs or clearly mattered already; newEntities never does,
+// entities get no page in this release. pagePromotions grants a page to a
+// person already captured as a node-only in a past session, once they
+// recur.
 
 import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -55,7 +65,25 @@ export interface ReflectionOutput {
     itemIndexes: number[]
     narrative: string
   }[]
-  newPersons: { name: string; reason: string; itemIndexes: number[]; narrative: string }[]
+  // A person node, generously created on first mention. deservesPage is the
+  // separate, earned decision: true only when this person recurs across
+  // sessions or clearly mattered enough within this one. narrative is only
+  // read when deservesPage is true; leave it an empty string otherwise.
+  newPersons: {
+    name: string
+    reason: string
+    itemIndexes: number[]
+    deservesPage: boolean
+    narrative: string
+  }[]
+  // A non-person node: a film, book, company, place, band, or work of
+  // fiction with a real part in this person's life. Entities never carry a
+  // page-worthiness decision; they get no page in this release.
+  newEntities: { name: string; reason: string; itemIndexes: number[] }[]
+  // Grants a page to a person already known as a node with no page, once
+  // they recur. nodeId must be one of the ids listed under Known people
+  // with no page yet; narrative is the first paragraph of their new page.
+  pagePromotions: { nodeId: string; reason: string; itemIndexes: number[]; narrative: string }[]
   arcUpdates: { arcId: string; note: string }[]
   personUpdates: { personId: string; note: string }[]
   constitutionUpdate: string | null
@@ -66,6 +94,7 @@ export interface ReflectionContext {
   arcs: GraphNode[]
   realms: GraphNode[]
   people: GraphNode[]
+  entities: GraphNode[]
 }
 
 const reflectionItemKindSchema = z.enum(['observation', 'feeling', 'event', 'intention'])
@@ -90,6 +119,22 @@ export const reflectionOutputSchema: z.ZodType<ReflectionOutput> = z.object({
       name: z.string(),
       reason: z.string(),
       itemIndexes: z.array(z.number()),
+      deservesPage: z.boolean(),
+      narrative: z.string(),
+    }),
+  ),
+  newEntities: z.array(
+    z.object({
+      name: z.string(),
+      reason: z.string(),
+      itemIndexes: z.array(z.number()),
+    }),
+  ),
+  pagePromotions: z.array(
+    z.object({
+      nodeId: z.string(),
+      reason: z.string(),
+      itemIndexes: z.array(z.number()),
       narrative: z.string(),
     }),
   ),
@@ -105,6 +150,19 @@ function renderListing(nodes: GraphNode[]): string {
   return nodes.map((node) => `- ${node.id}: ${node.label}`).join('\n')
 }
 
+// Used for people and entities: each line also says whether the node
+// already has a page, which is what makes promotion possible. A model
+// deciding whether to fill pagePromotions or newPersons needs to see this
+// directly; it cannot infer page status from the id or label alone.
+function renderListingWithPageStatus(nodes: GraphNode[]): string {
+  if (nodes.length === 0) {
+    return '(none yet)'
+  }
+  return nodes
+    .map((node) => `- ${node.id}: ${node.label} (${node.doc ? 'has a page' : 'no page yet'})`)
+    .join('\n')
+}
+
 function renderTranscript(transcript: TranscriptLine[]): string {
   return transcript.map((line) => `${line.role}: ${line.content}`).join('\n')
 }
@@ -114,7 +172,9 @@ const RESPONSE_SHAPE = `{
   "items": [{"text": string, "kind": "observation" | "feeling" | "event" | "intention"}],
   "attributions": [{"itemIndex": number, "arcId": string, "confidence": number}],
   "newArcs": [{"name": string, "realm": string, "reason": string, "itemIndexes": number[], "narrative": string}],
-  "newPersons": [{"name": string, "reason": string, "itemIndexes": number[], "narrative": string}],
+  "newPersons": [{"name": string, "reason": string, "itemIndexes": number[], "deservesPage": boolean, "narrative": string}],
+  "newEntities": [{"name": string, "reason": string, "itemIndexes": number[]}],
+  "pagePromotions": [{"nodeId": string, "reason": string, "itemIndexes": number[], "narrative": string}],
   "arcUpdates": [{"arcId": string, "note": string}],
   "personUpdates": [{"personId": string, "note": string}],
   "constitutionUpdate": string | null
@@ -134,16 +194,27 @@ function buildReflectionPrompt(context: ReflectionContext, transcript: Transcrip
     renderListing(context.realms),
     '',
     'Known people:',
-    renderListing(context.people),
+    renderListingWithPageStatus(context.people),
+    '',
+    'Known entities:',
+    renderListingWithPageStatus(context.entities),
     '',
     'Transcript:',
     renderTranscript(transcript),
     '',
     'When updating the constitution: basic identity facts about the user (their name, pronouns, where they live, their timezone, their occupation or work situation) always belong in the constitution when first learned or when they change. Do not wait for these facts to feel weighty; update the constitution to include them immediately.',
     '',
-    "When deciding whether someone deserves a person page, in newPersons: a person page is for someone who recurs in this person's life and whom they actually talk about, not for every name that appears in a sentence. A partner, a close friend, a sibling, a therapist seen regularly: those recur. A coworker mentioned once in passing, a stranger from a single story, a public figure named in the news: those do not. When you are not sure someone recurs, do not add them yet.",
+    "A node and a page are two different decisions. A node is a permanent, queryable line in the graph; it is nearly free, so create one generously, on first mention, for anyone or anything with a real part in this person's life. A page is a maintained document a separate model call rewrites every session that touches it; it is expensive, so it is only granted when earned. Each name under Known people and Known entities above is marked with whether it already has a page.",
     '',
-    'For each entry in newArcs and newPersons, narrative is the first paragraph of that document, written as if this session is the first time anything has been recorded about it.',
+    "People go in newPersons, using the existing person node type: real people in this person's life, and also public figures and fictional characters when they have a part in how this person thinks or talks. A partner, a manager, a therapist, but also a novelist they keep returning to or a character they identify with, all belong here. Set deservesPage to true only when this person recurs in this person's life across sessions, or clearly mattered enough within this single session already; otherwise set it to false and leave narrative empty. When you are not sure someone recurs or mattered enough, set deservesPage to false; a node with no page can still gain one later.",
+    '',
+    "Non-people things go in newEntities, using the existing entity node type: films, books, companies, places, bands, and works of fiction that have a real part in this person's life. Entities never get a page in this release, so there is no page decision to make for them.",
+    '',
+    'Do not add an entry to newPersons or newEntities for a name or thing already listed above under Known people or Known entities, whether or not it has a page yet; listing it again would create a duplicate. If a known person with no page yet now recurs or clearly matters, use pagePromotions instead, with their existing id from the Known people list. If a known person or entity is simply mentioned again, no new entry is needed at all.',
+    '',
+    "Do not add a node, in newPersons, newEntities, or pagePromotions, for a general fact about the world, or for a public person or incident mentioned only as an analogy or an example. The test is whether the thing has a real part in this person's life, not whether it was mentioned. Something invoked only to illustrate a point is not a node.",
+    '',
+    'For each entry in newArcs, newPersons with deservesPage true, and pagePromotions, narrative is the first paragraph of that document, written as if this session is the first time anything has been recorded about it.',
     '',
     'For each entry in arcUpdates and personUpdates, note is a short line describing what this session added or changed about an arc or person that already exists. Do not write full narrative prose in note; a separate pass uses it to rewrite the document.',
     '',
