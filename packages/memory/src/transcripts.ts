@@ -8,6 +8,7 @@
 import { access, appendFile, mkdir, readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { ToolCall } from '@openreverie/providers'
+import { decodeTime } from 'ulid'
 import { newId, readDocument } from './documents.js'
 import type { MemoryPaths } from './paths.js'
 
@@ -25,6 +26,18 @@ export interface PublicTranscriptLine extends TranscriptLine {
 
 export interface TranscriptPageInput {
   lines: PublicTranscriptLine[]
+}
+
+export interface StoredSessionDescription {
+  sessionId: string
+  createdAt: string
+  updatedAt: string
+  transcript: {
+    lineCount: number
+    userCount: number
+    assistantCount: number
+    toolCount: number
+  }
 }
 
 const TRANSCRIPT_FILE = 'transcript.jsonl'
@@ -95,6 +108,35 @@ export class SessionStore {
     return result
   }
 
+  static async readTranscriptPage(
+    paths: MemoryPaths,
+    sessionId: string,
+  ): Promise<PublicTranscriptLine[]> {
+    const lines = await SessionStore.readTranscript(paths, sessionId)
+    return lines.map((line, index) => ({ lineSequence: index + 1, ...line }))
+  }
+
+  static async describe(paths: MemoryPaths): Promise<StoredSessionDescription[]> {
+    const sessions = await SessionStore.listSessions(paths)
+    const result: StoredSessionDescription[] = []
+    for (const session of sessions) {
+      const lines = await SessionStore.readTranscript(paths, session.sessionId)
+      const createdAt = createdAtForSession(session.sessionId, `${session.date}T00:00:00.000Z`)
+      result.push({
+        sessionId: session.sessionId,
+        createdAt,
+        updatedAt: lines.at(-1)?.ts ?? createdAt,
+        transcript: {
+          lineCount: lines.length,
+          userCount: lines.filter((line) => line.role === 'user').length,
+          assistantCount: lines.filter((line) => line.role === 'assistant').length,
+          toolCount: lines.filter((line) => line.role === 'tool').length,
+        },
+      })
+    }
+    return result
+  }
+
   static async listSessions(
     paths: MemoryPaths,
   ): Promise<{ sessionId: string; date: string; reflected: boolean; skipped: boolean }[]> {
@@ -132,6 +174,18 @@ export class SessionStore {
       sessions.push({ sessionId, date, reflected, skipped })
     }
     return sessions
+  }
+}
+
+function createdAtForSession(sessionId: string, fallback: string): string {
+  const separator = sessionId.indexOf('_')
+  if (separator < 0) return fallback
+  try {
+    return new Date(
+      decodeTime(sessionId.slice(separator + 1) as Parameters<typeof decodeTime>[0]),
+    ).toISOString()
+  } catch {
+    return fallback
   }
 }
 
