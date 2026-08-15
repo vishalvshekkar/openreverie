@@ -7,13 +7,25 @@
 // memory folder location), memoryPaths, listDocuments, and readDocument:
 // pure filesystem, nothing else.
 //
-// Names come from document frontmatter, not the graph, which keeps this
-// whole path free of the graph and the index.
+// Named documents (arcs, realms, paged people) come from their own
+// frontmatter. A person known only as a node, and every entity (which
+// never gets a page in this release), have no document at all, so those
+// come from graph.jsonl instead, read with readGraph: a plain append-only
+// log, no database and no network, so this stays free of the index and the
+// engine either way.
 
 import { stat } from 'node:fs/promises'
 import { basename } from 'node:path'
 import type { ReverieConfig } from '@openreverie/core'
-import { type Document, listDocuments, memoryPaths, readDocument } from '@openreverie/memory'
+import {
+  type Document,
+  type GraphNode,
+  type GraphState,
+  listDocuments,
+  memoryPaths,
+  readDocument,
+  readGraph,
+} from '@openreverie/memory'
 import { magenta } from './colors.js'
 
 export interface ReadDeps {
@@ -22,11 +34,36 @@ export interface ReadDeps {
   colorEnabled: boolean
 }
 
-type NamedKind = 'arc' | 'realm' | 'person'
+type NamedKind = 'arc' | 'realm' | 'person' | 'entity'
+// Arcs, realms, and people are backed by a document on disk (loadCandidates
+// walks their directory). Entities never get a page in this release at
+// all, so they are resolved entirely from the graph, never through
+// loadCandidates; keeping this as its own narrower type is what lets
+// TypeScript confirm loadCandidates is never asked to look for one.
+type DocumentBackedKind = 'arc' | 'realm' | 'person'
 
 interface Candidate {
   name: string
   path: string
+}
+
+// Node-only people (a node with no doc) and every entity (which never gets
+// a doc in this release) are known only through the graph, never through a
+// document on disk. graph.jsonl is a plain append-only log with no
+// database and no network, so reading it here keeps this module's
+// guarantee: it works with the provider offline or unconfigured. A
+// missing or corrupt graph log is treated as empty, the same way a missing
+// people/ directory is treated as an empty listing below.
+async function loadGraph(paths: ReturnType<typeof memoryPaths>): Promise<GraphState> {
+  try {
+    return await readGraph(paths)
+  } catch {
+    return { nodes: new Map(), edges: new Map() }
+  }
+}
+
+function nodesOfType(graph: GraphState, type: 'person' | 'entity'): GraphNode[] {
+  return [...graph.nodes.values()].filter((node) => node.type === type)
 }
 
 async function pathIsDirectory(path: string): Promise<boolean> {
@@ -80,7 +117,7 @@ export async function runRead(args: string[], deps: ReadDeps): Promise<number> {
   if (first === 'constitution') {
     return printConstitution(paths, deps)
   }
-  if (first === 'arc' || first === 'realm' || first === 'person') {
+  if (first === 'arc' || first === 'realm' || first === 'person' || first === 'entity') {
     const name = rest.join(' ').trim()
     if (name === '') {
       deps.write(`reverie read ${first} needs a name to look for.\n`)
@@ -108,7 +145,7 @@ export async function runRead(args: string[], deps: ReadDeps): Promise<number> {
 // every read.ts listing and lookup instead of being reported.
 async function loadCandidates(
   paths: ReturnType<typeof memoryPaths>,
-  kind: NamedKind,
+  kind: DocumentBackedKind,
   onSkip: (path: string, reason: string) => void,
 ): Promise<Candidate[]> {
   const dir = kind === 'arc' ? paths.arcsDir : kind === 'realm' ? paths.realmsDir : paths.peopleDir
@@ -144,6 +181,10 @@ async function printOneOfKind(
   name: string,
   deps: ReadDeps,
 ): Promise<number> {
+  if (kind === 'entity') {
+    return printEntityLookup(paths, name, deps)
+  }
+
   const skips: { path: string; reason: string }[] = []
   const candidates = await loadCandidates(paths, kind, (path, reason) => {
     skips.push({ path, reason })
@@ -162,6 +203,14 @@ async function printOneOfKind(
       deps.write(`${skip.reason}\n`)
       return 1
     }
+    // A person with a node but no page is now the common case (see the
+    // remember-by-default round of work): reporting "not found" about
+    // someone actually sitting in the graph is the same class of
+    // dishonesty this command already had to be fixed for once before.
+    if (kind === 'person') {
+      const nodeOnlyResult = await printNodeOnlyPersonLookup(paths, name, deps)
+      if (nodeOnlyResult !== undefined) return nodeOnlyResult
+    }
     deps.write(`No ${kind} found matching "${name}".\n`)
     return 1
   }
@@ -178,6 +227,75 @@ async function printOneOfKind(
   return 0
 }
 
+// A person known only as a graph node, with no page yet. Returns undefined
+// (not a code) when nothing in the graph matches, so the caller falls
+// through to the ordinary "not found" message; returns an actual exit code
+// once it has something honest to say instead.
+async function printNodeOnlyPersonLookup(
+  paths: ReturnType<typeof memoryPaths>,
+  name: string,
+  deps: ReadDeps,
+): Promise<number | undefined> {
+  const graph = await loadGraph(paths)
+  const found = nodesOfType(graph, 'person')
+    .filter((node) => node.doc === undefined)
+    .filter((node) => matches(node.label, name))
+
+  if (found.length === 0) return undefined
+  if (found.length > 1) {
+    deps.write(`More than one person matches "${name}":\n`)
+    for (const node of found) deps.write(`  - ${node.label} (no page yet)\n`)
+    return 1
+  }
+
+  const node = found[0]
+  if (!node) return undefined
+  deps.write(
+    `${node.label} is in your memory, with no page yet: there is nothing written about them, ` +
+      'but they are known.\n',
+  )
+  return 0
+}
+
+// Entities never get a page in this release, so there is never a document
+// to read for one; this looks them up in the graph directly and says so
+// plainly instead of pretending a page exists.
+async function printEntityLookup(
+  paths: ReturnType<typeof memoryPaths>,
+  name: string,
+  deps: ReadDeps,
+): Promise<number> {
+  const graph = await loadGraph(paths)
+  const found = nodesOfType(graph, 'entity').filter((node) => matches(node.label, name))
+
+  if (found.length === 0) {
+    deps.write(`No entity found matching "${name}".\n`)
+    return 1
+  }
+  if (found.length > 1) {
+    deps.write(`More than one entity matches "${name}":\n`)
+    for (const node of found) deps.write(`  - ${node.label}\n`)
+    return 1
+  }
+
+  const node = found[0]
+  if (!node) return 1
+  deps.write(
+    `${node.label} is known as an entity in your memory. Entities have no page in this release.\n`,
+  )
+  return 0
+}
+
+interface SearchMatch {
+  name: string
+  label: string
+  // A document-backed match (arc, realm, a paged person) carries a path to
+  // read. A graph-only match (a node-only person, any entity) carries a
+  // plain honest line to print instead, since there is no document at all.
+  path?: string
+  honestNote?: string
+}
+
 async function printSearchAllKinds(
   paths: ReturnType<typeof memoryPaths>,
   name: string,
@@ -188,12 +306,12 @@ async function printSearchAllKinds(
     return 1
   }
 
-  const kinds: { kind: NamedKind; label: string }[] = [
+  const kinds: { kind: DocumentBackedKind; label: string }[] = [
     { kind: 'arc', label: 'arc' },
     { kind: 'realm', label: 'realm' },
     { kind: 'person', label: 'person' },
   ]
-  const found: { name: string; path: string; label: string }[] = []
+  const found: SearchMatch[] = []
   const skips: { path: string; reason: string }[] = []
   for (const { kind, label } of kinds) {
     const candidates = await loadCandidates(paths, kind, (path, reason) => {
@@ -201,6 +319,31 @@ async function printSearchAllKinds(
     })
     for (const candidate of candidates) {
       if (matches(candidate.name, name)) found.push({ ...candidate, label })
+    }
+  }
+
+  // A person with a node but no page yet, and every entity, are known
+  // only through the graph. Leaving them out of the bare, kindless search
+  // would tell someone reverie has never heard of a name that is actually
+  // sitting right there, the same dishonesty this fix exists to remove.
+  const graph = await loadGraph(paths)
+  for (const node of nodesOfType(graph, 'person')) {
+    if (node.doc !== undefined) continue
+    if (matches(node.label, name)) {
+      found.push({
+        name: node.label,
+        label: 'person',
+        honestNote: `${node.label} is in your memory, with no page yet: there is nothing written about them, but they are known.`,
+      })
+    }
+  }
+  for (const node of nodesOfType(graph, 'entity')) {
+    if (matches(node.label, name)) {
+      found.push({
+        name: node.label,
+        label: 'entity',
+        honestNote: `${node.label} is known as an entity in your memory. Entities have no page in this release.`,
+      })
     }
   }
 
@@ -214,7 +357,7 @@ async function printSearchAllKinds(
       deps.write(`${skip.reason}\n`)
       return 1
     }
-    deps.write(`No arc, realm, or person found matching "${name}".\n`)
+    deps.write(`No arc, realm, person, or entity found matching "${name}".\n`)
     return 1
   }
   if (found.length > 1) {
@@ -225,9 +368,16 @@ async function printSearchAllKinds(
 
   const match = found[0]
   if (!match) return 1
-  const doc = await readDocument(match.path)
-  printDocument(deps, match.name, doc)
-  return 0
+  if (match.path) {
+    const doc = await readDocument(match.path)
+    printDocument(deps, match.name, doc)
+    return 0
+  }
+  if (match.honestNote) {
+    deps.write(`${match.honestNote}\n`)
+    return 0
+  }
+  return 1
 }
 
 async function printConstitution(
@@ -292,14 +442,27 @@ async function listOverview(
 
   const peopleSkips: string[] = []
   const people = await loadCandidates(paths, 'person', (_path, reason) => peopleSkips.push(reason))
+  const graph = await loadGraph(paths)
+  // A person node with no doc is exactly the node-only case this whole fix
+  // is for: known, but not yet worth a page. Listed alongside paged people,
+  // distinguishably, rather than being invisible.
+  const nodeOnlyPeople = nodesOfType(graph, 'person').filter((node) => node.doc === undefined)
   deps.write(`\n${magenta('People', deps.colorEnabled)}\n`)
-  if (people.length === 0 && peopleSkips.length === 0) deps.write('  (none yet)\n')
+  if (people.length === 0 && nodeOnlyPeople.length === 0 && peopleSkips.length === 0) {
+    deps.write('  (none yet)\n')
+  }
   for (const person of people) deps.write(`  - ${person.name}\n`)
+  for (const node of nodeOnlyPeople) deps.write(`  - ${node.label} (no page yet)\n`)
   for (const reason of peopleSkips) deps.write(`  ! ${reason}\n`)
+
+  const entities = nodesOfType(graph, 'entity')
+  deps.write(`\n${magenta('Entities', deps.colorEnabled)}\n`)
+  if (entities.length === 0) deps.write('  (none yet)\n')
+  for (const entity of entities) deps.write(`  - ${entity.label}\n`)
 
   deps.write(
     '\nUse: reverie read constitution, reverie read arc <name>, reverie read realm <name>, ' +
-      'or reverie read person <name>.\n',
+      'reverie read person <name>, or reverie read entity <name>.\n',
   )
   return 0
 }
