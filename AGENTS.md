@@ -21,7 +21,7 @@ The README's Status section must reflect reality at all times. After any meaning
 
 ## Architecture rules
 
-- Four packages with downward-only dependencies: `cli` -> `core` -> `memory` -> `providers`. Never import upward or sideways around this order.
+- Six packages with downward-only dependencies: `cli` -> `core` -> `memory` -> `providers`, and `server` -> `core` -> `memory` -> `providers`. `cli` and `server` are sibling outer interfaces. `web` communicates with `server` through HTTP only and never imports runtime engine packages. Never import upward or sideways around these boundaries.
 - Truth lives in the user's memory folder: markdown prose files plus the append-only `graph.jsonl`. SQLite is a derived index and must always be rebuildable from the folder. Never store anything only in SQLite.
 - Transcripts are sacred. Append-only, never modified, never deleted by code.
 - Relationship claims in prose are testimony, not record. The graph log is the record.

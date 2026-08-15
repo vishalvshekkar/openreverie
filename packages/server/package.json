@@ -1,15 +1,9 @@
 {
-  "name": "openreverie",
+  "name": "@openreverie/server",
   "version": "0.4.0",
-  "description": "A self-hosted companion agent with a memory that does not forget. Terminal chat interface.",
-  "homepage": "https://reverie.my",
-  "license": "AGPL-3.0-only",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "bin": {
-    "reverie": "dist/index.js"
-  },
   "files": [
     "dist"
   ],
@@ -21,6 +15,7 @@
     "@openreverie/core": "workspace:*",
     "@openreverie/memory": "workspace:*",
     "@openreverie/providers": "workspace:*",
-    "@openreverie/server": "workspace:*"
+    "@openreverie/web": "workspace:*",
+    "zod": "^4.0.0"
   }
 }

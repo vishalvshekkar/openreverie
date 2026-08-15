@@ -8,7 +8,7 @@ Website: [reverie.my](https://reverie.my)
 
 ## Status
 
-**Usable as a terminal app. Everything else in the roadmap is still ahead.**
+**Usable as a terminal app and a local web interface. v0.4.0 is the first release that ships a browser UI alongside the terminal CLI.**
 
 What works today:
 
@@ -21,16 +21,21 @@ What works today:
 - Both safety modes (companion and firewall)
 - A first-run setup wizard
 - The `reindex`, `reflect`, and `read` CLI subcommands. `read` works with no network call and no API key: it is a plain filesystem read of your memory record
+- A local web interface, `reverie web`, serving the same record in a browser. The server binds to `127.0.0.1` only and admits you through a single-use bootstrap token that is generated fresh each run and expires five minutes after startup. Browsing records, people, sessions, and transcripts works with no API key configured; chat in the browser works when a provider is configured. Pending legacy proposals are readable in the interface. The command prints the bootstrap URL and does not open your browser for you.
+- Sessions you start in the browser stay live while the server runs, then become read-only after it restarts. Their transcripts remain browsable after the restart.
 - A status line while the model or a tool is working, so a slow call looks slow rather than stuck. It only appears when the terminal supports color; a piped or non-interactive session gets none.
 - Opening a session and leaving without typing anything costs nothing: no reflection call, no rollup
 - The OpenAI provider
 
+The Phase B atlas renders the graph of realms, arcs, people, entities, items, and sessions as an interactive node view.
+
+The atlas in v0.4.0 has deterministic temporary layout, pan and zoom, type filtering, selection, and an accessible node list. It does not yet include saved graph positions, graph search, realm influence, progressive labels, or a history time lens.
+
 What does not exist yet:
 
-- A web UI (terminal only, for now)
 - Providers other than OpenAI
 - Any deployment target beyond running it yourself (no Cloudflare or VPS packaging)
-- Graph visualization of realms, arcs, and their connections
+- Saved graph positions, graph search, realm influence, progressive labels, or a history time lens in the atlas (see above)
 - Pages for entities: they get a node in the graph, not a maintained document, in this release
 - Monthly and yearly rollups (only daily and weekly exist)
 - Any way to make reverie forget. The feature exists in code and is tested, but it is deliberately unexposed: no tool, no persona instruction, and no CLI command reaches it. Deleting or editing a page under `people/` or `arcs/` removes the prose, but not the record: the node it corresponds to, its edges, and every attribution that named it still live in `graph.jsonl`, nothing in the product retracts them, and the agent can still surface what the graph knows about a person or arc whose page you deleted. Running `reindex` does clear the deleted page's stale rows out of the search index, so it stops turning up in `search_memory` hits, but `reindex` rebuilds the graph from `graph.jsonl` exactly as it already was, so the node and its edges come straight back. There is currently no user-accessible way to remove a node, an edge, or an attribution at all.
@@ -44,12 +49,14 @@ pnpm install
 pnpm build
 node packages/cli/dist/index.js setup
 node packages/cli/dist/index.js
+node packages/cli/dist/index.js web
 ```
 
 `setup` runs a first-run wizard that asks for your provider API key, your safety mode, and where you want your memory folder to live, then writes a config file. Run it once before anything else.
 
 With no arguments, the same binary starts the terminal chat REPL, loading your existing memory (constitution, arcs, recent context) into the conversation. A few more subcommands are available:
 
+- `web`: starts the local web interface and prints its bootstrap URL. The server listens on `127.0.0.1` only, so only processes on your own machine can reach it. Copy the printed URL into your browser to start; the command does not open the browser for you.
 - `reindex`: rebuilds the SQLite search index from your memory folder from scratch. Safe to run any time; the index is always derived and disposable.
 - `reflect`: runs maintenance on demand (reflects any stale unreflected sessions, builds any daily or weekly rollups that are due) instead of waiting for it to happen automatically.
 - `read`: prints part of your memory record straight from the files on disk. With no arguments it lists your constitution, arcs, realms, and people; `read constitution` prints the constitution in full; `read arc <name>`, `read realm <name>`, and `read person <name>` print one document by a case-insensitive substring match on its name. This is a plain filesystem read: it works even with no model provider configured or reachable, since seeing what is being kept about you should never depend on the network being up.
@@ -82,22 +89,26 @@ openreverie is not a therapist and does not diagnose or treat anything. It is a 
 
 ## Architecture
 
-TypeScript monorepo, four packages, strict downward-only dependencies:
+TypeScript monorepo, six packages, strict downward-only dependencies:
 
 | Package | Purpose |
 | --- | --- |
-| `openreverie` (cli) | Terminal chat and the `reverie setup` wizard |
+| `openreverie` (cli) | Terminal chat, the `reverie setup` wizard, and the `reverie web` launcher |
+| `@openreverie/server` | Loopback HTTP server: bootstrap auth, record/graph/session APIs, live streaming, and static asset serving |
+| `@openreverie/web` | The browser client (React). Talks to `@openreverie/server` over HTTP only; never imports runtime engine packages |
 | `@openreverie/core` | Agent loop, context assembly, tools, safety modes |
 | `@openreverie/memory` | Stores, reflection pipeline, rollups, retrieval, indexer |
 | `@openreverie/providers` | Chat and embedding provider interfaces, swappable adapters (OpenAI first) |
 
+Dependencies point downward only. `cli` and `server` are sibling outer interfaces that both depend on `core`, which depends on `memory`, which depends on `providers`. `cli` also depends on `server` to launch the web interface. `web` depends on nothing in the engine and reaches the server over HTTP alone.
+
 ## Roadmap
 
 1. Memory engine and agent core behind a terminal CLI (done, v0.1.0)
-2. Web interface and local auth
+2. Web interface and local auth (done, v0.4.0)
 3. More provider adapters (Anthropic, OpenRouter, Cloudflare AI Gateway, DeepSeek, local models)
 4. Alternate deployment targets (Cloudflare, VPS)
-5. Graph visualization of realms, arcs, and their connections
+5. Phase C atlas polish (saved graph positions, graph search, realm influence, progressive labels, history time lens)
 
 Ongoing work, remaining tasks, and contributor-friendly starting points live in [ROADMAP.md](ROADMAP.md).
 
