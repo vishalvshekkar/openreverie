@@ -1,8 +1,8 @@
 import { Buffer } from 'node:buffer'
 import { createHash } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
+import { readFile, realpath } from 'node:fs/promises'
 import type { IncomingMessage, RequestListener, ServerResponse } from 'node:http'
-import { extname, relative, resolve } from 'node:path'
+import { extname, isAbsolute, relative, resolve, sep } from 'node:path'
 import type { ReverieConfig } from '@openreverie/core'
 import type {
   Proposal,
@@ -371,14 +371,9 @@ async function serveStatic(
 ): Promise<void> {
   const decoded = decodeURIComponent(pathname)
   const requested = decoded === '/' ? 'index.html' : decoded.replace(/^\/+/, '')
-  const file = resolve(staticDir, requested)
-  const withinStaticDir = relative(resolve(staticDir), file)
   const extension = extname(requested).toLowerCase()
   const contentType = staticContentTypes[extension]
 
-  if (withinStaticDir.startsWith('..') || withinStaticDir === '') {
-    throw new ApiError(404, 'not_found', 'The requested resource was not found.')
-  }
   if (requested !== 'index.html' && extension === '') {
     await serveStatic(res, staticDir, '/')
     return
@@ -387,6 +382,7 @@ async function serveStatic(
     throw new ApiError(404, 'not_found', 'The requested resource was not found.')
 
   try {
+    const file = await resolveStaticFile(staticDir, requested)
     const contents = await readFile(file)
     res.writeHead(200, {
       'content-type': contentType,
@@ -398,6 +394,25 @@ async function serveStatic(
     if (!isMissingFile(error)) throw error
     throw new ApiError(404, 'not_found', 'The requested resource was not found.')
   }
+}
+
+async function resolveStaticFile(staticDir: string, requested: string): Promise<string> {
+  const realStaticDir = await realpath(staticDir)
+  const candidate = resolve(realStaticDir, requested)
+  if (!isWithinDirectory(realStaticDir, candidate)) {
+    throw new ApiError(404, 'not_found', 'The requested resource was not found.')
+  }
+
+  const realFile = await realpath(candidate)
+  if (!isWithinDirectory(realStaticDir, realFile)) {
+    throw new ApiError(404, 'not_found', 'The requested resource was not found.')
+  }
+  return realFile
+}
+
+function isWithinDirectory(directory: string, candidate: string): boolean {
+  const path = relative(directory, candidate)
+  return path !== '' && path !== '..' && !path.startsWith(`..${sep}`) && !isAbsolute(path)
 }
 
 function isMissingFile(error: unknown): boolean {

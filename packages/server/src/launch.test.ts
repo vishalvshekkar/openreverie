@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -177,5 +177,93 @@ describe('createServerLauncher', () => {
     expect(await request(running.origin, '/api/missing')).toMatchObject({ status: 404 })
 
     await running.close()
+  })
+
+  it('does not serve files through static-directory symlinks that escape the asset directory', async () => {
+    const outsideDir = join(dir, 'outside')
+    const secret = 'outside bytes must never be served'
+    await mkdir(outsideDir)
+    await writeFile(join(outsideDir, 'secret.js'), secret)
+    await symlink(join(outsideDir, 'secret.js'), join(staticDir, 'escape.js'))
+    await symlink(outsideDir, join(staticDir, 'escape-dir'))
+
+    const running = await createServerLauncher(deps)({ write: () => {} })
+
+    for (const path of ['/escape.js', '/escape-dir/secret.js']) {
+      const response = await request(running.origin, path)
+      expect(response.status).toBe(404)
+      expect(response.text).not.toContain(secret)
+    }
+
+    await rm(join(staticDir, 'index.html'))
+    await symlink(join(outsideDir, 'secret.js'), join(staticDir, 'index.html'))
+    const indexResponse = await request(running.origin, '/library')
+    expect(indexResponse.status).toBe(404)
+    expect(indexResponse.text).not.toContain(secret)
+
+    await running.close()
+  })
+
+  it('still closes the HTTP server and engine when the registry close rejects', async () => {
+    const registryError = new Error('registry close failed')
+    const registryClose = vi.fn(async () => {
+      throw registryError
+    })
+    const closeHttpServer = vi.fn(deps.closeHttpServer)
+    const engineClose = vi.spyOn(engine, 'close')
+    deps.closeHttpServer = closeHttpServer
+    deps.createRegistry = vi.fn(() => ({
+      close: registryClose,
+      liveSessions: () => [],
+    })) as never
+
+    const running = await createServerLauncher(deps)({ write: () => {} })
+
+    await expect(running.close()).rejects.toBe(registryError)
+    expect(registryClose).toHaveBeenCalledOnce()
+    expect(closeHttpServer).toHaveBeenCalledOnce()
+    expect(engineClose).toHaveBeenCalledOnce()
+  })
+
+  it('still closes the engine when HTTP server close rejects', async () => {
+    const serverError = new Error('HTTP server close failed')
+    const registryClose = vi.fn(async () => {})
+    const originalCloseHttpServer = deps.closeHttpServer
+    const closeHttpServer = vi.fn(async (server) => {
+      await originalCloseHttpServer(server)
+      throw serverError
+    })
+    const engineClose = vi.spyOn(engine, 'close')
+    deps.closeHttpServer = closeHttpServer
+    deps.createRegistry = vi.fn(() => ({
+      close: registryClose,
+      liveSessions: () => [],
+    })) as never
+
+    const running = await createServerLauncher(deps)({ write: () => {} })
+
+    await expect(running.close()).rejects.toBe(serverError)
+    expect(registryClose).toHaveBeenCalledOnce()
+    expect(closeHttpServer).toHaveBeenCalledOnce()
+    expect(engineClose).toHaveBeenCalledOnce()
+  })
+
+  it('attempts every resource close exactly once when the engine close rejects', async () => {
+    const engineError = new Error('engine close failed')
+    const registryClose = vi.fn(async () => {})
+    const closeHttpServer = vi.fn(deps.closeHttpServer)
+    const engineClose = vi.spyOn(engine, 'close').mockRejectedValue(engineError)
+    deps.closeHttpServer = closeHttpServer
+    deps.createRegistry = vi.fn(() => ({
+      close: registryClose,
+      liveSessions: () => [],
+    })) as never
+
+    const running = await createServerLauncher(deps)({ write: () => {} })
+
+    await expect(running.close()).rejects.toBe(engineError)
+    expect(registryClose).toHaveBeenCalledOnce()
+    expect(closeHttpServer).toHaveBeenCalledOnce()
+    expect(engineClose).toHaveBeenCalledOnce()
   })
 })

@@ -30,22 +30,16 @@ async function assertStaticDirectory(directory: string): Promise<void> {
   try {
     details = await stat(directory)
   } catch {
-    throw new Error(
-      `Web interface assets are missing at ${directory}. Run: pnpm --filter @openreverie/web build`,
-    )
+    throw new Error(`Web interface assets are missing at ${directory}. Run: pnpm build`)
   }
   if (!details.isDirectory()) {
-    throw new Error(
-      `Web interface assets are missing at ${directory}. Run: pnpm --filter @openreverie/web build`,
-    )
+    throw new Error(`Web interface assets are missing at ${directory}. Run: pnpm build`)
   }
   try {
     const index = await stat(join(directory, 'index.html'))
     if (!index.isFile()) throw new Error('not a file')
   } catch {
-    throw new Error(
-      `Web interface assets are missing at ${directory}. Run: pnpm --filter @openreverie/web build`,
-    )
+    throw new Error(`Web interface assets are missing at ${directory}. Run: pnpm build`)
   }
 }
 
