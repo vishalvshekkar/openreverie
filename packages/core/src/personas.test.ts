@@ -57,16 +57,17 @@ describe('buildPersona', () => {
     const prefix = sharedPrefix(companion, firewall)
 
     // Shared prefix must be substantial: what reverie is, what it is not,
-    // retrieve-before-asserting, raising pending proposals, conversational
-    // voice, style axis guidance, and even the crisis detection judgment
-    // itself are identical text, built from the same shared parts. Only
-    // the stance taken once danger is judged real differs.
+    // retrieve-before-asserting, the never-ask rule, the memory
+    // orientation, conversational voice, style axis guidance, and even the
+    // crisis detection judgment itself are identical text, built from the
+    // same shared parts. Only the stance taken once danger is judged real
+    // differs.
     expect(prefix.length).toBeGreaterThan(400)
 
     const prefixLower = prefix.toLowerCase()
     expect(prefixLower).toContain('not a therapist')
     expect(prefixLower).toMatch(/search|retriev/)
-    expect(prefixLower).toContain('proposal')
+    expect(prefixLower).toContain('never ask permission')
     expect(prefixLower).toContain('crisis territory')
   })
 
@@ -93,10 +94,34 @@ describe('buildPersona', () => {
     }
   })
 
-  it('mentions raising pending proposals near the start of a session', () => {
+  it('states the never-ask rule plainly, in both modes: never ask permission to remember something', () => {
     for (const mode of ['companion', 'firewall'] as const) {
       const text = buildPersona(mode, resources, defaultStyle)
-      expect(text.toLowerCase()).toContain('proposal')
+      expect(text.toLowerCase()).toContain('never ask permission')
+      expect(text.toLowerCase()).toContain('use the remember tool silently')
+    }
+  })
+
+  it('never instructs raising pending proposals or asking to remember something', () => {
+    for (const mode of ['companion', 'firewall'] as const) {
+      const text = buildPersona(mode, resources, defaultStyle).toLowerCase()
+      expect(text).not.toContain('pending proposal')
+      expect(text).not.toContain('resolve_proposal')
+    }
+  })
+
+  it('gives a plain orientation to the memory architecture: transcripts, items, summaries, rollups, arcs, realms, constitution, and the graph', () => {
+    for (const mode of ['companion', 'firewall'] as const) {
+      const text = buildPersona(mode, resources, defaultStyle).toLowerCase()
+      expect(text).toContain('verbatim transcripts')
+      expect(text).toContain('observation, a feeling, an event, or an intention')
+      expect(text).toContain('summary written for each session')
+      expect(text).toContain('daily and then weekly rollups')
+      expect(text).toContain('ongoing storylines')
+      expect(text).toContain('life domains')
+      expect(text).toContain('living record of who this person is')
+      expect(text).toContain('graph.jsonl')
+      expect(text).toContain('testimony')
     }
   })
 
