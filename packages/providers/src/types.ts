@@ -54,4 +54,11 @@ export interface EmbeddingProvider {
   embed(model: string, texts: string[]): Promise<number[][]>
 }
 
+export class ProviderUnavailableError extends Error {
+  constructor(message = 'The model provider is unavailable.') {
+    super(message)
+    this.name = 'ProviderUnavailableError'
+  }
+}
+
 export type FetchLike = typeof fetch

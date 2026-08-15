@@ -9,6 +9,7 @@ import {
   type ChatRequest,
   type ChatResult,
   FakeEmbeddingProvider,
+  ProviderUnavailableError,
 } from '@openreverie/providers'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { DEFAULT_REGISTRY_LIMITS, LiveSessionRegistry, type StreamEvent } from './registry.js'
@@ -144,23 +145,59 @@ describe('LiveSessionRegistry', () => {
     await new Promise<void>((resolve) => setImmediate(resolve))
   })
 
-  it('evicts only the oldest ended tombstone at the cap', async () => {
-    const registry = createRegistry({ providerAvailable: false })
+  it('expires inactive sessions through its scheduler and releases capacity without a manual sweep', async () => {
+    let now = 0
+    const scheduler = new FakeScheduler()
+    const registry = createRegistry({
+      providerAvailable: false,
+      now: () => now,
+      scheduler,
+    })
+    await Promise.all(Array.from({ length: 8 }, () => registry.create()))
+    await expect(registry.create()).rejects.toMatchObject({ status: 429, code: 'session_capacity' })
+
+    now = THIRTY_MINUTES + 1
+    scheduler.runAll()
+
+    await expect(registry.create()).resolves.toMatchObject({ status: 'live', readOnly: false })
+  })
+
+  it('cancels its scheduled sweep callback when closed', async () => {
+    const scheduler = new FakeScheduler()
+    const registry = createRegistry({ providerAvailable: false, scheduler })
+    await registry.create()
+
+    await registry.close()
+
+    expect(scheduler.runAll()).toBe(0)
+  })
+
+  it('keeps only recent expired sessions in the tombstone cache', async () => {
+    let now = 0
+    const scheduler = new FakeScheduler()
+    const registry = createRegistry({
+      providerAvailable: false,
+      maxLiveSessions: 65,
+      now: () => now,
+      scheduler,
+    })
     const sessions = [] as Awaited<ReturnType<LiveSessionRegistry['create']>>[]
     for (let index = 0; index < 65; index += 1) {
       const session = await registry.create()
       sessions.push(session)
-      await registry.end(session.sessionId)
     }
+    now = THIRTY_MINUTES + 1
+    scheduler.runAll()
+
     await expect(
       collect(registry.message(sessions[0]?.sessionId ?? '', 'turn-oldest', { message: 'again' })),
-    ).rejects.toMatchObject({ status: 404 })
+    ).rejects.toMatchObject({ status: 409, code: 'session_ended' })
     await expect(
       collect(registry.message(sessions[1]?.sessionId ?? '', 'turn-next', { message: 'again' })),
-    ).rejects.toMatchObject({ status: 409, code: 'session_ended' })
+    ).rejects.toMatchObject({ status: 409, code: 'session_expired' })
     await expect(
       collect(registry.message(sessions[64]?.sessionId ?? '', 'turn-newest', { message: 'again' })),
-    ).rejects.toMatchObject({ status: 409, code: 'session_ended' })
+    ).rejects.toMatchObject({ status: 409, code: 'session_expired' })
   }, 15_000)
 
   it('returns one safe terminal chat_unavailable event when the provider is absent', async () => {
@@ -176,23 +213,44 @@ describe('LiveSessionRegistry', () => {
     )
     expect(events.filter((event) => event.type === 'error')).toHaveLength(1)
   })
+
+  it('reports a runtime typed provider outage as chat_unavailable', async () => {
+    const registry = createRegistry({ chat: new RuntimeUnavailableChatProvider() })
+    const session = await registry.create()
+
+    const events = await collect(
+      registry.message(session.sessionId, 'turn-unavailable', { message: 'Are you there?' }),
+    )
+
+    expect(events.at(-1)).toMatchObject({
+      type: 'error',
+      code: 'chat_unavailable',
+      retryable: true,
+    })
+    expect(events.filter((event) => event.type === 'error')).toHaveLength(1)
+  })
 })
 
 function createRegistry(
   options: Partial<{
     providerAvailable: boolean
+    chat: ChatProvider
+    now: () => number
+    scheduler: FakeScheduler
+    maxLiveSessions: number
     maxTurns: number
     maxReplayEvents: number
     maxReplayBytes: number
   }> = {},
 ): LiveSessionRegistry {
+  const { chat = fakeChat, ...registryOptions } = options
   return new LiveSessionRegistry({
     engine,
     config: testConfig(),
-    chat: fakeChat,
-    providerAvailable: options.providerAvailable ?? true,
+    chat,
+    providerAvailable: true,
     now: () => 0,
-    ...options,
+    ...(registryOptions as object),
   })
 }
 
@@ -277,6 +335,41 @@ class ControlledChatProvider implements ChatProvider {
     this.finished = true
     this.releaseTextResolve?.('')
     this.releaseFinish?.()
+  }
+}
+
+class RuntimeUnavailableChatProvider implements ChatProvider {
+  readonly name = 'runtime-unavailable'
+
+  async complete(_request: ChatRequest): Promise<ChatResult> {
+    throw new ProviderUnavailableError()
+  }
+
+  stream(_request: ChatRequest): AsyncIterable<ChatEvent> {
+    return {
+      [Symbol.asyncIterator](): AsyncIterator<ChatEvent> {
+        return {
+          async next(): Promise<IteratorResult<ChatEvent>> {
+            throw new ProviderUnavailableError()
+          },
+        }
+      },
+    }
+  }
+}
+
+class FakeScheduler {
+  private readonly callbacks = new Set<() => void>()
+
+  schedule(callback: () => void, _intervalMs: number): () => void {
+    this.callbacks.add(callback)
+    return () => this.callbacks.delete(callback)
+  }
+
+  runAll(): number {
+    const callbacks = [...this.callbacks]
+    for (const callback of callbacks) callback()
+    return callbacks.length
   }
 }
 

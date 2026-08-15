@@ -2,12 +2,13 @@ import { Buffer } from 'node:buffer'
 import { createHash } from 'node:crypto'
 import { type AgentEvent, AgentSession, type ReverieConfig } from '@openreverie/core'
 import type { MemoryEngine, PublicSession, PublicTranscriptLine } from '@openreverie/memory'
-import type { ChatProvider } from '@openreverie/providers'
+import { type ChatProvider, ProviderUnavailableError } from '@openreverie/providers'
 import { ApiError } from './api.js'
 
 const MAX_NDJSON_EVENT_BYTES = 256 * 1024
 const ENDED_TOMBSTONE_CAP = 64
 const THIRTY_MINUTES = 30 * 60 * 1000
+const SWEEP_INTERVAL = 60 * 1000
 
 export const DEFAULT_REGISTRY_LIMITS = {
   maxLiveSessions: 8,
@@ -56,6 +57,11 @@ export interface LiveSessionRegistryOptions {
   maxTurns?: number
   maxReplayEvents?: number
   maxReplayBytes?: number
+  scheduler?: RegistryScheduler
+}
+
+export interface RegistryScheduler {
+  schedule(callback: () => void, intervalMs: number): () => void
 }
 
 interface ReplayRecord {
@@ -65,7 +71,6 @@ interface ReplayRecord {
 
 interface TurnRecord {
   hash: string
-  message: string
   state: 'active' | 'terminal'
   startSeq: number
   endSeq?: number
@@ -99,9 +104,11 @@ export class LiveSessionRegistry {
   private readonly maxTurns: number
   private readonly maxReplayEvents: number
   private readonly maxReplayBytes: number
+  private readonly cancelSweep: () => void
   private readonly live = new Map<string, LiveSession>()
   private readonly tombstones = new Map<string, Tombstone>()
-  private readonly evictedTombstones = new Set<string>()
+  private closed = false
+  private closePromise: Promise<void> | undefined
 
   constructor(options: LiveSessionRegistryOptions) {
     this.engine = options.engine
@@ -113,6 +120,26 @@ export class LiveSessionRegistry {
     this.maxTurns = options.maxTurns ?? DEFAULT_REGISTRY_LIMITS.maxTurns
     this.maxReplayEvents = options.maxReplayEvents ?? DEFAULT_REGISTRY_LIMITS.maxReplayEvents
     this.maxReplayBytes = options.maxReplayBytes ?? DEFAULT_REGISTRY_LIMITS.maxReplayBytes
+    const scheduler = options.scheduler ?? nodeIntervalScheduler
+    this.cancelSweep = scheduler.schedule(() => {
+      if (!this.closed) this.sweep()
+    }, SWEEP_INTERVAL)
+  }
+
+  async close(): Promise<void> {
+    if (this.closePromise) return this.closePromise
+    this.closed = true
+    this.cancelSweep()
+    const sessions = [...this.live.values()]
+    this.live.clear()
+    for (const live of sessions) this.notify(live)
+    this.closePromise = Promise.all(
+      sessions.map(async (live) => {
+        await live.greeting
+        await live.agent.end()
+      }),
+    ).then(() => undefined)
+    return this.closePromise
   }
 
   async create(): Promise<CreateSessionResponse> {
@@ -193,13 +220,12 @@ export class LiveSessionRegistry {
 
     const turn: TurnRecord = {
       hash,
-      message: body.message,
       state: 'active',
       startSeq: live.sequence + 1,
     }
     live.turns.set(turnId, turn)
     live.activeTurnId = turnId
-    void this.runTurn(live, turnId, turn)
+    void this.runTurn(live, turnId, turn, body.message)
     yield* this.replayOrSubscribe(live, turn, after ?? turn.startSeq - 1)
   }
 
@@ -240,6 +266,7 @@ export class LiveSessionRegistry {
   }
 
   sweep(now = this.now()): void {
+    if (this.closed) return
     for (const [sessionId, live] of this.live) {
       if (live.activeTurnId || now - live.lastActivity < THIRTY_MINUTES) continue
       this.live.delete(sessionId)
@@ -259,7 +286,12 @@ export class LiveSessionRegistry {
     return live ? { ...live.public } : undefined
   }
 
-  private async runTurn(live: LiveSession, turnId: string, turn: TurnRecord): Promise<void> {
+  private async runTurn(
+    live: LiveSession,
+    turnId: string,
+    turn: TurnRecord,
+    message: string,
+  ): Promise<void> {
     let terminal = false
     try {
       if (!this.providerAvailable) {
@@ -272,7 +304,7 @@ export class LiveSessionRegistry {
         terminal = true
         return
       }
-      for await (const event of live.agent.send(turn.message)) {
+      for await (const event of live.agent.send(message)) {
         const recorded = this.record(live, streamEventFromAgent(event))
         terminal ||= recorded.type === 'done' || recorded.type === 'error'
       }
@@ -393,9 +425,6 @@ export class LiveSessionRegistry {
         'This session is read-only.',
       )
     }
-    if (this.evictedTombstones.has(sessionId)) {
-      throw new ApiError(404, 'not_found', 'The requested resource was not found.')
-    }
     if (await this.isStoredSession(sessionId)) {
       throw new ApiError(409, 'session_ended', 'This session is read-only.')
     }
@@ -418,21 +447,27 @@ export class LiveSessionRegistry {
   }
 
   private addTombstone(tombstone: Tombstone): void {
-    this.evictedTombstones.delete(tombstone.sessionId)
     this.tombstones.delete(tombstone.sessionId)
     this.tombstones.set(tombstone.sessionId, tombstone)
     while (this.tombstones.size > ENDED_TOMBSTONE_CAP) {
       const oldest = this.tombstones.keys().next().value as string | undefined
       if (oldest) {
         this.tombstones.delete(oldest)
-        this.evictedTombstones.add(oldest)
       }
     }
   }
 
-  private isProviderUnavailable(_error: unknown): boolean {
-    return !this.providerAvailable
+  private isProviderUnavailable(error: unknown): boolean {
+    return error instanceof ProviderUnavailableError
   }
+}
+
+const nodeIntervalScheduler: RegistryScheduler = {
+  schedule(callback, intervalMs) {
+    const timer = setInterval(callback, intervalMs)
+    timer.unref()
+    return () => clearInterval(timer)
+  },
 }
 
 function streamEventFromAgent(event: AgentEvent): StreamEventInput {
