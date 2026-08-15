@@ -6,9 +6,13 @@ import {
 } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import type {
+  GraphRecord,
   PublicDocument,
   PublicDocumentRow,
+  PublicGraphEdge,
+  PublicGraphNode,
   PublicSession,
+  SequencedGraphRecord,
   TranscriptLine,
 } from '@openreverie/memory'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -67,6 +71,57 @@ class FakeEngine implements RecordEngine {
     },
   ]
   lines: TranscriptLine[] = [userLine, assistantLine]
+  snapshot: { nodes: PublicGraphNode[]; edges: PublicGraphEdge[] } = {
+    nodes: [
+      { id: 'person_1', type: 'person', label: 'Mina', assertedAt: '2026-08-15T10:00:00.000Z' },
+      { id: 'item_1', type: 'item', label: 'Notebook', assertedAt: '2026-08-15T10:00:00.000Z' },
+    ],
+    edges: [
+      {
+        key: 'in:item_1:realm_1',
+        type: 'in',
+        from: 'item_1',
+        to: 'realm_1',
+        confidence: 0.8,
+        confirmed: true,
+        assertedAt: '2026-08-15T10:00:01.000Z',
+      },
+    ],
+  }
+  history: SequencedGraphRecord[] = [
+    {
+      sequence: 1,
+      record: {
+        ts: '2026-08-15T10:00:00.000Z',
+        op: 'assert',
+        node: 'person_1',
+        type: 'person',
+        label: 'Mina',
+      },
+    },
+    {
+      sequence: 2,
+      record: {
+        ts: '2026-08-15T10:00:01.000Z',
+        op: 'retract',
+        node: 'person_1',
+        type: 'person',
+        label: 'Mina',
+      },
+    },
+    {
+      sequence: 3,
+      record: {
+        ts: '2026-08-15T10:00:02.000Z',
+        op: 'assert',
+        edge: 'in',
+        from: 'item_1',
+        to: 'realm_1',
+        confidence: 0.8,
+        confirmed: true,
+      },
+    },
+  ]
   proposals = [
     {
       id: 'prop_1',
@@ -104,6 +159,15 @@ class FakeEngine implements RecordEngine {
   async readTranscriptPage(id: string): Promise<(TranscriptLine & { lineSequence: number })[]> {
     if (!this.sessions.some((session) => session.sessionId === id)) throw new Error('missing')
     return this.lines.map((line, index) => ({ lineSequence: index + 1, ...line }))
+  }
+  graphSnapshot(): { nodes: PublicGraphNode[]; edges: PublicGraphEdge[] } {
+    return this.snapshot
+  }
+  async readGraphHistory(): Promise<SequencedGraphRecord[]> {
+    return this.history
+  }
+  docIdForPath(_path: string): string | undefined {
+    return undefined
   }
   async listPendingProposals() {
     return this.proposals
@@ -190,7 +254,10 @@ describe('record browsing app', () => {
             resolve({
               status: response.statusCode ?? 0,
               headers: response.headers,
-              json: JSON.parse(Buffer.concat(chunks).toString('utf8')),
+              json: (() => {
+                const body = Buffer.concat(chunks).toString('utf8')
+                return body === '' ? null : JSON.parse(body)
+              })(),
             }),
           )
         },
@@ -267,6 +334,98 @@ describe('record browsing app', () => {
     await expect(
       getJson(`/api/v1/sessions/${sessionId}/transcript?limit=1000`),
     ).resolves.toMatchObject({ status: 200 })
+  })
+
+  it('returns one canonical folded snapshot with stable SHA-256 revision and 304 ETag', async () => {
+    const first = (await getJson('/api/v1/graph/snapshot')) as Response & {
+      json: { data: { revision: string; nodes: unknown[]; edges: unknown[] } }
+    }
+    expect(first.json.data).toMatchObject({
+      revision: /^[0-9a-f]{64}$/,
+      nodes: expect.any(Array),
+      edges: expect.any(Array),
+    })
+    expect(first.json.data.nodes).toMatchObject([{ id: 'item_1' }, { id: 'person_1' }])
+    expect(first.headers.etag).toBe(`"${first.json.data.revision}"`)
+    engine.snapshot.nodes.reverse()
+    const second = (await getJson('/api/v1/graph/snapshot')) as Response & {
+      json: { data: { revision: string } }
+    }
+    expect(second.json.data.revision).toBe(first.json.data.revision)
+    await expect(
+      request(
+        'GET',
+        '/api/v1/graph/snapshot',
+        undefined,
+        authenticated({ 'if-none-match': first.headers.etag as string }),
+      ),
+    ).resolves.toMatchObject({ status: 304, json: null })
+  })
+
+  it('preserves asserts and retracts in append sequence even when they are dangling', async () => {
+    const response = (await getJson('/api/v1/graph/events?limit=2')) as Response & {
+      json: { data: unknown[]; meta: { nextCursor: string } }
+    }
+
+    expect(response.json.data).toEqual([
+      expect.objectContaining({
+        sequence: 1,
+        op: 'assert',
+        kind: 'node',
+        node: expect.objectContaining({ id: 'person_1' }),
+      }),
+      expect.objectContaining({ sequence: 2, op: 'retract', kind: 'node', nodeId: 'person_1' }),
+    ])
+    expect(response.json.meta.nextCursor).toEqual(expect.any(String))
+  })
+
+  it('rejects a graph-event cursor after the raw append history changes', async () => {
+    const first = (await getJson('/api/v1/graph/events?limit=1')) as Response & {
+      json: { meta: { nextCursor: string } }
+    }
+    const anotherAssert: GraphRecord = {
+      ts: '2026-08-15T10:00:03.000Z',
+      op: 'assert',
+      node: 'person_2',
+      type: 'person',
+      label: 'Noor',
+    }
+    engine.history.push({ sequence: 4, record: anotherAssert })
+
+    await expect(
+      getJson(`/api/v1/graph/events?after=${encodeURIComponent(first.json.meta.nextCursor)}`),
+    ).resolves.toMatchObject({ status: 400, json: { code: 'cursor_invalid' } })
+  })
+
+  it('fails rather than truncating an oversized graph snapshot or one oversized event', async () => {
+    const large = 'x'.repeat(8 * 1024 * 1024)
+    engine.snapshot = {
+      nodes: [
+        { id: 'person_1', type: 'person', label: large, assertedAt: '2026-08-15T10:00:00.000Z' },
+      ],
+      edges: [],
+    }
+    await expect(getJson('/api/v1/graph/snapshot')).resolves.toMatchObject({
+      status: 413,
+      json: { code: 'graph_snapshot_too_large' },
+    })
+
+    engine.history = [
+      {
+        sequence: 1,
+        record: {
+          ts: '2026-08-15T10:00:00.000Z',
+          op: 'assert',
+          node: 'person_1',
+          type: 'person',
+          label: 'x'.repeat(256 * 1024),
+        },
+      },
+    ]
+    await expect(getJson('/api/v1/graph/events')).resolves.toMatchObject({
+      status: 413,
+      json: { code: 'record_too_large' },
+    })
   })
 
   it.each(['%', Buffer.from('{', 'utf8').toString('base64url')])(
