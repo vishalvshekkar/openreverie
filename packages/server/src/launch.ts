@@ -146,19 +146,43 @@ export function createServerLauncher(deps: ServerLaunchDeps) {
         origin,
         bootstrapUrl,
         close: () => {
-          closePromise ??= (async () => {
-            await registry?.close()
-            await deps.closeHttpServer(server as Server)
-            await engine.close()
-          })()
+          closePromise ??= closeServerResources(deps, registry, server as Server, engine)
           return closePromise
         },
       }
     } catch (error) {
-      await registry?.close()
-      if (server) await deps.closeHttpServer(server)
-      await engine.close()
+      try {
+        await closeServerResources(deps, registry, server, engine)
+      } catch {
+        // Preserve the original startup failure after attempting every cleanup.
+      }
       throw error
     }
   }
+}
+
+async function closeServerResources(
+  deps: Pick<ServerLaunchDeps, 'closeHttpServer'>,
+  registry: LiveSessionRegistry | undefined,
+  server: Server | undefined,
+  engine: MemoryEngine,
+): Promise<void> {
+  let firstError: unknown
+  let hasError = false
+  const attempt = async (close: () => Promise<void>): Promise<void> => {
+    try {
+      await close()
+    } catch (error) {
+      if (!hasError) {
+        firstError = error
+        hasError = true
+      }
+    }
+  }
+
+  await attempt(async () => registry?.close())
+  if (server) await attempt(() => deps.closeHttpServer(server))
+  await attempt(() => engine.close())
+
+  if (hasError) throw firstError
 }
