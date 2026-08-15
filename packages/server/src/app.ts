@@ -94,9 +94,7 @@ async function handle(
   }
 
   if (method === 'GET' && path.length === 3 && path[2] === 'documents') {
-    const documents = publicDocumentRowsSchema
-      .parse(await engine.listPublicDocuments())
-      .sort(compareDocuments)
+    const documents = (await engine.listPublicDocuments()).sort(compareDocuments)
     const page = pageResource(documents, {
       resource: 'documents',
       query: parsed.searchParams,
@@ -113,7 +111,7 @@ async function handle(
     const storedDocument = await engine.getPublicDocument(docId)
     if (!storedDocument)
       throw new ApiError(404, 'not_found', 'The requested resource was not found.')
-    const document = publicDocumentSchema.parse(storedDocument)
+    const document = storedDocument
     if (Buffer.byteLength(document.body, 'utf8') > LIMITS.documentBytes) {
       throw new ApiError(413, 'resource_too_large', 'The requested resource is too large.')
     }
@@ -122,9 +120,7 @@ async function handle(
   }
 
   if (method === 'GET' && path.length === 3 && path[2] === 'sessions') {
-    const sessions = publicSessionsSchema
-      .parse(await engine.listStoredSessions())
-      .sort(compareSessions)
+    const sessions = (await engine.listStoredSessions()).sort(compareSessions)
     const page = pageResource(sessions, {
       resource: 'sessions',
       query: parsed.searchParams,
@@ -138,9 +134,7 @@ async function handle(
 
   if (method === 'GET' && path.length === 4 && path[2] === 'sessions') {
     const sessionId = requiredId(path[3])
-    const session = publicSessionsSchema
-      .parse(await engine.listStoredSessions())
-      .find((item) => item.sessionId === sessionId)
+    const session = (await engine.listStoredSessions()).find((item) => item.sessionId === sessionId)
     if (!session) throw new ApiError(404, 'not_found', 'The requested resource was not found.')
     writePublicJson(res, 200, publicSessionSchema, session, null)
     return
@@ -148,11 +142,9 @@ async function handle(
 
   if (method === 'GET' && path.length === 5 && path[2] === 'sessions' && path[4] === 'transcript') {
     const sessionId = requiredId(path[3])
-    const session = publicSessionsSchema
-      .parse(await engine.listStoredSessions())
-      .find((item) => item.sessionId === sessionId)
+    const session = (await engine.listStoredSessions()).find((item) => item.sessionId === sessionId)
     if (!session) throw new ApiError(404, 'not_found', 'The requested resource was not found.')
-    const transcript = publicTranscriptLinesSchema.parse(await engine.readTranscriptPage(sessionId))
+    const transcript = await engine.readTranscriptPage(sessionId)
     const page = pageResource(transcript, {
       resource: 'transcript',
       query: parsed.searchParams,
@@ -180,8 +172,8 @@ async function handle(
   }
 
   if (method === 'GET' && path.length === 3 && path[2] === 'proposals') {
-    const proposals = publicProposalsSchema
-      .parse((await engine.listPendingProposals()).map(publicProposal))
+    const proposals = (await engine.listPendingProposals())
+      .map(publicProposal)
       .sort(compareProposals)
     const page = pageResource(proposals, {
       resource: 'proposals',
