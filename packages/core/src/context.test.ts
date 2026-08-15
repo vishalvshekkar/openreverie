@@ -3,14 +3,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   appendGraph,
-  appendProposals,
   type EngineDeps,
   ensureMemoryTree,
   MemoryEngine,
   type MemoryPaths,
   memoryPaths,
   newId,
-  type Proposal,
   SessionStore,
   writeDocumentAtomic,
 } from '@openreverie/memory'
@@ -107,6 +105,37 @@ describe('assembleSystemPrompt', () => {
       body: 'A steady day of small wins.\n',
     })
 
+    const pagedPersonPath = join(paths.peopleDir, 'priya.md')
+    await writeDocumentAtomic({
+      path: pagedPersonPath,
+      meta: { id: newId('doc'), name: 'Priya', node: 'person_paged', opened: '2026-08-01' },
+      body: 'This page is new. It grows as we talk.\n',
+    })
+    await appendGraph(paths, [
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'person_paged',
+        type: 'person',
+        label: 'Priya',
+        doc: pagedPersonPath,
+      },
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'person_nodeonly',
+        type: 'person',
+        label: 'Sam',
+      },
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'entity_dune',
+        type: 'entity',
+        label: 'Dune',
+      },
+    ])
+
     const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)
     const store = await SessionStore.start(paths, yesterday)
     await store.appendLine({
@@ -116,27 +145,17 @@ describe('assembleSystemPrompt', () => {
     })
     await writeDocumentAtomic({
       path: join(store.dir, 'summary.md'),
-      meta: { id: newId('doc') },
+      meta: {
+        id: newId('doc'),
+        items: [
+          { id: newId('item'), text: 'Call the dentist next week.', kind: 'intention', ts: '' },
+        ],
+      },
       body: 'Talked through a quiet, low-key evening.\n',
     })
 
     const config = testConfig()
     const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
-
-    // Appended after open(), not before: a proposal present at open time is
-    // now materialized and resolved silently by the engine itself (see
-    // openreverie's remember-by-default round), so seeding it here instead
-    // still exercises assembleSystemPrompt's own pending-proposals rendering
-    // against whatever is actually sitting in proposals.jsonl.
-    const proposal: Proposal = {
-      id: newId('prop'),
-      ts: new Date().toISOString(),
-      kind: 'link',
-      summary: 'Link the run item to marathon training.',
-      payload: { edge: 'part_of', from: newId('item'), to: arcId, confidence: 0.5 },
-      source: 'session_seed',
-    }
-    await appendProposals(paths, [proposal])
 
     const prompt = await assembleSystemPrompt(engine, config)
 
@@ -152,7 +171,17 @@ describe('assembleSystemPrompt', () => {
     expect(prompt).toContain('## Active arcs')
     expect(prompt).toContain('Marathon Training')
     expect(prompt).toContain('status: active')
-    expect(prompt).toContain('2026-08-10')
+    expect(prompt).toContain('last touched: 2026-08-10')
+
+    expect(prompt).toContain('## People')
+    expect(prompt).toContain('Priya (has a page)')
+    expect(prompt).toContain('Sam (no page yet)')
+
+    expect(prompt).toContain('## Entities')
+    expect(prompt).toContain('Dune')
+
+    expect(prompt).toContain('## Recent intentions')
+    expect(prompt).toContain('Call the dentist next week.')
 
     expect(prompt).toContain('## Latest daily rollup')
     expect(prompt).toContain('A steady day of small wins.')
@@ -160,23 +189,20 @@ describe('assembleSystemPrompt', () => {
     expect(prompt).toContain('## Recent sessions')
     expect(prompt).toContain('Talked through a quiet, low-key evening.')
 
-    expect(prompt).toContain('## Pending proposals')
-    expect(prompt).toContain('Link the run item to marathon training.')
-    expect(prompt.toLowerCase()).toContain('resolve_proposal')
-    // The proposal id must reach the model verbatim: it is the only way
-    // resolve_proposal can ever be called with a valid proposalId.
-    expect(prompt).toContain(`[${proposal.id}]`)
+    expect(prompt).not.toContain('## Pending proposals')
 
     // Every populated section appears in the order specified by the brief:
-    // constitution, realms, active arcs, latest daily rollup, recent
-    // sessions, pending proposals.
+    // constitution, realms, active arcs, people, entities, recent
+    // intentions, latest daily rollup, recent sessions.
     const headers = [
       '## Constitution',
       '## Realms',
       '## Active arcs',
+      '## People',
+      '## Entities',
+      '## Recent intentions',
       '## Latest daily rollup',
       '## Recent sessions',
-      '## Pending proposals',
     ]
     const positions = headers.map((header) => prompt.indexOf(header))
     expect(positions.every((position) => position >= 0)).toBe(true)
@@ -216,9 +242,11 @@ describe('assembleSystemPrompt', () => {
     expect(prompt).toContain('## Constitution')
     expect(prompt).not.toContain('## Realms')
     expect(prompt).not.toContain('## Active arcs')
+    expect(prompt).not.toContain('## People')
+    expect(prompt).not.toContain('## Entities')
+    expect(prompt).not.toContain('## Recent intentions')
     expect(prompt).not.toContain('## Latest daily rollup')
     expect(prompt).not.toContain('## Recent sessions')
-    expect(prompt).not.toContain('## Pending proposals')
 
     await engine.close()
   })
