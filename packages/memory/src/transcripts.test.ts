@@ -155,6 +155,29 @@ describe('SessionStore', () => {
     expect(read).toEqual([validLine])
   })
 
+  it('describes durable sessions and assigns one-based sequences after excluding blank and partial lines', async () => {
+    const store = await SessionStore.start(paths, new Date('2026-08-13T21:04:11Z'))
+    const first = { ts: '2026-08-13T21:04:11.000Z', role: 'user' as const, content: 'hello' }
+    const second = { ts: '2026-08-13T21:04:12.000Z', role: 'assistant' as const, content: 'hi' }
+    await appendFile(
+      join(store.dir, 'transcript.jsonl'),
+      `${JSON.stringify(first)}\n\n${JSON.stringify(second)}\n{"ts":"partial`,
+      'utf8',
+    )
+
+    await expect(SessionStore.describe(paths)).resolves.toEqual([
+      expect.objectContaining({
+        sessionId: store.sessionId,
+        updatedAt: second.ts,
+        transcript: { lineCount: 2, userCount: 1, assistantCount: 1, toolCount: 0 },
+      }),
+    ])
+    await expect(SessionStore.readTranscriptPage(paths, store.sessionId)).resolves.toEqual([
+      { lineSequence: 1, ...first },
+      { lineSequence: 2, ...second },
+    ])
+  })
+
   it('readTranscript throws for malformed JSON in the middle of a transcript', async () => {
     const now = new Date('2026-08-13T21:04:11Z')
     const store = await SessionStore.start(paths, now)

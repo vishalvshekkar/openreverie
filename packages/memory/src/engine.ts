@@ -60,7 +60,7 @@ import {
   pendingWeeklyRollups,
 } from './rollups.js'
 import { type DocKind, MemoryIndex, type SearchHit } from './sqlite.js'
-import { SessionStore, type TranscriptLine } from './transcripts.js'
+import { type PublicTranscriptLine, SessionStore, type TranscriptLine } from './transcripts.js'
 
 export type { SequencedGraphRecord } from './graph.js'
 
@@ -729,27 +729,12 @@ export class MemoryEngine {
   }
 
   async listStoredSessions(): Promise<PublicSession[]> {
-    const sessions = await SessionStore.listSessions(this.paths)
-    const result: PublicSession[] = []
-    for (const session of sessions) {
-      const lines = await SessionStore.readTranscript(this.paths, session.sessionId)
-      const createdAt = isoFromId(session.sessionId, `${session.date}T00:00:00.000Z`)
-      const updatedAt = lines.at(-1)?.ts ?? createdAt
-      result.push({
-        sessionId: session.sessionId,
-        createdAt,
-        updatedAt,
-        status: 'ended',
-        readOnly: true,
-        transcript: {
-          lineCount: lines.length,
-          userCount: lines.filter((line) => line.role === 'user').length,
-          assistantCount: lines.filter((line) => line.role === 'assistant').length,
-          toolCount: lines.filter((line) => line.role === 'tool').length,
-        },
-      })
-    }
-    return result
+    const sessions = await SessionStore.describe(this.paths)
+    return sessions.map((session) => ({
+      ...session,
+      status: 'ended',
+      readOnly: true,
+    }))
   }
 
   async readGraphHistory(): Promise<SequencedGraphRecord[]> {
@@ -784,6 +769,14 @@ export class MemoryEngine {
 
   async readTranscript(sessionId: string): Promise<TranscriptLine[]> {
     return SessionStore.readTranscript(this.paths, sessionId)
+  }
+
+  async readTranscriptPage(sessionId: string): Promise<PublicTranscriptLine[]> {
+    return SessionStore.readTranscriptPage(this.paths, sessionId)
+  }
+
+  async listPendingProposals(): Promise<Proposal[]> {
+    return pendingProposals(this.paths)
   }
 
   listArcs(): GraphNode[] {
