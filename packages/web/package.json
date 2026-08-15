@@ -11,9 +11,11 @@
     "graphology": "^0.26.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "sigma": "^3.0.0"
+    "sigma": "^3.0.0",
+    "zod": "^4.0.0"
   },
   "devDependencies": {
+    "@testing-library/jest-dom": "^7.0.0",
     "@testing-library/react": "^16.0.0",
     "@testing-library/user-event": "^14.0.0",
     "@types/react": "^19.0.0",
