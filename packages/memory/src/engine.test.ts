@@ -3284,7 +3284,12 @@ describe('buildReflectionContext people and entities wiring', () => {
 
     const prompt = chat.requests[0]?.messages[0]?.content ?? ''
     expect(prompt).toContain('Known entities:')
-    expect(prompt).toContain('entity_film: A Favorite Film (no page yet)')
+    // Entities never get a page in this release, so unlike people, their
+    // listing carries no page-status suffix at all (see MINOR 1 in the
+    // fix-round report: entities used to be marked "(no page yet)" even
+    // though the same prompt says they never get a page).
+    expect(prompt).toContain('entity_film: A Favorite Film')
+    expect(prompt).not.toContain('entity_film: A Favorite Film (no page yet)')
 
     await engine.close()
   })
