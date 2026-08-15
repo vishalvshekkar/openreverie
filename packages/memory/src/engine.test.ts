@@ -1878,7 +1878,13 @@ describe('MemoryEngine', () => {
       await engine.close()
     })
 
-    it('resolves a newPersons entry that relists an already node-only known person by attaching this session items instead of minting a duplicate node', async () => {
+    // The genuine relist case: the identical name, meaning the model
+    // believes (correctly, in this test) that it is the same person.
+    // Contrast with the escape-hatch test right below, where a
+    // distinguishing name is used because it is a different person who
+    // happens to share a first name: that one must NOT attach to this
+    // node, and does not.
+    it('attaches items to the existing node when newPersons relists the same person under the identical name', async () => {
       await appendGraph(paths, [
         {
           ts: '2026-08-01T00:00:00.000Z',

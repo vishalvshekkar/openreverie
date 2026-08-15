@@ -43,6 +43,7 @@ Good first contributions, roughly ordered by usefulness. Read [CONTRIBUTING.md](
 - **A relisted paged person's `personUpdates` note is silently dropped.** Their items and edges still land, but the note describing what this session added to their page is discarded, so the page itself does not learn what was said about them.
 - **`sessionContext` does not dedupe people or entities by label.** Two graph nodes that happen to share a label (the escape-hatch fix for two different people with the same name is a legitimate reason this can now happen) render as two identical-looking lines in the People or Entities section, distinguishable only by id.
 - **An arc touched only by attribution carries no `lastTouched`.** `arcUpdates` sets it, but attaching an item to an arc through `attributions` alone does not, so an arc that was actually just talked about can still look untouched to the greeting's "arc gone quiet" logic.
+- **People and entities are capped and ordered by first mention, not last mention.** The `ts` on a person or entity node is set once, when the node is created, and nothing that attaches later items to it (`attachItemsToNode`) refreshes that `ts`. So the cap's recency order is really "created most recently," not "come up most recently": someone mentioned once two years ago and never since can, in principle, sort above someone who comes up every week but was first mentioned earlier. A fix needs a real last-touched signal on the node, not just its creation `ts`.
 
 ## How work happens here
 

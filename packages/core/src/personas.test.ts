@@ -110,7 +110,7 @@ describe('buildPersona', () => {
     }
   })
 
-  it('gives a plain orientation to the memory architecture: transcripts, items, summaries, rollups, arcs, realms, constitution, and the graph', () => {
+  it('gives a plain orientation to the memory architecture: transcripts, items, summaries, rollups, arcs, realms, nodes, pages, entities, constitution, and the graph', () => {
     for (const mode of ['companion', 'firewall'] as const) {
       const text = buildPersona(mode, resources, defaultStyle).toLowerCase()
       expect(text).toContain('verbatim transcripts')
@@ -122,6 +122,21 @@ describe('buildPersona', () => {
       expect(text).toContain('living record of who this person is')
       expect(text).toContain('graph.jsonl')
       expect(text).toContain('testimony')
+      // A node and a page are different things (the substantive change
+      // this orientation must cover): a node is the cheap, generously
+      // created graph record; a page is the maintained document granted
+      // only once earned. Entities are the non-person node type.
+      expect(text).toContain('node in the graph')
+      expect(text).toContain('maintained document')
+      expect(text).toContain('entity such as a film')
+    }
+  })
+
+  it('does not tell the model it maintains an arc itself: only reflection writes an arc narrative, after the session ends', () => {
+    for (const mode of ['companion', 'firewall'] as const) {
+      const text = buildPersona(mode, resources, defaultStyle).toLowerCase()
+      expect(text).not.toContain('ongoing storylines you maintain')
+      expect(text).toContain('written and rewritten only by reflection after a session ends')
     }
   })
 
