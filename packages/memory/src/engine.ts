@@ -70,20 +70,32 @@ export interface SessionContext {
   constitution: string
   realms: { id: string; name: string; firstLine: string }[]
   arcs: { id: string; name: string; status: string; lastTouched?: string }[]
-  // Every person node, paged or not. This is what lets the model know a
-  // person exists in a later session without having to search for them:
-  // the actual fix for the failure that started this round of work.
+  // Every person node, paged or not, up to PEOPLE_CAP, most recently
+  // created first (paged people kept over unpaged ones when the cap cuts
+  // the list short). This is what lets the model know a person exists in
+  // a later session without having to search for them: the actual fix for
+  // the failure that started this round of work.
   people: { id: string; name: string; hasPage: boolean }[]
+  // True when there are more person nodes than PEOPLE_CAP, so `people`
+  // above is a partial list rather than the complete roster.
+  peopleTruncated: boolean
   // Every entity node (a film, a book, a company, a place, a band, a work
-  // of fiction). Entities never get a page in this release, so there is no
-  // page status to carry alongside the name.
+  // of fiction), up to ENTITIES_CAP, most recently created first. Entities
+  // never get a page in this release, so there is no page status to carry
+  // alongside the name.
   entities: { id: string; name: string }[]
-  // Item texts of kind 'intention', pulled from recent session summaries'
-  // own frontmatter (the same read sessionContext already does for
-  // recentSummaries below, not a second pass over disk). These are
-  // captured today and nothing ever surfaces them again, which is why the
-  // companion appears to forget what the person said they wanted to do.
-  recentIntentions: string[]
+  // True when there are more entity nodes than ENTITIES_CAP.
+  entitiesTruncated: boolean
+  // Text and the date of the session that captured it, for items of kind
+  // 'intention', pulled from recent session summaries' own frontmatter
+  // (the same read sessionContext already does for recentSummaries below,
+  // not a second pass over disk). These are captured today and nothing
+  // ever surfaces them again, which is why the companion appears to forget
+  // what the person said they wanted to do. The date matters here exactly
+  // as it does for recentSummaries and the daily rollup: without it the
+  // model cannot tell an intention from yesterday apart from one from last
+  // week.
+  recentIntentions: { text: string; date: string }[]
   latestDailyRollup?: { date: string; body: string }
   recentSummaries: { sessionId: string; date: string; body: string }[]
   // Today's date, in the same YYYY-MM-DD form used for recent session
@@ -124,6 +136,15 @@ const ARC_STARTER_BODY = 'This arc is new. It grows as we talk.\n'
 const RECENT_SUMMARIES_WINDOW_DAYS = 7
 const RECENT_SUMMARIES_CAP = 3
 const RECENT_INTENTIONS_CAP = 5
+// People and entity nodes are created generously and never forgotten, so
+// both lists only ever grow. Every sibling prompt section is bounded
+// (active-only for arcs, a window and a cap for recentSummaries, a cap for
+// recentIntentions); these two caps do the same job for people and
+// entities, in both the session prompt (context.ts) and the reflection
+// prompt (reflection.ts), so neither turns into thousands of tokens on
+// every turn after a couple of years of daily use.
+const PEOPLE_CAP = 40
+const ENTITIES_CAP = 30
 const PERSON_STARTER_BODY = 'This page is new. It grows as we talk.\n'
 
 export class MemoryEngine {
@@ -503,7 +524,7 @@ export class MemoryEngine {
       .slice(0, RECENT_SUMMARIES_CAP)
 
     const recentSummaries: SessionContext['recentSummaries'] = []
-    const recentIntentions: string[] = []
+    const recentIntentions: SessionContext['recentIntentions'] = []
     for (const session of recentCandidates) {
       const summaryPath = join(
         this.paths.sessionsDir,
@@ -525,21 +546,36 @@ export class MemoryEngine {
             (item as { kind?: unknown }).kind === 'intention' &&
             typeof (item as { text?: unknown }).text === 'string'
           ) {
-            recentIntentions.push((item as { text: string }).text)
+            // The session's own date, not the item's ts: consistent with
+            // recentSummaries and the daily rollup, and unlike ts (empty
+            // on a hand-written summary.md in several tests) it is always
+            // present.
+            recentIntentions.push({ text: (item as { text: string }).text, date: session.date })
           }
         }
       }
     }
 
-    const people: SessionContext['people'] = []
-    const entities: SessionContext['entities'] = []
+    const personNodes: GraphNode[] = []
+    const entityNodes: GraphNode[] = []
     for (const node of this.graphState.nodes.values()) {
       if (node.type === 'person') {
-        people.push({ id: node.id, name: node.label, hasPage: node.doc !== undefined })
+        personNodes.push(node)
       } else if (node.type === 'entity') {
-        entities.push({ id: node.id, name: node.label })
+        entityNodes.push(node)
       }
     }
+    const cappedPeople = capPeople(personNodes)
+    const cappedEntities = capEntities(entityNodes)
+    const people: SessionContext['people'] = cappedPeople.nodes.map((node) => ({
+      id: node.id,
+      name: node.label,
+      hasPage: node.doc !== undefined,
+    }))
+    const entities: SessionContext['entities'] = cappedEntities.nodes.map((node) => ({
+      id: node.id,
+      name: node.label,
+    }))
 
     // Any arc at all (regardless of status) or any reflected session
     // (regardless of date) means this person has talked with reverie
@@ -558,7 +594,9 @@ export class MemoryEngine {
       realms,
       arcs,
       people,
+      peopleTruncated: cappedPeople.truncated,
       entities,
+      entitiesTruncated: cappedEntities.truncated,
       recentIntentions: recentIntentions.slice(0, RECENT_INTENTIONS_CAP),
       ...(latestDailyRollup ? { latestDailyRollup } : {}),
       recentSummaries,
@@ -677,7 +715,29 @@ export class MemoryEngine {
   // with no graph record completing it. This drain does not clean that up;
   // it only guarantees the proposal queue itself stops blocking open().
   private async drainLegacyProposals(): Promise<void> {
-    const proposals = await pendingProposals(this.paths)
+    // The read itself, not just materialization, must be inside a
+    // try/catch: readLines (via pendingProposals) throws on any line that
+    // is not valid JSON, and proposals.jsonl is append-only, hand-editable,
+    // and written with appendFile, which is not crash atomic. A single
+    // truncated line is reachable in practice, and this is the repair
+    // command's own dependency: reindex opens the engine too, so letting
+    // this throw locks the user out of the one command that could fix it.
+    // Unlike a malformed payload (valid JSON, wrong shape, caught per
+    // proposal below), a corrupt line cannot be isolated: there is no way
+    // to know where the queue is broken versus where it is fine, so the
+    // whole drain is skipped for this open() rather than materializing
+    // some proposals and silently dropping the rest.
+    let proposals: Proposal[]
+    try {
+      proposals = await pendingProposals(this.paths)
+    } catch (err) {
+      this.warnings.push(
+        `Could not read the proposal queue at ${this.paths.proposals}: ${errorMessage(err)}. ` +
+          'Skipping the legacy proposal drain for this session; nothing pending in it was lost, ' +
+          'it is just not readable right now.',
+      )
+      return
+    }
     for (const proposal of proposals) {
       try {
         await this.resolveProposal(proposal.id, 'accepted')
@@ -920,9 +980,22 @@ export class MemoryEngine {
     const constitutionDoc = await readDocument(this.paths.constitution)
     const arcs = [...this.graphState.nodes.values()].filter((node) => node.type === 'arc')
     const realms = [...this.graphState.nodes.values()].filter((node) => node.type === 'realm')
-    const people = [...this.graphState.nodes.values()].filter((node) => node.type === 'person')
-    const entities = [...this.graphState.nodes.values()].filter((node) => node.type === 'entity')
-    return { constitution: constitutionDoc.body, arcs, realms, people, entities }
+    const allPeople = [...this.graphState.nodes.values()].filter((node) => node.type === 'person')
+    const allEntities = [...this.graphState.nodes.values()].filter((node) => node.type === 'entity')
+    // Bounded and recency-ordered exactly like sessionContext's people and
+    // entities above: reflection sees the same known-people and
+    // known-entities lists the chat prompt does, not an unbounded one.
+    const cappedPeople = capPeople(allPeople)
+    const cappedEntities = capEntities(allEntities)
+    return {
+      constitution: constitutionDoc.body,
+      arcs,
+      realms,
+      people: cappedPeople.nodes,
+      peopleTruncated: cappedPeople.truncated,
+      entities: cappedEntities.nodes,
+      entitiesTruncated: cappedEntities.truncated,
+    }
   }
 
   private async syncGraph(): Promise<void> {
@@ -1444,6 +1517,33 @@ function isDegraded(
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
+}
+
+function byTsDescending(a: GraphNode, b: GraphNode): number {
+  if (a.ts === b.ts) return 0
+  return a.ts > b.ts ? -1 : 1
+}
+
+// Orders person nodes most-recently-created first, then applies
+// PEOPLE_CAP. When the cap must cut the list short, a paged person is kept
+// over an unpaged one regardless of recency: a page means the subject
+// already earned a maintained document, which matters more than an
+// unpaged node's raw recency. Shared by sessionContext (the chat prompt)
+// and buildReflectionContext (the reflection prompt), so both are bounded
+// the same way.
+function capPeople(nodes: GraphNode[]): { nodes: GraphNode[]; truncated: boolean } {
+  const paged = nodes.filter((node) => node.doc !== undefined).sort(byTsDescending)
+  const unpaged = nodes.filter((node) => node.doc === undefined).sort(byTsDescending)
+  const ordered = [...paged, ...unpaged]
+  return { nodes: ordered.slice(0, PEOPLE_CAP), truncated: ordered.length > PEOPLE_CAP }
+}
+
+// Orders entity nodes most-recently-created first, then applies
+// ENTITIES_CAP. Entities never get a page in this release, so there is no
+// paged/unpaged priority to apply here, unlike capPeople above.
+function capEntities(nodes: GraphNode[]): { nodes: GraphNode[]; truncated: boolean } {
+  const ordered = [...nodes].sort(byTsDescending)
+  return { nodes: ordered.slice(0, ENTITIES_CAP), truncated: ordered.length > ENTITIES_CAP }
 }
 
 function stringMeta(docs: Document[], key: string): string[] {

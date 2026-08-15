@@ -174,8 +174,8 @@ describe('assembleSystemPrompt', () => {
     expect(prompt).toContain('last touched: 2026-08-10')
 
     expect(prompt).toContain('## People')
-    expect(prompt).toContain('Priya (has a page)')
-    expect(prompt).toContain('Sam (no page yet)')
+    expect(prompt).toContain('Priya (person_paged, has a page)')
+    expect(prompt).toContain('Sam (person_nodeonly, no page yet)')
 
     expect(prompt).toContain('## Entities')
     expect(prompt).toContain('Dune')
@@ -357,6 +357,65 @@ describe('assembleSystemPrompt', () => {
     expect(prompt).toContain('## Recent sessions')
     expect(prompt).toContain(dateString)
     expect(prompt).toContain('Checked in briefly, nothing pressing.')
+
+    await engine.close()
+  })
+
+  it('shows the date of each recent intention next to its text', async () => {
+    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)
+    const store = await SessionStore.start(paths, yesterday)
+    await store.appendLine({ ts: yesterday.toISOString(), role: 'user', content: 'Hi.' })
+    const dateString = yesterday.toISOString().slice(0, 10)
+    await writeDocumentAtomic({
+      path: join(store.dir, 'summary.md'),
+      meta: {
+        id: newId('doc'),
+        items: [
+          { id: newId('item'), text: 'Call the dentist next week.', kind: 'intention', ts: '' },
+        ],
+      },
+      body: 'A quiet day.\n',
+    })
+
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+    const prompt = await assembleSystemPrompt(engine, testConfig())
+
+    expect(prompt).toContain('## Recent intentions')
+    expect(prompt).toContain(`${dateString}: Call the dentist next week.`)
+
+    await engine.close()
+  })
+
+  it('marks the people section as truncated once there are more people than the cap, and still shows each remaining line with its id', async () => {
+    // A reflected session, so this is not treated as the very first
+    // conversation (which would replace every normal section, including
+    // People, with the guided onboarding flow instead).
+    const store = await SessionStore.start(paths, new Date())
+    await writeDocumentAtomic({
+      path: join(store.dir, 'summary.md'),
+      meta: { id: newId('doc') },
+      body: 'A prior session.\n',
+    })
+
+    const records: Parameters<typeof appendGraph>[1] = []
+    for (let i = 0; i < 45; i++) {
+      records.push({
+        ts: `2026-02-01T00:${String(i).padStart(2, '0')}:00.000Z`,
+        op: 'assert',
+        node: `person_${i}`,
+        type: 'person',
+        label: `Person ${i}`,
+      })
+    }
+    await appendGraph(paths, records)
+
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+    const prompt = await assembleSystemPrompt(engine, testConfig())
+
+    expect(prompt).toContain('## People')
+    expect(prompt).toContain('list truncated')
+    expect(prompt).toContain('Person 44 (person_44, no page yet)')
+    expect(prompt).not.toContain('Person 0 (person_0, no page yet)')
 
     await engine.close()
   })

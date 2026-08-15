@@ -93,8 +93,16 @@ export interface ReflectionContext {
   constitution: string
   arcs: GraphNode[]
   realms: GraphNode[]
+  // Already capped and recency-ordered by the caller (MemoryEngine); see
+  // capPeople/capEntities in engine.ts. peopleTruncated/entitiesTruncated
+  // say whether the cap actually cut anything, so the rendered listing can
+  // say so. Optional so existing test fixtures that build a
+  // ReflectionContext literal without these fields (an untruncated,
+  // uncapped list) keep compiling; a missing flag renders as not truncated.
   people: GraphNode[]
+  peopleTruncated?: boolean
   entities: GraphNode[]
+  entitiesTruncated?: boolean
 }
 
 const reflectionItemKindSchema = z.enum(['observation', 'feeling', 'event', 'intention'])
@@ -143,24 +151,41 @@ export const reflectionOutputSchema: z.ZodType<ReflectionOutput> = z.object({
   constitutionUpdate: z.string().nullable(),
 })
 
-function renderListing(nodes: GraphNode[]): string {
+// truncated is only ever true for entities (arcs and realms are never
+// capped): when the caller already cut the list down to ENTITIES_CAP, say
+// so, so the model knows this is a partial list of what is known rather
+// than the complete one.
+function renderListing(nodes: GraphNode[], truncated = false): string {
   if (nodes.length === 0) {
     return '(none yet)'
   }
-  return nodes.map((node) => `- ${node.id}: ${node.label}`).join('\n')
+  const lines = nodes.map((node) => `- ${node.id}: ${node.label}`)
+  if (truncated) {
+    lines.push(
+      '(list truncated to the most recently created entries; older ones exist but are not shown here)',
+    )
+  }
+  return lines.join('\n')
 }
 
-// Used for people and entities: each line also says whether the node
-// already has a page, which is what makes promotion possible. A model
-// deciding whether to fill pagePromotions or newPersons needs to see this
-// directly; it cannot infer page status from the id or label alone.
-function renderListingWithPageStatus(nodes: GraphNode[]): string {
+// Used for people: each line also says whether the node already has a
+// page, which is what makes promotion possible. A model deciding whether
+// to fill pagePromotions or newPersons needs to see this directly; it
+// cannot infer page status from the id or label alone. truncated is true
+// when the caller already cut the list down to PEOPLE_CAP.
+function renderListingWithPageStatus(nodes: GraphNode[], truncated = false): string {
   if (nodes.length === 0) {
     return '(none yet)'
   }
-  return nodes
-    .map((node) => `- ${node.id}: ${node.label} (${node.doc ? 'has a page' : 'no page yet'})`)
-    .join('\n')
+  const lines = nodes.map(
+    (node) => `- ${node.id}: ${node.label} (${node.doc ? 'has a page' : 'no page yet'})`,
+  )
+  if (truncated) {
+    lines.push(
+      '(list truncated: paged people are kept first, then the most recently created; older, unpaged people exist but are not shown here)',
+    )
+  }
+  return lines.join('\n')
 }
 
 function renderTranscript(transcript: TranscriptLine[]): string {
@@ -194,10 +219,10 @@ function buildReflectionPrompt(context: ReflectionContext, transcript: Transcrip
     renderListing(context.realms),
     '',
     'Known people:',
-    renderListingWithPageStatus(context.people),
+    renderListingWithPageStatus(context.people, context.peopleTruncated),
     '',
     'Known entities:',
-    renderListing(context.entities),
+    renderListing(context.entities, context.entitiesTruncated),
     '',
     'Transcript:',
     renderTranscript(transcript),
@@ -211,6 +236,8 @@ function buildReflectionPrompt(context: ReflectionContext, transcript: Transcrip
     "Non-people things go in newEntities, using the existing entity node type: films, books, companies, places, bands, and works of fiction that have a real part in this person's life. Entities never get a page in this release, so there is no page decision to make for them.",
     '',
     'Do not add an entry to newPersons or newEntities for a name or thing already listed above under Known people or Known entities, whether or not it has a page yet; listing it again would create a duplicate. If a known person with no page yet now recurs or clearly matters, use pagePromotions instead, with their existing id from the Known people list. If a known person or entity is simply mentioned again, no new entry is needed at all.',
+    '',
+    'This rule is about the same person coming up again, not about a shared name. If someone who comes up shares a name with a person already listed under Known people but is clearly a different human, they are not a duplicate: give them a distinguishing name in newPersons (for example "Sarah from work" rather than "Sarah") so they file under their own node instead of merging into the existing one. There is no way to undo a merge later, so when in doubt, treat two people who share a name as two different people. Merging two different people into one record is worse than having two records.',
     '',
     "Do not add a node, in newPersons, newEntities, or pagePromotions, for a general fact about the world, or for a public person or incident mentioned only as an analogy or an example. The test is whether the thing has a real part in this person's life, not whether it was mentioned. Something invoked only to illustrate a point is not a node.",
     '',
