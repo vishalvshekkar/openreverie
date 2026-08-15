@@ -55,6 +55,8 @@ function emptyReflectionOutput(summary: string) {
     attributions: [],
     newArcs: [],
     newPersons: [],
+    newEntities: [],
+    pagePromotions: [],
     arcUpdates: [],
     personUpdates: [],
     constitutionUpdate: null,
@@ -443,6 +445,14 @@ describe('dispatchTool', () => {
       },
     ])
 
+    const engine = await MemoryEngine.open(dir, fakeDeps())
+    const sessionId = await engine.startSession()
+
+    // Appended after open(), not before: a proposal present at open time is
+    // now materialized and resolved silently by the engine itself (see
+    // openreverie's remember-by-default round). Appending these two here
+    // instead still exercises the resolve_proposal tool's own accept and
+    // reject paths against whatever is actually sitting in proposals.jsonl.
     const acceptedProposal: Proposal = {
       id: newId('prop'),
       ts: '2026-08-01T01:00:00.000Z',
@@ -460,9 +470,6 @@ describe('dispatchTool', () => {
       source: 'session_seed',
     }
     await appendProposals(paths, [acceptedProposal, rejectedProposal])
-
-    const engine = await MemoryEngine.open(dir, fakeDeps())
-    const sessionId = await engine.startSession()
 
     const acceptResult = await dispatchTool(
       engine,
