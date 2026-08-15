@@ -3,13 +3,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   appendGraph,
-  appendProposals,
   type EngineDeps,
   MemoryEngine,
   memoryPaths,
   newId,
-  type Proposal,
-  pendingProposals,
   readDocument,
   writeDocumentAtomic,
 } from '@openreverie/memory'
@@ -55,6 +52,8 @@ function emptyReflectionOutput(summary: string) {
     attributions: [],
     newArcs: [],
     newPersons: [],
+    newEntities: [],
+    pagePromotions: [],
     arcUpdates: [],
     personUpdates: [],
     constitutionUpdate: null,
@@ -62,7 +61,7 @@ function emptyReflectionOutput(summary: string) {
 }
 
 describe('toolDefinitions', () => {
-  it('lists exactly the nine memory and style tools with non-empty descriptions and a JSON schema', () => {
+  it('lists exactly the eight memory and style tools with non-empty descriptions and a JSON schema', () => {
     const defs = toolDefinitions()
     const names = defs.map((d) => d.name).sort()
     expect(names).toEqual(
@@ -73,7 +72,6 @@ describe('toolDefinitions', () => {
         'read_document',
         'read_transcript',
         'remember',
-        'resolve_proposal',
         'search_memory',
         'update_style',
       ].sort(),
@@ -82,6 +80,16 @@ describe('toolDefinitions', () => {
       expect(def.description.length).toBeGreaterThan(20)
       expect(def.parameters).toMatchObject({ type: 'object' })
     }
+  })
+
+  // resolve_proposal is the literal cause of the dogfooding failure this
+  // round of work fixes: it is what let the model ask permission to
+  // remember something. Asking is removed entirely, not narrowed, so this
+  // guards against the tool coming back on the list by accident.
+  it('does not list a resolve_proposal tool: asking permission to remember is removed entirely', () => {
+    const defs = toolDefinitions()
+    const names = defs.map((d) => d.name)
+    expect(names).not.toContain('resolve_proposal')
   })
 
   it('never uses an em dash in a tool description', () => {
@@ -415,89 +423,16 @@ describe('dispatchTool', () => {
     await engine.close()
   })
 
-  it('resolve_proposal accepted materializes the link and rejected leaves no trace', async () => {
-    const paths = memoryPaths(dir)
-    await MemoryEngine.open(dir, fakeDeps()).then((e) => e.close())
-
-    await appendGraph(paths, [
-      {
-        ts: '2026-08-01T00:00:00.000Z',
-        op: 'assert',
-        node: 'person_a',
-        type: 'person',
-        label: 'Alex',
-      },
-      {
-        ts: '2026-08-01T00:00:00.000Z',
-        op: 'assert',
-        node: 'person_b',
-        type: 'person',
-        label: 'Sam',
-      },
-      {
-        ts: '2026-08-01T00:00:00.000Z',
-        op: 'assert',
-        node: 'person_c',
-        type: 'person',
-        label: 'Jo',
-      },
-    ])
-
-    const acceptedProposal: Proposal = {
-      id: newId('prop'),
-      ts: '2026-08-01T01:00:00.000Z',
-      kind: 'link',
-      summary: 'Alex relates to Sam',
-      payload: { edge: 'relates_to', from: 'person_a', to: 'person_b', confidence: 0.7 },
-      source: 'session_seed',
-    }
-    const rejectedProposal: Proposal = {
-      id: newId('prop'),
-      ts: '2026-08-01T02:00:00.000Z',
-      kind: 'link',
-      summary: 'Alex relates to Jo',
-      payload: { edge: 'relates_to', from: 'person_a', to: 'person_c', confidence: 0.7 },
-      source: 'session_seed',
-    }
-    await appendProposals(paths, [acceptedProposal, rejectedProposal])
-
+  it('dispatching resolve_proposal returns an unknown-tool JSON error, not a throw: the tool no longer exists', async () => {
     const engine = await MemoryEngine.open(dir, fakeDeps())
     const sessionId = await engine.startSession()
 
-    const acceptResult = await dispatchTool(
+    const result = await dispatchTool(
       engine,
       sessionId,
-      call('resolve_proposal', { proposalId: acceptedProposal.id, resolution: 'accepted' }),
+      call('resolve_proposal', { proposalId: 'prop_x', resolution: 'accepted' }),
     )
-    expect(JSON.parse(acceptResult)).toEqual({ ok: true })
-
-    const rejectResult = await dispatchTool(
-      engine,
-      sessionId,
-      call('resolve_proposal', { proposalId: rejectedProposal.id, resolution: 'rejected' }),
-    )
-    expect(JSON.parse(rejectResult)).toEqual({ ok: true })
-
-    const stillPending = await pendingProposals(paths)
-    expect(stillPending).toEqual([])
-
-    const neighborsResult = await dispatchTool(
-      engine,
-      sessionId,
-      call('graph_query', { kind: 'neighbors', nodeId: 'person_a' }),
-    )
-    const neighbors = JSON.parse(neighborsResult) as {
-      edge: { edge: string }
-      node: { id: string }
-    }[]
-    expect(neighbors.map((n) => n.node.id)).toEqual(['person_b'])
-
-    const unknownResult = await dispatchTool(
-      engine,
-      sessionId,
-      call('resolve_proposal', { proposalId: 'prop_does_not_exist', resolution: 'accepted' }),
-    )
-    expect(typeof JSON.parse(unknownResult).error).toBe('string')
+    expect(JSON.parse(result)).toEqual({ error: 'unknown tool: resolve_proposal' })
 
     await engine.close()
   })

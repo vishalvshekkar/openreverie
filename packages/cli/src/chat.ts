@@ -34,7 +34,6 @@ export interface ChatIo {
 // fallback instead of silence or a crash.
 const TOOL_NOTICES: Record<string, string> = {
   remember: 'remembering',
-  resolve_proposal: 'updating memory',
   update_style: 'adjusting style',
   search_memory: 'searching memory',
   read_document: 'reading memory',

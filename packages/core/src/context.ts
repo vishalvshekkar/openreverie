@@ -2,10 +2,10 @@
 // at the start of a session. It is the persona for the configured safety
 // mode, followed by today's date, followed by a snapshot of memory state
 // pulled from MemoryEngine.sessionContext(): the constitution, realms,
-// active arcs, the latest daily rollup, session summaries from the last
-// week, and pending proposals. A section with nothing to say is left out
-// entirely rather than rendered as an empty header, so the model never sees
-// "## Realms" with nothing under it.
+// active arcs, known people and entities, recent intentions, the latest
+// daily rollup, and session summaries from the last week. A section with
+// nothing to say is left out entirely rather than rendered as an empty
+// header, so the model never sees "## Realms" with nothing under it.
 //
 // The model is never told the current date anywhere else. Recent sessions
 // and the latest daily rollup are rendered with absolute dates
@@ -36,9 +36,11 @@ export async function assembleSystemPrompt(
     constitutionSection(context),
     realmsSection(context),
     arcsSection(context),
+    peopleSection(context),
+    entitiesSection(context),
+    recentIntentionsSection(context),
     latestDailyRollupSection(context),
     recentSummariesSection(context),
-    pendingProposalsSection(context),
   ].filter((section): section is string => section !== undefined)
 
   return sections.join('\n\n')
@@ -99,12 +101,34 @@ function recentSummariesSection(context: SessionContext): string | undefined {
   return `## Recent sessions\n\n${parts.join('\n\n')}`
 }
 
-function pendingProposalsSection(context: SessionContext): string | undefined {
-  if (context.pendingProposals.length === 0) return undefined
-  const instruction =
-    "Weave these into the conversation naturally, near the start, and record the user's " +
-    'decision on each with the resolve_proposal tool, passing the bracketed id shown before ' +
-    'each proposal below as proposalId exactly as written.'
-  const lines = context.pendingProposals.map((proposal) => `- [${proposal.id}] ${proposal.summary}`)
-  return `## Pending proposals\n\n${instruction}\n\n${lines.join('\n')}`
+function peopleSection(context: SessionContext): string | undefined {
+  if (context.people.length === 0) return undefined
+  const lines = context.people.map(
+    (person) => `- ${person.name} (${person.id}, ${person.hasPage ? 'has a page' : 'no page yet'})`,
+  )
+  if (context.peopleTruncated) {
+    lines.push(
+      '(list truncated: paged people are kept first, then the most recently created; older, unpaged people exist but are not shown here)',
+    )
+  }
+  return `## People\n\n${lines.join('\n')}`
+}
+
+function entitiesSection(context: SessionContext): string | undefined {
+  if (context.entities.length === 0) return undefined
+  const lines = context.entities.map((entity) => `- ${entity.name}`)
+  if (context.entitiesTruncated) {
+    lines.push(
+      '(list truncated to the most recently created entries; older ones exist but are not shown here)',
+    )
+  }
+  return `## Entities\n\n${lines.join('\n')}`
+}
+
+function recentIntentionsSection(context: SessionContext): string | undefined {
+  if (context.recentIntentions.length === 0) return undefined
+  const lines = context.recentIntentions.map(
+    (intention) => `- ${intention.date}: ${intention.text}`,
+  )
+  return `## Recent intentions\n\n${lines.join('\n')}`
 }

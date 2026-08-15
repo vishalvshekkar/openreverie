@@ -30,6 +30,8 @@ function emptyReflectionOutput(summary: string): ReflectionOutput {
     attributions: [],
     newArcs: [],
     newPersons: [],
+    newEntities: [],
+    pagePromotions: [],
     arcUpdates: [],
     personUpdates: [],
     constitutionUpdate: null,
@@ -117,6 +119,8 @@ describe('MemoryEngine', () => {
           },
         ],
         newPersons: [],
+        newEntities: [],
+        pagePromotions: [],
         arcUpdates: [],
         personUpdates: [],
         constitutionUpdate: null,
@@ -919,6 +923,7 @@ describe('MemoryEngine', () => {
             name: 'Sam',
             reason: 'recurring running partner, mentioned again this session',
             itemIndexes: [0],
+            deservesPage: true,
             narrative: 'Sam is a running partner who joins for weekend long runs.',
           },
         ],
@@ -1011,6 +1016,7 @@ describe('MemoryEngine', () => {
             name: 'Sam',
             reason: 'recurring running partner',
             itemIndexes: [0],
+            deservesPage: true,
             narrative: '',
           },
         ],
@@ -1068,7 +1074,7 @@ describe('MemoryEngine', () => {
       await engine.close()
     })
 
-    it('a pre-existing pending proposal still surfaces in sessionContext and still resolves end to end', async () => {
+    it('materializes a pre-existing pending proposal silently on open, with no conversation and nothing left pending', async () => {
       const proposal: Proposal = {
         id: newId('prop'),
         ts: new Date().toISOString(),
@@ -1081,11 +1087,8 @@ describe('MemoryEngine', () => {
 
       const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
 
-      const context = await engine.sessionContext()
-      expect(context.pendingProposals.map((p) => p.id)).toContain(proposal.id)
-
-      await engine.resolveProposal(proposal.id, 'accepted')
-
+      // Already materialized and resolved by the time open() returns: no
+      // acceptance step, no call to resolveProposal from the test at all.
       const graph = await readGraph(paths)
       const arcNode = [...graph.nodes.values()].find(
         (n) => n.type === 'arc' && n.label === 'Legacy Arc',
@@ -1095,7 +1098,147 @@ describe('MemoryEngine', () => {
       const pending = await pendingProposals(paths)
       expect(pending.find((p) => p.id === proposal.id)).toBeUndefined()
 
+      // Silent: the resolution is recorded (proposals.jsonl keeps its
+      // compatibility promise), but nothing about draining it is surfaced
+      // as a warning.
+      const rawProposals = await readFile(paths.proposals, 'utf8')
+      expect(rawProposals).toContain(`"op":"resolve","id":"${proposal.id}","resolution":"accepted"`)
+      expect(engine.warnings).toEqual([])
+
       await engine.close()
+    })
+
+    it('drains multiple pre-existing proposals of different kinds silently on open', async () => {
+      const arcItemId = newId('item')
+      const personItemId = newId('item')
+      const arcProposal: Proposal = {
+        id: newId('prop'),
+        ts: new Date().toISOString(),
+        kind: 'new_arc',
+        summary: 'A legacy arc proposal.',
+        payload: { name: 'Legacy Arc', realm: 'Legacy Realm', itemIds: [arcItemId] },
+        source: 'session_legacy',
+      }
+      const personProposal: Proposal = {
+        id: newId('prop'),
+        ts: new Date().toISOString(),
+        kind: 'new_person',
+        summary: 'A legacy person proposal.',
+        payload: { name: 'Legacy Person', itemIds: [personItemId] },
+        source: 'session_legacy',
+      }
+      await appendProposals(paths, [arcProposal, personProposal])
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+
+      const graph = await readGraph(paths)
+      expect(
+        [...graph.nodes.values()].some((n) => n.type === 'arc' && n.label === 'Legacy Arc'),
+      ).toBe(true)
+      expect(
+        [...graph.nodes.values()].some((n) => n.type === 'person' && n.label === 'Legacy Person'),
+      ).toBe(true)
+
+      const pending = await pendingProposals(paths)
+      expect(pending).toHaveLength(0)
+
+      await engine.close()
+    })
+
+    it('a legacy proposal with a malformed payload does not prevent open() from succeeding or the rest of the queue from draining', async () => {
+      const malformed: Proposal = {
+        id: newId('prop'),
+        ts: new Date().toISOString(),
+        kind: 'new_arc',
+        summary: 'A proposal written under a shape this release no longer produces.',
+        // itemIds is missing entirely: materializeProposal's unchecked cast
+        // to { name; realm; itemIds } lets this through, and createArc's
+        // `for (const itemId of input.itemIds)` throws a TypeError on it.
+        payload: { name: 'Malformed Arc', realm: 'Some Realm' },
+        source: 'session_legacy',
+      }
+      const good: Proposal = {
+        id: newId('prop'),
+        ts: new Date().toISOString(),
+        kind: 'new_arc',
+        summary: 'A proposal in the shape this release actually writes.',
+        payload: { name: 'Good Arc', realm: 'Some Realm', itemIds: [newId('item')] },
+        source: 'session_legacy',
+      }
+      await appendProposals(paths, [malformed, good])
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+
+      const graph = await readGraph(paths)
+      expect([...graph.nodes.values()].some((n) => n.label === 'Malformed Arc')).toBe(false)
+      expect(
+        [...graph.nodes.values()].some((n) => n.type === 'arc' && n.label === 'Good Arc'),
+      ).toBe(true)
+
+      const pending = await pendingProposals(paths)
+      expect(pending).toHaveLength(0)
+
+      expect(
+        engine.warnings.some(
+          (w) => w.includes(malformed.id) && w.toLowerCase().includes('materialize'),
+        ),
+      ).toBe(true)
+
+      await engine.close()
+    })
+
+    it('a legacy proposal with a malformed payload does not make a second open() throw either', async () => {
+      const malformed: Proposal = {
+        id: newId('prop'),
+        ts: new Date().toISOString(),
+        kind: 'new_arc',
+        summary: 'A proposal written under a shape this release no longer produces.',
+        payload: { name: 'Malformed Arc', realm: 'Some Realm' },
+        source: 'session_legacy',
+      }
+      await appendProposals(paths, [malformed])
+
+      const first = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      await first.close()
+
+      const second = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const pending = await pendingProposals(paths)
+      expect(pending).toHaveLength(0)
+      await second.close()
+    })
+
+    it('a genuinely corrupt line in the proposal queue does not make open() throw', async () => {
+      // Not a malformed payload (valid JSON, wrong shape): a truncated line
+      // that is not valid JSON at all, the kind appendFile's lack of crash
+      // atomicity or a synced, hand-edited folder can produce.
+      await ensureMemoryTree(paths)
+      await writeFile(paths.proposals, '{"id":"prop_broken","kind":"new_arc"\n', 'utf8')
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+
+      expect(
+        engine.warnings.some(
+          (w) => w.includes(paths.proposals) || w.toLowerCase().includes('proposal queue'),
+        ),
+      ).toBe(true)
+
+      await engine.close()
+    })
+
+    it('a genuinely corrupt proposal queue does not block a second open() either, so reindex keeps working', async () => {
+      await ensureMemoryTree(paths)
+      await writeFile(paths.proposals, '{"id":"prop_broken","kind":"new_arc"\n', 'utf8')
+
+      const first = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      await first.close()
+
+      const second = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      expect(
+        second.warnings.some(
+          (w) => w.includes(paths.proposals) || w.toLowerCase().includes('proposal queue'),
+        ),
+      ).toBe(true)
+      await second.close()
     })
 
     it('a reflection run appends nothing to proposals.jsonl even with new arcs, new persons, and low-confidence attributions', async () => {
@@ -1326,6 +1469,688 @@ describe('MemoryEngine', () => {
       expect([...graphAfterRetry.nodes.values()].some((n) => n.label === 'Marathon Training')).toBe(
         true,
       )
+
+      await engine.close()
+    })
+  })
+
+  describe('node-only capture, entities, promotion, and dedup', () => {
+    let dir: string
+    let paths: MemoryPaths
+
+    beforeEach(async () => {
+      dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-nodes-'))
+      paths = memoryPaths(dir)
+      await ensureMemoryTree(paths)
+    })
+
+    afterEach(async () => {
+      await rm(dir, { recursive: true, force: true })
+    })
+
+    it('creates a person node with no page and no doc when deservesPage is false', async () => {
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('Mentioned a coworker in passing.'),
+        items: [{ text: 'Mentioned working with Priya on the launch', kind: 'event' }],
+        newPersons: [
+          {
+            name: 'Priya',
+            reason: 'coworker mentioned this session, not yet recurring',
+            itemIndexes: [0],
+            deservesPage: false,
+            narrative: '',
+          },
+        ],
+      }
+      const chat = new FakeChatProvider([{ text: JSON.stringify(out), toolCalls: [] }])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      const sessionId = await engine.startSession()
+      await engine.appendTranscript(sessionId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'Worked with Priya on the launch today.',
+      })
+      await engine.endSession(sessionId)
+
+      const graph = await readGraph(paths)
+      const personNode = [...graph.nodes.values()].find(
+        (n) => n.type === 'person' && n.label === 'Priya',
+      )
+      if (!personNode) throw new Error('expected a person node')
+      expect(personNode.doc).toBeUndefined()
+
+      const itemNode = [...graph.nodes.values()].find((n) => n.type === 'item')
+      if (!itemNode) throw new Error('expected the minted item node')
+      expect(graph.edges.get(`involves:${itemNode.id}:${personNode.id}`)).toMatchObject({
+        confidence: 1,
+        confirmed: false,
+      })
+
+      await engine.close()
+    })
+
+    it('creates an entity node with no page and no doc, connected by a relates_to edge', async () => {
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('Rewatched a favorite film.'),
+        items: [{ text: 'Rewatched a favorite film for the third time', kind: 'event' }],
+        newEntities: [
+          {
+            name: 'A Favorite Film',
+            reason: 'rewatched again, clearly matters to them',
+            itemIndexes: [0],
+          },
+        ],
+      }
+      const chat = new FakeChatProvider([{ text: JSON.stringify(out), toolCalls: [] }])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      const sessionId = await engine.startSession()
+      await engine.appendTranscript(sessionId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'Rewatched my favorite film again tonight.',
+      })
+      await engine.endSession(sessionId)
+
+      const graph = await readGraph(paths)
+      const entityNode = [...graph.nodes.values()].find(
+        (n) => n.type === 'entity' && n.label === 'A Favorite Film',
+      )
+      if (!entityNode) throw new Error('expected an entity node')
+      expect(entityNode.doc).toBeUndefined()
+
+      const itemNode = [...graph.nodes.values()].find((n) => n.type === 'item')
+      if (!itemNode) throw new Error('expected the minted item node')
+      expect(graph.edges.get(`relates_to:${itemNode.id}:${entityNode.id}`)).toMatchObject({
+        confidence: 1,
+        confirmed: false,
+      })
+
+      await engine.close()
+    })
+
+    it('drops a newEntities entry whose itemIndexes resolve to no items, materializing nothing for it', async () => {
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('A session with a ghost entity.'),
+        newEntities: [
+          { name: 'Ghost Entity', reason: 'only out-of-range indexes', itemIndexes: [9] },
+        ],
+      }
+      const chat = new FakeChatProvider([{ text: JSON.stringify(out), toolCalls: [] }])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      const sessionId = await engine.startSession()
+      await engine.appendTranscript(sessionId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'A quiet session.',
+      })
+      await engine.endSession(sessionId)
+
+      const graph = await readGraph(paths)
+      expect([...graph.nodes.values()].some((n) => n.label === 'Ghost Entity')).toBe(false)
+
+      await engine.close()
+    })
+
+    it('promotes a person captured node-only in one session to a page in a later session', async () => {
+      const firstOut: ReflectionOutput = {
+        ...emptyReflectionOutput('Mentioned a coworker in passing.'),
+        items: [{ text: 'Mentioned working with Priya on the launch', kind: 'event' }],
+        newPersons: [
+          {
+            name: 'Priya',
+            reason: 'coworker mentioned once, not yet recurring',
+            itemIndexes: [0],
+            deservesPage: false,
+            narrative: '',
+          },
+        ],
+      }
+      const firstChat = new FakeChatProvider([{ text: JSON.stringify(firstOut), toolCalls: [] }])
+      let engine = await MemoryEngine.open(dir, fakeDeps(firstChat))
+
+      const firstSessionId = await engine.startSession()
+      await engine.appendTranscript(firstSessionId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'Worked with Priya on the launch today.',
+      })
+      await engine.endSession(firstSessionId)
+
+      const graphAfterFirst = await readGraph(paths)
+      const priyaNode = [...graphAfterFirst.nodes.values()].find(
+        (n) => n.type === 'person' && n.label === 'Priya',
+      )
+      if (!priyaNode) throw new Error('expected a node-only person after the first session')
+      expect(priyaNode.doc).toBeUndefined()
+
+      await engine.close()
+
+      // Second session: Priya recurs, so reflection promotes her existing
+      // node-only id to a page instead of minting a second node for her.
+      const promotedNarrative = 'Priya is a coworker who keeps coming up on the launch project.'
+      const secondOut: ReflectionOutput = {
+        ...emptyReflectionOutput('Priya came up again, this time it is clear she matters.'),
+        items: [{ text: 'Worked late with Priya again on the launch', kind: 'event' }],
+        pagePromotions: [
+          {
+            nodeId: priyaNode.id,
+            reason: 'Priya keeps recurring across sessions now',
+            itemIndexes: [0],
+            narrative: promotedNarrative,
+          },
+        ],
+      }
+      const secondChat = new FakeChatProvider([{ text: JSON.stringify(secondOut), toolCalls: [] }])
+      engine = await MemoryEngine.open(dir, fakeDeps(secondChat))
+
+      // The prompt this session must show Priya as already known, with no
+      // page yet: that is the visibility promotion depends on.
+      const secondSessionId = await engine.startSession()
+      await engine.appendTranscript(secondSessionId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'Worked late with Priya again on the launch.',
+      })
+      await engine.endSession(secondSessionId)
+
+      const promptSeenBySecondSession = secondChat.requests[0]?.messages[0]?.content ?? ''
+      expect(promptSeenBySecondSession).toContain(`${priyaNode.id}: Priya (no page yet)`)
+
+      const graphAfterSecond = await readGraph(paths)
+      const promotedNode = graphAfterSecond.nodes.get(priyaNode.id)
+      if (!promotedNode?.doc)
+        throw new Error('expected Priya to have a doc pointer after promotion')
+      // Same node id preserved across the promotion: nothing pointing at
+      // Priya from the first session goes stale.
+      expect(promotedNode.id).toBe(priyaNode.id)
+
+      const personDoc = await readDocument(promotedNode.doc)
+      expect(personDoc.body).toBe(`${promotedNarrative}\n`)
+      expect(personDoc.meta.node).toBe(priyaNode.id)
+
+      const itemNode = [...graphAfterSecond.nodes.values()].find(
+        (n) => n.type === 'item' && n.label === 'Worked late with Priya again on the launch',
+      )
+      if (!itemNode) throw new Error('expected the second session item node')
+      expect(graphAfterSecond.edges.get(`involves:${itemNode.id}:${priyaNode.id}`)).toMatchObject({
+        confidence: 1,
+        confirmed: false,
+      })
+
+      await engine.close()
+    })
+
+    it('does not gate a page promotion on this session resolving any items', async () => {
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'person_priya',
+          type: 'person',
+          label: 'Priya',
+        },
+      ])
+
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput(
+          'Priya was clearly central to this session, but no single new item names her.',
+        ),
+        pagePromotions: [
+          {
+            nodeId: 'person_priya',
+            reason: 'recurs now, even with no item indexes this session',
+            itemIndexes: [],
+            narrative: 'Priya matters.',
+          },
+        ],
+      }
+      const chat = new FakeChatProvider([{ text: JSON.stringify(out), toolCalls: [] }])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      const sessionId = await engine.startSession()
+      await engine.appendTranscript(sessionId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'A session about Priya with no distinct new item.',
+      })
+      await engine.endSession(sessionId)
+
+      const graph = await readGraph(paths)
+      const priyaNode = graph.nodes.get('person_priya')
+      if (!priyaNode?.doc)
+        throw new Error('expected Priya to be promoted despite zero item indexes')
+      const personDoc = await readDocument(priyaNode.doc)
+      expect(personDoc.body).toBe('Priya matters.\n')
+
+      await engine.close()
+    })
+
+    it('drops a pagePromotions entry targeting a person who already has a page, instead of writing a second page', async () => {
+      const personDocPath = join(paths.peopleDir, 'priya.md')
+      await writeDocumentAtomic({
+        path: personDocPath,
+        meta: { id: newId('doc'), name: 'Priya', node: 'person_priya' },
+        body: 'Original Priya page.\n',
+      })
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'person_priya',
+          type: 'person',
+          label: 'Priya',
+          doc: personDocPath,
+        },
+      ])
+
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('Priya came up again.'),
+        pagePromotions: [
+          {
+            nodeId: 'person_priya',
+            reason: 'mistakenly promoted again',
+            itemIndexes: [],
+            narrative: 'Should never land, she already has a page.',
+          },
+        ],
+      }
+      const chat = new FakeChatProvider([{ text: JSON.stringify(out), toolCalls: [] }])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      const sessionId = await engine.startSession()
+      await engine.appendTranscript(sessionId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'Priya came up again today.',
+      })
+      await engine.endSession(sessionId)
+
+      const personDoc = await readDocument(personDocPath)
+      expect(personDoc.body).toBe('Original Priya page.\n')
+
+      await engine.close()
+    })
+
+    // Guards against a double page write when a single reflection output
+    // names the same already-known, node-only person in BOTH newPersons
+    // (as if she were new, deservesPage true) AND pagePromotions (targeting
+    // her real existing node id): a plausible way for a model to slip,
+    // since it decides newPersons and pagePromotions independently.
+    //
+    // What actually carries this safety: whichever of the two loops runs
+    // second reads existing.doc off the live graphState and skips writing
+    // a page once it is set, and writePersonPage's syncGraph() call is what
+    // makes the first loop's write visible to the second loop's read. Loop
+    // order (newPersons before pagePromotions in materializeNew today) does
+    // NOT matter for this specific double-write guarantee: the two guards
+    // are symmetric, so either loop running first and the other second is
+    // still safe, and this test passes either way (verified by temporarily
+    // swapping the two loop blocks in engine.ts while writing this test).
+    // What is genuinely load-bearing is the `existing.doc` check itself:
+    // remove it from the pagePromotions guard and this test fails with two
+    // person pages for the same node id, one from each branch.
+    //
+    // Loop order does still matter for something else, outside what this
+    // test checks: when pagePromotions runs after a page already exists,
+    // it drops that entry's items with no fallback attach (unlike
+    // newPersons, which falls back to attachItemsToNode), so an item
+    // attributed only through pagePromotions in this exact scenario is
+    // silently never linked to the person. See the report for this task.
+    it('writes exactly one page when one reflection output names the same known, node-only person in both newPersons and pagePromotions', async () => {
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'person_priya',
+          type: 'person',
+          label: 'Priya',
+        },
+      ])
+
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('Priya came up twice, and reflection listed her both ways.'),
+        items: [
+          { text: 'Priya helped debug the release', kind: 'event' },
+          { text: 'Priya stayed late again to help', kind: 'event' },
+        ],
+        newPersons: [
+          {
+            name: 'Priya',
+            reason: 'model treated her as newly worth a page',
+            itemIndexes: [0],
+            deservesPage: true,
+            narrative: 'From newPersons: Priya has become a real presence at work.',
+          },
+        ],
+        pagePromotions: [
+          {
+            nodeId: 'person_priya',
+            reason: 'model also promoted her existing node-only id',
+            itemIndexes: [1],
+            narrative: 'From pagePromotions: Priya has become a real presence at work.',
+          },
+        ],
+      }
+      const chat = new FakeChatProvider([{ text: JSON.stringify(out), toolCalls: [] }])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      const sessionId = await engine.startSession()
+      await engine.appendTranscript(sessionId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'Priya helped a lot today, staying late again.',
+      })
+      await engine.endSession(sessionId)
+
+      const graph = await readGraph(paths)
+      const personNodes = [...graph.nodes.values()].filter(
+        (n) => n.type === 'person' && n.label === 'Priya',
+      )
+      expect(personNodes).toHaveLength(1)
+
+      const personPages = await listDocuments(paths.peopleDir)
+      expect(personPages).toHaveLength(1)
+
+      await engine.close()
+    })
+
+    it('drops a pagePromotions entry targeting an unknown node id', async () => {
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('A session naming someone not actually known.'),
+        pagePromotions: [
+          { nodeId: 'person_does_not_exist', reason: 'unknown', itemIndexes: [], narrative: 'x' },
+        ],
+      }
+      const chat = new FakeChatProvider([{ text: JSON.stringify(out), toolCalls: [] }])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      const sessionId = await engine.startSession()
+      await engine.appendTranscript(sessionId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'A quiet session.',
+      })
+      await expect(engine.endSession(sessionId)).resolves.toBeUndefined()
+
+      await engine.close()
+    })
+
+    // The genuine relist case: the identical name, meaning the model
+    // believes (correctly, in this test) that it is the same person.
+    // Contrast with the escape-hatch test right below, where a
+    // distinguishing name is used because it is a different person who
+    // happens to share a first name: that one must NOT attach to this
+    // node, and does not.
+    it('attaches items to the existing node when newPersons relists the same person under the identical name', async () => {
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'person_priya',
+          type: 'person',
+          label: 'Priya',
+        },
+      ])
+
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput(
+          'Priya mentioned again, model relists her despite the instruction not to.',
+        ),
+        items: [{ text: 'Worked with Priya again', kind: 'event' }],
+        newPersons: [
+          {
+            name: 'Priya',
+            reason: 'relisted by mistake',
+            itemIndexes: [0],
+            deservesPage: false,
+            narrative: '',
+          },
+        ],
+      }
+      const chat = new FakeChatProvider([{ text: JSON.stringify(out), toolCalls: [] }])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      const sessionId = await engine.startSession()
+      await engine.appendTranscript(sessionId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'Worked with Priya again today.',
+      })
+      await engine.endSession(sessionId)
+
+      const graph = await readGraph(paths)
+      const personNodes = [...graph.nodes.values()].filter(
+        (n) => n.type === 'person' && n.label === 'Priya',
+      )
+      expect(personNodes).toHaveLength(1)
+
+      const itemNode = [...graph.nodes.values()].find((n) => n.type === 'item')
+      if (!itemNode) throw new Error('expected the minted item node')
+      expect(graph.edges.get(`involves:${itemNode.id}:person_priya`)).toMatchObject({
+        confidence: 1,
+        confirmed: false,
+      })
+
+      await engine.close()
+    })
+
+    it('a newPersons entry with a distinguishing name does not merge into an existing person who happens to share a first name', async () => {
+      // The escape hatch: label dedup is exact (case-insensitive), so a
+      // second, different Priya captured under a distinguishing name (the
+      // prompt now tells the model to do this rather than merge two
+      // different people into one node) resolves as a brand-new node, not
+      // an attachment to the first Priya's.
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'person_priya',
+          type: 'person',
+          label: 'Priya',
+        },
+      ])
+
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('A different Priya, from the new team, came up this session.'),
+        items: [{ text: 'Met Priya from the new team', kind: 'event' }],
+        newPersons: [
+          {
+            name: 'Priya from the new team',
+            reason: 'a different person who shares a first name with a known person',
+            itemIndexes: [0],
+            deservesPage: false,
+            narrative: '',
+          },
+        ],
+      }
+      const chat = new FakeChatProvider([{ text: JSON.stringify(out), toolCalls: [] }])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      const sessionId = await engine.startSession()
+      await engine.appendTranscript(sessionId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'Met Priya from the new team today.',
+      })
+      await engine.endSession(sessionId)
+
+      const graph = await readGraph(paths)
+      const priyaNodes = [...graph.nodes.values()].filter(
+        (n) => n.type === 'person' && n.label === 'Priya',
+      )
+      expect(priyaNodes).toHaveLength(1)
+      const newPriyaNodes = [...graph.nodes.values()].filter(
+        (n) => n.type === 'person' && n.label === 'Priya from the new team',
+      )
+      expect(newPriyaNodes).toHaveLength(1)
+      expect(newPriyaNodes[0]?.id).not.toBe('person_priya')
+
+      // The original Priya's node carries no edge to this session's item:
+      // nothing from this session attached to her.
+      const itemNode2 = [...graph.nodes.values()].find((n) => n.type === 'item')
+      if (!itemNode2) throw new Error('expected the minted item node')
+      expect(graph.edges.get(`involves:${itemNode2.id}:person_priya`)).toBeUndefined()
+      expect(graph.edges.get(`involves:${itemNode2.id}:${newPriyaNodes[0]?.id}`)).toMatchObject({
+        confidence: 1,
+        confirmed: false,
+      })
+
+      await engine.close()
+    })
+
+    it('resolves a newPersons entry that relists an already-paged known person by attaching items, not writing a second page', async () => {
+      const personDocPath = join(paths.peopleDir, 'priya.md')
+      await writeDocumentAtomic({
+        path: personDocPath,
+        meta: { id: newId('doc'), name: 'Priya', node: 'person_priya' },
+        body: 'Original Priya page.\n',
+      })
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'person_priya',
+          type: 'person',
+          label: 'Priya',
+          doc: personDocPath,
+        },
+      ])
+
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('Priya mentioned again.'),
+        items: [{ text: 'Worked with Priya again', kind: 'event' }],
+        newPersons: [
+          {
+            name: 'Priya',
+            reason: 'relisted by mistake, she already has a page',
+            itemIndexes: [0],
+            deservesPage: true,
+            narrative: 'Should never land, she already has a page.',
+          },
+        ],
+      }
+      const chat = new FakeChatProvider([{ text: JSON.stringify(out), toolCalls: [] }])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      const sessionId = await engine.startSession()
+      await engine.appendTranscript(sessionId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'Worked with Priya again today.',
+      })
+      await engine.endSession(sessionId)
+
+      const personDoc = await readDocument(personDocPath)
+      expect(personDoc.body).toBe('Original Priya page.\n')
+
+      const graph = await readGraph(paths)
+      const itemNode = [...graph.nodes.values()].find((n) => n.type === 'item')
+      if (!itemNode) throw new Error('expected the minted item node')
+      expect(graph.edges.get(`involves:${itemNode.id}:person_priya`)).toMatchObject({
+        confidence: 1,
+        confirmed: false,
+      })
+
+      await engine.close()
+    })
+
+    it('resolves a newEntities entry that relists an already-known entity by attaching items instead of minting a duplicate', async () => {
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'entity_film',
+          type: 'entity',
+          label: 'A Favorite Film',
+        },
+      ])
+
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('The film comes up again.'),
+        items: [{ text: 'Talked about the film again', kind: 'event' }],
+        newEntities: [{ name: 'A Favorite Film', reason: 'relisted by mistake', itemIndexes: [0] }],
+      }
+      const chat = new FakeChatProvider([{ text: JSON.stringify(out), toolCalls: [] }])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      const sessionId = await engine.startSession()
+      await engine.appendTranscript(sessionId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'Talked about the film again.',
+      })
+      await engine.endSession(sessionId)
+
+      const graph = await readGraph(paths)
+      const entityNodes = [...graph.nodes.values()].filter(
+        (n) => n.type === 'entity' && n.label === 'A Favorite Film',
+      )
+      expect(entityNodes).toHaveLength(1)
+
+      const itemNode = [...graph.nodes.values()].find((n) => n.type === 'item')
+      if (!itemNode) throw new Error('expected the minted item node')
+      expect(graph.edges.get(`relates_to:${itemNode.id}:entity_film`)).toMatchObject({
+        confidence: 1,
+        confirmed: false,
+      })
+
+      await engine.close()
+    })
+
+    it('drops a personUpdates note for a node promoted this same session, since the cached graph state still has no doc for it when pass two runs', async () => {
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'person_priya',
+          type: 'person',
+          label: 'Priya',
+        },
+      ])
+
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('Priya recurs and, contradictorily, is also given a note update.'),
+        items: [{ text: 'Worked with Priya again', kind: 'event' }],
+        pagePromotions: [
+          {
+            nodeId: 'person_priya',
+            reason: 'recurs now',
+            itemIndexes: [0],
+            narrative: 'Priya, promoted this session.',
+          },
+        ],
+        // Nonsensical model output (a node cannot be promoted and already
+        // have a page-worthy update note in the same session), but pass
+        // two must handle it safely: it reads the graph state cached
+        // before this session's materialization, where person_priya still
+        // has no doc, so this entry is dropped, not used to overwrite the
+        // narrative promotion is about to write.
+        personUpdates: [{ personId: 'person_priya', note: 'Should be dropped, no doc yet.' }],
+      }
+      const chat = new FakeChatProvider([{ text: JSON.stringify(out), toolCalls: [] }])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      const sessionId = await engine.startSession()
+      await engine.appendTranscript(sessionId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'Worked with Priya again today.',
+      })
+      await expect(engine.endSession(sessionId)).resolves.toBeUndefined()
+
+      const summaryDoc = await readDocument(
+        join(paths.sessionsDir, `${isoDate(new Date())}-${sessionId}`, 'summary.md'),
+      )
+      expect(summaryDoc.body).toBe(`${out.summary}\n`)
+
+      const graph = await readGraph(paths)
+      const promotedNode = graph.nodes.get('person_priya')
+      if (!promotedNode?.doc) throw new Error('expected the promotion to have landed')
+      const personDoc = await readDocument(promotedNode.doc)
+      expect(personDoc.body).toBe('Priya, promoted this session.\n')
 
       await engine.close()
     })
@@ -1603,7 +2428,7 @@ describe('MemoryEngine', () => {
       await rm(dir, { recursive: true, force: true })
     })
 
-    it('includes only active arcs, alongside the constitution text and pending proposals', async () => {
+    it('includes only active arcs, alongside the constitution text', async () => {
       const activeArcId = 'arc_active'
       const dormantArcId = 'arc_dormant'
       const activeArcPath = join(paths.arcsDir, 'active-arc.md')
@@ -1637,6 +2462,14 @@ describe('MemoryEngine', () => {
         },
       ])
 
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+
+      // Appended after open(), not before: a proposal present at open time
+      // is drained silently now (see 'materializes a pre-existing pending
+      // proposal silently on open...' above). Appending it here instead
+      // proves sessionContext no longer touches proposals.jsonl at all
+      // (there is no field on SessionContext to render it into any more):
+      // the file itself still carries it, untouched by sessionContext.
       const proposal: Proposal = {
         id: newId('prop'),
         ts: new Date().toISOString(),
@@ -1647,14 +2480,210 @@ describe('MemoryEngine', () => {
       }
       await appendProposals(paths, [proposal])
 
-      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
-
       const context = await engine.sessionContext()
 
       expect(context.arcs.map((a) => a.id)).toEqual([activeArcId])
       expect(context.arcs[0]?.status).toBe('active')
       expect(context.constitution.length).toBeGreaterThan(0)
-      expect(context.pendingProposals.map((p) => p.id)).toContain(proposal.id)
+
+      const stillPending = await pendingProposals(paths)
+      expect(stillPending.map((p) => p.id)).toContain(proposal.id)
+
+      await engine.close()
+    })
+  })
+
+  describe('sessionContext people, entities, and recent intentions', () => {
+    let dir: string
+    let paths: MemoryPaths
+
+    beforeEach(async () => {
+      dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-people-context-'))
+      paths = memoryPaths(dir)
+      await ensureMemoryTree(paths)
+    })
+
+    afterEach(async () => {
+      await rm(dir, { recursive: true, force: true })
+    })
+
+    it('includes every person node, marking whether each one has a page', async () => {
+      const pagedPath = join(paths.peopleDir, 'priya.md')
+      await writeDocumentAtomic({
+        path: pagedPath,
+        meta: { id: newId('doc'), name: 'Priya', node: 'person_paged', opened: '2026-08-01' },
+        body: 'This page is new. It grows as we talk.\n',
+      })
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'person_paged',
+          type: 'person',
+          label: 'Priya',
+          doc: pagedPath,
+        },
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'person_nodeonly',
+          type: 'person',
+          label: 'Sam',
+        },
+      ])
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const context = await engine.sessionContext()
+
+      expect(context.people).toEqual(
+        expect.arrayContaining([
+          { id: 'person_paged', name: 'Priya', hasPage: true },
+          { id: 'person_nodeonly', name: 'Sam', hasPage: false },
+        ]),
+      )
+      expect(context.peopleTruncated).toBe(false)
+
+      await engine.close()
+    })
+
+    it('includes every entity node by name, with no page field at all', async () => {
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'entity_1',
+          type: 'entity',
+          label: 'Dune',
+        },
+      ])
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const context = await engine.sessionContext()
+
+      expect(context.entities).toEqual([{ id: 'entity_1', name: 'Dune' }])
+      expect(context.entitiesTruncated).toBe(false)
+
+      await engine.close()
+    })
+
+    it('caps people at 40, keeping paged people over unpaged ones and, within each, the most recently created', async () => {
+      // 5 paged people, oldest first, plus 40 unpaged people, oldest
+      // first: 45 total, 5 over PEOPLE_CAP. All 5 paged must survive the
+      // cut (paged is kept over unpaged), and the 35 most recent of the 40
+      // unpaged ones fill the remaining slots, dropping the 5 oldest
+      // unpaged people.
+      const records: Parameters<typeof appendGraph>[1] = []
+      for (let i = 0; i < 5; i++) {
+        records.push({
+          ts: `2026-01-01T00:00:${String(i).padStart(2, '0')}.000Z`,
+          op: 'assert',
+          node: `person_paged_${i}`,
+          type: 'person',
+          label: `Paged ${i}`,
+          doc: join(paths.peopleDir, `paged-${i}.md`),
+        })
+      }
+      for (let i = 0; i < 40; i++) {
+        records.push({
+          ts: `2026-02-01T00:${String(i).padStart(2, '0')}:00.000Z`,
+          op: 'assert',
+          node: `person_unpaged_${i}`,
+          type: 'person',
+          label: `Unpaged ${i}`,
+        })
+      }
+      await appendGraph(paths, records)
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const context = await engine.sessionContext()
+
+      expect(context.people).toHaveLength(40)
+      expect(context.peopleTruncated).toBe(true)
+      for (let i = 0; i < 5; i++) {
+        expect(context.people.some((p) => p.id === `person_paged_${i}`)).toBe(true)
+      }
+      // The 5 oldest unpaged people (indexes 0 through 4) are dropped; the
+      // 35 most recent (indexes 5 through 39) survive.
+      for (let i = 0; i < 5; i++) {
+        expect(context.people.some((p) => p.id === `person_unpaged_${i}`)).toBe(false)
+      }
+      for (let i = 5; i < 40; i++) {
+        expect(context.people.some((p) => p.id === `person_unpaged_${i}`)).toBe(true)
+      }
+
+      await engine.close()
+    })
+
+    it('caps entities at 30, keeping the most recently created and dropping the oldest', async () => {
+      const records: Parameters<typeof appendGraph>[1] = []
+      for (let i = 0; i < 35; i++) {
+        records.push({
+          ts: `2026-02-01T00:${String(i).padStart(2, '0')}:00.000Z`,
+          op: 'assert',
+          node: `entity_${i}`,
+          type: 'entity',
+          label: `Entity ${i}`,
+        })
+      }
+      await appendGraph(paths, records)
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const context = await engine.sessionContext()
+
+      expect(context.entities).toHaveLength(30)
+      expect(context.entitiesTruncated).toBe(true)
+      // The 5 oldest (indexes 0 through 4) are dropped; the 30 most
+      // recent (indexes 5 through 34) survive.
+      for (let i = 0; i < 5; i++) {
+        expect(context.entities.some((e) => e.id === `entity_${i}`)).toBe(false)
+      }
+      for (let i = 5; i < 35; i++) {
+        expect(context.entities.some((e) => e.id === `entity_${i}`)).toBe(true)
+      }
+
+      await engine.close()
+    })
+
+    it('pulls intention item texts out of recent session summaries, skipping other kinds', async () => {
+      const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)
+      const store = await SessionStore.start(paths, yesterday)
+      await store.appendLine({ ts: yesterday.toISOString(), role: 'user', content: 'Hi.' })
+      await writeDocumentAtomic({
+        path: join(store.dir, 'summary.md'),
+        meta: {
+          id: newId('doc'),
+          items: [
+            { id: newId('item'), text: 'Call the dentist next week.', kind: 'intention', ts: '' },
+            { id: newId('item'), text: 'Felt tired all day.', kind: 'feeling', ts: '' },
+          ],
+        },
+        body: 'A quiet day.\n',
+      })
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const context = await engine.sessionContext()
+
+      expect(context.recentIntentions).toEqual([
+        { text: 'Call the dentist next week.', date: isoDate(yesterday) },
+      ])
+
+      await engine.close()
+    })
+
+    it('tolerates a hand-written summary.md with no items key at all, in the same recentSummaries window', async () => {
+      const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)
+      const store = await SessionStore.start(paths, yesterday)
+      await store.appendLine({ ts: yesterday.toISOString(), role: 'user', content: 'Hi.' })
+      await writeDocumentAtomic({
+        path: join(store.dir, 'summary.md'),
+        meta: { id: newId('doc') },
+        body: 'A quiet day, written by hand.\n',
+      })
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const context = await engine.sessionContext()
+
+      expect(context.recentIntentions).toEqual([])
 
       await engine.close()
     })
@@ -2371,7 +3400,7 @@ describe('MemoryEngine', () => {
   })
 })
 
-describe('buildReflectionContext people wiring', () => {
+describe('buildReflectionContext people and entities wiring', () => {
   let dir: string
   let paths: MemoryPaths
 
@@ -2411,6 +3440,122 @@ describe('buildReflectionContext people wiring', () => {
 
     const prompt = chat.requests[0]?.messages[0]?.content ?? ''
     expect(prompt).toContain('person_sam: Sam')
+
+    await engine.close()
+  })
+
+  it('includes existing entities in the reflection prompt built by the engine', async () => {
+    await appendGraph(paths, [
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'entity_film',
+        type: 'entity',
+        label: 'A Favorite Film',
+      },
+    ])
+
+    const chat = new FakeChatProvider([
+      { text: JSON.stringify(emptyReflectionOutput('A session.')), toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+    const sessionId = await engine.startSession()
+    await engine.appendTranscript(sessionId, {
+      ts: new Date().toISOString(),
+      role: 'user',
+      content: 'Hello there.',
+    })
+    await engine.endSession(sessionId)
+
+    const prompt = chat.requests[0]?.messages[0]?.content ?? ''
+    expect(prompt).toContain('Known entities:')
+    // Entities never get a page in this release, so unlike people, their
+    // listing carries no page-status suffix at all (see MINOR 1 in the
+    // fix-round report: entities used to be marked "(no page yet)" even
+    // though the same prompt says they never get a page).
+    expect(prompt).toContain('entity_film: A Favorite Film')
+    expect(prompt).not.toContain('entity_film: A Favorite Film (no page yet)')
+
+    await engine.close()
+  })
+
+  it('marks a known person with a page differently from one without, in the prompt built by the engine', async () => {
+    const personDocPath = join(paths.peopleDir, 'alex.md')
+    await writeDocumentAtomic({
+      path: personDocPath,
+      meta: { id: newId('doc'), name: 'Alex', node: 'person_alex' },
+      body: 'Alex has a page already.\n',
+    })
+    await appendGraph(paths, [
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'person_sam',
+        type: 'person',
+        label: 'Sam',
+      },
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'person_alex',
+        type: 'person',
+        label: 'Alex',
+        doc: personDocPath,
+      },
+    ])
+
+    const chat = new FakeChatProvider([
+      { text: JSON.stringify(emptyReflectionOutput('A session.')), toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+    const sessionId = await engine.startSession()
+    await engine.appendTranscript(sessionId, {
+      ts: new Date().toISOString(),
+      role: 'user',
+      content: 'Hello there.',
+    })
+    await engine.endSession(sessionId)
+
+    const prompt = chat.requests[0]?.messages[0]?.content ?? ''
+    expect(prompt).toContain('person_sam: Sam (no page yet)')
+    expect(prompt).toContain('person_alex: Alex (has a page)')
+
+    await engine.close()
+  })
+
+  it('marks the known-entities listing as truncated in the reflection prompt once there are more entities than ENTITIES_CAP', async () => {
+    const records: Parameters<typeof appendGraph>[1] = []
+    for (let i = 0; i < 35; i++) {
+      records.push({
+        ts: `2026-02-01T00:${String(i).padStart(2, '0')}:00.000Z`,
+        op: 'assert',
+        node: `entity_${i}`,
+        type: 'entity',
+        label: `Entity ${i}`,
+      })
+    }
+    await appendGraph(paths, records)
+
+    const chat = new FakeChatProvider([
+      { text: JSON.stringify(emptyReflectionOutput('A session.')), toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+    const sessionId = await engine.startSession()
+    await engine.appendTranscript(sessionId, {
+      ts: new Date().toISOString(),
+      role: 'user',
+      content: 'Hello there.',
+    })
+    await engine.endSession(sessionId)
+
+    const prompt = chat.requests[0]?.messages[0]?.content ?? ''
+    expect(prompt).toContain('list truncated')
+    // Only 30 of the 35 entity lines actually appear (plus the note above).
+    expect(prompt).not.toContain('entity_0: Entity 0')
+    expect(prompt).toContain('entity_34: Entity 34')
 
     await engine.close()
   })

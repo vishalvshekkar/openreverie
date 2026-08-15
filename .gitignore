@@ -20,3 +20,7 @@ coverage/
 
 # Local user data. A developer's own memory folder must never enter the repo.
 .reverie/
+
+# Agent working directories: specs and plans are committed under docs/,
+# everything in here is scratch for a single session.
+.superpowers/
