@@ -157,6 +157,15 @@ export class MemoryEngine {
     // reindexDocument writes it), and running the doc walk last also picks
     // up any rollups or session summaries maintenance itself just wrote.
     await engine.runMaintenance()
+    // drainLegacyProposals() after runMaintenance(), not before: runMaintenance
+    // clears warnings as its own first step, and draining after it means a
+    // warning the drain itself produces (a reindex failure inside
+    // createArc/createPersonPage, materialized via materializeProposal)
+    // survives instead of being wiped. It runs before refreshDocPaths() so
+    // the doc walk that seeds docPaths/docIdByPath already sees any page a
+    // drained proposal just wrote, the same reasoning that already put
+    // refreshDocPaths() last.
+    await engine.drainLegacyProposals()
     await engine.refreshDocPaths()
     return engine
   }
@@ -239,6 +248,8 @@ export class MemoryEngine {
           attributions: [],
           newArcs: [],
           newPersons: [],
+          newEntities: [],
+          pagePromotions: [],
           arcUpdates: [],
           personUpdates: [],
           constitutionUpdate: null,
@@ -266,17 +277,20 @@ export class MemoryEngine {
       },
     )
 
-    // Reflection no longer proposes new arcs or persons; it saves them
-    // directly, using the itemIds applyReflection mints. This runs as a
-    // callback INSIDE applyReflection's phase two, before the summary
-    // write, not after applyReflection returns: summary.md's presence is
-    // what marks a session reflected, so materialization must complete
-    // before that write or a crash here would permanently mark the session
-    // reflected while the arc or person it should have created never
+    // Reflection no longer proposes new arcs, persons, or entities; it
+    // saves them directly, using the itemIds applyReflection mints. This
+    // runs as a callback INSIDE applyReflection's phase two, before the
+    // summary write, not after applyReflection returns: summary.md's
+    // presence is what marks a session reflected, so materialization must
+    // complete before that write or a crash here would permanently mark
+    // the session reflected while whatever it should have created never
     // materializes, with no retry path left. An entry whose itemIndexes
-    // resolve to no items is dropped silently rather than materializing an
-    // arc or person with nothing attached to it. Nothing here was
-    // affirmed by the user, so confirmed is false on every edge, unlike
+    // resolve to no items is dropped silently rather than materializing a
+    // brand-new arc, person, or entity with nothing attached to it; a page
+    // promotion is not gated on this, since the node it targets already
+    // exists and already has history, so zero new items this session
+    // still yields a page, not an orphan. Nothing here was affirmed by the
+    // user, so confirmed is false on every edge, unlike
     // materializeProposal's confirmed: true for an accepted proposal.
     const materializeNew = async (mintedItems: ReflectionItem[]): Promise<void> => {
       for (const arc of out.newArcs) {
@@ -295,13 +309,79 @@ export class MemoryEngine {
       }
       for (const person of out.newPersons) {
         const itemIds = resolveItemIds(person.itemIndexes, mintedItems)
+        // A model told never to relist a known name may still slip. Resolve
+        // by label first, exactly like resolveOrCreateRealm resolves an
+        // arc's realm, so a repeated name attaches this session's items (or
+        // is promoted) instead of minting a second node for the same person.
+        const existing = this.findNodeByLabel('person', person.name)
+        if (existing) {
+          if (person.deservesPage && !existing.doc) {
+            await this.promoteToPage({
+              nodeId: existing.id,
+              itemIds,
+              narrative: person.narrative,
+              source: sessionId,
+              confirmed: false,
+            })
+          } else {
+            await this.attachItemsToNode(existing.id, 'person', itemIds, sessionId, false)
+          }
+          continue
+        }
         if (itemIds.length === 0) {
           continue
         }
-        await this.createPersonPage({
-          name: person.name,
+        if (person.deservesPage) {
+          await this.createPersonPage({
+            name: person.name,
+            itemIds,
+            narrative: person.narrative,
+            source: sessionId,
+            confirmed: false,
+          })
+        } else {
+          await this.createNode({
+            name: person.name,
+            type: 'person',
+            itemIds,
+            source: sessionId,
+            confirmed: false,
+          })
+        }
+      }
+      for (const entity of out.newEntities) {
+        const itemIds = resolveItemIds(entity.itemIndexes, mintedItems)
+        const existing = this.findNodeByLabel('entity', entity.name)
+        if (existing) {
+          await this.attachItemsToNode(existing.id, 'entity', itemIds, sessionId, false)
+          continue
+        }
+        if (itemIds.length === 0) {
+          continue
+        }
+        await this.createNode({
+          name: entity.name,
+          type: 'entity',
           itemIds,
-          narrative: person.narrative,
+          source: sessionId,
+          confirmed: false,
+        })
+      }
+      for (const promotion of out.pagePromotions) {
+        const itemIds = resolveItemIds(promotion.itemIndexes, mintedItems)
+        const existing = this.graphState.nodes.get(promotion.nodeId)
+        // Only a known, still-unpaged person can be promoted: an unknown
+        // id, an entity (no pages this release), or a person who already
+        // has a page are all dropped silently rather than treated as an
+        // error, the same way resolveNarratives drops a target it cannot
+        // act on.
+        if (existing?.type !== 'person' || existing.doc) {
+          continue
+        }
+        await this.promoteToPage({
+          nodeId: existing.id,
+          itemIds,
+          narrative: promotion.narrative,
           source: sessionId,
           confirmed: false,
         })
@@ -521,6 +601,23 @@ export class MemoryEngine {
     await commitMemory(this.paths.root, `proposal: ${resolution} ${id}`)
   }
 
+  // Materializes and resolves every pending proposal silently, with no
+  // conversation and no acceptance step: proposal generation is retired, so
+  // nothing is ever newly queued, but an older memory folder can still
+  // carry proposals left over from before that change, and stranding them
+  // unresolved forever is worse than accepting what reflection already
+  // judged worth remembering. Reuses resolveProposal itself (accepted, the
+  // same materialize-then-record path a person would trigger by hand) so
+  // there is exactly one implementation of "accept a proposal", not a
+  // second one duplicated here for the silent case. A no-op when the queue
+  // is empty, which is the common case: the owner's own queue already is.
+  private async drainLegacyProposals(): Promise<void> {
+    const proposals = await pendingProposals(this.paths)
+    for (const proposal of proposals) {
+      await this.resolveProposal(proposal.id, 'accepted')
+    }
+  }
+
   // Parked, not shipped. Nothing in core or cli calls this: no tool
   // exposes it to the model, and no persona text promises it. It stays
   // here as dormant code, kept working and kept tested, because the
@@ -738,7 +835,8 @@ export class MemoryEngine {
     const arcs = [...this.graphState.nodes.values()].filter((node) => node.type === 'arc')
     const realms = [...this.graphState.nodes.values()].filter((node) => node.type === 'realm')
     const people = [...this.graphState.nodes.values()].filter((node) => node.type === 'person')
-    return { constitution: constitutionDoc.body, arcs, realms, people }
+    const entities = [...this.graphState.nodes.values()].filter((node) => node.type === 'entity')
+    return { constitution: constitutionDoc.body, arcs, realms, people, entities }
   }
 
   private async syncGraph(): Promise<void> {
@@ -1018,13 +1116,17 @@ export class MemoryEngine {
     return node
   }
 
-  // Writes a person's page and asserts their node, with its doc pointer set
-  // to the page path, together with confirmed involves edges for every item
-  // passed in. Shared by materializeProposal's new_person branch (proposals
-  // accepted from an older memory folder) and _doEndSession's direct
-  // materialization of reflection's newPersons: one implementation, two
-  // call sites, so there is exactly one place that writes a person page.
-  private async createPersonPage(input: {
+  // Writes a person's page and asserts their node (minting a fresh one, or
+  // reusing an already-known node's id when promoting it), with its doc
+  // pointer set to the page path, together with confirmed involves edges
+  // for every item passed in. Shared by createPersonPage (a brand-new
+  // person who earns a page immediately), promoteToPage (an existing
+  // node-only person who earns one later), and materializeProposal's
+  // new_person branch (proposals accepted from an older memory folder):
+  // one implementation, three call sites, so there is exactly one place
+  // that writes a person page.
+  private async writePersonPage(input: {
+    personNodeId: string
     name: string
     itemIds: string[]
     narrative: string
@@ -1036,13 +1138,12 @@ export class MemoryEngine {
     const now = new Date()
     const nowIso = now.toISOString()
 
-    const personNodeId = newId('person')
     const slug = await uniqueSlug(this.paths.peopleDir, input.name)
     const personPath = join(this.paths.peopleDir, `${slug}.md`)
     const narrative = input.narrative.trim()
     const personDoc: Document = {
       path: personPath,
-      meta: { id: newId('doc'), name: input.name, node: personNodeId, opened: nowIso },
+      meta: { id: newId('doc'), name: input.name, node: input.personNodeId, opened: nowIso },
       body: narrative.length > 0 ? input.narrative : PERSON_STARTER_BODY,
     }
     await writeDocumentAtomic(personDoc)
@@ -1050,11 +1151,15 @@ export class MemoryEngine {
     // Node assert and every involves edge for this person's items go in one
     // appendGraph call: a failure partway through would otherwise leave a
     // person node and page on disk with no edges connecting its items to it.
+    // Re-asserting the node here (even when personNodeId already existed,
+    // as it does for a promotion) is what attaches the doc pointer: the
+    // fold in graph.ts takes the later record, so this record is what turns
+    // a node-only person into a paged one.
     const records: GraphRecord[] = [
       {
         ts: nowIso,
         op: 'assert',
-        node: personNodeId,
+        node: input.personNodeId,
         type: 'person',
         label: input.name,
         doc: personPath,
@@ -1066,7 +1171,7 @@ export class MemoryEngine {
         op: 'assert',
         edge: 'involves',
         from: itemId,
-        to: personNodeId,
+        to: input.personNodeId,
         confidence: 1,
         confirmed: input.confirmed,
         source: input.source,
@@ -1075,13 +1180,134 @@ export class MemoryEngine {
     await appendGraph(this.paths, records)
     await this.syncGraph()
     await this.reindexOrWarn(personDoc, 'person', `person page for ${input.name}`)
-    const node = this.graphState.nodes.get(personNodeId)
+    const node = this.graphState.nodes.get(input.personNodeId)
     if (!node) {
       throw new Error(
-        `createPersonPage: person node ${personNodeId} missing from graph state after assert.`,
+        `writePersonPage: person node ${input.personNodeId} missing from graph state after assert.`,
       )
     }
     return node
+  }
+
+  // A brand-new person who earns a page on first mention already: mints a
+  // fresh node id and defers to writePersonPage.
+  private async createPersonPage(input: {
+    name: string
+    itemIds: string[]
+    narrative: string
+    source: string
+    confirmed: boolean
+  }): Promise<GraphNode> {
+    return this.writePersonPage({ personNodeId: newId('person'), ...input })
+  }
+
+  // Grants a page to a person already known as a node with no page. Reuses
+  // their existing node id rather than minting a new one, so their id and
+  // any edges already pointing at them stay valid; writePersonPage's
+  // re-assert of that same id is what attaches the doc pointer.
+  private async promoteToPage(input: {
+    nodeId: string
+    itemIds: string[]
+    narrative: string
+    source: string
+    confirmed: boolean
+  }): Promise<GraphNode> {
+    const existing = this.graphState.nodes.get(input.nodeId)
+    if (!existing) {
+      throw new Error(`promoteToPage: no node ${input.nodeId} in graph state.`)
+    }
+    return this.writePersonPage({
+      personNodeId: input.nodeId,
+      name: existing.label,
+      itemIds: input.itemIds,
+      narrative: input.narrative,
+      source: input.source,
+      confirmed: input.confirmed,
+    })
+  }
+
+  // Creates a person or entity node with no page at all: no document is
+  // written, so there is nothing to reindex. Node assert and every edge
+  // for this node's items go in one appendGraph call, matching createArc
+  // and writePersonPage. Shared by both node types (a person captured
+  // node-only, and every entity, which never gets a page in this release)
+  // so there is exactly one place that creates a page-less node.
+  private async createNode(input: {
+    name: string
+    type: 'person' | 'entity'
+    itemIds: string[]
+    source: string
+    confirmed: boolean
+  }): Promise<GraphNode> {
+    const now = new Date()
+    const nowIso = now.toISOString()
+    const nodeId = newId(input.type)
+    const edgeType: EdgeType = input.type === 'person' ? 'involves' : 'relates_to'
+
+    const records: GraphRecord[] = [
+      { ts: nowIso, op: 'assert', node: nodeId, type: input.type, label: input.name },
+    ]
+    for (const itemId of input.itemIds) {
+      records.push({
+        ts: nowIso,
+        op: 'assert',
+        edge: edgeType,
+        from: itemId,
+        to: nodeId,
+        confidence: 1,
+        confirmed: input.confirmed,
+        source: input.source,
+      })
+    }
+    await appendGraph(this.paths, records)
+    await this.syncGraph()
+    const node = this.graphState.nodes.get(nodeId)
+    if (!node) {
+      throw new Error(`createNode: node ${nodeId} missing from graph state after assert.`)
+    }
+    return node
+  }
+
+  // Adds involves or relates_to edges from this session's items to a node
+  // that already exists (a person or entity mentioned again, resolved by
+  // label before a new node would otherwise have been minted for them). No
+  // node assert here: the node is already durably in the graph. A no-op
+  // when there is nothing to attach.
+  private async attachItemsToNode(
+    nodeId: string,
+    type: 'person' | 'entity',
+    itemIds: string[],
+    source: string,
+    confirmed: boolean,
+  ): Promise<void> {
+    if (itemIds.length === 0) {
+      return
+    }
+    const edgeType: EdgeType = type === 'person' ? 'involves' : 'relates_to'
+    const nowIso = new Date().toISOString()
+    const records: GraphRecord[] = itemIds.map((itemId) => ({
+      ts: nowIso,
+      op: 'assert',
+      edge: edgeType,
+      from: itemId,
+      to: nodeId,
+      confidence: 1,
+      confirmed,
+      source,
+    }))
+    await appendGraph(this.paths, records)
+    await this.syncGraph()
+  }
+
+  // Resolves an existing person or entity node by case-insensitive label,
+  // the same pattern resolveOrCreateRealm already uses for realms. Used to
+  // stop a model that (despite being told not to) relists an already-known
+  // name in newPersons or newEntities from minting a duplicate node for the
+  // same person or thing.
+  private findNodeByLabel(type: 'person' | 'entity', name: string): GraphNode | undefined {
+    return [...this.graphState.nodes.values()].find(
+      (node) => node.type === type && node.label.toLowerCase() === name.toLowerCase(),
+    )
   }
 
   // Resolves a new_arc proposal's `realm` field to a realm node id. It
