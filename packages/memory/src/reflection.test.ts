@@ -193,7 +193,7 @@ describe('reflection', () => {
       expect(prompt).toContain('first learned or when they change')
     })
 
-    it('lists known people and entities by id, label, and page status, and states what makes someone worth a person page', async () => {
+    it('lists known people by id, label, and page status, known entities by id and label only, and states what makes someone worth a person page', async () => {
       const out = emptyReflectionOutput('A session mentioning a few names.')
       const chat = new FakeChatProvider([{ text: JSON.stringify(out), toolCalls: [] }])
 
@@ -226,7 +226,10 @@ describe('reflection', () => {
       expect(prompt).toContain('person_sam: Sam (no page yet)')
       expect(prompt).toContain('person_alex: Alex (has a page)')
       expect(prompt).toContain('Known entities:')
-      expect(prompt).toContain('entity_film: A Favorite Film (no page yet)')
+      // Entities never get a page in this release, so their listing (unlike
+      // people's) carries no page-status suffix.
+      expect(prompt).toContain('entity_film: A Favorite Film')
+      expect(prompt).not.toContain('entity_film: A Favorite Film (no page yet)')
       expect(prompt).toContain("recurs in this person's life")
       expect(prompt).toContain('pagePromotions')
       expect(prompt).toContain('newEntities')
