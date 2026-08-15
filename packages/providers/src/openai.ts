@@ -14,6 +14,7 @@ import type {
   ToolCall,
   ToolDefinition,
 } from './types.js'
+import { ProviderUnavailableError } from './types.js'
 
 export interface OpenAiConfig {
   apiKey: string
@@ -116,7 +117,42 @@ function buildRequestBody(req: ChatRequest, stream: boolean): Record<string, unk
 async function requireOk(res: Response): Promise<void> {
   if (res.ok) return
   const text = await res.text()
-  throw new Error(`openai: HTTP ${res.status}: ${text.slice(0, 200)}`)
+  const message = `openai: HTTP ${res.status}: ${text.slice(0, 200)}`
+  if (res.status === 429 || res.status >= 500) throw new ProviderUnavailableError(message)
+  throw new Error(message)
+}
+
+const NETWORK_ERROR_CODES = new Set([
+  'EAI_AGAIN',
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'ETIMEDOUT',
+])
+
+function isNetworkError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const code = 'code' in error ? error.code : undefined
+  if (typeof code === 'string' && NETWORK_ERROR_CODES.has(code)) return true
+  const cause = 'cause' in error ? error.cause : undefined
+  return cause !== error && isNetworkError(cause)
+}
+
+async function requestOpenAi(
+  fetchImpl: FetchLike,
+  input: Parameters<FetchLike>[0],
+  init: Parameters<FetchLike>[1],
+): Promise<Response> {
+  try {
+    return await fetchImpl(input, init)
+  } catch (error) {
+    if (error instanceof ProviderUnavailableError) throw error
+    if (isNetworkError(error)) {
+      throw new ProviderUnavailableError('openai: network connection failed')
+    }
+    throw error
+  }
 }
 
 function authHeaders(apiKey: string): Record<string, string> {
@@ -136,7 +172,7 @@ export class OpenAiChatProvider implements ChatProvider {
   }
 
   async complete(req: ChatRequest): Promise<ChatResult> {
-    const res = await this.fetchImpl(`${this.baseUrl}/chat/completions`, {
+    const res = await requestOpenAi(this.fetchImpl, `${this.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: authHeaders(this.apiKey),
       body: JSON.stringify(buildRequestBody(req, false)),
@@ -156,7 +192,7 @@ export class OpenAiChatProvider implements ChatProvider {
   }
 
   async *stream(req: ChatRequest): AsyncIterable<ChatEvent> {
-    const res = await this.fetchImpl(`${this.baseUrl}/chat/completions`, {
+    const res = await requestOpenAi(this.fetchImpl, `${this.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: authHeaders(this.apiKey),
       body: JSON.stringify(buildRequestBody(req, true)),
@@ -289,7 +325,7 @@ export class OpenAiEmbeddingProvider implements EmbeddingProvider {
   }
 
   private async embedBatch(model: string, texts: string[]): Promise<number[][]> {
-    const res = await this.fetchImpl(`${this.baseUrl}/embeddings`, {
+    const res = await requestOpenAi(this.fetchImpl, `${this.baseUrl}/embeddings`, {
       method: 'POST',
       headers: authHeaders(this.apiKey),
       body: JSON.stringify({ model, input: texts }),
