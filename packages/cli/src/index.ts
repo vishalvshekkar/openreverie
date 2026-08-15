@@ -13,6 +13,7 @@
 // actual logic lives in those files, where it is tested with injected io
 // and fakes instead of the real filesystem, terminal, and network.
 
+import { realpathSync } from 'node:fs'
 import { createInterface } from 'node:readline/promises'
 import { fileURLToPath } from 'node:url'
 import type { ReverieConfig } from '@openreverie/core'
@@ -197,7 +198,22 @@ const defaultDeps: CliMainDeps = {
   colorEnabled: colorsEnabled,
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+// The entry guard compares the real path of the invoked script with this
+// file's own real path. A plain string comparison breaks when the CLI is run
+// through a symlink (npm link, a global install, or a user's own `reverie`
+// link): process.argv[1] then holds the symlink path while import.meta.url
+// holds the resolved file, so the guard never fires and the command exits
+// without doing anything.
+function isMainModule(): boolean {
+  if (!process.argv[1]) return false
+  try {
+    return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)
+  } catch {
+    return process.argv[1] === fileURLToPath(import.meta.url)
+  }
+}
+
+if (isMainModule()) {
   mainWith(process.argv.slice(2), defaultDeps).catch((err: unknown) => {
     stdout.write(`${errorMessage(err)}\n`)
     process.exitCode = 1
