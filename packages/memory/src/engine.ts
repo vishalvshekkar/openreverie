@@ -1524,18 +1524,24 @@ function byTsDescending(a: GraphNode, b: GraphNode): number {
   return a.ts > b.ts ? -1 : 1
 }
 
-// Orders person nodes most-recently-created first, then applies
-// PEOPLE_CAP. When the cap must cut the list short, a paged person is kept
-// over an unpaged one regardless of recency: a page means the subject
-// already earned a maintained document, which matters more than an
-// unpaged node's raw recency. Shared by sessionContext (the chat prompt)
-// and buildReflectionContext (the reflection prompt), so both are bounded
-// the same way.
+// Orders person nodes most-recently-created first. Under PEOPLE_CAP,
+// nothing is dropped, so the result is a plain recency order with no
+// paged/unpaged distinction. Over the cap, which people survive is
+// decided paged-first (a page means the subject already earned a
+// maintained document, which matters more than an unpaged node's raw
+// recency), but the survivors are still returned in recency order, not
+// grouped by page status: the paged-over-unpaged rule only decides who
+// gets truncated away, never the rendered order of who is left. Shared by
+// sessionContext (the chat prompt) and buildReflectionContext (the
+// reflection prompt), so both are bounded the same way.
 function capPeople(nodes: GraphNode[]): { nodes: GraphNode[]; truncated: boolean } {
+  if (nodes.length <= PEOPLE_CAP) {
+    return { nodes: [...nodes].sort(byTsDescending), truncated: false }
+  }
   const paged = nodes.filter((node) => node.doc !== undefined).sort(byTsDescending)
   const unpaged = nodes.filter((node) => node.doc === undefined).sort(byTsDescending)
-  const ordered = [...paged, ...unpaged]
-  return { nodes: ordered.slice(0, PEOPLE_CAP), truncated: ordered.length > PEOPLE_CAP }
+  const survivors = [...paged, ...unpaged].slice(0, PEOPLE_CAP)
+  return { nodes: survivors.sort(byTsDescending), truncated: true }
 }
 
 // Orders entity nodes most-recently-created first, then applies
