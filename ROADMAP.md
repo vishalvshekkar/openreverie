@@ -2,7 +2,7 @@
 
 This file tracks what openreverie can do, what is being worked on, and where help is welcome. It is kept honest the same way the README is: nothing here is claimed as done unless it works.
 
-## Done (v0.1.0 through v0.3.1)
+## Done (v0.1.0 through v0.4.0)
 
 Sub-project 1 of 5: the local-first memory engine and agent core, usable as a terminal app. See the README for the full capability list and the [design spec](docs/superpowers/specs/2026-08-13-openreverie-design.md) for how it all fits together.
 
@@ -12,14 +12,15 @@ v0.3.0 removed the confirmation step from reflection. Asking permission to remem
 
 v0.3.1 finished the job v0.3.0 started: the persona no longer raises pending proposals, no longer asks whether to keep something, and `resolve_proposal` is gone from the tool list, so the model has no way left to ask. Asking permission to remember did not fit a companion whose defining property is that it remembers. Capture also widened: reflection now mints a node, using the existing person or entity type, for anyone or anything with a real part in the owner's life (a partner as much as a public figure they keep returning to, a company as much as a film), while a maintained page stays earned separately, granted only once someone recurs across sessions or clearly matters within one. A node-only person can be promoted to a page later. The session prompt now surfaces known people and entities by name and page status, and recent intentions, so the companion does not need to search for what it already knows. Legacy proposal queues from before this release drain silently on open instead of stranding anyone who upgrades.
 
+v0.4.0 shipped the local web interface alongside the terminal CLI. `reverie web` serves the record through a browser on `127.0.0.1` only, admitted by a single-use bootstrap token that expires five minutes after startup. Browsing records, people, sessions, and transcripts works with no API key configured, pending legacy proposals are readable, and browser sessions become read-only after the server restarts. Chat streams live when a provider is configured. The Phase B atlas foundation renders the graph with deterministic temporary layout, pan and zoom, type filtering, selection, and an accessible node list.
+
 ## Up next (sub-projects, in intended order)
 
 These are the large pieces from the original design, each sized like its own project. Open an issue before starting one of these; they need design conversation first.
 
-2. **Web interface and local auth.** A proper chat UI served by the engine, replacing nothing (the CLI stays) but making daily use gentler. Needs an engine-facing API layer and a session auth story for a machine you own.
 3. **More provider adapters.** The interfaces are in `@openreverie/providers` (`ChatProvider`, `EmbeddingProvider`) and the factory has one switch statement waiting for company: Anthropic, OpenRouter, Cloudflare AI Gateway, DeepSeek, and local models (Ollama and OpenAI-compatible endpoints). Every adapter must pass the same contract tests. This is the most contributor-friendly large item.
 4. **Alternate deployment targets.** Cloudflare (Workers, D1 or Durable Objects storage, Vectorize) and VPS packaging. The storage layer is behind interfaces for exactly this reason, but this is a real porting effort.
-5. **Graph visualization.** The data has been accumulating in `graph.jsonl` since the first conversation; nothing renders it yet.
+5. **Phase C atlas polish.** The Phase B atlas already renders nodes with deterministic temporary layout, pan and zoom, type filtering, selection, and an accessible node list. Phase C adds the deferred pieces: saved graph positions, graph search, realm influence, progressive labels, and a history time lens.
 
 ## Smaller improvements, help welcome
 
