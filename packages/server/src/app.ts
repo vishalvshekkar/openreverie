@@ -25,6 +25,7 @@ import {
   parsePageLimit,
 } from './api.js'
 import type { BootstrapAuth } from './auth.js'
+import type { LiveSessionRegistry, StreamEvent } from './registry.js'
 
 export interface RecordEngine {
   listPublicDocuments(): Promise<PublicDocumentRow[]>
@@ -42,6 +43,7 @@ export interface CreateAppDeps {
   engine: RecordEngine
   auth: BootstrapAuth
   canonicalOrigin: string
+  registry?: LiveSessionRegistry
 }
 
 interface CanonicalOrigin {
@@ -61,11 +63,17 @@ export function createApp(deps: CreateAppDeps): RequestListener {
   const canonical = parseCanonicalOrigin(deps.canonicalOrigin)
   const proposalResolutionLocks = new Map<string, Promise<void>>()
   return (req, res) => {
-    void handle(req, res, deps.engine, deps.auth, canonical, proposalResolutionLocks).catch(
-      (error: unknown) => {
-        writeError(res, toApiError(error))
-      },
-    )
+    void handle(
+      req,
+      res,
+      deps.engine,
+      deps.auth,
+      canonical,
+      proposalResolutionLocks,
+      deps.registry,
+    ).catch((error: unknown) => {
+      writeError(res, toApiError(error))
+    })
   }
 }
 
@@ -76,6 +84,7 @@ async function handle(
   auth: BootstrapAuth,
   canonical: CanonicalOrigin,
   proposalResolutionLocks: Map<string, Promise<void>>,
+  registry: LiveSessionRegistry | undefined,
 ): Promise<void> {
   const parsed = parseRequestUrl(req)
   const path = decodePath(parsed.pathname)
@@ -168,7 +177,11 @@ async function handle(
   }
 
   if (method === 'GET' && path.length === 3 && path[2] === 'sessions') {
-    const sessions = (await engine.listStoredSessions()).sort(compareSessions)
+    const byId = new Map(
+      (await engine.listStoredSessions()).map((session) => [session.sessionId, session]),
+    )
+    for (const session of registry?.liveSessions() ?? []) byId.set(session.sessionId, session)
+    const sessions = [...byId.values()].sort(compareSessions)
     const page = pageResource(sessions, {
       resource: 'sessions',
       query: parsed.searchParams,
@@ -182,7 +195,9 @@ async function handle(
 
   if (method === 'GET' && path.length === 4 && path[2] === 'sessions') {
     const sessionId = requiredId(path[3])
-    const session = (await engine.listStoredSessions()).find((item) => item.sessionId === sessionId)
+    const session =
+      registry?.getLiveSession(sessionId) ??
+      (await engine.listStoredSessions()).find((item) => item.sessionId === sessionId)
     if (!session) throw new ApiError(404, 'not_found', 'The requested resource was not found.')
     writePublicJson(res, 200, publicSessionSchema, session, null)
     return
@@ -216,6 +231,57 @@ async function handle(
       page.nextCursor,
       LIMITS.transcriptPageBytes,
     )
+    return
+  }
+
+  if (registry && method === 'POST' && path.length === 3 && path[2] === 'sessions') {
+    const session = await registry.create()
+    writePublicJson(res, 201, createSessionResponseSchema, session, null)
+    return
+  }
+
+  if (
+    registry &&
+    method === 'POST' &&
+    path.length === 5 &&
+    path[2] === 'sessions' &&
+    path[4] === 'message'
+  ) {
+    const sessionId = requiredId(path[3])
+    const turnId = requiredTurnId(req.headers['x-reverie-turn-id'])
+    const after = parseLastSequence(req.headers['x-reverie-last-sequence'])
+    const body = messageSchema.safeParse(await readJson(req))
+    if (!body.success) throw new ApiError(400, 'invalid_request', 'The request is invalid.')
+    if (Buffer.byteLength(body.data.message, 'utf8') > LIMITS.messageBytes) {
+      throw new ApiError(413, 'message_too_large', 'The message is too large.')
+    }
+    await writeNdjson(res, registry.message(sessionId, turnId, body.data, after))
+    return
+  }
+
+  if (
+    registry &&
+    method === 'GET' &&
+    path.length === 5 &&
+    path[2] === 'sessions' &&
+    path[4] === 'events'
+  ) {
+    const sessionId = requiredId(path[3])
+    const after = parseLastSequence(req.headers['x-reverie-last-sequence'])
+    await writeNdjson(res, registry.events(sessionId, after))
+    return
+  }
+
+  if (
+    registry &&
+    method === 'POST' &&
+    path.length === 5 &&
+    path[2] === 'sessions' &&
+    path[4] === 'end'
+  ) {
+    const sessionId = requiredId(path[3])
+    const session = await registry.end(sessionId)
+    writePublicJson(res, 200, publicSessionSchema, session, null)
     return
   }
 
@@ -268,6 +334,7 @@ async function handle(
 
 const bootstrapSchema = z.strictObject({ token: z.string() })
 const proposalResolutionSchema = z.strictObject({ resolution: z.enum(['accepted', 'rejected']) })
+const messageSchema = z.strictObject({ message: z.string() })
 const documentKindSchema = z.enum([
   'constitution',
   'realm',
@@ -298,6 +365,9 @@ const publicSessionSchema = z.strictObject({
     assistantCount: z.number().int().nonnegative(),
     toolCount: z.number().int().nonnegative(),
   }),
+})
+const createSessionResponseSchema = publicSessionSchema.extend({
+  initialGreetingStreamUrl: z.string().optional(),
 })
 const publicSessionsSchema = z.array(publicSessionSchema)
 const toolCallSchema = z.strictObject({
@@ -448,6 +518,30 @@ function requiredId(value: string | undefined): string {
     throw new ApiError(400, 'invalid_request', 'The identifier is invalid.')
   }
   return value
+}
+
+function requiredTurnId(value: string | string[] | undefined): string {
+  if (
+    typeof value !== 'string' ||
+    value.length === 0 ||
+    value.length > 128 ||
+    !/^[A-Za-z0-9._:-]+$/.test(value)
+  ) {
+    throw new ApiError(400, 'invalid_request', 'The turn identifier is invalid.')
+  }
+  return value
+}
+
+function parseLastSequence(value: string | string[] | undefined): number | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'string' || !/^\d+$/.test(value)) {
+    throw new ApiError(400, 'invalid_request', 'The replay sequence is invalid.')
+  }
+  const sequence = Number(value)
+  if (!Number.isSafeInteger(sequence) || sequence < 0) {
+    throw new ApiError(400, 'invalid_request', 'The replay sequence is invalid.')
+  }
+  return sequence
 }
 
 function requireHost(req: IncomingMessage, host: string): void {
@@ -734,6 +828,37 @@ function writeJson(res: ServerResponse, status: number, payload: unknown, maxByt
     'content-length': bytes,
   })
   res.end(serialized)
+}
+
+async function writeNdjson(res: ServerResponse, events: AsyncIterable<StreamEvent>): Promise<void> {
+  const iterator = events[Symbol.asyncIterator]()
+  let first: IteratorResult<StreamEvent>
+  try {
+    first = await iterator.next()
+  } catch (error) {
+    await iterator.return?.()
+    throw error
+  }
+
+  res.writeHead(200, { 'content-type': 'application/x-ndjson; charset=utf-8' })
+  let closed = false
+  const onClose = (): void => {
+    closed = true
+    void iterator.return?.()
+  }
+  res.once('close', onClose)
+  try {
+    if (!first.done && !closed) res.write(`${JSON.stringify(first.value)}\n`)
+    while (!closed) {
+      const next = await iterator.next()
+      if (next.done) break
+      res.write(`${JSON.stringify(next.value)}\n`)
+    }
+    if (!closed) res.end()
+  } finally {
+    res.off('close', onClose)
+    await iterator.return?.()
+  }
 }
 
 function toApiError(error: unknown): ApiError {

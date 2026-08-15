@@ -1,3 +1,4 @@
+import { mkdtemp, rm } from 'node:fs/promises'
 import {
   createServer,
   type IncomingHttpHeaders,
@@ -5,6 +6,9 @@ import {
   type Server,
 } from 'node:http'
 import type { AddressInfo } from 'node:net'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { defaultCrisisResources, type ReverieConfig } from '@openreverie/core'
 import type {
   GraphRecord,
   PublicDocument,
@@ -15,9 +19,12 @@ import type {
   SequencedGraphRecord,
   TranscriptLine,
 } from '@openreverie/memory'
+import { type EngineDeps, MemoryEngine } from '@openreverie/memory'
+import { FakeChatProvider, FakeEmbeddingProvider } from '@openreverie/providers'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createApp, type RecordEngine } from './app.js'
 import { createBootstrapAuth } from './auth.js'
+import { LiveSessionRegistry } from './registry.js'
 
 interface Response {
   status: number
@@ -573,3 +580,151 @@ describe('record browsing app', () => {
     }
   }
 })
+
+describe('live session HTTP routes', () => {
+  let server: Server
+  let memoryDir: string
+  let engine: MemoryEngine
+  let host: string
+  let origin: string
+  let cookie: string
+
+  beforeEach(async () => {
+    memoryDir = await mkdtemp(join(tmpdir(), 'openreverie-live-app-'))
+    const chat = new FakeChatProvider([
+      { text: '', toolCalls: [] },
+      { text: 'Reply.', toolCalls: [] },
+    ])
+    const deps: EngineDeps = {
+      chat,
+      embeddings: new FakeEmbeddingProvider(),
+      reflectionModel: 'fake-reflect',
+      embeddingModel: 'fake-embed',
+    }
+    engine = await MemoryEngine.open(memoryDir, deps, { maintenance: false })
+    server = createServer()
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address() as AddressInfo
+    host = `127.0.0.1:${address.port}`
+    origin = `http://${host}`
+    const { token, auth } = createBootstrapAuth({
+      origin,
+      now: () => 0,
+      randomBytes: () => Buffer.alloc(32, 3),
+    })
+    const registry = new LiveSessionRegistry({
+      engine,
+      config: liveConfig(memoryDir),
+      chat,
+      providerAvailable: true,
+      maxReplayEvents: 1,
+      now: () => 0,
+    })
+    server.on('request', createApp({ engine, auth, canonicalOrigin: origin, registry }))
+    const bootstrap = await liveRequest('POST', '/api/v1/auth/bootstrap', { token }, { host })
+    cookie = bootstrap.headers['set-cookie']?.[0]?.split(';', 1)[0] ?? ''
+  })
+
+  afterEach(async () => {
+    server.closeAllConnections()
+    if (server.listening) {
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      )
+    }
+    await engine.close()
+    await rm(memoryDir, { recursive: true, force: true })
+  })
+
+  it('returns 409 resync_required JSON for a missing replay sequence instead of NDJSON', async () => {
+    const created = await liveRequest(
+      'POST',
+      '/api/v1/sessions',
+      undefined,
+      authenticated({ origin }),
+    )
+    expect(created.status).toBe(201)
+    const createdJson = created.json as { data: { sessionId: string } }
+    const id = createdJson.data.sessionId
+
+    const first = await liveRequest(
+      'POST',
+      `/api/v1/sessions/${id}/message`,
+      { message: 'again' },
+      authenticated({ origin, 'x-reverie-turn-id': 'turn-1' }),
+    )
+    expect(first.headers['content-type']).toContain('application/x-ndjson')
+
+    const replay = await liveRequest(
+      'POST',
+      `/api/v1/sessions/${id}/message`,
+      { message: 'again' },
+      authenticated({ origin, 'x-reverie-turn-id': 'turn-1', 'x-reverie-last-sequence': '0' }),
+    )
+    expect(replay).toMatchObject({
+      status: 409,
+      json: { schemaVersion: '1', code: 'resync_required' },
+    })
+    expect(replay.headers['content-type']).toContain('application/json')
+  })
+
+  function authenticated(overrides: Record<string, string> = {}): Record<string, string> {
+    return { host, cookie, ...overrides }
+  }
+
+  function liveRequest(
+    method: string,
+    path: string,
+    body: unknown,
+    headers: Record<string, string>,
+  ): Promise<{ status: number; headers: IncomingHttpHeaders; json: unknown; body: string }> {
+    const text = body === undefined ? undefined : JSON.stringify(body)
+    return new Promise((resolve, reject) => {
+      const request = nodeRequest(
+        {
+          hostname: '127.0.0.1',
+          port: Number(host.split(':')[1]),
+          method,
+          path,
+          agent: false,
+          headers: {
+            connection: 'close',
+            ...(text === undefined
+              ? {}
+              : { 'content-type': 'application/json', 'content-length': Buffer.byteLength(text) }),
+            ...headers,
+          },
+        },
+        (response) => {
+          const chunks: Buffer[] = []
+          response.on('data', (chunk: Buffer) => chunks.push(chunk))
+          response.on('end', () => {
+            const responseBody = Buffer.concat(chunks).toString('utf8')
+            resolve({
+              status: response.statusCode ?? 0,
+              headers: response.headers,
+              body: responseBody,
+              json:
+                responseBody === '' ||
+                !response.headers['content-type']?.includes('application/json')
+                  ? null
+                  : JSON.parse(responseBody),
+            })
+          })
+        },
+      )
+      request.on('error', reject)
+      request.end(text)
+    })
+  }
+})
+
+function liveConfig(memoryDir: string): ReverieConfig {
+  return {
+    memoryDir,
+    provider: { name: 'openai', apiKey: 'test' },
+    models: { chat: 'fake-chat', reflection: 'fake-reflect', embeddings: 'fake-embed' },
+    safety: { mode: 'companion', resources: defaultCrisisResources },
+    style: { engagement: 'balanced', tone: 'warm', orientation: 'listening' },
+  }
+}
