@@ -45,6 +45,11 @@ The main agent in a session acts as an orchestrator. It plans, decomposes, revie
 - Prose file writes are atomic (temp file, then rename). Graph log writes are single-line appends.
 - Keep commits small and messages plain: what changed and why, no ceremony.
 
+Two review practices, learned the hard way here and not optional:
+
+- **A reviewer runs the tests, the build, and the lint itself.** Do not accept an implementer's report as evidence that the suite passes. One task reported a fully passing suite while a test file was failing, and it went two tasks undetected because reviewers had been told the report already carried that evidence.
+- **Falsify, do not read.** The recurring failure in this codebase is a test that passes for a reason unrelated to what it is named: an error-path test whose fake threw before any output accumulated, a status line test that passed with the wiring deleted, a narrative test asserting the body equals the new narrative, which is the bug recorded as the expectation. Delete the fix, watch the test fail, restore it. Reading tells you the code is right today; falsifying tells you it stays right.
+
 ## Honesty about authorship
 
 This codebase is built with heavy agent involvement, reviewed by a human. Do not obscure that, and do not add self-congratulatory attribution either. The code speaks for itself or it does not.
