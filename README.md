@@ -15,8 +15,8 @@ What works today:
 - Terminal chat with persistent, layered memory (constitution, realms, arcs, people, session transcripts)
 - Live capture during a conversation (the agent can call `remember` mid-session)
 - Reverie speaks first. A session opens with a short, model-written hello instead of waiting for you to type. Reverie is instructed to lead with anything left unresolved from last time or notable in the recent record, and to keep it to a plain hello otherwise, but that is guidance to the model, not a guarantee of what it actually says. If the model is unreachable or the call times out, the greeting is skipped silently and the session just opens at the prompt. A first conversation still gets the guided flow, not this.
-- Person pages: people who recur get a narrative document under `people/` that reflection maintains, the same way it maintains arc narratives.
-- Post-session reflection: each session is summarized and filed into memory directly. New arcs, new people, and every attribution (whatever the model's confidence) are saved right away: nothing is held back for your review, and nothing saved this way can be undone through the product (see below). A memory folder from an earlier release may still carry pending proposals from before this changed; those still surface and can still be accepted or rejected with `resolve_proposal`
+- Person and entity nodes, captured generously: reflection creates a node the moment someone or something with a real part in your life is mentioned, whether or not it ever gets a page. A person earns a page (a narrative document under `people/` that reflection maintains) only when they recur across sessions or clearly mattered within one; a person captured as a node only can still gain a page later, once they recur. Entities (books, films, companies, places, and the like) get a node only; they do not get a page in this release.
+- Post-session reflection: each session is summarized and filed into memory directly. New arcs, new people, new entities, page promotions, and every attribution (whatever the model's confidence) are saved right away: nothing is held back for your review, and nothing saved this way can be undone through the product (see below). A memory folder from an earlier release may still carry pending proposals from before proposal generation was retired; those are now materialized and resolved automatically the moment the engine opens, silently, with no review step, so they no longer wait for `resolve_proposal`
 - Lazy daily and weekly rollups, built the first time enough time has passed to need them
 - Both safety modes (companion and firewall)
 - A first-run setup wizard
@@ -31,6 +31,7 @@ What does not exist yet:
 - Providers other than OpenAI
 - Any deployment target beyond running it yourself (no Cloudflare or VPS packaging)
 - Graph visualization of realms, arcs, and their connections
+- Pages for entities: they get a node in the graph, not a maintained document, in this release
 - Monthly and yearly rollups (only daily and weekly exist)
 - Any way to make reverie forget. The feature exists in code and is tested, but it is deliberately unexposed: no tool, no persona instruction, and no CLI command reaches it. Deleting or editing a page under `people/` or `arcs/` removes the prose, but not the record: the node it corresponds to, its edges, and every attribution that named it still live in `graph.jsonl`, nothing in the product retracts them, and the agent can still surface what the graph knows about a person or arc whose page you deleted. Running `reindex` does clear the deleted page's stale rows out of the search index, so it stops turning up in `search_memory` hits, but `reindex` rebuilds the graph from `graph.jsonl` exactly as it already was, so the node and its edges come straight back. There is currently no user-accessible way to remove a node, an edge, or an attribution at all.
 
@@ -66,14 +67,14 @@ memory/
 ├── constitution.md   A living record of who you are
 ├── realms/           Life domains (health, career, ...)
 ├── arcs/             Ongoing storylines, positive and negative
-├── people/           People who recur, each with a narrative page
+├── people/           People who recur or clearly matter, each with a narrative page
 ├── sessions/         Verbatim transcripts and session summaries
 ├── rollups/          Daily and weekly synthesis
 ├── graph.jsonl       Timestamped relationships between all of it
 └── index.db          Rebuildable search index (FTS + vectors)
 ```
 
-Each conversation starts with your constitution, active arcs, and recent context already loaded. The agent retrieves deeper memory through tools: semantic search, keyword search, graph traversal, and full transcript reads. After each session, a reflection pass extracts what mattered and saves it directly: new arcs, new people, updated arc and person narratives, and every attribution, unconfirmed but not held back for approval. A companion that remembers should not have to ask permission to remember. Nothing you said is ever deleted or rewritten; transcripts are append-only.
+Each conversation starts with your constitution, active arcs, and recent context already loaded. The agent retrieves deeper memory through tools: semantic search, keyword search, graph traversal, and full transcript reads. After each session, a reflection pass extracts what mattered and saves it directly: new arcs, new people and entities as nodes, page promotions for a person who has come to recur, updated arc and person narratives, and every attribution, unconfirmed but not held back for approval. A companion that remembers should not have to ask permission to remember. Nothing you said is ever deleted or rewritten; transcripts are append-only.
 
 ## What it is not
 
