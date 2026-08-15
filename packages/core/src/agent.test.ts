@@ -43,6 +43,8 @@ function emptyReflectionOutput(summary: string) {
     attributions: [],
     newArcs: [],
     newPersons: [],
+    newEntities: [],
+    pagePromotions: [],
     arcUpdates: [],
     personUpdates: [],
     constitutionUpdate: null,

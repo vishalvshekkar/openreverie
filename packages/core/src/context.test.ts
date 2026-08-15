@@ -120,6 +120,14 @@ describe('assembleSystemPrompt', () => {
       body: 'Talked through a quiet, low-key evening.\n',
     })
 
+    const config = testConfig()
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+
+    // Appended after open(), not before: a proposal present at open time is
+    // now materialized and resolved silently by the engine itself (see
+    // openreverie's remember-by-default round), so seeding it here instead
+    // still exercises assembleSystemPrompt's own pending-proposals rendering
+    // against whatever is actually sitting in proposals.jsonl.
     const proposal: Proposal = {
       id: newId('prop'),
       ts: new Date().toISOString(),
@@ -129,9 +137,6 @@ describe('assembleSystemPrompt', () => {
       source: 'session_seed',
     }
     await appendProposals(paths, [proposal])
-
-    const config = testConfig()
-    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
 
     const prompt = await assembleSystemPrompt(engine, config)
 
