@@ -1740,6 +1740,89 @@ describe('MemoryEngine', () => {
       await engine.close()
     })
 
+    // Guards against a double page write when a single reflection output
+    // names the same already-known, node-only person in BOTH newPersons
+    // (as if she were new, deservesPage true) AND pagePromotions (targeting
+    // her real existing node id): a plausible way for a model to slip,
+    // since it decides newPersons and pagePromotions independently.
+    //
+    // What actually carries this safety: whichever of the two loops runs
+    // second reads existing.doc off the live graphState and skips writing
+    // a page once it is set, and writePersonPage's syncGraph() call is what
+    // makes the first loop's write visible to the second loop's read. Loop
+    // order (newPersons before pagePromotions in materializeNew today) does
+    // NOT matter for this specific double-write guarantee: the two guards
+    // are symmetric, so either loop running first and the other second is
+    // still safe, and this test passes either way (verified by temporarily
+    // swapping the two loop blocks in engine.ts while writing this test).
+    // What is genuinely load-bearing is the `existing.doc` check itself:
+    // remove it from the pagePromotions guard and this test fails with two
+    // person pages for the same node id, one from each branch.
+    //
+    // Loop order does still matter for something else, outside what this
+    // test checks: when pagePromotions runs after a page already exists,
+    // it drops that entry's items with no fallback attach (unlike
+    // newPersons, which falls back to attachItemsToNode), so an item
+    // attributed only through pagePromotions in this exact scenario is
+    // silently never linked to the person. See the report for this task.
+    it('writes exactly one page when one reflection output names the same known, node-only person in both newPersons and pagePromotions', async () => {
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'person_priya',
+          type: 'person',
+          label: 'Priya',
+        },
+      ])
+
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('Priya came up twice, and reflection listed her both ways.'),
+        items: [
+          { text: 'Priya helped debug the release', kind: 'event' },
+          { text: 'Priya stayed late again to help', kind: 'event' },
+        ],
+        newPersons: [
+          {
+            name: 'Priya',
+            reason: 'model treated her as newly worth a page',
+            itemIndexes: [0],
+            deservesPage: true,
+            narrative: 'From newPersons: Priya has become a real presence at work.',
+          },
+        ],
+        pagePromotions: [
+          {
+            nodeId: 'person_priya',
+            reason: 'model also promoted her existing node-only id',
+            itemIndexes: [1],
+            narrative: 'From pagePromotions: Priya has become a real presence at work.',
+          },
+        ],
+      }
+      const chat = new FakeChatProvider([{ text: JSON.stringify(out), toolCalls: [] }])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      const sessionId = await engine.startSession()
+      await engine.appendTranscript(sessionId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'Priya helped a lot today, staying late again.',
+      })
+      await engine.endSession(sessionId)
+
+      const graph = await readGraph(paths)
+      const personNodes = [...graph.nodes.values()].filter(
+        (n) => n.type === 'person' && n.label === 'Priya',
+      )
+      expect(personNodes).toHaveLength(1)
+
+      const personPages = await listDocuments(paths.peopleDir)
+      expect(personPages).toHaveLength(1)
+
+      await engine.close()
+    })
+
     it('drops a pagePromotions entry targeting an unknown node id', async () => {
       const out: ReflectionOutput = {
         ...emptyReflectionOutput('A session naming someone not actually known.'),
