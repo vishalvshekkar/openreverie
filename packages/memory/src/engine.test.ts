@@ -140,6 +140,27 @@ describe('MemoryEngine', () => {
       await engine.close()
     })
 
+    it('omits active edges whose endpoints are no longer active from the graph snapshot', async () => {
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-14T12:00:00.000Z',
+          op: 'assert',
+          edge: 'in',
+          from: 'person_no_page',
+          to: 'missing_realm',
+          confidence: 0.7,
+          confirmed: false,
+        },
+      ])
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])), {
+        maintenance: false,
+      })
+
+      expect(engine.graphSnapshot().edges).toEqual([])
+
+      await engine.close()
+    })
+
     it('does not alter the v0.3.1 SessionContext contract while adding read projections', async () => {
       const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])), {
         maintenance: false,

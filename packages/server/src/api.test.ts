@@ -1,6 +1,7 @@
 import { Buffer } from 'node:buffer'
+import { createHash } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
-import { decodeCursor, encodeCursor } from './api.js'
+import { canonicalJson, decodeCursor, encodeCursor, makeGraphSnapshot } from './api.js'
 
 describe('API cursors', () => {
   it.each(['%', Buffer.from('{', 'utf8').toString('base64url')])(
@@ -35,5 +36,29 @@ describe('API cursors', () => {
     expect(() => decodeCursor(document, 'documents', 'documents-rev-2')).toThrowError(
       expect.objectContaining({ code: 'cursor_invalid' }),
     )
+  })
+})
+
+describe('canonical graph snapshots', () => {
+  it('sorts object keys recursively and hashes the canonical folded graph bytes', () => {
+    const snapshot = makeGraphSnapshot({
+      nodes: [
+        { id: 'node_b', type: 'person', label: 'B', assertedAt: '2026-08-15T10:00:00.000Z' },
+        { id: 'node_a', type: 'person', label: 'A', assertedAt: '2026-08-15T10:00:00.000Z' },
+      ],
+      edges: [],
+    })
+
+    const bytes = Buffer.from(
+      '{"edges":[],"nodes":[{"assertedAt":"2026-08-15T10:00:00.000Z","id":"node_a","label":"A","type":"person"},{"assertedAt":"2026-08-15T10:00:00.000Z","id":"node_b","label":"B","type":"person"}]}',
+      'utf8',
+    )
+    expect(canonicalJson({ z: { b: 1, a: [true, null] }, a: 'first' })).toBe(
+      '{"a":"first","z":{"a":[true,null],"b":1}}',
+    )
+    expect(snapshot).toMatchObject({
+      revision: createHash('sha256').update(bytes).digest('hex'),
+      nodes: [{ id: 'node_a' }, { id: 'node_b' }],
+    })
   })
 })

@@ -5,18 +5,23 @@ import type {
   Proposal,
   PublicDocument,
   PublicDocumentRow,
+  PublicGraphEdge,
+  PublicGraphNode,
   PublicSession,
   PublicTranscriptLine,
+  SequencedGraphRecord,
 } from '@openreverie/memory'
 import { z } from 'zod'
 import {
   ApiError,
   type Cursor,
   type CursorResource,
+  canonicalJson,
   decodeCursor,
   encodeCursor,
   envelope,
   LIMITS,
+  makeGraphSnapshot,
   parsePageLimit,
 } from './api.js'
 import type { BootstrapAuth } from './auth.js'
@@ -26,6 +31,9 @@ export interface RecordEngine {
   getPublicDocument(docId: string): Promise<PublicDocument | null>
   listStoredSessions(): Promise<PublicSession[]>
   readTranscriptPage(sessionId: string): Promise<PublicTranscriptLine[]>
+  graphSnapshot(): { nodes: PublicGraphNode[]; edges: PublicGraphEdge[] }
+  readGraphHistory(): Promise<SequencedGraphRecord[]>
+  docIdForPath(path: string): string | undefined
   listPendingProposals(): Promise<Proposal[]>
   resolveProposal(id: string, resolution: 'accepted' | 'rejected'): Promise<void>
 }
@@ -91,6 +99,46 @@ async function handle(
     requireAuthenticatedRead(req, auth, canonical)
   } else {
     requireAuthenticatedWrite(req, auth, canonical)
+  }
+
+  if (method === 'GET' && path.length === 4 && path[2] === 'graph' && path[3] === 'snapshot') {
+    const snapshot = makeGraphSnapshot(engine.graphSnapshot())
+    ensureGraphSnapshotResponseSize(snapshot)
+    const etag = `"${snapshot.revision}"`
+    if (req.headers['if-none-match'] === etag) {
+      res.writeHead(304, { etag })
+      res.end()
+      return
+    }
+    res.setHeader('etag', etag)
+    writePublicJson(res, 200, publicGraphSnapshotSchema, snapshot, null, LIMITS.graphPageBytes)
+    return
+  }
+
+  if (method === 'GET' && path.length === 4 && path[2] === 'graph' && path[3] === 'events') {
+    const events = (await engine.readGraphHistory()).map((event) => publicGraphEvent(event, engine))
+    const page = pageResource(events, {
+      resource: 'graph_events',
+      query: parsed.searchParams,
+      revisionValue: events,
+      revision: graphEventRevision(events),
+      tuple: (event) => [event.sequence],
+      byteLimit: LIMITS.graphPageBytes,
+      recordByteLimit: LIMITS.graphEventBytes,
+      recordTooLargeCode: 'record_too_large',
+      cursorParam: 'after',
+      fallback: 500,
+      maximum: 2000,
+    })
+    writePublicJson(
+      res,
+      200,
+      publicGraphEventsSchema,
+      page.data,
+      page.nextCursor,
+      LIMITS.graphPageBytes,
+    )
+    return
   }
 
   if (method === 'GET' && path.length === 3 && path[2] === 'documents') {
@@ -274,6 +322,61 @@ const publicProposalSchema = z.strictObject({
   sourceSessionId: z.string(),
 })
 const publicProposalsSchema = z.array(publicProposalSchema)
+const graphNodeTypeSchema = z.enum(['realm', 'arc', 'item', 'session', 'person', 'entity'])
+const graphEdgeTypeSchema = z.enum(['part_of', 'in', 'from', 'involves', 'relates_to'])
+const publicGraphNodeSchema = z.strictObject({
+  id: z.string(),
+  type: graphNodeTypeSchema,
+  label: z.string(),
+  docId: z.string().optional(),
+  assertedAt: z.string(),
+})
+const publicGraphEdgeSchema = z.strictObject({
+  key: z.string(),
+  type: graphEdgeTypeSchema,
+  from: z.string(),
+  to: z.string(),
+  confidence: z.number().min(0).max(1),
+  confirmed: z.boolean(),
+  sourceSessionId: z.string().optional(),
+  assertedAt: z.string(),
+})
+const publicGraphSnapshotSchema = z.strictObject({
+  revision: z.string().regex(/^[0-9a-f]{64}$/),
+  nodes: z.array(publicGraphNodeSchema),
+  edges: z.array(publicGraphEdgeSchema),
+})
+const publicGraphEventSchema = z.union([
+  z.strictObject({
+    sequence: z.number().int().positive(),
+    op: z.literal('assert'),
+    kind: z.literal('node'),
+    assertedAt: z.string(),
+    node: publicGraphNodeSchema,
+  }),
+  z.strictObject({
+    sequence: z.number().int().positive(),
+    op: z.literal('retract'),
+    kind: z.literal('node'),
+    assertedAt: z.string(),
+    nodeId: z.string(),
+  }),
+  z.strictObject({
+    sequence: z.number().int().positive(),
+    op: z.literal('assert'),
+    kind: z.literal('edge'),
+    assertedAt: z.string(),
+    edge: publicGraphEdgeSchema,
+  }),
+  z.strictObject({
+    sequence: z.number().int().positive(),
+    op: z.literal('retract'),
+    kind: z.literal('edge'),
+    assertedAt: z.string(),
+    edgeKey: z.string(),
+  }),
+])
+const publicGraphEventsSchema = z.array(publicGraphEventSchema)
 const bootstrapResponseSchema = z.strictObject({ authenticated: z.literal(true) })
 const proposalResolutionResponseSchema = z.strictObject({
   proposalId: z.string(),
@@ -399,9 +502,12 @@ interface PageOptions<T, R extends CursorResource> {
   revisionValue: unknown
   tuple: (record: T) => readonly unknown[]
   byteLimit: number | undefined
+  recordByteLimit?: number
   fallback?: number
   maximum?: number
   recordTooLargeCode?: string
+  cursorParam?: string
+  revision?: string
 }
 
 function pageResource<T, R extends CursorResource>(
@@ -411,9 +517,9 @@ function pageResource<T, R extends CursorResource>(
   const fallback = options.fallback ?? 50
   const maximum = options.maximum ?? 200
   const limit = parsePageLimit(options.query.get('limit'), fallback, maximum)
-  const revision = revisionFor(options.revisionValue)
+  const revision = options.revision ?? revisionFor(options.revisionValue)
   let start = 0
-  const cursor = options.query.get('cursor')
+  const cursor = options.query.get(options.cursorParam ?? 'cursor')
   if (cursor !== null) {
     const decoded = decodeCursor(cursor, options.resource, revision)
     const found = records.findIndex((record) => tuplesEqual(options.tuple(record), decoded.tuple))
@@ -426,6 +532,16 @@ function pageResource<T, R extends CursorResource>(
   while (end < records.length && data.length < limit) {
     const record = records[end]
     if (record === undefined) break
+    if (
+      options.recordByteLimit !== undefined &&
+      Buffer.byteLength(JSON.stringify(record), 'utf8') > options.recordByteLimit
+    ) {
+      throw new ApiError(
+        413,
+        options.recordTooLargeCode ?? 'record_too_large',
+        'A record is too large.',
+      )
+    }
     const next = [...data, record]
     const nextEnd = end + 1
     const nextCursor =
@@ -467,6 +583,97 @@ function tuplesEqual(left: readonly unknown[], right: readonly unknown[]): boole
 
 function revisionFor(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value), 'utf8').digest('base64url')
+}
+
+type PublicGraphEvent =
+  | {
+      sequence: number
+      op: 'assert'
+      kind: 'node'
+      assertedAt: string
+      node: PublicGraphNode
+    }
+  | { sequence: number; op: 'retract'; kind: 'node'; assertedAt: string; nodeId: string }
+  | {
+      sequence: number
+      op: 'assert'
+      kind: 'edge'
+      assertedAt: string
+      edge: PublicGraphEdge
+    }
+  | { sequence: number; op: 'retract'; kind: 'edge'; assertedAt: string; edgeKey: string }
+
+function publicGraphEvent(event: SequencedGraphRecord, engine: RecordEngine): PublicGraphEvent {
+  const { sequence, record } = event
+  if ('node' in record) {
+    return record.op === 'assert'
+      ? {
+          sequence,
+          op: 'assert',
+          kind: 'node',
+          assertedAt: record.ts,
+          node: publicNodeRecord(record, engine),
+        }
+      : { sequence, op: 'retract', kind: 'node', assertedAt: record.ts, nodeId: record.node }
+  }
+  return record.op === 'assert'
+    ? {
+        sequence,
+        op: 'assert',
+        kind: 'edge',
+        assertedAt: record.ts,
+        edge: publicEdgeRecord(record),
+      }
+    : {
+        sequence,
+        op: 'retract',
+        kind: 'edge',
+        assertedAt: record.ts,
+        edgeKey: `${record.edge}:${record.from}:${record.to}`,
+      }
+}
+
+function publicNodeRecord(
+  record: Extract<SequencedGraphRecord['record'], { node: string }>,
+  engine: RecordEngine,
+): PublicGraphNode {
+  const docId = record.doc ? engine.docIdForPath(record.doc) : undefined
+  return {
+    id: record.node,
+    type: record.type,
+    label: record.label,
+    ...(docId ? { docId } : {}),
+    assertedAt: record.ts,
+  }
+}
+
+function publicEdgeRecord(
+  record: Extract<SequencedGraphRecord['record'], { edge: string }>,
+): PublicGraphEdge {
+  return {
+    key: `${record.edge}:${record.from}:${record.to}`,
+    type: record.edge,
+    from: record.from,
+    to: record.to,
+    confidence: record.confidence,
+    confirmed: record.confirmed,
+    ...(record.source ? { sourceSessionId: record.source } : {}),
+    assertedAt: record.ts,
+  }
+}
+
+function graphEventRevision(events: PublicGraphEvent[]): string {
+  return createHash('sha256').update(canonicalJson(events), 'utf8').digest('hex')
+}
+
+function ensureGraphSnapshotResponseSize(snapshot: {
+  revision: string
+  nodes: PublicGraphNode[]
+  edges: PublicGraphEdge[]
+}): void {
+  if (Buffer.byteLength(JSON.stringify(envelope(snapshot, null)), 'utf8') > LIMITS.graphPageBytes) {
+    throw new ApiError(413, 'graph_snapshot_too_large', 'The graph snapshot is too large.')
+  }
 }
 
 function compareDocuments(left: PublicDocumentRow, right: PublicDocumentRow): number {

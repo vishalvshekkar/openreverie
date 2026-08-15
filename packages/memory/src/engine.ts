@@ -742,28 +742,32 @@ export class MemoryEngine {
   }
 
   graphSnapshot(): { nodes: PublicGraphNode[]; edges: PublicGraphEdge[] } {
+    const nodes = [...this.graphState.nodes.values()].map((node) => {
+      const projected: PublicGraphNode = {
+        id: node.id,
+        type: node.type,
+        label: node.label,
+        assertedAt: node.ts,
+      }
+      const docId = node.doc ? this.docIdByPath.get(node.doc) : undefined
+      if (docId) projected.docId = docId
+      return projected
+    })
+    const activeNodeIds = new Set(nodes.map((node) => node.id))
     return {
-      nodes: [...this.graphState.nodes.values()].map((node) => {
-        const projected: PublicGraphNode = {
-          id: node.id,
-          type: node.type,
-          label: node.label,
-          assertedAt: node.ts,
-        }
-        const docId = node.doc ? this.docIdByPath.get(node.doc) : undefined
-        if (docId) projected.docId = docId
-        return projected
-      }),
-      edges: [...this.graphState.edges.values()].map((edge) => ({
-        key: edgeKey(edge),
-        type: edge.edge,
-        from: edge.from,
-        to: edge.to,
-        confidence: edge.confidence,
-        confirmed: edge.confirmed,
-        ...(edge.source ? { sourceSessionId: edge.source } : {}),
-        assertedAt: edge.ts,
-      })),
+      nodes,
+      edges: [...this.graphState.edges.values()]
+        .filter((edge) => activeNodeIds.has(edge.from) && activeNodeIds.has(edge.to))
+        .map((edge) => ({
+          key: edgeKey(edge),
+          type: edge.edge,
+          from: edge.from,
+          to: edge.to,
+          confidence: edge.confidence,
+          confirmed: edge.confirmed,
+          ...(edge.source ? { sourceSessionId: edge.source } : {}),
+          assertedAt: edge.ts,
+        })),
     }
   }
 

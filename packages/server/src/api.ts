@@ -1,4 +1,6 @@
 import { Buffer } from 'node:buffer'
+import { createHash } from 'node:crypto'
+import type { PublicGraphEdge, PublicGraphNode } from '@openreverie/memory'
 import { z } from 'zod'
 
 export const LIMITS = {
@@ -103,6 +105,37 @@ export function decodeCursor<R extends CursorResource>(
 
 export function envelope<T>(data: T, nextCursor: string | null) {
   return { data, meta: { nextCursor } }
+}
+
+export function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  if (value !== null && typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) =>
+      a.localeCompare(b),
+    )
+    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`).join(',')}}`
+  }
+  const serialized = JSON.stringify(value)
+  if (serialized === undefined) throw new TypeError('Canonical JSON does not support undefined.')
+  return serialized
+}
+
+export function makeGraphSnapshot(graph: { nodes: PublicGraphNode[]; edges: PublicGraphEdge[] }): {
+  revision: string
+  nodes: PublicGraphNode[]
+  edges: PublicGraphEdge[]
+} {
+  const nodes = [...graph.nodes].sort(
+    (a, b) => a.assertedAt.localeCompare(b.assertedAt) || a.id.localeCompare(b.id),
+  )
+  const edges = [...graph.edges].sort(
+    (a, b) => a.assertedAt.localeCompare(b.assertedAt) || a.key.localeCompare(b.key),
+  )
+  const bytes = Buffer.from(canonicalJson({ nodes, edges }), 'utf8')
+  if (bytes.byteLength > LIMITS.graphPageBytes) {
+    throw new ApiError(413, 'graph_snapshot_too_large', 'The graph snapshot is too large.')
+  }
+  return { revision: createHash('sha256').update(bytes).digest('hex'), nodes, edges }
 }
 
 export function parsePageLimit(value: string | null, fallback: number, maximum: number): number {
