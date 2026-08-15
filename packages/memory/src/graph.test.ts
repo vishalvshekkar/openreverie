@@ -2,7 +2,14 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { appendGraph, edgeKey, foldGraph, type GraphRecord, readGraph } from './graph.js'
+import {
+  appendGraph,
+  edgeKey,
+  foldGraph,
+  type GraphRecord,
+  readGraph,
+  readGraphRecords,
+} from './graph.js'
 import { ensureMemoryTree, memoryPaths } from './paths.js'
 
 describe('edgeKey', () => {
@@ -194,6 +201,26 @@ describe('appendGraph and readGraph', () => {
 
     const state = await readGraph(paths)
     expect(state.nodes.has('realm_1')).toBe(false)
+  })
+
+  it('retains every raw graph operation with its one-based append sequence', async () => {
+    const paths = memoryPaths(dir)
+    await ensureMemoryTree(paths)
+    const assertNode: GraphRecord = {
+      ts: '2026-08-01T00:00:00.000Z',
+      op: 'assert',
+      node: 'person_no_page',
+      type: 'person',
+      label: 'Noor',
+    }
+    const retractNode: GraphRecord = { ...assertNode, op: 'retract' }
+
+    await appendGraph(paths, [assertNode, retractNode])
+
+    expect(await readGraphRecords(paths)).toEqual([
+      { sequence: 1, record: assertNode },
+      { sequence: 2, record: retractNode },
+    ])
   })
 
   it('returns empty state when the graph log does not exist yet', async () => {

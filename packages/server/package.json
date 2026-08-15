@@ -1,0 +1,20 @@
+{
+  "name": "@openreverie/server",
+  "version": "0.4.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@openreverie/core": "workspace:*",
+    "@openreverie/memory": "workspace:*",
+    "@openreverie/providers": "workspace:*",
+    "zod": "^4.0.0"
+  }
+}

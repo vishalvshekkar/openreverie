@@ -1,7 +1,7 @@
 {
   "name": "openreverie-workspace",
   "private": true,
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Workspace root for openreverie, a self-hosted companion agent with a memory that does not forget.",
   "homepage": "https://reverie.my",
   "license": "AGPL-3.0-only",
