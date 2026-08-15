@@ -482,6 +482,20 @@ describe('AgentSession', () => {
     await engine.close()
   })
 
+  it('greet() instructs never opening with housekeeping, bookkeeping, or managing memory', async () => {
+    const chat = new FakeChatProvider([{ text: 'Hello again.', toolCalls: [] }])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const session = await AgentSession.start(engine, testConfig(), chat)
+
+    await collect(session.greet())
+
+    const system = chat.requests[0]?.system ?? ''
+    expect(system.toLowerCase()).toContain('never open with housekeeping')
+    expect(system.toLowerCase()).toContain("open with the person's life")
+
+    await engine.close()
+  })
+
   it('greet() writes a transcript line in the same shape as a normal assistant line', async () => {
     const chat = new FakeChatProvider([{ text: 'Hello again.', toolCalls: [] }])
     const engine = await MemoryEngine.open(dir, fakeDeps(chat))
