@@ -20,6 +20,7 @@
   "dependencies": {
     "@openreverie/core": "workspace:*",
     "@openreverie/memory": "workspace:*",
-    "@openreverie/providers": "workspace:*"
+    "@openreverie/providers": "workspace:*",
+    "@openreverie/server": "workspace:*"
   }
 }
