@@ -38,6 +38,11 @@ export interface EdgeRecord {
 
 export type GraphRecord = NodeRecord | EdgeRecord
 
+export interface SequencedGraphRecord {
+  sequence: number
+  record: GraphRecord
+}
+
 // Exported so callers that need to validate a record shape independently of
 // appendGraph/readGraph (e.g. reflection.ts, or tests) can reuse the exact
 // rules the graph log enforces, instead of re-deriving them.
@@ -168,18 +173,23 @@ export async function appendGraph(paths: MemoryPaths, records: GraphRecord[]): P
   await appendFile(paths.graphLog, lines, 'utf8')
 }
 
-export async function readGraph(paths: MemoryPaths): Promise<GraphState> {
+interface GraphLogLine {
+  record: GraphRecord
+  sourceLine: number
+}
+
+async function readGraphLines(graphLog: string): Promise<GraphLogLine[]> {
   let raw: string
   try {
-    raw = await readFile(paths.graphLog, 'utf8')
+    raw = await readFile(graphLog, 'utf8')
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-      return foldGraph([])
+      return []
     }
     throw err
   }
 
-  const records: GraphRecord[] = []
+  const records: GraphLogLine[] = []
   const lines = raw.split('\n')
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]
@@ -191,15 +201,25 @@ export async function readGraph(paths: MemoryPaths): Promise<GraphState> {
       parsed = JSON.parse(line)
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
-      throw new Error(`Graph log ${paths.graphLog} line ${i + 1} is not valid JSON: ${message}`)
+      throw new Error(`Graph log ${graphLog} line ${i + 1} is not valid JSON: ${message}`)
     }
 
     const validation = parseGraphRecord(parsed)
     if (!validation.success || !validation.data) {
-      throw new Error(`Graph log ${paths.graphLog} line ${i + 1}: ${validation.error}`)
+      throw new Error(`Graph log ${graphLog} line ${i + 1}: ${validation.error}`)
     }
-    records.push(validation.data)
+    records.push({ record: validation.data, sourceLine: i + 1 })
   }
 
-  return foldGraph(records)
+  return records
+}
+
+export async function readGraphRecords(paths: MemoryPaths): Promise<SequencedGraphRecord[]> {
+  const lines = await readGraphLines(paths.graphLog)
+  return lines.map(({ record, sourceLine }) => ({ sequence: sourceLine, record }))
+}
+
+export async function readGraph(paths: MemoryPaths): Promise<GraphState> {
+  const lines = await readGraphLines(paths.graphLog)
+  return foldGraph(lines.map(({ record }) => record))
 }

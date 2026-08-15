@@ -15,6 +15,7 @@
 import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { ChatProvider, EmbeddingProvider } from '@openreverie/providers'
+import { decodeTime } from 'ulid'
 import {
   type Document,
   listDocuments,
@@ -31,6 +32,8 @@ import {
   type GraphRecord,
   type GraphState,
   readGraph,
+  readGraphRecords,
+  type SequencedGraphRecord,
 } from './graph.js'
 import { ensureMemoryTree, type MemoryPaths, memoryPaths } from './paths.js'
 import {
@@ -58,6 +61,57 @@ import {
 } from './rollups.js'
 import { type DocKind, MemoryIndex, type SearchHit } from './sqlite.js'
 import { SessionStore, type TranscriptLine } from './transcripts.js'
+
+export type { SequencedGraphRecord } from './graph.js'
+
+export interface MemoryEngineOpenOptions {
+  maintenance?: boolean
+}
+
+export interface PublicDocumentRow {
+  docId: string
+  kind: DocKind
+  title: string
+  updatedAt: string
+  readOnly: true
+}
+
+export interface PublicDocument extends PublicDocumentRow {
+  body: string
+}
+
+export interface PublicSession {
+  sessionId: string
+  createdAt: string
+  updatedAt: string
+  status: 'live' | 'ended' | 'expired'
+  readOnly: boolean
+  transcript: {
+    lineCount: number
+    userCount: number
+    assistantCount: number
+    toolCount: number
+  }
+}
+
+export interface PublicGraphNode {
+  id: string
+  type: GraphNode['type']
+  label: string
+  docId?: string
+  assertedAt: string
+}
+
+export interface PublicGraphEdge {
+  key: string
+  type: EdgeType
+  from: string
+  to: string
+  confidence: number
+  confirmed: boolean
+  sourceSessionId?: string
+  assertedAt: string
+}
 
 export interface EngineDeps {
   chat: ChatProvider
@@ -177,7 +231,11 @@ export class MemoryEngine {
     this.graphState = graphState
   }
 
-  static async open(root: string, deps: EngineDeps): Promise<MemoryEngine> {
+  static async open(
+    root: string,
+    deps: EngineDeps,
+    options: MemoryEngineOpenOptions = {},
+  ): Promise<MemoryEngine> {
     const paths = memoryPaths(root)
     await ensureMemoryTree(paths)
     const index = MemoryIndex.open(paths.indexDb)
@@ -191,7 +249,9 @@ export class MemoryEngine {
     // recorded. Nothing in the maintenance path reads docPaths (only
     // reindexDocument writes it), and running the doc walk last also picks
     // up any rollups or session summaries maintenance itself just wrote.
-    await engine.runMaintenance()
+    if (options.maintenance !== false) {
+      await engine.runMaintenance()
+    }
     // drainLegacyProposals() after runMaintenance(), not before: runMaintenance
     // clears warnings as its own first step, and draining after it means a
     // warning the drain itself produces (a reindex failure inside
@@ -200,7 +260,9 @@ export class MemoryEngine {
     // the doc walk that seeds docPaths/docIdByPath already sees any page a
     // drained proposal just wrote, the same reasoning that already put
     // refreshDocPaths() last.
-    await engine.drainLegacyProposals()
+    if (options.maintenance !== false) {
+      await engine.drainLegacyProposals()
+    }
     await engine.refreshDocPaths()
     return engine
   }
@@ -650,6 +712,73 @@ export class MemoryEngine {
       return await readDocument(path)
     } catch {
       return null
+    }
+  }
+
+  async listPublicDocuments(): Promise<PublicDocumentRow[]> {
+    const docs = await this.walkAllDocuments()
+    return docs.map(({ doc, kind }) => publicDocumentRow(doc, kind)).sort(comparePublicDocuments)
+  }
+
+  async getPublicDocument(docId: string): Promise<PublicDocument | null> {
+    const doc = await this.readDocumentById(docId)
+    if (!doc) return null
+    const kind = await this.kindForPublicDocument(doc.path)
+    if (!kind) return null
+    return { ...publicDocumentRow(doc, kind), body: doc.body }
+  }
+
+  async listStoredSessions(): Promise<PublicSession[]> {
+    const sessions = await SessionStore.listSessions(this.paths)
+    const result: PublicSession[] = []
+    for (const session of sessions) {
+      const lines = await SessionStore.readTranscript(this.paths, session.sessionId)
+      const createdAt = isoFromId(session.sessionId, `${session.date}T00:00:00.000Z`)
+      const updatedAt = lines.at(-1)?.ts ?? createdAt
+      result.push({
+        sessionId: session.sessionId,
+        createdAt,
+        updatedAt,
+        status: 'ended',
+        readOnly: true,
+        transcript: {
+          lineCount: lines.length,
+          userCount: lines.filter((line) => line.role === 'user').length,
+          assistantCount: lines.filter((line) => line.role === 'assistant').length,
+          toolCount: lines.filter((line) => line.role === 'tool').length,
+        },
+      })
+    }
+    return result
+  }
+
+  async readGraphHistory(): Promise<SequencedGraphRecord[]> {
+    return readGraphRecords(this.paths)
+  }
+
+  graphSnapshot(): { nodes: PublicGraphNode[]; edges: PublicGraphEdge[] } {
+    return {
+      nodes: [...this.graphState.nodes.values()].map((node) => {
+        const projected: PublicGraphNode = {
+          id: node.id,
+          type: node.type,
+          label: node.label,
+          assertedAt: node.ts,
+        }
+        const docId = node.doc ? this.docIdByPath.get(node.doc) : undefined
+        if (docId) projected.docId = docId
+        return projected
+      }),
+      edges: [...this.graphState.edges.values()].map((edge) => ({
+        key: edgeKey(edge),
+        type: edge.edge,
+        from: edge.from,
+        to: edge.to,
+        confidence: edge.confidence,
+        confirmed: edge.confirmed,
+        ...(edge.source ? { sourceSessionId: edge.source } : {}),
+        assertedAt: edge.ts,
+      })),
     }
   }
 
@@ -1104,6 +1233,11 @@ export class MemoryEngine {
     this.docIdByPath = new Map(docs.map(({ doc }) => [doc.path, doc.meta.id]))
   }
 
+  private async kindForPublicDocument(path: string): Promise<DocKind | null> {
+    const docs = await this.walkAllDocuments()
+    return docs.find(({ doc }) => doc.path === path)?.kind ?? null
+  }
+
   private async walkAllDocuments(): Promise<{ doc: Document; kind: DocKind }[]> {
     const result: { doc: Document; kind: DocKind }[] = []
     result.push({ doc: await readDocument(this.paths.constitution), kind: 'constitution' })
@@ -1517,6 +1651,49 @@ function isDegraded(
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
+}
+
+function publicDocumentRow(doc: Document, kind: DocKind): PublicDocumentRow {
+  return {
+    docId: doc.meta.id,
+    kind,
+    title: documentTitle(doc),
+    updatedAt: documentUpdatedAt(doc),
+    readOnly: true,
+  }
+}
+
+function documentTitle(doc: Document): string {
+  if (typeof doc.meta.name === 'string' && doc.meta.name.length > 0) return doc.meta.name
+  if (typeof doc.meta.title === 'string') return doc.meta.title
+  return doc.meta.id
+}
+
+function documentUpdatedAt(doc: Document): string {
+  for (const key of ['updated', 'date', 'week']) {
+    const value = doc.meta[key]
+    if (typeof value === 'string') return value
+  }
+  return isoFromId(doc.meta.id, '1970-01-01T00:00:00.000Z')
+}
+
+function comparePublicDocuments(a: PublicDocumentRow, b: PublicDocumentRow): number {
+  if (a.kind !== b.kind) return a.kind < b.kind ? -1 : 1
+  if (a.title !== b.title) return a.title < b.title ? -1 : 1
+  if (a.docId === b.docId) return 0
+  return a.docId < b.docId ? -1 : 1
+}
+
+function isoFromId(id: string, fallback: string): string {
+  const separator = id.indexOf('_')
+  if (separator < 0) return fallback
+  try {
+    return new Date(
+      decodeTime(id.slice(separator + 1) as Parameters<typeof decodeTime>[0]),
+    ).toISOString()
+  } catch {
+    return fallback
+  }
 }
 
 function byTsDescending(a: GraphNode, b: GraphNode): number {

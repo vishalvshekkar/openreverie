@@ -19,6 +19,14 @@ export interface TranscriptLine {
   toolCallId?: string
 }
 
+export interface PublicTranscriptLine extends TranscriptLine {
+  lineSequence: number
+}
+
+export interface TranscriptPageInput {
+  lines: PublicTranscriptLine[]
+}
+
 const TRANSCRIPT_FILE = 'transcript.jsonl'
 const SUMMARY_FILE = 'summary.md'
 const SESSION_DIR_PATTERN = /^(\d{4}-\d{2}-\d{2})-(session_[0-9A-Za-z]+)$/
