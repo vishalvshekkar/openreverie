@@ -8,7 +8,7 @@ Website: [reverie.my](https://reverie.my)
 
 ## Status
 
-**Usable as a terminal app and a local web interface. v0.4.0 is the first release that ships a browser UI alongside the terminal CLI.**
+**Usable as a terminal app and a local web interface. v0.4.0 was the first release to ship a browser UI alongside the terminal CLI. v0.5.0 rebuilds that browser UI into three separate sections and replaces the hand-written graph layout with the standard graphology layout libraries.**
 
 What works today:
 
@@ -21,21 +21,28 @@ What works today:
 - Both safety modes (companion and firewall)
 - A first-run setup wizard
 - The `reindex`, `reflect`, and `read` CLI subcommands. `read` works with no network call and no API key: it is a plain filesystem read of your memory record
-- A local web interface, `reverie web`, serving the same record in a browser. The server binds to `127.0.0.1` only and admits you through a single-use bootstrap token that is generated fresh each run and expires five minutes after startup. Browsing records, people, sessions, and transcripts works with no API key configured; chat in the browser works when a provider is configured. Pending legacy proposals are readable in the interface. The command prints the bootstrap URL and does not open your browser for you.
+- A local web interface, `reverie web`, serving the same record in a browser. The server binds to `127.0.0.1` only and admits you through a single-use bootstrap token that is generated fresh each run and expires five minutes after startup. Browsing records, people, sessions, and transcripts works with no API key configured; chat in the browser works when a provider is configured. The command prints the bootstrap URL and does not open your browser for you.
+- The browser interface is organized into three sections reached from a left rail: Talk (conversations), Atlas (the graph), and Record (the written documents). Only one section is on screen at a time, and the atlas is unmounted while you are in another section, so the graph costs nothing while you are reading or talking.
+- Talk shows a session list grouped by day with readable times instead of raw session ids. Clicking a past session opens its transcript read only. The message thread keeps the full conversation through a turn, and streamed replies arrive as one growing message.
+- The browser now shows the opening greeting described above. Until this rework, the server sent the greeting stream but no browser client consumed it, so a new conversation opened with an empty thread even though the greeting had already been written to the transcript. If the greeting fails or the provider is unreachable, the session still opens and the composer still works, matching the terminal.
+- Record groups your documents by kind and shows a readable label for summaries and rollups, which carry no title of their own, derived from their date. It has a search box and renders markdown through a deliberately limited renderer that handles headings, paragraphs, lists, blockquotes, horizontal rules, fenced code, and inline code, bold, and italic. It builds React elements only and never sets raw HTML; it also no longer treats an underscore inside a word as italic markup, so an identifier like `doc_const_1` displays correctly.
 - Sessions you start in the browser stay live while the server runs, then become read-only after it restarts. Their transcripts remain browsable after the restart.
 - A status line while the model or a tool is working, so a slow call looks slow rather than stuck. It only appears when the terminal supports color; a piped or non-interactive session gets none.
 - Opening a session and leaving without typing anything costs nothing: no reflection call, no rollup
 - The OpenAI provider
 
-The Phase B atlas renders the graph of realms, arcs, people, entities, items, and sessions as an interactive node view.
+The atlas renders the graph of realms, arcs, people, entities, items, and sessions as an interactive node view. It is now built on the standard graphology layout libraries rather than hand-written geometry, which also fixed a bug where the atlas canvas was sized by the list next to it and could grow past the browser's maximum canvas dimension, so WebGL allocation failed and the graph rendered as a black rectangle.
 
-The atlas in v0.4.0 has deterministic temporary layout, pan and zoom, type filtering, selection, and an accessible node list. It does not yet include saved graph positions, graph search, realm influence, progressive labels, or a history time lens.
+The atlas uses ForceAtlas2 for layout and noverlap for collision removal, both run with fixed iteration counts so the result stays deterministic. It supports pan, zoom with explicit zoom in, zoom out, and reset controls, dragging a node to move it, click selection, hover emphasis that dims everything except the hovered node and its direct neighbors, label culling so labels appear progressively as you zoom in, a type filter with live counts where item nodes start hidden, a label search, and the accessible node list. Positions you set by dragging a node are saved to the browser's local storage, so the map does not rearrange itself between visits; nothing about layout is written to your memory folder.
+
+Realm influence visualization and a history time lens still do not exist in the atlas. ForceAtlas2 runs on the main thread: it is fast at the current graph size and the iteration count is capped so a large graph cannot hang the tab, but the worker build the library ships with is not used yet. The graph snapshot is still loaded whole; the server caps it at 8 MiB and never paginates, so there is an upper limit on graph size the browser cannot work around. Switching your operating system between light and dark while the atlas is open can also leave some of its colors out of step until you reload the page.
 
 What does not exist yet:
 
 - Providers other than OpenAI
 - Any deployment target beyond running it yourself (no Cloudflare or VPS packaging)
-- Saved graph positions, graph search, realm influence, progressive labels, or a history time lens in the atlas (see above)
+- A view of pending legacy proposals in the browser. An earlier build listed them; the three section rework dropped that panel. The engine already materializes and resolves any leftover proposals silently the moment it opens, so there is normally nothing left to show, but if your memory folder still holds some there is now no way to see them in the interface
+- Realm influence or a history time lens in the atlas (see above)
 - Pages for entities: they get a node in the graph, not a maintained document, in this release
 - Monthly and yearly rollups (only daily and weekly exist)
 - Any way to make reverie forget. The feature exists in code and is tested, but it is deliberately unexposed: no tool, no persona instruction, and no CLI command reaches it. Deleting or editing a page under `people/` or `arcs/` removes the prose, but not the record: the node it corresponds to, its edges, and every attribution that named it still live in `graph.jsonl`, nothing in the product retracts them, and the agent can still surface what the graph knows about a person or arc whose page you deleted. Running `reindex` does clear the deleted page's stale rows out of the search index, so it stops turning up in `search_memory` hits, but `reindex` rebuilds the graph from `graph.jsonl` exactly as it already was, so the node and its edges come straight back. There is currently no user-accessible way to remove a node, an edge, or an attribution at all.
@@ -108,7 +115,7 @@ Dependencies point downward only. `cli` and `server` are sibling outer interface
 2. Web interface and local auth (done, v0.4.0)
 3. More provider adapters (Anthropic, OpenRouter, Cloudflare AI Gateway, DeepSeek, local models)
 4. Alternate deployment targets (Cloudflare, VPS)
-5. Phase C atlas polish (saved graph positions, graph search, realm influence, progressive labels, history time lens)
+5. Phase C atlas polish (realm influence, history time lens)
 
 Ongoing work, remaining tasks, and contributor-friendly starting points live in [ROADMAP.md](ROADMAP.md).
 

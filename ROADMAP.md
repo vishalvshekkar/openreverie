@@ -20,7 +20,7 @@ These are the large pieces from the original design, each sized like its own pro
 
 3. **More provider adapters.** The interfaces are in `@openreverie/providers` (`ChatProvider`, `EmbeddingProvider`) and the factory has one switch statement waiting for company: Anthropic, OpenRouter, Cloudflare AI Gateway, DeepSeek, and local models (Ollama and OpenAI-compatible endpoints). Every adapter must pass the same contract tests. This is the most contributor-friendly large item.
 4. **Alternate deployment targets.** Cloudflare (Workers, D1 or Durable Objects storage, Vectorize) and VPS packaging. The storage layer is behind interfaces for exactly this reason, but this is a real porting effort.
-5. **Phase C atlas polish.** The Phase B atlas already renders nodes with deterministic temporary layout, pan and zoom, type filtering, selection, and an accessible node list. Phase C adds the deferred pieces: saved graph positions, graph search, realm influence, progressive labels, and a history time lens.
+5. **Phase C atlas polish.** v0.5.0 rebuilt the atlas on the standard graphology layout libraries and delivered several of the deferred pieces: saved graph positions, label search, progressive labels, node dragging, and hover emphasis. Still outstanding: realm influence, a history time lens, running the layout in a worker instead of on the main thread, and a way to load the graph in parts rather than as one capped snapshot.
 
 ## Smaller improvements, help welcome
 

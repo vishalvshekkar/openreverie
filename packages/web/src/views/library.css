@@ -1,0 +1,272 @@
+/*
+ * Styles for the Library reading view. Every colour comes from a
+ * var(--token) defined in tokens.css; this file defines no raw colours.
+ * tokens.css is not imported here because styles.css already loads it.
+ */
+
+.library {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  background: var(--paper);
+  color: var(--ink);
+}
+
+.library-index {
+  width: var(--sidebar-width);
+  flex: 0 0 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  padding: var(--space-4) var(--space-3);
+  border-right: 1px solid var(--rule);
+  font-family: var(--font-ui);
+}
+
+.library-search label {
+  display: block;
+  font-size: var(--step--1);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin: 0 0 var(--space-1);
+}
+
+.library-search input {
+  width: 100%;
+  font-family: var(--font-ui);
+  font-size: var(--step-0);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-2);
+  background: var(--panel-raised);
+  color: var(--ink);
+}
+
+.library-search input:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+.library-status {
+  font-family: var(--font-ui);
+  font-size: var(--step-0);
+  color: var(--ink-soft);
+  margin: 0;
+}
+
+.library-status-error {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.library-status-error button {
+  font-family: var(--font-ui);
+  font-size: var(--step-0);
+  color: var(--ink);
+  background: none;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-1);
+  padding: var(--space-1) var(--space-2);
+  cursor: pointer;
+}
+
+.library-status-error button:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+.library-group h3 {
+  font-family: var(--font-ui);
+  font-size: var(--step--1);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin: 0 0 var(--space-2);
+}
+
+.library-group ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.library-group button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font-family: var(--font-ui);
+  font-size: var(--step-0);
+  line-height: 1.35;
+  color: var(--ink-soft);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-2);
+  padding: var(--space-2) var(--space-3);
+  cursor: pointer;
+}
+
+.library-group button:hover {
+  background: var(--panel);
+  color: var(--ink);
+}
+
+.library-group button[aria-current="true"] {
+  background: var(--panel-raised);
+  border-color: var(--rule-strong);
+  color: var(--ink);
+  font-weight: 600;
+  box-shadow: var(--shadow);
+}
+
+.library-group button:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+.library-reading {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-6);
+}
+
+.library-reading-header {
+  max-width: var(--reading-measure);
+  border-left: 1px solid var(--rule);
+  padding-left: var(--space-3);
+  margin: 0 0 var(--space-5);
+  font-family: var(--font-record);
+  font-size: var(--step--1);
+  letter-spacing: 0.02em;
+  color: var(--ink-faint);
+}
+
+.library-meta {
+  margin: 0 0 var(--space-1);
+}
+
+.library-docid {
+  margin: 0 0 var(--space-2);
+  word-break: break-all;
+}
+
+.library-readonly-note {
+  margin: 0;
+  font-family: var(--font-ui);
+  letter-spacing: normal;
+  text-transform: none;
+  color: var(--ink-faint);
+}
+
+.library-notice {
+  max-width: var(--reading-measure);
+  font-family: var(--font-ui);
+  font-size: var(--step-0);
+  color: var(--ink-soft);
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-2);
+  padding: var(--space-3);
+  margin: 0 0 var(--space-4);
+}
+
+.library-empty {
+  max-width: var(--reading-measure);
+  font-family: var(--font-reading);
+  font-size: var(--step-2);
+  color: var(--ink-soft);
+}
+
+.library-body {
+  max-width: var(--reading-measure);
+  font-family: var(--font-reading);
+  font-size: var(--step-2);
+  line-height: 1.75;
+  color: var(--ink);
+}
+
+.library-body h1,
+.library-body h2,
+.library-body h3 {
+  font-weight: 600;
+  line-height: 1.3;
+  margin: var(--space-6) 0 var(--space-3);
+}
+
+.library-body h1:first-child,
+.library-body h2:first-child,
+.library-body h3:first-child {
+  margin-top: 0;
+}
+
+.library-body p {
+  margin: 0 0 var(--space-4);
+}
+
+.library-body ul,
+.library-body ol {
+  margin: 0 0 var(--space-4);
+  padding-left: var(--space-6);
+}
+
+.library-body li {
+  margin: 0 0 var(--space-1);
+}
+
+.library-body blockquote {
+  margin: 0 0 var(--space-4);
+  padding-left: var(--space-4);
+  border-left: 2px solid var(--rule-strong);
+  color: var(--ink-soft);
+}
+
+.library-body blockquote p {
+  margin: 0;
+}
+
+.library-body hr {
+  border: none;
+  border-top: 1px solid var(--rule);
+  margin: var(--space-6) 0;
+}
+
+.library-body pre {
+  background: var(--paper-sunken);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-2);
+  padding: var(--space-3);
+  margin: 0 0 var(--space-4);
+  overflow-x: auto;
+  font-family: var(--font-record);
+  font-size: var(--step-0);
+}
+
+.library-body code {
+  font-family: var(--font-record);
+  font-size: 0.9em;
+  background: var(--said);
+  padding: 0 0.3em;
+  border-radius: var(--radius-1);
+}
+
+.library-body pre code {
+  background: none;
+  padding: 0;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .library-group button {
+    transition:
+      background-color 120ms ease,
+      color 120ms ease,
+      border-color 120ms ease;
+  }
+}

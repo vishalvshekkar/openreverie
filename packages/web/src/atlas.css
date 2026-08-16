@@ -1,0 +1,325 @@
+/*
+ * Atlas view. Consumes tokens.css only; every colour, spacing, and type
+ * choice in this file is a var(--token) reference. The exception lives
+ * entirely in atlas.tsx, not here: colorForType's two ramps and dimColor's
+ * two literals are the only raw monochrome hex values in the view, and
+ * borderColorForType, edgeColor, and edgeEmphasisColor all derive their
+ * colours from those rather than adding new literals of their own. Sigma
+ * paints to a canvas and cannot read CSS custom properties, which is why
+ * that code cannot just reference these tokens directly.
+ *
+ * Layout note: the root and every scrolling region below it carry an
+ * explicit min-height: 0. A grid or flex child defaults to min-height: auto,
+ * which refuses to shrink below its content. With a 116-node sidebar list
+ * that default is what stretched the canvas to thousands of pixels tall and
+ * blew past the browser's canvas size limit. min-height: 0 plus overflow:
+ * auto on each scrolling region is what keeps this view inside the box the
+ * shell gives it.
+ */
+
+.atlas {
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--sidebar-width);
+  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-areas: "canvas sidebar" "detail sidebar";
+  gap: var(--space-3);
+  padding: var(--space-3);
+  background: var(--paper);
+}
+
+.atlas-empty-state {
+  display: grid;
+  place-content: center;
+}
+
+.atlas-status {
+  padding: var(--space-4);
+  color: var(--ink-soft);
+  font-family: var(--font-ui);
+  font-size: var(--step-0);
+}
+
+.atlas-status-error {
+  color: var(--ink);
+}
+
+.atlas-canvas-cell {
+  grid-area: canvas;
+  position: relative;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-2);
+}
+
+.atlas-canvas {
+  position: absolute;
+  inset: 0;
+}
+
+.atlas-controls {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-2);
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  border: none;
+}
+
+/* An accessible-name-only legend: sighted users read the control purpose
+   from the button labels (Zoom in, Zoom out, Reset view) and this fieldset's
+   own visual chrome is nothing but a positioning box, but the fieldset/
+   legend pairing (the same pattern .atlas-filter already uses) is what
+   satisfies the a11y "role=group belongs on a real grouping element" rule
+   without losing the group's accessible name for assistive tech. */
+.atlas-controls legend {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.atlas-controls button {
+  min-width: 2rem;
+  padding: var(--space-1) var(--space-2);
+  background: var(--panel-raised);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-1);
+  box-shadow: var(--shadow);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: var(--step-0);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.atlas-controls button:hover {
+  background: var(--said);
+}
+
+.atlas-sidebar {
+  grid-area: sidebar;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.atlas-search {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-family: var(--font-ui);
+  font-size: var(--step--1);
+  letter-spacing: 0.02em;
+}
+
+.atlas-search label {
+  color: var(--ink-soft);
+}
+
+.atlas-search input {
+  padding: var(--space-2);
+  background: var(--panel-raised);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-1);
+  color: var(--ink);
+}
+
+.atlas-filter {
+  flex: none;
+  margin: 0;
+  padding: var(--space-2);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-1);
+  font-family: var(--font-ui);
+  font-size: var(--step--1);
+}
+
+.atlas-filter legend {
+  padding: 0 var(--space-1);
+  color: var(--ink-soft);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-size: var(--step--1);
+}
+
+.atlas-filter label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) 0;
+  color: var(--ink);
+}
+
+.atlas-filter-swatch {
+  display: inline-block;
+  box-sizing: border-box;
+  border-radius: 50%;
+  flex: none;
+}
+
+.atlas-filter input[type="checkbox"] {
+  accent-color: var(--ink);
+}
+
+.atlas-filter-count {
+  color: var(--ink-faint);
+  font-family: var(--font-record);
+}
+
+.atlas-node-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-1);
+}
+
+.atlas-node-list button {
+  display: -webkit-box;
+  width: 100%;
+  text-align: left;
+  padding: var(--space-2);
+  font-family: var(--font-ui);
+  font-size: var(--step--1);
+  color: var(--ink);
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+}
+
+.atlas-node-list button:hover {
+  background: var(--said);
+}
+
+.atlas-detail {
+  grid-area: detail;
+  min-height: 0;
+  min-width: 0;
+  max-height: 20rem;
+  overflow: auto;
+  padding: var(--space-3);
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-2);
+  font-family: var(--font-ui);
+}
+
+.atlas-detail h2 {
+  margin: 0 0 var(--space-3);
+  font-family: var(--font-reading);
+  font-size: var(--step-2);
+}
+
+.atlas-detail h3 {
+  margin: 0 0 var(--space-2);
+  font-family: var(--font-reading);
+  font-size: var(--step-1);
+}
+
+.atlas-facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--space-1) var(--space-3);
+  margin: 0 0 var(--space-3);
+  font-size: var(--step--1);
+}
+
+.atlas-facts dt {
+  color: var(--ink-soft);
+  letter-spacing: 0.02em;
+}
+
+.atlas-facts dd {
+  margin: 0;
+  font-family: var(--font-record);
+}
+
+.atlas-edges ul {
+  list-style: none;
+  margin: 0 0 var(--space-3);
+  padding: 0;
+}
+
+.atlas-edges li {
+  display: flex;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  padding: var(--space-1) 0;
+  border-bottom: 1px solid var(--rule);
+  font-size: var(--step--1);
+  font-family: var(--font-record);
+}
+
+.atlas-edge-type {
+  color: var(--ink-soft);
+}
+
+.atlas-node-list li + li {
+  border-top: 1px solid var(--rule);
+}
+
+.atlas-history,
+.atlas-empty,
+.atlas-detail-hint,
+.atlas-document-status {
+  color: var(--ink-soft);
+  font-size: var(--step--1);
+}
+
+.atlas-document {
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--rule);
+}
+
+.atlas-document-body {
+  font-family: var(--font-reading);
+  font-size: var(--step-1);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--ink);
+}
+
+.atlas :focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+  border-radius: var(--radius-1);
+}
+
+/*
+ * Reduced motion is handled globally in styles.css (`* { ... !important }`
+ * under the same media query), so this view adds nothing further: it has no
+ * animation of its own beyond what Sigma itself respects via the
+ * zoomDuration / doubleClickZoomingDuration settings set in atlas.tsx.
+ */
+
+@media (max-width: 48rem) {
+  .atlas {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) minmax(0, 12rem) auto;
+    grid-template-areas: "canvas" "sidebar" "detail";
+  }
+}
