@@ -1,345 +1,143 @@
-import type { FormEvent } from 'react'
-import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
-import {
-  ApiHttpError,
-  type AppApi,
-  type Document,
-  type DocumentRow,
-  type GraphSnapshot,
-  IncompleteStreamError,
-  isTerminalEvent,
-  type Proposal,
-  type Session,
-  type StreamEvent,
-  type TranscriptLine,
-} from './api.js'
-import { Atlas } from './atlas.js'
-import { initialChatState, newTurnId, sessionReducer } from './session.js'
+import { Component, type ReactNode, useEffect, useState } from 'react'
+import type { AppApi } from './api.js'
+import { AtlasView } from './atlas.js'
+import { Conversations } from './views/Conversations.js'
+import { Library } from './views/Library.js'
 
-function isResyncRequired(error: unknown): boolean {
-  return error instanceof ApiHttpError && error.status === 409 && error.code === 'resync_required'
+export type ViewId = 'conversations' | 'atlas' | 'library'
+
+const VIEW_IDS: ViewId[] = ['conversations', 'atlas', 'library']
+
+const VIEW_LABELS: Record<ViewId, string> = {
+  conversations: 'Talk',
+  atlas: 'Atlas',
+  library: 'Record',
 }
 
-function transcriptLineLabel(role: TranscriptLine['role']): string {
-  if (role === 'user') return 'You'
-  if (role === 'assistant') return 'openreverie'
-  return 'Tool'
+function isViewId(value: string): value is ViewId {
+  return (VIEW_IDS as string[]).includes(value)
 }
 
-function renderTranscriptLine(line: TranscriptLine) {
+export function viewFromHash(hash: string): ViewId {
+  const candidate = hash.replace(/^#\/?/, '')
+  return isViewId(candidate) ? candidate : 'conversations'
+}
+
+function RailIcon({ view }: { view: ViewId }) {
+  if (view === 'conversations') {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v7a2.5 2.5 0 0 1-2.5 2.5H10l-5 4v-4H6.5" />
+        <path d="M8.5 8.5h7M8.5 12h4" />
+      </svg>
+    )
+  }
+  if (view === 'atlas') {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <circle cx="12" cy="6" r="2.2" />
+        <circle cx="5.5" cy="17" r="2.2" />
+        <circle cx="18.5" cy="17" r="2.2" />
+        <path d="M10.6 7.9 6.9 15.1M13.4 7.9l3.7 7.2M7.7 17h8.6" />
+      </svg>
+    )
+  }
   return (
-    <p className={`line line-${line.role}`} key={line.lineSequence}>
-      <span className="line-role">{transcriptLineLabel(line.role)}: </span>
-      {line.content}
-    </p>
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M5 5.5A1.5 1.5 0 0 1 6.5 4H11v16H6.5A1.5 1.5 0 0 1 5 18.5z" />
+      <path d="M11 4h6.5A1.5 1.5 0 0 1 19 5.5v13a1.5 1.5 0 0 1-1.5 1.5H11" />
+      <path d="M13.5 8.5h3M13.5 12h3" />
+    </svg>
   )
 }
 
-function renderStreamEvent(event: StreamEvent) {
-  switch (event.type) {
-    case 'thinking':
+/*
+ * A view that throws must not take the whole interface down with it. The record
+ * stays readable through the other destinations.
+ */
+class ViewBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
+  constructor(props: { children: ReactNode }) {
+    super(props)
+    this.state = { failed: false }
+  }
+
+  static getDerivedStateFromError() {
+    return { failed: true }
+  }
+
+  render() {
+    if (this.state.failed) {
       return (
-        <p className="event event-thinking" key={event.seq}>
-          Thinking.
-        </p>
+        <div className="view-error">
+          <p>This view could not be displayed.</p>
+          <p>The other views still work. Reload the page to try again.</p>
+        </div>
       )
-    case 'text':
-      return (
-        <p className="event event-text" key={event.seq}>
-          {event.text}
-        </p>
-      )
-    case 'tool':
-      return (
-        <p className="event event-tool" key={event.seq}>
-          Using {event.name}.
-        </p>
-      )
-    case 'error':
-      return (
-        <p className="event event-error" key={event.seq}>
-          {event.message}
-        </p>
-      )
-    case 'done':
-      return null
+    }
+    return this.props.children
   }
 }
 
 export function App({ api }: { api: AppApi }) {
-  const [state, dispatch] = useReducer(sessionReducer, initialChatState)
-  const [draft, setDraft] = useState('')
-  const [documents, setDocuments] = useState<DocumentRow[]>([])
-  const [sessions, setSessions] = useState<Session[]>([])
-  const [proposals, setProposals] = useState<Proposal[]>([])
-  const [openDocument, setOpenDocument] = useState<Document | null>(null)
-  const [snapshot, setSnapshot] = useState<GraphSnapshot | null>(null)
-  const lastSequenceRef = useRef(0)
-
-  const startSession = useCallback(async () => {
-    try {
-      const session = await api.createSession()
-      lastSequenceRef.current = 0
-      dispatch({ type: 'new-session', session })
-    } catch {
-      // A session may fail to start while records stay browsable.
-    }
-  }, [api])
-
-  const loadRecords = useCallback(async () => {
-    try {
-      const [documentsPage, sessionsPage, proposalsPage] = await Promise.all([
-        api.listDocuments(),
-        api.listSessions(),
-        api.listProposals(),
-      ])
-      setDocuments(documentsPage.data)
-      setSessions(sessionsPage.data)
-      setProposals(proposalsPage.data)
-    } catch {
-      // A failed record load must not block chat.
-    }
-  }, [api])
+  const [view, setView] = useState<ViewId>(() =>
+    typeof window === 'undefined' ? 'conversations' : viewFromHash(window.location.hash),
+  )
 
   useEffect(() => {
-    const token = new URLSearchParams(window.location.search).get('token')
-    if (token) {
-      void api.bootstrap(token)
-      window.history.replaceState({}, '', window.location.pathname)
+    function syncFromHash() {
+      setView(viewFromHash(window.location.hash))
     }
-    void loadRecords()
-    void startSession()
-  }, [api, loadRecords, startSession])
+    window.addEventListener('hashchange', syncFromHash)
+    return () => window.removeEventListener('hashchange', syncFromHash)
+  }, [])
 
-  useEffect(() => {
-    let active = true
-    api
-      .getGraphSnapshot()
-      .then((result) => {
-        if (active) setSnapshot(result)
-      })
-      .catch(() => {
-        // A missing graph leaves the atlas empty; chat and documents still work.
-      })
-    return () => {
-      active = false
-    }
-  }, [api])
-
-  async function consumeEvents(stream: AsyncIterable<StreamEvent>): Promise<boolean> {
-    let terminal = false
-    for await (const event of stream) {
-      dispatch({ type: 'stream', event })
-      lastSequenceRef.current = Math.max(lastSequenceRef.current, event.seq)
-      if (isTerminalEvent(event)) terminal = true
-    }
-    return terminal
+  function go(next: ViewId) {
+    setView(next)
+    if (typeof window !== 'undefined') window.history.replaceState({}, '', `#/${next}`)
   }
-
-  async function resync(sessionId: string) {
-    const page = await api.transcript(sessionId)
-    dispatch({ type: 'resync', lines: page.data })
-  }
-
-  async function reconnect(sessionId: string) {
-    try {
-      const stream = await api.events(sessionId, lastSequenceRef.current)
-      const terminal = await consumeEvents(stream)
-      if (!terminal) await resync(sessionId)
-    } catch (error) {
-      if (isResyncRequired(error)) await resync(sessionId)
-      else if (!(error instanceof IncompleteStreamError)) pushChatFailed()
-    }
-  }
-
-  function pushChatFailed() {
-    const seq = lastSequenceRef.current + 1
-    const event: StreamEvent = {
-      schemaVersion: '1',
-      seq,
-      type: 'error',
-      code: 'chat_failed',
-      retryable: true,
-      message: 'Chat could not finish. Please try again.',
-    }
-    lastSequenceRef.current = seq
-    dispatch({ type: 'stream', event })
-  }
-
-  async function send() {
-    const session = state.session
-    if (!session || session.readOnly || state.sending) return
-    const text = draft
-    setDraft('')
-    const turnId = newTurnId()
-    dispatch({ type: 'turn-start' })
-    try {
-      const stream = await api.message(session.sessionId, turnId, text)
-      const terminal = await consumeEvents(stream)
-      if (!terminal) await reconnect(session.sessionId)
-    } catch (error) {
-      if (error instanceof IncompleteStreamError) await reconnect(session.sessionId)
-      else if (isResyncRequired(error)) await resync(session.sessionId)
-      else pushChatFailed()
-    }
-  }
-
-  function handleSubmit(event: FormEvent) {
-    event.preventDefault()
-    void send()
-  }
-
-  async function newChat() {
-    const current = state.session
-    if (current && !current.readOnly) {
-      try {
-        await api.end(current.sessionId)
-      } catch {
-        // Ending the prior session is best effort.
-      }
-    }
-    await startSession()
-  }
-
-  async function endChat() {
-    const current = state.session
-    if (!current || current.readOnly) return
-    try {
-      const ended = await api.end(current.sessionId)
-      lastSequenceRef.current = 0
-      dispatch({ type: 'new-session', session: ended })
-    } catch {
-      // Ending the session is best effort.
-    }
-  }
-
-  async function openDocumentById(docId: string) {
-    try {
-      setOpenDocument(await api.getDocument(docId))
-    } catch {
-      // A single document read must not crash the page.
-    }
-  }
-
-  async function resolveProposal(proposal: Proposal, resolution: 'accepted' | 'rejected') {
-    try {
-      await api.resolveProposal(proposal.proposalId, resolution)
-      setProposals((current) => current.filter((item) => item.proposalId !== proposal.proposalId))
-    } catch {
-      // A proposal resolution failure leaves the row in place.
-    }
-  }
-
-  const statusText = state.sending
-    ? 'Sending a message.'
-    : state.events.some((event) => event.type === 'error')
-      ? 'The message could not be completed.'
-      : 'Ready.'
 
   return (
     <div className="app">
-      <header className="app-header">
-        <h1>openreverie</h1>
-        <p className="stream-status" aria-live="polite">
-          {statusText}
-        </p>
-      </header>
-      <main className="app-main">
-        <nav className="sessions" aria-label="Sessions">
-          <h2>Sessions</h2>
-          <div className="session-controls">
-            <button type="button" onClick={() => void newChat()}>
-              New chat
-            </button>
-            <button
-              type="button"
-              onClick={() => void endChat()}
-              disabled={!state.session || state.session.readOnly}
-            >
-              End chat
-            </button>
-          </div>
-          <ul className="session-list">
-            {sessions.map((session) => (
-              <li key={session.sessionId}>
-                {session.sessionId} ({session.status})
-              </li>
-            ))}
-          </ul>
-        </nav>
+      <nav className="rail" aria-label="Sections">
+        <div className="rail-mark" aria-hidden="true">
+          r
+        </div>
+        {VIEW_IDS.map((id) => (
+          <button
+            key={id}
+            type="button"
+            className="rail-item"
+            aria-current={view === id ? 'page' : undefined}
+            onClick={() => go(id)}
+          >
+            <RailIcon view={id} />
+            <span className="rail-label">{VIEW_LABELS[id]}</span>
+          </button>
+        ))}
+      </nav>
 
-        <section className="chat" aria-label="Chat">
-          <div className="transcript">
-            {(state.transcript ?? []).map(renderTranscriptLine)}
-            {state.events.map(renderStreamEvent)}
-          </div>
-          <form className="composer" onSubmit={handleSubmit}>
-            <label htmlFor="message-input">Message</label>
-            <input
-              id="message-input"
-              value={draft}
-              onChange={(event) => setDraft(event.target.value)}
-              disabled={state.sending}
-              autoComplete="off"
-            />
-            <button type="submit" disabled={state.sending || (state.session?.readOnly ?? false)}>
-              Send
-            </button>
-          </form>
-        </section>
-
-        <section className="documents" aria-label="Documents">
-          <h2>Documents</h2>
-          <ul className="document-list">
-            {documents.map((document) => (
-              <li key={document.docId}>
-                <button type="button" onClick={() => void openDocumentById(document.docId)}>
-                  {document.title}
-                </button>
-              </li>
-            ))}
-          </ul>
-        </section>
-
-        <section className="reader" aria-label="Reader">
-          {openDocument && (
-            <article className="document" aria-label={openDocument.title}>
-              <h2>{openDocument.title}</h2>
-              <div className="document-body">{openDocument.body}</div>
-            </article>
-          )}
-        </section>
-
-        <section className="proposals" aria-label="Proposals">
-          <h2>Proposals</h2>
-          {proposals.length === 0 ? (
-            <p>No pending proposals.</p>
-          ) : (
-            <ul className="proposal-list">
-              {proposals.map((proposal) => (
-                <li key={proposal.proposalId}>
-                  <span className="proposal-summary">{proposal.summary}</span>
-                  <button type="button" onClick={() => void resolveProposal(proposal, 'accepted')}>
-                    Accept
-                  </button>
-                  <button type="button" onClick={() => void resolveProposal(proposal, 'rejected')}>
-                    Reject
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
-
-        {snapshot === null ? (
-          <section className="atlas-mount" aria-label="Atlas">
-            <h2>Atlas</h2>
-            <p className="atlas-loading">Loading the graph.</p>
-          </section>
-        ) : (
-          <Atlas snapshot={snapshot} onOpenDocument={openDocumentById} />
+      {/*
+       * Conversations stays mounted while hidden so a live session survives a
+       * trip to the atlas. The atlas is mounted only while it is on screen, so
+       * the graph costs nothing at all while the user is reading or talking.
+       */}
+      <div className="stage">
+        <div hidden={view !== 'conversations'} style={{ height: '100%', minHeight: 0 }}>
+          <ViewBoundary>
+            <Conversations api={api} />
+          </ViewBoundary>
+        </div>
+        {view === 'atlas' && (
+          <ViewBoundary>
+            <AtlasView api={api} />
+          </ViewBoundary>
         )}
-      </main>
+        {view === 'library' && (
+          <ViewBoundary>
+            <Library api={api} />
+          </ViewBoundary>
+        )}
+      </div>
     </div>
   )
 }

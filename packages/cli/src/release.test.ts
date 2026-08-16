@@ -12,7 +12,7 @@ async function readAt(path: string): Promise<string> {
 }
 
 describe('release', () => {
-  it('marks every workspace package as v0.4.1', async () => {
+  it('marks every workspace package as v0.5.0', async () => {
     const manifests = [
       'package.json',
       'packages/cli/package.json',
@@ -23,16 +23,23 @@ describe('release', () => {
       'packages/web/package.json',
     ]
     for (const path of manifests) {
-      expect(JSON.parse(await readAt(path)).version).toBe('0.4.1')
+      expect(JSON.parse(await readAt(path)).version).toBe('0.5.0')
     }
   })
 
-  it('documents Phase B without claiming Phase C atlas features', async () => {
+  it('documents the web interface without claiming atlas features that do not exist', async () => {
     const readme = await readAt('README.md')
-    const limitation =
-      'The atlas in v0.4.0 has deterministic temporary layout, pan and zoom, type filtering, selection, and an accessible node list. It does not yet include saved graph positions, graph search, realm influence, progressive labels, or a history time lens.'
     expect(readme).toContain('local web interface')
     expect(readme).toContain('reverie web')
-    expect(readme).toContain(limitation)
+
+    // Saved positions, label search, and progressive labels were built, so the
+    // README is allowed to claim them now. These three are still absent and the
+    // README must keep saying so. Overstating status is a defect in this
+    // project, so this test guards the claims rather than the wording.
+    expect(readme).toContain(
+      'Realm influence visualization and a history time lens still do not exist',
+    )
+    expect(readme).toContain('the worker build the library ships with is not used yet')
+    expect(readme).toContain('the server caps it at 8 MiB and never paginates')
   })
 })
