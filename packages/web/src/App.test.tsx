@@ -1,134 +1,119 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen } from '@testing-library/react'
 import { userEvent } from '@testing-library/user-event'
+import { useEffect } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { App } from './App.js'
-import { ApiHttpError, type AppApi, type StreamEvent, type TranscriptLine } from './api.js'
+import { App, viewFromHash } from './App.js'
+import type { AppApi } from './api.js'
 
-const sessionId = 'session-1'
+/*
+ * The shell is tested on its own. Each view is replaced with a marker that
+ * records how many times it mounted, so these tests describe navigation and
+ * mounting policy rather than the contents of any view.
+ */
 
-const session = {
-  sessionId,
-  createdAt: '2026-08-15T12:00:00.000Z',
-  updatedAt: '2026-08-15T12:00:00.000Z',
-  status: 'live' as const,
-  readOnly: false,
-  transcript: { lineCount: 0, userCount: 0, assistantCount: 0, toolCount: 0 },
-}
+let conversationsMounts = 0
+let atlasMounts = 0
+let libraryMounts = 0
 
-const minaDoc = {
-  docId: 'doc-mina',
-  kind: 'person' as const,
-  title: 'Mina',
-  updatedAt: '2026-08-15T12:00:00.000Z',
-  readOnly: true as const,
-}
+vi.mock('./views/Conversations.js', () => ({
+  Conversations: () => {
+    // Counted in an effect with no dependencies, so this records mounts rather
+    // than renders. A re-render must not look like a remount.
+    useEffect(() => {
+      conversationsMounts += 1
+    }, [])
+    return <div>conversations view</div>
+  },
+}))
 
-const minaBody = 'Mina has been preparing for the move across town.'
+vi.mock('./atlas.js', () => ({
+  AtlasView: () => {
+    useEffect(() => {
+      atlasMounts += 1
+    }, [])
+    return <div>atlas view</div>
+  },
+}))
 
-const helloLine: TranscriptLine = {
-  lineSequence: 1,
-  ts: '2026-08-15T12:00:00.000Z',
-  role: 'assistant',
-  content: 'Hello',
-}
+vi.mock('./views/Library.js', () => ({
+  Library: () => {
+    useEffect(() => {
+      libraryMounts += 1
+    }, [])
+    return <div>library view</div>
+  },
+}))
 
-const thinking = (seq: number): StreamEvent => ({ schemaVersion: '1', seq, type: 'thinking' })
-const text = (seq: number, value: string): StreamEvent => ({
-  schemaVersion: '1',
-  seq,
-  type: 'text',
-  text: value,
-})
-const done = (seq: number): StreamEvent => ({ schemaVersion: '1', seq, type: 'done' })
-const error = (
-  seq: number,
-  code: 'chat_unavailable' | 'chat_failed',
-  message: string,
-): StreamEvent => ({ schemaVersion: '1', seq, type: 'error', code, retryable: true, message })
-const ndjson = (events: StreamEvent[]): StreamEvent[] => events
-
-function createApi() {
-  return {
-    bootstrap: vi.fn(),
-    createSession: vi.fn(),
-    listSessions: vi.fn(),
-    listDocuments: vi.fn(),
-    getDocument: vi.fn(),
-    listProposals: vi.fn(),
-    resolveProposal: vi.fn(),
-    message: vi.fn(),
-    events: vi.fn(),
-    transcript: vi.fn(),
-    end: vi.fn(),
-    getGraphSnapshot: vi.fn(),
-  }
-}
-
-let api: ReturnType<typeof createApi>
+const api = {} as AppApi
+let user: ReturnType<typeof userEvent.setup>
 
 beforeEach(() => {
+  user = userEvent.setup()
+  conversationsMounts = 0
+  atlasMounts = 0
+  libraryMounts = 0
   window.history.replaceState({}, '', '/')
-  api = createApi()
-  api.bootstrap.mockResolvedValue({ authenticated: true })
-  api.createSession.mockResolvedValue(session)
-  api.listSessions.mockResolvedValue({ data: [], nextCursor: null })
-  api.listDocuments.mockResolvedValue({ data: [minaDoc], nextCursor: null })
-  api.getDocument.mockResolvedValue({ ...minaDoc, body: minaBody })
-  api.listProposals.mockResolvedValue({ data: [], nextCursor: null })
-  api.transcript.mockResolvedValue({ data: [helloLine], nextCursor: null })
-  api.getGraphSnapshot.mockResolvedValue({ revision: 'a'.repeat(64), nodes: [], edges: [] })
 })
 
-describe('App', () => {
-  it('bootstraps once, removes token from the address, and loads records with credentials', async () => {
-    window.history.replaceState({}, '', '/?token=launch-token')
-    render(<App api={api as unknown as AppApi} />)
-    await waitFor(() => expect(api.bootstrap).toHaveBeenCalledWith('launch-token'))
-    expect(window.location.search).toBe('')
-    expect(await screen.findByRole('heading', { name: 'Documents' })).toBeVisible()
+describe('viewFromHash', () => {
+  it('reads a known view out of the hash', () => {
+    expect(viewFromHash('#/atlas')).toBe('atlas')
+    expect(viewFromHash('#library')).toBe('library')
   })
 
-  it('reconnects from its last sequence and fetches transcript after resync_required', async () => {
-    api.message.mockResolvedValueOnce(ndjson([thinking(1), text(2, 'Hello')]))
-    api.events.mockRejectedValueOnce(new ApiHttpError(409, 'resync_required', 'Resync required.'))
-    render(<App api={api as unknown as AppApi} />)
-    await userEvent.type(screen.getByLabelText('Message'), 'Hi')
-    await userEvent.click(screen.getByRole('button', { name: 'Send' }))
-    await waitFor(() => expect(api.events).toHaveBeenCalledWith(sessionId, 2))
-    await waitFor(() => expect(api.transcript).toHaveBeenCalledWith(sessionId))
-    expect(screen.getByText('Hello')).toBeVisible()
+  it('falls back to conversations for anything else', () => {
+    expect(viewFromHash('')).toBe('conversations')
+    expect(viewFromHash('#/nonsense')).toBe('conversations')
+  })
+})
+
+describe('App shell', () => {
+  it('opens on conversations and leaves the atlas unmounted', () => {
+    render(<App api={api} />)
+    expect(screen.getByText('conversations view')).toBeVisible()
+    expect(atlasMounts).toBe(0)
+    expect(libraryMounts).toBe(0)
   })
 
-  it('opens a document from the browser and makes provider outage honest', async () => {
-    render(<App api={api as unknown as AppApi} />)
-    await userEvent.click(await screen.findByRole('button', { name: 'Mina' }))
-    expect(await screen.findByRole('article', { name: 'Mina' })).toHaveTextContent(
-      'Mina has been preparing',
-    )
-    api.message.mockResolvedValueOnce(
-      ndjson([
-        error(
-          3,
-          'chat_unavailable',
-          'Chat is unavailable right now. Your saved record is still available.',
-        ),
-      ]),
-    )
-    await userEvent.click(screen.getByRole('button', { name: 'Send' }))
-    expect(
-      await screen.findByText(
-        'Chat is unavailable right now. Your saved record is still available.',
-      ),
-    ).toBeVisible()
+  it('mounts the atlas only once it is selected', async () => {
+    render(<App api={api} />)
+    await user.click(screen.getByRole('button', { name: /atlas/i }))
+    expect(screen.getByText('atlas view')).toBeVisible()
+    expect(atlasMounts).toBe(1)
   })
 
-  it('renders stream text as plain text, never as HTML markup', async () => {
-    const payload = '<img src=x onerror="window.hacked=1">'
-    api.message.mockResolvedValueOnce(ndjson([text(1, payload), done(2)]))
-    render(<App api={api as unknown as AppApi} />)
-    await userEvent.type(screen.getByLabelText('Message'), 'Hi')
-    await userEvent.click(screen.getByRole('button', { name: 'Send' }))
-    expect(await screen.findByText(payload)).toBeVisible()
-    expect(document.querySelector('img')).toBeNull()
+  it('unmounts the atlas on the way back so the graph costs nothing while reading', async () => {
+    render(<App api={api} />)
+    await user.click(screen.getByRole('button', { name: /atlas/i }))
+    await user.click(screen.getByRole('button', { name: /talk/i }))
+    expect(screen.queryByText('atlas view')).not.toBeInTheDocument()
+  })
+
+  it('keeps conversations mounted across a trip to the atlas so a live session survives', async () => {
+    render(<App api={api} />)
+    await user.click(screen.getByRole('button', { name: /atlas/i }))
+    await user.click(screen.getByRole('button', { name: /record/i }))
+    await user.click(screen.getByRole('button', { name: /talk/i }))
+    expect(conversationsMounts).toBe(1)
+    expect(screen.getByText('conversations view')).toBeVisible()
+  })
+
+  it('hides conversations rather than showing two views at once', async () => {
+    render(<App api={api} />)
+    await user.click(screen.getByRole('button', { name: /atlas/i }))
+    expect(screen.getByText('conversations view')).not.toBeVisible()
+  })
+
+  it('marks the current destination in the rail', async () => {
+    render(<App api={api} />)
+    await user.click(screen.getByRole('button', { name: /record/i }))
+    expect(screen.getByRole('button', { name: /record/i })).toHaveAttribute('aria-current', 'page')
+    expect(screen.getByRole('button', { name: /talk/i })).not.toHaveAttribute('aria-current')
+  })
+
+  it('restores the view named in the address bar', () => {
+    window.history.replaceState({}, '', '#/library')
+    render(<App api={api} />)
+    expect(screen.getByText('library view')).toBeVisible()
   })
 })
