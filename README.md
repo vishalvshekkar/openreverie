@@ -88,7 +88,7 @@ memory/
 └── index.db          Rebuildable search index (FTS + vectors)
 ```
 
-Each conversation starts with your constitution, active arcs, and recent context already loaded. The agent retrieves deeper memory through tools: semantic search, keyword search, graph traversal, and full transcript reads. After each session, a reflection pass extracts what mattered and saves it directly: new arcs, new people and entities as nodes, page promotions for a person who has come to recur, updated arc and person narratives, and every attribution, unconfirmed but not held back for approval. A companion that remembers should not have to ask permission to remember. Nothing you said is ever deleted or rewritten; transcripts are append-only.
+Each conversation starts with your constitution, active arcs, and recent context already loaded. The agent retrieves deeper memory through tools: semantic search, keyword search, graph traversal, and full transcript reads. Search itself is a hybrid of keyword and vector search fused by reciprocal rank; see [docs/retrieval.md](docs/retrieval.md) for how it works and its current limits (brute-force vector search, no reranking, unreliable date filters on most document kinds). After each session, a reflection pass extracts what mattered and saves it directly: new arcs, new people and entities as nodes, page promotions for a person who has come to recur, updated arc and person narratives, and every attribution, unconfirmed but not held back for approval. A companion that remembers should not have to ask permission to remember. Nothing you said is ever deleted or rewritten; transcripts are append-only.
 
 ## What it is not
 
