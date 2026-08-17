@@ -34,6 +34,8 @@ import { runRead } from './read.js'
 import { runSetup } from './setup.js'
 import { runWebCommand } from './web.js'
 
+const KNOWN_SUBCOMMANDS = new Set(['setup', 'web', 'read', 'reindex', 'reflect'])
+
 // Colors are read from real process state exactly once, here at the edge:
 // disabled when stdout is not a TTY (piped, redirected, or captured by a
 // test harness) or when NO_COLOR is set, per the NO_COLOR convention. Every
@@ -118,6 +120,12 @@ export interface CliMainDeps {
 
 export async function mainWith(args: string[], deps: CliMainDeps): Promise<void> {
   const subcommand = args[0]
+
+  if (subcommand !== undefined && !KNOWN_SUBCOMMANDS.has(subcommand)) {
+    deps.write(`reverie: unknown command '${subcommand}'\nRun 'reverie --help' for a list of commands.\n`)
+    process.exitCode = 1
+    return
+  }
 
   if (subcommand === 'setup') {
     await deps.runSetupCommand()
