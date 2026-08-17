@@ -122,11 +122,7 @@ export async function buildDailyRollup(deps: RollupDeps, date: string): Promise<
 
   const summaries: string[] = []
   for (const session of daySessions) {
-    const summaryPath = join(
-      deps.paths.sessionsDir,
-      `${session.date}-${session.sessionId}`,
-      'summary.md',
-    )
+    const summaryPath = join(deps.paths.sessionsDir, session.dirName, 'summary.md')
     const summary = await readDocument(summaryPath)
     summaries.push(summary.body.trim())
   }

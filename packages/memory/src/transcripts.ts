@@ -137,16 +137,36 @@ export class SessionStore {
     return result
   }
 
-  static async listSessions(
-    paths: MemoryPaths,
-  ): Promise<{ sessionId: string; date: string; reflected: boolean; skipped: boolean }[]> {
+  // The one way anything resolves a session directory from an id. It
+  // matches on the id suffix and never on the date prefix, which is what
+  // lets the prefix be treated as an opaque disambiguator rather than a
+  // claim about which calendar day the session belongs to.
+  static async sessionDir(paths: MemoryPaths, sessionId: string): Promise<string> {
+    return findSessionDir(paths, sessionId)
+  }
+
+  static async listSessions(paths: MemoryPaths): Promise<
+    {
+      sessionId: string
+      dirName: string
+      date: string
+      reflected: boolean
+      skipped: boolean
+    }[]
+  > {
     const entries = await readdir(paths.sessionsDir, { withFileTypes: true })
     const dirNames = entries
       .filter((entry) => entry.isDirectory())
       .map((entry) => entry.name)
       .sort()
 
-    const sessions: { sessionId: string; date: string; reflected: boolean; skipped: boolean }[] = []
+    const sessions: {
+      sessionId: string
+      dirName: string
+      date: string
+      reflected: boolean
+      skipped: boolean
+    }[] = []
     for (const dirName of dirNames) {
       const match = dirName.match(SESSION_DIR_PATTERN)
       if (!match) continue
@@ -171,7 +191,10 @@ export class SessionStore {
           skipped = false
         }
       }
-      sessions.push({ sessionId, date, reflected, skipped })
+      // dirName is the directory exactly as readdir produced it. It is the
+      // only value here that may ever be used to build a path. date is for
+      // windowing, grouping, and display only.
+      sessions.push({ sessionId, dirName, date, reflected, skipped })
     }
     return sessions
   }

@@ -640,11 +640,7 @@ export class MemoryEngine {
     const recentSummaries: SessionContext['recentSummaries'] = []
     const recentIntentions: SessionContext['recentIntentions'] = []
     for (const session of recentCandidates) {
-      const summaryPath = join(
-        this.paths.sessionsDir,
-        `${session.date}-${session.sessionId}`,
-        'summary.md',
-      )
+      const summaryPath = join(this.paths.sessionsDir, session.dirName, 'summary.md')
       const doc = await readDocument(summaryPath)
       recentSummaries.push({ sessionId: session.sessionId, date: session.date, body: doc.body })
       // doc.meta.items is the same mergedItems array applyReflection wrote
@@ -1234,7 +1230,12 @@ export class MemoryEngine {
     const sessions = await SessionStore.listSessions(this.paths)
     const session = sessions.find((s) => s.sessionId === sessionId)
     const date = session?.date ?? formatDateUTC(now)
-    const dir = join(this.paths.sessionsDir, `${date}-${sessionId}`)
+    // Resolved by id suffix, never rebuilt from the date. A derived date
+    // that differs from the directory prefix would otherwise create a
+    // second directory beside the real one, holding a summary for a session
+    // whose transcript lives elsewhere, which makes that session look
+    // permanently unreflected and get retried forever.
+    const dir = await SessionStore.sessionDir(this.paths, sessionId)
     const summaryPath = join(dir, 'summary.md')
 
     await writeDocumentAtomic({

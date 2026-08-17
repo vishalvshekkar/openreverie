@@ -93,14 +93,26 @@ describe('SessionStore', () => {
 
     const before = await SessionStore.listSessions(paths)
     expect(before).toEqual([
-      { sessionId: store.sessionId, date: '2026-08-13', reflected: false, skipped: false },
+      {
+        sessionId: store.sessionId,
+        dirName: `2026-08-13-${store.sessionId}`,
+        date: '2026-08-13',
+        reflected: false,
+        skipped: false,
+      },
     ])
 
     await writeFile(join(store.dir, 'summary.md'), '---\nid: doc_x\n---\nSummary text.\n', 'utf8')
 
     const after = await SessionStore.listSessions(paths)
     expect(after).toEqual([
-      { sessionId: store.sessionId, date: '2026-08-13', reflected: true, skipped: false },
+      {
+        sessionId: store.sessionId,
+        dirName: `2026-08-13-${store.sessionId}`,
+        date: '2026-08-13',
+        reflected: true,
+        skipped: false,
+      },
     ])
   })
 
@@ -110,8 +122,20 @@ describe('SessionStore', () => {
 
     const sessions = await SessionStore.listSessions(paths)
     expect(sessions).toEqual([
-      { sessionId: first.sessionId, date: '2026-08-13', reflected: false, skipped: false },
-      { sessionId: second.sessionId, date: '2026-08-14', reflected: false, skipped: false },
+      {
+        sessionId: first.sessionId,
+        dirName: `2026-08-13-${first.sessionId}`,
+        date: '2026-08-13',
+        reflected: false,
+        skipped: false,
+      },
+      {
+        sessionId: second.sessionId,
+        dirName: `2026-08-14-${second.sessionId}`,
+        date: '2026-08-14',
+        reflected: false,
+        skipped: false,
+      },
     ])
   })
 
@@ -127,8 +151,25 @@ describe('SessionStore', () => {
 
     const sessions = await SessionStore.listSessions(paths)
     expect(sessions).toEqual([
-      { sessionId: store.sessionId, date: '2026-08-13', reflected: true, skipped: true },
+      {
+        sessionId: store.sessionId,
+        dirName: `2026-08-13-${store.sessionId}`,
+        date: '2026-08-13',
+        reflected: true,
+        skipped: true,
+      },
     ])
+  })
+
+  it('sessionDir resolves a session directory by its id suffix, never by its date prefix', async () => {
+    const store = await SessionStore.start(paths, new Date('2026-08-13T21:04:11Z'))
+
+    const dir = await SessionStore.sessionDir(paths, store.sessionId)
+    expect(dir).toBe(join(paths.sessionsDir, `2026-08-13-${store.sessionId}`))
+
+    await expect(SessionStore.sessionDir(paths, 'session_nope')).rejects.toThrow(
+      'No session directory found for session_nope',
+    )
   })
 
   it('listSessions reports skipped false for a summary with no skipped field at all', async () => {
