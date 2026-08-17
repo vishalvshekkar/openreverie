@@ -465,6 +465,7 @@ const toolCallSchema = z.strictObject({
 const publicTranscriptLineSchema = z.strictObject({
   lineSequence: z.number().int().positive(),
   ts: z.string(),
+  utcOffsetMinutes: z.number().optional(),
   role: z.enum(['user', 'assistant', 'tool']),
   content: z.string(),
   toolCalls: z.array(toolCallSchema).optional(),

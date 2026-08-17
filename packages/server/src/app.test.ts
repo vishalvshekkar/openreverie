@@ -33,7 +33,12 @@ interface Response {
 }
 
 const sessionId = 'session_01K2XNJYABCD12345678901234'
-const userLine: TranscriptLine = { ts: '2026-08-15T10:00:00.000Z', role: 'user', content: 'Hello.' }
+const userLine: TranscriptLine = {
+  ts: '2026-08-15T10:00:00.000Z',
+  utcOffsetMinutes: 330,
+  role: 'user',
+  content: 'Hello.',
+}
 const assistantLine: TranscriptLine = {
   ts: '2026-08-15T10:00:01.000Z',
   role: 'assistant',

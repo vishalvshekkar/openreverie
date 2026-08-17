@@ -768,4 +768,141 @@ describe('AgentSession', () => {
 
     await engine.close()
   })
+
+  it('records the local UTC offset alongside ts, from the same clock read', async () => {
+    const chat = new FakeChatProvider([{ text: 'Noted.', toolCalls: [] }])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    await engine.updateProfile({ timezone: 'Asia/Kolkata' })
+    const session = await AgentSession.start(engine, testConfig(), chat, undefined, {
+      now: () => new Date('2026-08-16T20:00:00.000Z'),
+    })
+
+    await collect(session.send('Hello.'))
+
+    const transcript = await engine.readTranscript(session.sessionId)
+    expect(transcript).toHaveLength(2)
+    expect(transcript[0]?.ts).toBe('2026-08-16T20:00:00.000Z')
+    expect(transcript[0]?.utcOffsetMinutes).toBe(330)
+    expect(transcript[1]?.utcOffsetMinutes).toBe(330)
+
+    await engine.close()
+  })
+
+  it('stamps the user message with its local time in content, and leaves the transcript verbatim', async () => {
+    const chat = new FakeChatProvider([{ text: 'Sounds fun.', toolCalls: [] }])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    await engine.updateProfile({ timezone: 'Asia/Kolkata' })
+    const session = await AgentSession.start(engine, testConfig(), chat, undefined, {
+      now: () => new Date('2026-08-16T20:00:00.000Z'),
+    })
+
+    await collect(session.send("I'm watching Halcyon tonight at 7.25pm"))
+
+    expect(chat.requests[0]?.messages).toEqual([
+      {
+        role: 'user',
+        content: "[Mon 2026-08-17 01:30 Asia/Kolkata] I'm watching Halcyon tonight at 7.25pm",
+      },
+    ])
+
+    const transcript = await engine.readTranscript(session.sessionId)
+    expect(transcript[0]?.content).toBe("I'm watching Halcyon tonight at 7.25pm")
+    expect(transcript[0]?.utcOffsetMinutes).toBe(330)
+    expect(transcript[1]?.content).toBe('Sounds fun.')
+
+    await engine.close()
+  })
+
+  it('never stamps an assistant or a tool message', async () => {
+    const chat = new FakeChatProvider([
+      { text: '', toolCalls: [{ id: 'call_1', name: 'list_arcs', arguments: '{}' }] },
+      { text: 'Nothing open right now.', toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    await engine.updateProfile({ timezone: 'Asia/Kolkata' })
+    const session = await AgentSession.start(engine, testConfig(), chat, undefined, {
+      now: () => new Date('2026-08-16T20:00:00.000Z'),
+    })
+
+    await collect(session.send('What is open?'))
+
+    const secondRound = chat.requests[1]?.messages ?? []
+    for (const message of secondRound) {
+      if (message.role === 'user') {
+        expect(message.content.startsWith('[Mon 2026-08-17 01:30 Asia/Kolkata] ')).toBe(true)
+      } else {
+        expect(message.content.startsWith('[Mon 2026-08-17 01:30 Asia/Kolkata]')).toBe(false)
+      }
+    }
+
+    await engine.close()
+  })
+
+  it('keeps the request prefix byte-stable across tool rounds even as the clock advances', async () => {
+    const chat = new FakeChatProvider([
+      { text: '', toolCalls: [{ id: 'call_1', name: 'list_arcs', arguments: '{}' }] },
+      { text: 'Nothing open right now.', toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    await engine.updateProfile({ timezone: 'Asia/Kolkata' })
+    let clock = new Date('2026-08-16T20:00:00.000Z')
+    const session = await AgentSession.start(engine, testConfig(), chat, undefined, {
+      now: () => clock,
+    })
+
+    const events = session.send('What is open?')
+    const seen: string[] = []
+    for await (const event of events) {
+      seen.push(event.type)
+      // Advance real wall-clock time in the middle of the turn, between the
+      // two provider rounds. Nothing already sent may change because of it.
+      if (event.type === 'tool') clock = new Date('2026-08-16T21:47:00.000Z')
+    }
+    expect(seen).toContain('done')
+
+    const first = chat.requests[0]
+    const second = chat.requests[1]
+    expect(first).toBeDefined()
+    expect(second).toBeDefined()
+    // The system string is frozen for the life of the session: a per-round
+    // clock read in here would reprocess the whole history every turn.
+    expect(second?.system).toBe(first?.system)
+    // Round two's messages are a strict extension of round one's, element
+    // for element. A rebuild of history, or a re-rendered stamp, breaks it.
+    const firstMessages = first?.messages ?? []
+    const secondMessages = second?.messages ?? []
+    expect(secondMessages.length).toBeGreaterThan(firstMessages.length)
+    expect(secondMessages.slice(0, firstMessages.length)).toEqual(firstMessages)
+
+    await engine.close()
+  })
+
+  it('stamps a later message with the later time and never re-renders the earlier stamp', async () => {
+    const chat = new FakeChatProvider([
+      { text: 'Enjoy it.', toolCalls: [] },
+      { text: 'How was it?', toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    await engine.updateProfile({ timezone: 'Asia/Kolkata' })
+    let clock = new Date('2026-08-16T10:49:00.000Z')
+    const session = await AgentSession.start(engine, testConfig(), chat, undefined, {
+      now: () => clock,
+    })
+
+    await collect(session.send('Watching Halcyon tonight at 7.25pm'))
+    clock = new Date('2026-08-16T18:00:00.000Z')
+    await collect(session.send('Back home.'))
+
+    const secondRequest = chat.requests[1]?.messages ?? []
+    const userMessages = secondRequest.filter((message) => message.role === 'user')
+    expect(userMessages).toEqual([
+      {
+        role: 'user',
+        content: '[Sun 2026-08-16 16:19 Asia/Kolkata] Watching Halcyon tonight at 7.25pm',
+      },
+      { role: 'user', content: '[Sun 2026-08-16 23:30 Asia/Kolkata] Back home.' },
+    ])
+
+    await engine.close()
+  })
 })

@@ -13,9 +13,19 @@
 // on-disk transcript before it is added to the in-memory message history
 // that gets sent back to the model. The transcript is the durable record;
 // the in-memory history exists only for the life of this session object.
+//
+// Invariant: history content and transcript content deliberately differ.
+// The transcript line stores content verbatim, plus structural time fields
+// (ts, utcOffsetMinutes). The in-memory history stores the same content,
+// with that same time rendered into it for user messages. Both come from
+// one clock read per message; the transcript is the record, the history is
+// the rendering, and neither is ever built from a different read than the
+// other. A stamp, once written into history, is never rewritten: that is
+// what keeps every request a strict extension of the previous one, which is
+// the shape a provider's prefix cache is built to serve.
 
 import type { MemoryEngine } from '@openreverie/memory'
-import { renderLocalTime } from '@openreverie/memory'
+import { renderLiveStamp, renderLocalTime, utcOffsetMinutesFor } from '@openreverie/memory'
 import type { ChatProvider, ToolCall } from '@openreverie/providers'
 import type { ReverieConfig } from './config.js'
 import { assembleSystemPrompt } from './context.js'
@@ -382,16 +392,34 @@ export class AgentSession {
   // Appends a message to the on-disk transcript first, then to the
   // in-memory history, per the transcript-first discipline: nothing is
   // added to history until it is durably recorded.
+  //
+  // One clock read per appended message, and one only. That single instant
+  // produces the transcript line's ts, its utcOffsetMinutes, and the
+  // rendered stamp, so the value the model sees and the value on disk can
+  // never disagree.
+  //
+  // Only user messages are stamped. An assistant or tool message is
+  // produced within seconds of the user message that prompted it, so its
+  // own time adds nothing the preceding user stamp does not already give,
+  // and an assistant message that comes back carrying a bracket prefix it
+  // did not write teaches the model to start emitting stamps into its own
+  // replies to the person.
   private async appendBoth(message: SessionMessage): Promise<void> {
     const now = this.now()
+    const timezone = this.engine.timezone()
     await this.engine.appendTranscript(this.sessionId, {
       ts: now.toISOString(),
+      utcOffsetMinutes: utcOffsetMinutesFor(now, timezone),
       role: message.role,
       content: message.content,
       ...(message.toolCalls ? { toolCalls: message.toolCalls } : {}),
       ...(message.toolCallId ? { toolCallId: message.toolCallId } : {}),
     })
-    this.history.push(message)
+    this.history.push(
+      message.role === 'user'
+        ? { ...message, content: `${renderLiveStamp(now, timezone)} ${message.content}` }
+        : message,
+    )
   }
 
   private resultHasError(result: string): boolean {

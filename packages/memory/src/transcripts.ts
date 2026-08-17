@@ -14,7 +14,18 @@ import type { MemoryPaths } from './paths.js'
 import { formatLocalDate } from './time.js'
 
 export interface TranscriptLine {
+  // A UTC instant, ISO 8601: record time, when this line was written down.
   ts: string
+  // The offset from UTC, in minutes, of the person's timezone at the moment
+  // this line was written (330 for IST, -300 for US Eastern in winter).
+  // Optional because lines written before this field existed do not have
+  // it, and nothing backfills it: there is no source of truth for what
+  // timezone a past session was actually written in, and a wrong guess
+  // presented with the confidence of a real value is worse than an honest
+  // gap. Storing the offset that was actually in effect is what lets a past
+  // session be rendered in the wall clock it really happened in, even after
+  // the person moves.
+  utcOffsetMinutes?: number
   role: 'user' | 'assistant' | 'tool'
   content: string
   toolCalls?: ToolCall[]
