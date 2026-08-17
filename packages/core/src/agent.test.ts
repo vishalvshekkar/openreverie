@@ -905,4 +905,34 @@ describe('AgentSession', () => {
 
     await engine.close()
   })
+
+  it('reassembles the system prompt after update_profile so the Time section shows the confirmed zone', async () => {
+    const chat = new FakeChatProvider([
+      {
+        text: '',
+        toolCalls: [
+          {
+            id: 'call_1',
+            name: 'update_profile',
+            arguments: JSON.stringify({ timezone: 'Asia/Kolkata' }),
+          },
+        ],
+      },
+      { text: 'Got it, thanks.', toolCalls: [] },
+      { text: 'Sure.', toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const session = await AgentSession.start(engine, testConfig(), chat, undefined, {
+      now: () => new Date('2026-08-16T20:00:00.000Z'),
+    })
+
+    await collect(session.send('I live in Bengaluru.'))
+    await collect(session.send('Anything else?'))
+
+    const last = chat.requests.at(-1)?.system ?? ''
+    expect(last).toContain("This person's timezone is Asia/Kolkata.")
+    expect(last).not.toContain('This timezone is a system default')
+
+    await engine.close()
+  })
 })

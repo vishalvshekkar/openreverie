@@ -369,6 +369,15 @@ export class AgentSession {
           this.system = await assembleSystemPrompt(this.engine, this.config)
         }
 
+        // Same for update_profile: the Time section is built from the
+        // profile, so a confirmed timezone has to be reassembled in for the
+        // rest of this session. This costs one cache miss, once, typically
+        // during the first conversation. Messages already stamped keep the
+        // stamp they were written with and are never re-rendered.
+        if (toolCall.name === 'update_profile' && !this.resultHasError(result)) {
+          this.system = await assembleSystemPrompt(this.engine, this.config)
+        }
+
         await this.appendBoth({ role: 'tool', content: result, toolCallId: toolCall.id })
       }
     }

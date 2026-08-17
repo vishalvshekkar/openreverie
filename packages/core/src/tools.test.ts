@@ -61,7 +61,7 @@ function emptyReflectionOutput(summary: string) {
 }
 
 describe('toolDefinitions', () => {
-  it('lists exactly the eight memory and style tools with non-empty descriptions and a JSON schema', () => {
+  it('lists exactly the nine memory and style tools with non-empty descriptions and a JSON schema', () => {
     const defs = toolDefinitions()
     const names = defs.map((d) => d.name).sort()
     expect(names).toEqual(
@@ -73,6 +73,7 @@ describe('toolDefinitions', () => {
         'read_transcript',
         'remember',
         'search_memory',
+        'update_profile',
         'update_style',
       ].sort(),
     )
@@ -456,6 +457,42 @@ describe('dispatchTool', () => {
       call('resolve_proposal', { proposalId: 'prop_x', resolution: 'accepted' }),
     )
     expect(JSON.parse(result)).toEqual({ error: 'unknown tool: resolve_proposal' })
+
+    await engine.close()
+  })
+
+  it('update_profile writes a confirmed timezone through the engine', async () => {
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+    const sessionId = await engine.startSession()
+
+    const result = await dispatchTool(engine, sessionId, {
+      id: 'call_1',
+      name: 'update_profile',
+      arguments: JSON.stringify({ timezone: 'Asia/Kolkata' }),
+    })
+
+    const parsed = JSON.parse(result)
+    expect(parsed.ok).toBe(true)
+    expect(parsed.timezone).toBe('Asia/Kolkata')
+    expect(engine.timezone()).toBe('Asia/Kolkata')
+    expect(engine.timezoneSource()).toBe('user-confirmed')
+
+    await engine.close()
+  })
+
+  it('update_profile reports an unrecognized zone as a tool error instead of throwing', async () => {
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+    const sessionId = await engine.startSession()
+    const before = engine.timezone()
+
+    const result = await dispatchTool(engine, sessionId, {
+      id: 'call_1',
+      name: 'update_profile',
+      arguments: JSON.stringify({ timezone: 'Nowhere/Fake' }),
+    })
+
+    expect(JSON.parse(result).error).toContain('Nowhere/Fake')
+    expect(engine.timezone()).toBe(before)
 
     await engine.close()
   })

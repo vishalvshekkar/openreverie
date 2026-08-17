@@ -66,6 +66,10 @@ const updateStyleArgs = z
     { message: 'at least one of engagement, tone, or orientation is required' },
   )
 
+const updateProfileArgs = z.strictObject({
+  timezone: z.string(),
+})
+
 export function toolDefinitions(): ToolDefinition[] {
   return [
     {
@@ -252,6 +256,27 @@ export function toolDefinitions(): ToolDefinition[] {
         additionalProperties: false,
       },
     },
+    {
+      name: 'update_profile',
+      description:
+        'Record a structured personal fact reverie has to read back out in code. Right now that is the ' +
+        "person's timezone, as an IANA name such as Asia/Kolkata or America/New_York. Call this as soon as the " +
+        'person tells you where they are or corrects the timezone you were assuming, rather than waiting for the ' +
+        'end of the conversation. The local times shown on their messages start using it from that point onward.',
+      parameters: {
+        type: 'object',
+        properties: {
+          timezone: {
+            type: 'string',
+            description:
+              'The IANA timezone name for where the person actually is, for example Asia/Kolkata or ' +
+              'America/New_York. Not an abbreviation like IST or EST, and not a UTC offset.',
+          },
+        },
+        required: ['timezone'],
+        additionalProperties: false,
+      },
+    },
   ]
 }
 
@@ -284,6 +309,8 @@ export async function dispatchTool(
         return await dispatchListRealms(engine, parsedArgs.value)
       case 'update_style':
         return await dispatchUpdateStyle(deps, parsedArgs.value)
+      case 'update_profile':
+        return await dispatchUpdateProfile(engine, parsedArgs.value)
       default:
         return errorJson(`unknown tool: ${call.name}`)
     }
@@ -393,6 +420,25 @@ async function dispatchUpdateStyle(deps: ToolDeps | undefined, value: unknown): 
     style,
     message:
       'These settings apply from this moment onward in this conversation, and persist into future sessions.',
+  })
+}
+
+// Unlike update_style, this does not go through ToolDeps. Style lives in
+// config.toml, whose path is a CLI concern core must not know; the profile
+// lives in the memory folder, which MemoryEngine already owns. An
+// unrecognized zone name throws inside updateProfile and is turned into a
+// tool error by dispatchTool's own catch, so the model sees its mistake in
+// the transcript and can correct it.
+async function dispatchUpdateProfile(engine: MemoryEngine, value: unknown): Promise<string> {
+  const parsed = updateProfileArgs.safeParse(value)
+  if (!parsed.success) return errorJson(zodErrorMessage('update_profile', parsed.error))
+
+  const profile = await engine.updateProfile({ timezone: parsed.data.timezone })
+  return JSON.stringify({
+    ok: true,
+    timezone: profile.meta.timezone,
+    message:
+      'Saved. Local times on their messages use this from now on, in this conversation and in future ones.',
   })
 }
 
