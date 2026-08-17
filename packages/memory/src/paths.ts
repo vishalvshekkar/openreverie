@@ -12,6 +12,7 @@ export interface MemoryPaths {
   root: string
   constitution: string
   profile: string
+  migrationsLog: string
   realmsDir: string
   arcsDir: string
   peopleDir: string
@@ -28,6 +29,7 @@ export function memoryPaths(root: string): MemoryPaths {
     root,
     constitution: join(root, 'constitution.md'),
     profile: join(root, 'profile.md'),
+    migrationsLog: join(root, 'migrations.jsonl'),
     realmsDir: join(root, 'realms'),
     arcsDir: join(root, 'arcs'),
     peopleDir: join(root, 'people'),
