@@ -52,8 +52,22 @@ export async function commitMemory(root: string, message: string): Promise<Commi
   }
 }
 
+// Every git invocation this module makes gets -c gc.auto=0, so that
+// git commit (and git add/git init under some conditions) never triggers
+// a detached `git gc --auto` fork. That fork's own writes into
+// .git/objects/pack are not guaranteed to have finished by the time the
+// awaited execFile call resolves, which is the actual mechanism behind
+// an ENOTEMPTY race against a test's own `rm -rf` on the same directory
+// right after engine.close(). See
+// docs/superpowers/specs/2026-08-16-cli-polish-and-ci-fix-design.md
+// section 2.2. Extracted as its own pure function so the flag's presence
+// is directly testable without mocking child_process.
+export function gitArgs(args: string[]): string[] {
+  return ['-c', 'gc.auto=0', ...args]
+}
+
 async function git(root: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
-  return run('git', args, { cwd: root })
+  return run('git', gitArgs(args), { cwd: root })
 }
 
 async function isDirectory(path: string): Promise<boolean> {

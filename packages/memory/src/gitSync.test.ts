@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { commitMemory } from './gitSync.js'
+import { commitMemory, gitArgs } from './gitSync.js'
 
 const run = promisify(execFile)
 
@@ -105,5 +105,15 @@ describe('commitMemory', () => {
       env,
     })
     expect(authorName.trim()).toBe('reverie')
+  })
+})
+
+describe('gitArgs', () => {
+  it('prepends -c gc.auto=0 before the given subcommand and its arguments', () => {
+    expect(gitArgs(['status', '--porcelain'])).toEqual(['-c', 'gc.auto=0', 'status', '--porcelain'])
+  })
+
+  it('prepends the same flag for a bare single-word subcommand', () => {
+    expect(gitArgs(['init', '-q'])).toEqual(['-c', 'gc.auto=0', 'init', '-q'])
   })
 })
