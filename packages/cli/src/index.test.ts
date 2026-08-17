@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import type { DoctorDeps } from './doctor.js'
 import { subcommandHelp, TOP_LEVEL_HELP } from './help.js'
 import type { CliMainDeps } from './index.js'
 import { mainWith } from './index.js'
@@ -54,6 +55,12 @@ function testDeps(overrides: Partial<CliMainDeps> = {}): {
     },
     colorEnabled: () => false,
     readVersion: () => '9.9.9-test',
+    runDoctor: async () => {
+      throw new Error('runDoctor should not be called')
+    },
+    buildDoctorDeps: () => {
+      throw new Error('buildDoctorDeps should not be called')
+    },
   }
   return { deps: { ...base, ...overrides }, output: () => output }
 }
@@ -269,6 +276,46 @@ describe('mainWith exit codes for openCliContext failures', () => {
     await mainWith(['reflect'], deps)
     expect(output()).toBe('bad provider\n')
     expect(process.exitCode).toBe(3)
+    process.exitCode = 0
+  })
+})
+
+describe('mainWith doctor', () => {
+  it('calls buildDoctorDeps with the resolved config path and runDoctor with its result, setting exitCode from the return value', async () => {
+    let builtWithPath: string | undefined
+    const fakeDoctorDeps = {} as DoctorDeps
+    const { deps } = testDeps({
+      buildDoctorDeps: (configPath: string) => {
+        builtWithPath = configPath
+        return fakeDoctorDeps
+      },
+      runDoctor: async (doctorDeps: DoctorDeps) => {
+        expect(doctorDeps).toBe(fakeDoctorDeps)
+        return 1
+      },
+    })
+
+    await mainWith(['doctor', '--config', '/custom.toml'], deps)
+
+    expect(builtWithPath).toBe('/custom.toml')
+    expect(process.exitCode).toBe(1)
+    process.exitCode = 0
+  })
+
+  it('never opens a full CLI context for doctor', async () => {
+    let contextOpened = false
+    const { deps } = testDeps({
+      openCliContext: async () => {
+        contextOpened = true
+        throw new Error('should not be called')
+      },
+      buildDoctorDeps: () => ({}) as DoctorDeps,
+      runDoctor: async () => 0,
+    })
+
+    await mainWith(['doctor'], deps)
+
+    expect(contextOpened).toBe(false)
     process.exitCode = 0
   })
 })

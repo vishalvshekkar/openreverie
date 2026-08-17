@@ -30,13 +30,14 @@ import {
   printWarnings,
   runChat,
 } from './chat.js'
+import { buildRealDoctorDeps, type DoctorDeps, runDoctor } from './doctor.js'
 import { subcommandHelp, TOP_LEVEL_HELP } from './help.js'
 import { runRead } from './read.js'
 import { runSetup } from './setup.js'
 import { readOwnVersion } from './version.js'
 import { runWebCommand } from './web.js'
 
-const KNOWN_SUBCOMMANDS = new Set(['setup', 'web', 'read', 'reindex', 'reflect'])
+const KNOWN_SUBCOMMANDS = new Set(['setup', 'web', 'read', 'reindex', 'reflect', 'doctor'])
 
 // Colors are read from real process state exactly once, here at the edge:
 // disabled when stdout is not a TTY (piped, redirected, or captured by a
@@ -122,6 +123,8 @@ export interface CliMainDeps {
   write: (text: string) => void
   colorEnabled: () => boolean
   readVersion: () => string
+  runDoctor: (deps: DoctorDeps) => Promise<number>
+  buildDoctorDeps: (configPath: string, write: (text: string) => void) => DoctorDeps
 }
 
 interface ConfigExtraction {
@@ -239,6 +242,13 @@ export async function mainWith(args: string[], deps: CliMainDeps): Promise<void>
     return
   }
 
+  if (subcommand === 'doctor') {
+    const doctorDeps = deps.buildDoctorDeps(configPath, deps.write)
+    const exitCode = await deps.runDoctor(doctorDeps)
+    process.exitCode = exitCode
+    return
+  }
+
   const colorEnabled = deps.colorEnabled()
 
   const context = await deps.openCliContext({
@@ -297,6 +307,8 @@ const defaultDeps: CliMainDeps = {
   write: (text) => process.stdout.write(text),
   colorEnabled: colorsEnabled,
   readVersion: readOwnVersion,
+  runDoctor,
+  buildDoctorDeps: buildRealDoctorDeps,
 }
 
 // The entry guard compares the real path of the invoked script with this
