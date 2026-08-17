@@ -8,6 +8,7 @@ import {
   FakeChatProvider,
   FakeEmbeddingProvider,
 } from '@openreverie/providers'
+import Database from 'better-sqlite3'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { listDocuments, newId, readDocument, writeDocumentAtomic } from './documents.js'
 import { type EngineDeps, MemoryEngine } from './engine.js'
@@ -4115,5 +4116,35 @@ describe('reflection profileUpdates', () => {
     expect(engine.timezone()).toBe('UTC')
 
     await engine.close()
+  })
+})
+
+describe('index schema migration', () => {
+  it('rebuilds the index from the folder instead of leaving it empty', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'openreverie-migration-'))
+    const paths = memoryPaths(dir)
+
+    let engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+    await writeDocumentAtomic({
+      path: join(paths.realmsDir, 'fitness.md'),
+      meta: { id: 'doc_migration_realm', name: 'Fitness' },
+      body: 'Kayaking on the lake every Sunday morning.\n',
+    })
+    await engine.reindexAll()
+    const before = await engine.search('kayaking')
+    expect(before.some((hit) => hit.docId === 'doc_migration_realm')).toBe(true)
+    await engine.close()
+
+    const db = new Database(paths.indexDb)
+    db.pragma('user_version = 1')
+    db.close()
+
+    engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+    const after = await engine.search('kayaking')
+    expect(after.some((hit) => hit.docId === 'doc_migration_realm')).toBe(true)
+    expect(engine.warnings.some((w) => w.includes('search index schema'))).toBe(true)
+    await engine.close()
+
+    await rm(dir, { recursive: true, force: true })
   })
 })

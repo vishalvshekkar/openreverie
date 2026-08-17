@@ -38,6 +38,11 @@ export type EmbedFn = (texts: string[]) => Promise<number[][]>
 
 const MAX_CHUNK_CHARS = 1200
 
+// Bumped whenever the derived document tables change shape. On open, an
+// index.db carrying a lower version has those tables dropped and recreated,
+// and MemoryEngine.open rebuilds them from the memory folder.
+export const INDEX_SCHEMA_VERSION = 2
+
 interface DocumentRow {
   docId: string
   path: string
@@ -63,10 +68,11 @@ interface EdgeRow {
 
 export class MemoryIndex {
   private readonly db: Database.Database
+  readonly schemaRebuilt: boolean
 
   private constructor(db: Database.Database) {
     this.db = db
-    this.initSchema()
+    this.schemaRebuilt = this.initSchema()
   }
 
   static open(dbPath: string): MemoryIndex {
@@ -78,13 +84,59 @@ export class MemoryIndex {
     this.db.close()
   }
 
-  private initSchema(): void {
+  // Reads PRAGMA user_version and brings the derived document tables up to
+  // INDEX_SCHEMA_VERSION. Returns true only when there was an older index
+  // to migrate, so a caller can rebuild it.
+  //
+  // Migration is drop-and-recreate, not ALTER TABLE. Everything in these
+  // four tables is derived from the markdown files on disk and can be
+  // rebuilt exactly, so carrying rows forward buys nothing and every future
+  // schema change would need its own hand-written ALTER path. `nodes` and
+  // `edges` are left alone: replaceGraph already rewrites both wholesale on
+  // every engine open.
+  //
+  // A fresh database and a stale one both start at user_version 0, so the
+  // presence of the `documents` table in sqlite_master is what tells them
+  // apart. Without that check every brand-new memory folder would report a
+  // migration that never happened.
+  private initSchema(): boolean {
+    const storedVersion = Number(this.db.pragma('user_version', { simple: true }) ?? 0)
+    if (storedVersion >= INDEX_SCHEMA_VERSION) {
+      this.createTables()
+      return false
+    }
+
+    const hadDocuments =
+      this.db
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'documents'")
+        .get() !== undefined
+
+    if (hadDocuments) {
+      // chunks_fts first: it is an external-content FTS5 table over chunks,
+      // so dropping it before its content table keeps the drop of its
+      // shadow tables uncomplicated.
+      this.db.exec(`
+        DROP TABLE IF EXISTS chunks_fts;
+        DROP TABLE IF EXISTS embeddings;
+        DROP TABLE IF EXISTS chunks;
+        DROP TABLE IF EXISTS documents;
+      `)
+    }
+
+    this.createTables()
+    this.db.pragma(`user_version = ${INDEX_SCHEMA_VERSION}`)
+    return hadDocuments
+  }
+
+  private createTables(): void {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS documents (
         id TEXT PRIMARY KEY,
         path TEXT NOT NULL,
         kind TEXT NOT NULL,
-        mtime TEXT NOT NULL
+        mtime TEXT NOT NULL,
+        date_start TEXT,
+        date_end TEXT
       );
 
       CREATE TABLE IF NOT EXISTS chunks (

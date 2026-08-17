@@ -2,10 +2,11 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FakeEmbeddingProvider } from '@openreverie/providers'
+import Database from 'better-sqlite3'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Document } from './documents.js'
 import type { GraphState } from './graph.js'
-import { type DocKind, type EmbedFn, MemoryIndex } from './sqlite.js'
+import { type DocKind, type EmbedFn, INDEX_SCHEMA_VERSION, MemoryIndex } from './sqlite.js'
 
 function doc(overrides: Partial<Document> = {}): Document {
   return {
@@ -470,6 +471,47 @@ describe('MemoryIndex', () => {
 
       expect(index.nodeById('person_1')).toBeUndefined()
       expect(index.nodeById('realm_2')?.label).toBe('Solo realm')
+    })
+  })
+
+  describe('schema version', () => {
+    it('marks a fresh database as current, not rebuilt', () => {
+      expect(index.schemaRebuilt).toBe(false)
+      const db = new Database(dbPath)
+      expect(db.pragma('user_version', { simple: true })).toBe(INDEX_SCHEMA_VERSION)
+      db.close()
+    })
+
+    it('drops and recreates the derived document tables when the stored version is behind', async () => {
+      await index.upsertDocument(doc(), 'realm', embedFn())
+      expect(index.searchText('work', 10).length).toBeGreaterThan(0)
+      index.close()
+
+      const db = new Database(dbPath)
+      db.pragma('user_version = 1')
+      db.close()
+
+      const reopened = MemoryIndex.open(dbPath)
+      expect(reopened.schemaRebuilt).toBe(true)
+      // Derived rows are gone, and the table is present and queryable
+      // rather than missing: an empty result, not a throw.
+      expect(reopened.searchText('work', 10)).toEqual([])
+      reopened.close()
+
+      // Opening again finds the version current and does not rebuild.
+      const third = MemoryIndex.open(dbPath)
+      expect(third.schemaRebuilt).toBe(false)
+      third.close()
+
+      index = MemoryIndex.open(dbPath)
+    })
+
+    it('creates the date span columns on the documents table', () => {
+      const db = new Database(dbPath)
+      const columns = (db.pragma('table_info(documents)') as { name: string }[]).map((c) => c.name)
+      db.close()
+      expect(columns).toContain('date_start')
+      expect(columns).toContain('date_end')
     })
   })
 })

@@ -280,6 +280,27 @@ export class MemoryEngine {
     if (options.maintenance !== false) {
       await engine.drainLegacyProposals()
     }
+    // After runMaintenance and drainLegacyProposals, not before: both of
+    // those clear warnings as their own first step, so a warning pushed
+    // earlier would be wiped before anyone could read it. Nothing in the
+    // maintenance path searches the index (reflection reads graph state and
+    // the folder; the rollup builders read the folder), so running it
+    // against a freshly emptied index is safe, and running the rebuild
+    // afterwards also picks up whatever maintenance just wrote.
+    //
+    // Rebuild rather than leave the index empty: a silently empty search
+    // index is the exact failure this release exists to remove. The cost is
+    // one embedding pass over the whole folder, once. Nothing is lost if it
+    // is interrupted, since the version is only advanced when the tables are
+    // recreated and the index is derived from the folder either way.
+    if (index.schemaRebuilt) {
+      await engine.reindexAll()
+      engine.warnings.push(
+        'The search index schema changed in this version, so index.db was rebuilt from your memory folder. ' +
+          'This happens once, on the first launch after the upgrade, and it re-embeds every document in the folder. ' +
+          'Nothing was lost: the index is derived from your files, and it is rebuilt again on the next launch if this one was interrupted.',
+      )
+    }
     await engine.refreshDocPaths()
     return engine
   }
