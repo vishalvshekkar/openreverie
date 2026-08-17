@@ -5,6 +5,8 @@
 import { access, mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { newId, writeDocumentAtomic } from './documents.js'
+import { starterProfileDocument } from './profile.js'
+import { systemTimeZone } from './time.js'
 
 export interface MemoryPaths {
   root: string
@@ -60,6 +62,17 @@ export async function ensureMemoryTree(paths: MemoryPaths): Promise<void> {
       meta: { id: newId('doc') },
       body: CONSTITUTION_STARTER,
     })
+  }
+
+  // Unlike the constitution's starter (an empty sentence, since a person's
+  // identity is unknown when a folder is created), the profile starter is
+  // not empty: it carries the timezone of the machine reverie is running
+  // on, marked as a system default rather than a fact the person
+  // confirmed. That is what gives the per-message time stamp something to
+  // render from in the very first session.
+  const profileExists = await pathExists(paths.profile)
+  if (!profileExists) {
+    await writeDocumentAtomic(starterProfileDocument(paths.profile, systemTimeZone()))
   }
 
   // Seed .gitignore to exclude the SQLite index and atomic-write temp files
