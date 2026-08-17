@@ -32,12 +32,21 @@ import {
 } from './chat.js'
 import { buildRealDoctorDeps, type DoctorDeps, runDoctor } from './doctor.js'
 import { subcommandHelp, TOP_LEVEL_HELP } from './help.js'
+import { runMigrate } from './migrate.js'
 import { runRead } from './read.js'
 import { runSetup } from './setup.js'
 import { readOwnVersion } from './version.js'
 import { runWebCommand } from './web.js'
 
-const KNOWN_SUBCOMMANDS = new Set(['setup', 'web', 'read', 'reindex', 'reflect', 'doctor'])
+const KNOWN_SUBCOMMANDS = new Set([
+  'setup',
+  'web',
+  'read',
+  'migrate',
+  'reindex',
+  'reflect',
+  'doctor',
+])
 
 // Colors are read from real process state exactly once, here at the edge:
 // disabled when stdout is not a TTY (piped, redirected, or captured by a
@@ -110,6 +119,7 @@ export interface CliMainDeps {
   runWeb: typeof runWebCommand
   launchServer: typeof launchServer
   runRead: typeof runRead
+  runMigrate: typeof runMigrate
   runSetupCommand: (configPath: string) => Promise<void>
   openCliContext: typeof openCliContext
   buildChat: (config: ReverieConfig) => ReturnType<typeof createChatProvider>
@@ -242,6 +252,16 @@ export async function mainWith(args: string[], deps: CliMainDeps): Promise<void>
     return
   }
 
+  if (subcommand === 'migrate') {
+    const exitCode = await deps.runMigrate(args.slice(1), {
+      loadConfig: () => deps.loadConfig(configPath),
+      configPath: deps.configPath,
+      write: deps.write,
+    })
+    process.exitCode = exitCode
+    return
+  }
+
   if (subcommand === 'doctor') {
     const doctorDeps = deps.buildDoctorDeps(configPath, deps.write)
     const exitCode = await deps.runDoctor(doctorDeps)
@@ -300,6 +320,7 @@ const defaultDeps: CliMainDeps = {
   runWeb: runWebCommand,
   launchServer,
   runRead,
+  runMigrate,
   runSetupCommand,
   openCliContext,
   buildChat: (config) => createChatProvider(providerSelection(config)),

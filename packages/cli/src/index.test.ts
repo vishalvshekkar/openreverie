@@ -19,6 +19,9 @@ function testDeps(overrides: Partial<CliMainDeps> = {}): {
     runRead: async () => {
       throw new Error('runRead should not be called')
     },
+    runMigrate: async () => {
+      throw new Error('runMigrate should not be called')
+    },
     runSetupCommand: async (_configPath: string) => {
       throw new Error('runSetupCommand should not be called')
     },
