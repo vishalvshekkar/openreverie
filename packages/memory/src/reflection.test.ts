@@ -354,6 +354,39 @@ describe('reflection', () => {
         degraded: true,
       })
     })
+
+    it('accepts profileUpdates and never instructs timezone into constitution prose', async () => {
+      const withUpdate = {
+        ...emptyReflectionOutput('They mentioned moving to Berlin.'),
+        profileUpdates: { timezone: 'Europe/Berlin' },
+      }
+      expect(reflectionOutputSchema.safeParse(withUpdate).success).toBe(true)
+
+      const withNull = {
+        ...emptyReflectionOutput('Nothing to update.'),
+        profileUpdates: { timezone: null },
+      }
+      expect(reflectionOutputSchema.safeParse(withNull).success).toBe(true)
+
+      // Absent entirely is also valid, which is what every existing fixture
+      // in this file relies on.
+      expect(reflectionOutputSchema.safeParse(emptyReflectionOutput('Plain.')).success).toBe(true)
+
+      const chat = new FakeChatProvider([
+        { text: JSON.stringify(emptyReflectionOutput('Plain.')), toolCalls: [] },
+      ])
+      await reflectSession({ chat, model: 'fake-model' }, TRANSCRIPT, {
+        constitution: 'The user values honesty over comfort.',
+        arcs: [],
+        realms: [],
+        people: [],
+        entities: [],
+      })
+
+      const prompt = chat.requests[0]?.messages[0]?.content ?? ''
+      expect(prompt).not.toContain('their timezone')
+      expect(prompt).toContain('"profileUpdates"')
+    })
   })
 
   describe('rewriteNarrative', () => {

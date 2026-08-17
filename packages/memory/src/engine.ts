@@ -559,6 +559,21 @@ export class MemoryEngine {
     )
     this.liveItems.delete(sessionId)
 
+    // Reflection's timezone backstop. Validated by updateProfile itself,
+    // which rejects anything Intl does not recognize, and swallowed on
+    // failure: a bad zone name from the model must not undo a session that
+    // has already been written to disk.
+    const reportedTimezone = out.profileUpdates?.timezone
+    if (typeof reportedTimezone === 'string' && reportedTimezone.length > 0) {
+      try {
+        await this.updateProfile({ timezone: reportedTimezone })
+      } catch (err) {
+        this.warnings.push(
+          `Reflection reported a timezone this session that could not be saved: ${err instanceof Error ? err.message : String(err)}`,
+        )
+      }
+    }
+
     await this.syncGraph()
     await this.reindexOrWarn(result.summaryDoc, 'summary', `session ${sessionId} summary`)
 

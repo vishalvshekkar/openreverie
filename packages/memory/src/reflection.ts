@@ -93,6 +93,12 @@ export interface ReflectionOutput {
   arcUpdates: { arcId: string; note: string }[]
   personUpdates: { personId: string; note: string }[]
   constitutionUpdate: string | null
+  // A structured personal fact worth writing into profile.md rather than
+  // into constitution prose. null, or the field's absence, means nothing to
+  // update. This is a backstop: a model that used the live update_profile
+  // tool during the conversation has already written it, and writing the
+  // same confirmed value twice is a no-op in effect.
+  profileUpdates?: { timezone: string | null }
 }
 
 export interface ReflectionContext {
@@ -161,6 +167,7 @@ export const reflectionOutputSchema: z.ZodType<ReflectionOutput> = z.object({
   arcUpdates: z.array(z.object({ arcId: z.string(), note: z.string() })),
   personUpdates: z.array(z.object({ personId: z.string(), note: z.string() })),
   constitutionUpdate: z.string().nullable(),
+  profileUpdates: z.object({ timezone: z.string().nullable() }).exactOptional(),
 })
 
 // truncated is only ever true for entities (arcs and realms are never
@@ -225,7 +232,8 @@ const RESPONSE_SHAPE = `{
   "pagePromotions": [{"nodeId": string, "reason": string, "itemIndexes": number[], "narrative": string}],
   "arcUpdates": [{"arcId": string, "note": string}],
   "personUpdates": [{"personId": string, "note": string}],
-  "constitutionUpdate": string | null
+  "constitutionUpdate": string | null,
+  "profileUpdates": {"timezone": string | null}
 }`
 
 function buildReflectionPrompt(context: ReflectionContext, transcript: TranscriptLine[]): string {
@@ -250,7 +258,9 @@ function buildReflectionPrompt(context: ReflectionContext, transcript: Transcrip
     'Transcript:',
     renderTranscript(transcript),
     '',
-    'When updating the constitution: basic identity facts about the user (their name, pronouns, where they live, their timezone, their occupation or work situation) always belong in the constitution when first learned or when they change. Do not wait for these facts to feel weighty; update the constitution to include them immediately.',
+    'When updating the constitution: basic identity facts about the user (their name, pronouns, where they live, their occupation or work situation) always belong in the constitution when first learned or when they change. Do not wait for these facts to feel weighty; update the constitution to include them immediately.',
+    '',
+    'Timezone is the exception, and it does not go in the constitution: reverie has to read it back out in code to render local times, and prose is not reliably machine parseable. If this session established or corrected the person\'s timezone, put the IANA name (for example "Asia/Kolkata", "America/New_York") in profileUpdates.timezone. Otherwise set it to null.',
     '',
     "A node and a page are two different decisions. A node is a permanent, queryable line in the graph; it is nearly free, so create one generously, on first mention, for anyone or anything with a real part in this person's life. A page is a maintained document a separate model call rewrites every session that touches it; it is expensive, so it is only granted when earned. Each name under Known people above is marked with whether it already has a page. Entities never get a page in this release, so no name under Known entities carries that mark.",
     '',

@@ -4048,3 +4048,72 @@ describe('a session whose logical date differs from its directory prefix', () =>
     await engine.close()
   })
 })
+
+describe('reflection profileUpdates', () => {
+  let dir: string
+  let paths: MemoryPaths
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-profileupdates-'))
+    paths = memoryPaths(dir)
+    await ensureMemoryTree(paths)
+    await pinTimezoneUtc(paths)
+  })
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  it('writes a confirmed timezone reported by reflection, and ignores a null or invalid one', async () => {
+    const reflectionWith = {
+      ...emptyReflectionOutput('They moved to Berlin.'),
+      profileUpdates: { timezone: 'Europe/Berlin' },
+    }
+    const chat = new FakeChatProvider([
+      { text: JSON.stringify(reflectionWith), toolCalls: [] },
+      { text: 'A rewritten narrative.', toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat), { maintenance: false })
+    const sessionId = await engine.startSession(new Date('2026-08-16T09:00:00.000Z'))
+    await engine.appendTranscript(sessionId, {
+      ts: '2026-08-16T09:00:00.000Z',
+      utcOffsetMinutes: 0,
+      role: 'user',
+      content: 'I moved to Berlin last month.',
+    })
+
+    await engine.endSession(sessionId)
+
+    expect(engine.timezone()).toBe('Europe/Berlin')
+    expect(engine.timezoneSource()).toBe('user-confirmed')
+    const onDisk = await loadProfile(paths)
+    expect(onDisk.meta.timezone).toBe('Europe/Berlin')
+
+    await engine.close()
+  })
+
+  it('leaves the timezone alone when reflection reports null', async () => {
+    const reflectionWithout = {
+      ...emptyReflectionOutput('An ordinary session.'),
+      profileUpdates: { timezone: null },
+    }
+    const chat = new FakeChatProvider([
+      { text: JSON.stringify(reflectionWithout), toolCalls: [] },
+      { text: 'A rewritten narrative.', toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat), { maintenance: false })
+    const sessionId = await engine.startSession(new Date('2026-08-16T09:00:00.000Z'))
+    await engine.appendTranscript(sessionId, {
+      ts: '2026-08-16T09:00:00.000Z',
+      utcOffsetMinutes: 0,
+      role: 'user',
+      content: 'Nothing much happened.',
+    })
+
+    await engine.endSession(sessionId)
+
+    expect(engine.timezone()).toBe('UTC')
+
+    await engine.close()
+  })
+})
