@@ -117,6 +117,25 @@ describe('toolDefinitions', () => {
     const names = defs.map((d) => d.name)
     expect(names).not.toContain('forget')
   })
+
+  it('says plainly which kinds the date filters apply to and which they never exclude', () => {
+    const defs = toolDefinitions()
+    const searchMemory = defs.find((d) => d.name === 'search_memory')
+    if (!searchMemory) throw new Error('expected a search_memory tool definition')
+    const properties = (
+      searchMemory.parameters as {
+        properties: { after: { description: string }; before: { description: string } }
+      }
+    ).properties
+
+    for (const description of [properties.after.description, properties.before.description]) {
+      expect(description).toContain('weekly rollup matches if any day of its week falls in range')
+      expect(description).toContain('never excluded')
+      expect(description).toContain('kinds')
+    }
+    expect(properties.after.description).toContain('on or after')
+    expect(properties.before.description).toContain('on or before')
+  })
 })
 
 describe('dispatchTool', () => {

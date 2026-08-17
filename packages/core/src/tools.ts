@@ -96,11 +96,21 @@ export function toolDefinitions(): ToolDefinition[] {
           },
           after: {
             type: 'string',
-            description: 'Only include results dated on or after this date (YYYY-MM-DD).',
+            description:
+              'Only include dated artifacts on or after this date, YYYY-MM-DD. Dated artifacts are session ' +
+              'summaries, daily rollups, weekly rollups, and journal entries; a weekly rollup matches if any day ' +
+              'of its week falls in range. Living documents that are rewritten over time (the constitution, and ' +
+              'realm, arc and person pages) have no single date and are never excluded by these filters. To ' +
+              'search only within a date range, combine this with kinds.',
           },
           before: {
             type: 'string',
-            description: 'Only include results dated on or before this date (YYYY-MM-DD).',
+            description:
+              'Only include dated artifacts on or before this date, YYYY-MM-DD. Dated artifacts are session ' +
+              'summaries, daily rollups, weekly rollups, and journal entries; a weekly rollup matches if any day ' +
+              'of its week falls in range. Living documents that are rewritten over time (the constitution, and ' +
+              'realm, arc and person pages) have no single date and are never excluded by these filters. To ' +
+              'search only within a date range, combine this with kinds.',
           },
           limit: {
             type: 'number',
