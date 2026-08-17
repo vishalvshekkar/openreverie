@@ -30,6 +30,7 @@ import {
   printWarnings,
   runChat,
 } from './chat.js'
+import { subcommandHelp, TOP_LEVEL_HELP } from './help.js'
 import { runRead } from './read.js'
 import { runSetup } from './setup.js'
 import { readOwnVersion } from './version.js'
@@ -155,6 +156,34 @@ function extractConfigOverride(args: string[]): ConfigExtraction {
 export async function mainWith(args: string[], deps: CliMainDeps): Promise<void> {
   if (args.includes('--version') || args.includes('-v') || args[0] === 'version') {
     deps.write(`${deps.readVersion()}\n`)
+    process.exitCode = 0
+    return
+  }
+
+  if (args[0] === 'help') {
+    const topic = args[1]
+    if (topic === undefined) {
+      deps.write(TOP_LEVEL_HELP)
+      process.exitCode = 0
+      return
+    }
+    const text = subcommandHelp(topic)
+    if (text === undefined) {
+      deps.write(
+        `reverie: unknown command '${topic}'\nRun 'reverie --help' for a list of commands.\n`,
+      )
+      process.exitCode = 1
+      return
+    }
+    deps.write(text)
+    process.exitCode = 0
+    return
+  }
+
+  if (args.includes('--help') || args.includes('-h')) {
+    const first = args[0]
+    const topic = first !== undefined && !first.startsWith('-') ? subcommandHelp(first) : undefined
+    deps.write(topic ?? TOP_LEVEL_HELP)
     process.exitCode = 0
     return
   }

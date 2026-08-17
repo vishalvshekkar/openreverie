@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { subcommandHelp, TOP_LEVEL_HELP } from './help.js'
 import type { CliMainDeps } from './index.js'
 import { mainWith } from './index.js'
 
@@ -189,6 +190,61 @@ describe('mainWith unknown option', () => {
 
     expect(output()).toBe(
       "reverie: unknown option '--frobnicate'\nRun 'reverie --help' for a list of options.\n",
+    )
+    expect(process.exitCode).toBe(1)
+    process.exitCode = 0
+  })
+})
+
+describe('mainWith --help', () => {
+  it('prints top-level help and exits 0 for --help, without touching config', async () => {
+    const { deps, output } = testDeps()
+    await mainWith(['--help'], deps)
+    expect(output()).toBe(TOP_LEVEL_HELP)
+    expect(process.exitCode).toBe(0)
+    process.exitCode = 0
+  })
+
+  it('prints top-level help for -h', async () => {
+    const { deps, output } = testDeps()
+    await mainWith(['-h'], deps)
+    expect(output()).toBe(TOP_LEVEL_HELP)
+    process.exitCode = 0
+  })
+
+  it('prints top-level help for the bare help subcommand', async () => {
+    const { deps, output } = testDeps()
+    await mainWith(['help'], deps)
+    expect(output()).toBe(TOP_LEVEL_HELP)
+    process.exitCode = 0
+  })
+
+  it('prints reflect-specific help for reverie reflect --help, without opening an engine', async () => {
+    let contextOpened = false
+    const { deps, output } = testDeps({
+      openCliContext: async () => {
+        contextOpened = true
+        throw new Error('should not reach here')
+      },
+    })
+    await mainWith(['reflect', '--help'], deps)
+    expect(output()).toBe(subcommandHelp('reflect'))
+    expect(contextOpened).toBe(false)
+    process.exitCode = 0
+  })
+
+  it('prints reflect-specific help for reverie help reflect', async () => {
+    const { deps, output } = testDeps()
+    await mainWith(['help', 'reflect'], deps)
+    expect(output()).toBe(subcommandHelp('reflect'))
+    process.exitCode = 0
+  })
+
+  it('reports an unknown command and exits 1 for reverie help bogus', async () => {
+    const { deps, output } = testDeps()
+    await mainWith(['help', 'bogus'], deps)
+    expect(output()).toBe(
+      "reverie: unknown command 'bogus'\nRun 'reverie --help' for a list of commands.\n",
     )
     expect(process.exitCode).toBe(1)
     process.exitCode = 0
