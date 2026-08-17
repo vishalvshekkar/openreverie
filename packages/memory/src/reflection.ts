@@ -42,7 +42,7 @@ import {
   readGraph,
 } from './graph.js'
 import type { MemoryPaths } from './paths.js'
-import { localDateFromStored } from './time.js'
+import { localDateFromStored, renderStoredStamp } from './time.js'
 import { SessionStore, type TranscriptLine } from './transcripts.js'
 
 export type ReflectionItemKind = 'observation' | 'feeling' | 'event' | 'intention'
@@ -188,8 +188,19 @@ function renderListingWithPageStatus(nodes: GraphNode[], truncated = false): str
   return lines.join('\n')
 }
 
+// Each line is prefixed with the wall-clock time it was written at, built
+// from that line's own ts and its own recorded offset. A line written
+// before offsets existed renders as a labeled UTC instant instead, and
+// never as a local time guessed from a timezone the line does not carry.
+// This is what lets reflection distinguish record time (when the person
+// said it) from event time (when the thing they described happens).
 function renderTranscript(transcript: TranscriptLine[]): string {
-  return transcript.map((line) => `${line.role}: ${line.content}`).join('\n')
+  return transcript
+    .map(
+      (line) =>
+        `${renderStoredStamp(line.ts, line.utcOffsetMinutes)} ${line.role}: ${line.content}`,
+    )
+    .join('\n')
 }
 
 const RESPONSE_SHAPE = `{

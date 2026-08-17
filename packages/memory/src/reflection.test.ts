@@ -19,7 +19,12 @@ import {
 import { SessionStore, type TranscriptLine } from './transcripts.js'
 
 const TRANSCRIPT: TranscriptLine[] = [
-  { ts: '2026-08-13T09:00:00.000Z', role: 'user', content: 'I went for a long run this morning.' },
+  {
+    ts: '2026-08-13T09:00:00.000Z',
+    utcOffsetMinutes: 330,
+    role: 'user',
+    content: 'I went for a long run this morning.',
+  },
   {
     ts: '2026-08-13T09:01:00.000Z',
     role: 'assistant',
@@ -186,8 +191,12 @@ describe('reflection', () => {
       expect(prompt).toContain('arc_health: Health')
       expect(prompt).toContain('realm_health: Health')
       expect(prompt).toContain('person_sam: Sam')
-      expect(prompt).toContain('user: I went for a long run this morning.')
-      expect(prompt).toContain('assistant: That sounds like a good start to the day.')
+      expect(prompt).toContain(
+        '[Thu 2026-08-13 14:30 UTC+05:30] user: I went for a long run this morning.',
+      )
+      expect(prompt).toContain(
+        '[2026-08-13T09:01:00.000Z (UTC; local time unknown)] assistant: That sounds like a good start to the day.',
+      )
       expect(prompt).toContain('"constitutionUpdate": string | null')
       expect(prompt).toContain('identity facts')
       expect(prompt).toContain('first learned or when they change')
