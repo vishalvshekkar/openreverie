@@ -288,6 +288,9 @@ export async function mainWith(args: string[], deps: CliMainDeps): Promise<void>
         io.close()
       }
     }
+  } catch (err) {
+    deps.write(`${errorMessage(err)}\n`)
+    process.exitCode = 3
   } finally {
     await engine.close()
   }

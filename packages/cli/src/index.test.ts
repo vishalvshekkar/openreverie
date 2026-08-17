@@ -354,3 +354,75 @@ describe('mainWith chat interrupt exit code', () => {
     expect(process.exitCode).toBe(0)
   })
 })
+
+describe('mainWith exit code 3 on a live failure during reindex/reflect/chat', () => {
+  it('exits 3 and writes the error message when reindexAll throws', async () => {
+    const { deps, output } = testDeps({
+      openCliContext: async () => ({
+        ok: true,
+        engine: {
+          warnings: [],
+          reindexAll: async () => {
+            throw new Error('embedding provider unreachable')
+          },
+          close: async () => {},
+        } as never,
+        config: { memoryDir: '/fake/memory' } as never,
+        chat: {} as never,
+      }),
+    })
+
+    await mainWith(['reindex'], deps)
+
+    expect(output()).toContain('embedding provider unreachable')
+    expect(process.exitCode).toBe(3)
+    process.exitCode = 0
+  })
+
+  it('exits 3 when runMaintenance throws during reflect', async () => {
+    const { deps } = testDeps({
+      openCliContext: async () => ({
+        ok: true,
+        engine: {
+          warnings: [],
+          runMaintenance: async () => {
+            throw new Error('reflection model unreachable')
+          },
+          close: async () => {},
+        } as never,
+        config: { memoryDir: '/fake/memory' } as never,
+        chat: {} as never,
+      }),
+    })
+
+    await mainWith(['reflect'], deps)
+
+    expect(process.exitCode).toBe(3)
+    process.exitCode = 0
+  })
+
+  it('still closes the engine when reindexAll throws', async () => {
+    let closed = false
+    const { deps } = testDeps({
+      openCliContext: async () => ({
+        ok: true,
+        engine: {
+          warnings: [],
+          reindexAll: async () => {
+            throw new Error('boom')
+          },
+          close: async () => {
+            closed = true
+          },
+        } as never,
+        config: { memoryDir: '/fake/memory' } as never,
+        chat: {} as never,
+      }),
+    })
+
+    await mainWith(['reindex'], deps)
+
+    expect(closed).toBe(true)
+    process.exitCode = 0
+  })
+})
