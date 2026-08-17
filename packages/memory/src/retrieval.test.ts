@@ -166,69 +166,91 @@ describe('searchMemory', () => {
     expect(hits.length).toBe(8)
   })
 
-  it('filters by date encoded in the path when present, and passes hits through when it is not', async () => {
+  it('excludes a dated document outside the range, and returns it when unfiltered', async () => {
     const query = 'quiet morning walk'
 
-    // Daily rollups are written to rollups/daily/<date>.md, so the date is
-    // recoverable from the filename.
     await index.upsertDocument(
       doc({
-        meta: { id: 'doc_early' },
+        meta: { id: 'doc_may', date: '2026-05-01' },
         body: query,
-        path: '/memory/rollups/daily/2026-01-01.md',
+        path: '/memory/rollups/daily/2026-05-01.md',
       }),
       'rollup_daily',
       embedFn(embeddings),
     )
     await index.upsertDocument(
       doc({
-        meta: { id: 'doc_late' },
+        meta: { id: 'doc_august', date: '2026-08-01' },
         body: query,
         path: '/memory/rollups/daily/2026-08-01.md',
       }),
       'rollup_daily',
       embedFn(embeddings),
     )
-    // Session summaries carry their date in the parent directory
-    // (sessions/<date>-<sessionId>/summary.md), not the filename.
+
+    // Unfiltered first. Without this assertion the filtered one below
+    // would still pass if the filter were deleted and nothing had ranked.
+    const unfiltered = await searchMemory(index, embeddings, MODEL, query)
+    expect(unfiltered.map((h) => h.docId).sort()).toEqual(['doc_august', 'doc_may'])
+
+    const filtered = await searchMemory(index, embeddings, MODEL, query, { after: '2026-07-01' })
+    expect(filtered.map((h) => h.docId)).toEqual(['doc_august'])
+  })
+
+  it('never excludes a living document, whatever the date filter says', async () => {
+    const query = 'quiet morning walk'
+
     await index.upsertDocument(
       doc({
-        meta: { id: 'doc_session' },
+        meta: { id: 'doc_may', date: '2026-05-01' },
         body: query,
-        path: '/memory/sessions/2026-07-01-abc123/summary.md',
+        path: '/memory/rollups/daily/2026-05-01.md',
       }),
-      'summary',
+      'rollup_daily',
       embedFn(embeddings),
     )
-    // A kind whose path has no recoverable date. It has no date to compare,
-    // so an after/before filter never excludes it.
-    await index.upsertDocument(
-      doc({ meta: { id: 'doc_undated' }, body: query, path: '/memory/realms/undated.md' }),
-      'realm',
-      embedFn(embeddings),
-    )
-    // A decoy: a date-like substring appears in an ancestor directory, but
-    // that segment does not start with it, so it must not be read as the
-    // document's date. Without the segment-start anchor this would be
-    // wrongly excluded by the after filter below.
+    // An arc page carries opened and updated, both well outside the range,
+    // and still must not be excluded: it has no date span at all.
     await index.upsertDocument(
       doc({
-        meta: { id: 'doc_decoy' },
+        meta: { id: 'doc_arc', opened: '2026-01-04', updated: '2026-01-20' },
         body: query,
-        path: '/memory/backup-2024-01-01/realms/notes.md',
+        path: '/memory/arcs/walking.md',
       }),
-      'realm',
+      'arc',
       embedFn(embeddings),
     )
 
-    const hits = await searchMemory(index, embeddings, MODEL, query, { after: '2026-06-01' })
+    const hits = await searchMemory(index, embeddings, MODEL, query, { after: '2026-07-01' })
+    expect(hits.map((h) => h.docId)).toEqual(['doc_arc'])
+  })
 
-    expect(hits.map((h) => h.docId).sort()).toEqual([
-      'doc_decoy',
-      'doc_late',
-      'doc_session',
-      'doc_undated',
-    ])
+  it('matches a weekly rollup on span overlap, not on its Monday alone', async () => {
+    const query = 'quiet morning walk'
+
+    // 2026-W33 runs Monday 2026-08-10 through Sunday 2026-08-16.
+    await index.upsertDocument(
+      doc({
+        meta: { id: 'doc_week', week: '2026-W33' },
+        body: query,
+        path: '/memory/rollups/weekly/2026-W33.md',
+      }),
+      'rollup_weekly',
+      embedFn(embeddings),
+    )
+
+    const midWeek = await searchMemory(index, embeddings, MODEL, query, { after: '2026-08-14' })
+    expect(midWeek.map((h) => h.docId)).toEqual(['doc_week'])
+
+    const beforeMidWeek = await searchMemory(index, embeddings, MODEL, query, {
+      before: '2026-08-11',
+    })
+    expect(beforeMidWeek.map((h) => h.docId)).toEqual(['doc_week'])
+
+    const afterTheWeek = await searchMemory(index, embeddings, MODEL, query, {
+      after: '2026-08-17',
+    })
+    expect(afterTheWeek.map((h) => h.docId)).toEqual([])
   })
 
   it('does not let a document with many matching chunks in one list outrank a document that tops both lists', async () => {

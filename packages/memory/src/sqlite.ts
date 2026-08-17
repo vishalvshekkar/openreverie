@@ -322,7 +322,13 @@ export class MemoryIndex {
     run()
   }
 
-  searchText(query: string, limit: number, kinds?: DocKind[]): SearchHit[] {
+  searchText(
+    query: string,
+    limit: number,
+    kinds?: DocKind[],
+    after?: string,
+    before?: string,
+  ): SearchHit[] {
     const ftsQuery = toFtsQuery(query)
     if (ftsQuery === null) {
       return []
@@ -336,6 +342,7 @@ export class MemoryIndex {
     // Values are always bound as parameters, never interpolated into the
     // SQL string; only the placeholder count (one '?' per kind) varies.
     const kindClause = kinds ? `AND d.kind IN (${kinds.map(() => '?').join(', ')})` : ''
+    const dates = dateClause(after, before)
     const rows = this.db
       .prepare(
         `SELECT d.id as docId, d.path as path, d.kind as kind,
@@ -344,11 +351,14 @@ export class MemoryIndex {
          FROM chunks_fts
          JOIN chunks c ON c.id = chunks_fts.rowid
          JOIN documents d ON d.id = c.doc_id
-         WHERE chunks_fts MATCH ? ${kindClause}
+         WHERE chunks_fts MATCH ? ${kindClause} ${dates.sql}
          ORDER BY rank
          LIMIT ?`,
       )
-      .all(ftsQuery, ...(kinds ?? []), limit) as (DocumentRow & { snippet: string; rank: number })[]
+      .all(ftsQuery, ...(kinds ?? []), ...dates.params, limit) as (DocumentRow & {
+      snippet: string
+      rank: number
+    })[]
 
     return rows.map((row) => ({
       docId: row.docId,
@@ -359,20 +369,40 @@ export class MemoryIndex {
     }))
   }
 
-  async searchVector(queryVec: number[], limit: number, kinds?: DocKind[]): Promise<SearchHit[]> {
+  async searchVector(
+    queryVec: number[],
+    limit: number,
+    kinds?: DocKind[],
+    after?: string,
+    before?: string,
+  ): Promise<SearchHit[]> {
     if (kinds && kinds.length === 0) {
       return []
     }
-    const kindClause = kinds ? `WHERE d.kind IN (${kinds.map(() => '?').join(', ')})` : ''
+    const predicates: string[] = []
+    const params: (string | DocKind)[] = []
+    if (kinds) {
+      predicates.push(`d.kind IN (${kinds.map(() => '?').join(', ')})`)
+      params.push(...kinds)
+    }
+    const dates = dateClause(after, before)
+    if (dates.sql.length > 0) {
+      // dateClause returns its predicate already prefixed with AND, for the
+      // searchText query where it is never first. Here it can be first, so
+      // the prefix is stripped.
+      predicates.push(dates.sql.replace(/^AND /, ''))
+      params.push(...dates.params)
+    }
+    const whereClause = predicates.length > 0 ? `WHERE ${predicates.join(' AND ')}` : ''
     const rows = this.db
       .prepare(
         `SELECT e.vector as vector, d.id as docId, d.path as path, d.kind as kind, c.text as text
          FROM embeddings e
          JOIN chunks c ON c.id = e.chunk_id
          JOIN documents d ON d.id = c.doc_id
-         ${kindClause}`,
+         ${whereClause}`,
       )
-      .all(...(kinds ?? [])) as {
+      .all(...params) as {
       vector: Buffer
       docId: string
       path: string
@@ -537,6 +567,32 @@ function toFtsQuery(query: string): string | null {
     return null
   }
   return terms.map((term) => `"${term.replace(/"/g, '""')}"`).join(' ')
+}
+
+// The date predicate shared by searchText and searchVector. Filtering is by
+// span overlap, not point comparison: a hit passes when its span ends on or
+// after `after` and starts on or before `before`. A weekly rollup covering
+// Monday through Sunday is therefore returned for any day inside it, which a
+// comparison against its Monday alone would get wrong.
+//
+// A document with a NULL span (the constitution, and realm, arc and person
+// pages) always passes. Those are living documents with no single date; see
+// dateSpan.ts.
+function dateClause(after?: string, before?: string): { sql: string; params: string[] } {
+  const halves: string[] = []
+  const params: string[] = []
+  if (after !== undefined) {
+    halves.push('d.date_end >= ?')
+    params.push(after)
+  }
+  if (before !== undefined) {
+    halves.push('d.date_start <= ?')
+    params.push(before)
+  }
+  if (halves.length === 0) {
+    return { sql: '', params: [] }
+  }
+  return { sql: `AND (d.date_start IS NULL OR (${halves.join(' AND ')}))`, params }
 }
 
 function makeSnippet(text: string, maxChars = 200): string {
