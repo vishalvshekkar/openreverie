@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest'
 import type { CliMainDeps } from './index.js'
 import { mainWith } from './index.js'
 
-function testDeps(overrides: Partial<CliMainDeps> = {}): { deps: CliMainDeps; output: () => string } {
+function testDeps(overrides: Partial<CliMainDeps> = {}): {
+  deps: CliMainDeps
+  output: () => string
+} {
   let output = ''
   const base: CliMainDeps = {
     runWeb: async () => {
@@ -14,7 +17,7 @@ function testDeps(overrides: Partial<CliMainDeps> = {}): { deps: CliMainDeps; ou
     runRead: async () => {
       throw new Error('runRead should not be called')
     },
-    runSetupCommand: async () => {
+    runSetupCommand: async (_configPath: string) => {
       throw new Error('runSetupCommand should not be called')
     },
     openCliContext: async () => {
@@ -117,6 +120,77 @@ describe('mainWith --version', () => {
     const { deps, output } = testDeps({ readVersion: () => '1.2.3' })
     await mainWith(['--version', '--config', '/bogus'], deps)
     expect(output()).toBe('1.2.3\n')
+    process.exitCode = 0
+  })
+})
+
+describe('mainWith --config', () => {
+  it('routes --config before the subcommand into loadConfig', async () => {
+    let receivedPath: string | undefined
+    const { deps } = testDeps({
+      runRead: async (_args, readDeps) => {
+        await readDeps.loadConfig()
+        return 0
+      },
+      loadConfig: async (path: string) => {
+        receivedPath = path
+        return {} as never
+      },
+    })
+
+    await mainWith(['--config', '/custom/config.toml', 'read'], deps)
+
+    expect(receivedPath).toBe('/custom/config.toml')
+  })
+
+  it('routes --config after the subcommand the same way', async () => {
+    let receivedPath: string | undefined
+    const { deps } = testDeps({
+      runRead: async (_args, readDeps) => {
+        await readDeps.loadConfig()
+        return 0
+      },
+      loadConfig: async (path: string) => {
+        receivedPath = path
+        return {} as never
+      },
+    })
+
+    await mainWith(['read', '--config', '/custom/config.toml'], deps)
+
+    expect(receivedPath).toBe('/custom/config.toml')
+  })
+
+  it('reports a usage error when --config has no value', async () => {
+    const { deps, output } = testDeps()
+
+    await mainWith(['--config'], deps)
+
+    expect(output()).toBe('--config requires a path argument\n')
+    expect(process.exitCode).toBe(1)
+    process.exitCode = 0
+  })
+
+  it('reports a usage error when --config is the last argument with a subcommand before it', async () => {
+    const { deps, output } = testDeps()
+
+    await mainWith(['read', '--config'], deps)
+
+    expect(output()).toBe('--config requires a path argument\n')
+    process.exitCode = 0
+  })
+})
+
+describe('mainWith unknown option', () => {
+  it('reports an unknown flag anywhere in argv, without touching config', async () => {
+    const { deps, output } = testDeps()
+
+    await mainWith(['reflect', '--frobnicate'], deps)
+
+    expect(output()).toBe(
+      "reverie: unknown option '--frobnicate'\nRun 'reverie --help' for a list of options.\n",
+    )
+    expect(process.exitCode).toBe(1)
     process.exitCode = 0
   })
 })

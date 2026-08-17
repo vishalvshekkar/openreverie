@@ -89,13 +89,16 @@ function readlineChatIo(): ChatIo & { close(): void } {
   }
 }
 
-async function runSetupCommand(): Promise<void> {
+async function runSetupCommand(configPath: string): Promise<void> {
   const rl = createInterface({ input: process.stdin, output: process.stdout })
   try {
-    await runSetup({
-      question: (prompt: string) => rl.question(prompt),
-      write: (text: string) => process.stdout.write(text),
-    })
+    await runSetup(
+      {
+        question: (prompt: string) => rl.question(prompt),
+        write: (text: string) => process.stdout.write(text),
+      },
+      configPath,
+    )
   } finally {
     rl.close()
   }
@@ -105,7 +108,7 @@ export interface CliMainDeps {
   runWeb: typeof runWebCommand
   launchServer: typeof launchServer
   runRead: typeof runRead
-  runSetupCommand: () => Promise<void>
+  runSetupCommand: (configPath: string) => Promise<void>
   openCliContext: typeof openCliContext
   buildChat: (config: ReverieConfig) => ReturnType<typeof createChatProvider>
   buildEmbeddings: (config: ReverieConfig) => ReturnType<typeof createEmbeddingProvider>
@@ -120,6 +123,35 @@ export interface CliMainDeps {
   readVersion: () => string
 }
 
+interface ConfigExtraction {
+  configOverride?: string
+  rest: string[]
+  error?: string
+}
+
+// Pulls `--config <path>` out of argv, wherever it appears, leaving every
+// other token in `rest` in its original order. A `--config` with nothing
+// after it (or as the very last token) is reported as `error` instead of
+// silently swallowing the next real argument.
+function extractConfigOverride(args: string[]): ConfigExtraction {
+  const rest: string[] = []
+  let configOverride: string | undefined
+  for (let i = 0; i < args.length; i++) {
+    const token = args[i]
+    if (token === '--config') {
+      const value = args[i + 1]
+      if (value === undefined) {
+        return { rest: [], error: '--config requires a path argument' }
+      }
+      configOverride = value
+      i += 1
+      continue
+    }
+    if (token !== undefined) rest.push(token)
+  }
+  return configOverride === undefined ? { rest } : { configOverride, rest }
+}
+
 export async function mainWith(args: string[], deps: CliMainDeps): Promise<void> {
   if (args.includes('--version') || args.includes('-v') || args[0] === 'version') {
     deps.write(`${deps.readVersion()}\n`)
@@ -127,27 +159,50 @@ export async function mainWith(args: string[], deps: CliMainDeps): Promise<void>
     return
   }
 
-  const subcommand = args[0]
+  const extraction = extractConfigOverride(args)
+  if (extraction.error !== undefined) {
+    deps.write(`${extraction.error}\n`)
+    process.exitCode = 1
+    return
+  }
+  const { configOverride, rest } = extraction
+  const configPath = configOverride ?? deps.configPath
 
+  const unknownFlag = rest.find((token) => token.startsWith('-'))
+  if (unknownFlag !== undefined) {
+    deps.write(
+      `reverie: unknown option '${unknownFlag}'\nRun 'reverie --help' for a list of options.\n`,
+    )
+    process.exitCode = 1
+    return
+  }
+
+  const subcommand = rest[0]
   if (subcommand !== undefined && !KNOWN_SUBCOMMANDS.has(subcommand)) {
-    deps.write(`reverie: unknown command '${subcommand}'\nRun 'reverie --help' for a list of commands.\n`)
+    deps.write(
+      `reverie: unknown command '${subcommand}'\nRun 'reverie --help' for a list of commands.\n`,
+    )
     process.exitCode = 1
     return
   }
 
   if (subcommand === 'setup') {
-    await deps.runSetupCommand()
+    await deps.runSetupCommand(configPath)
     return
   }
 
   if (subcommand === 'web') {
-    await deps.runWeb({ launchServer: deps.launchServer, write: deps.write })
+    await deps.runWeb({
+      launchServer: deps.launchServer,
+      write: deps.write,
+      ...(configOverride !== undefined ? { configPath: configOverride } : {}),
+    })
     return
   }
 
   if (subcommand === 'read') {
-    const exitCode = await deps.runRead(args.slice(1), {
-      loadConfig: () => deps.loadConfig(deps.configPath),
+    const exitCode = await deps.runRead(rest.slice(1), {
+      loadConfig: () => deps.loadConfig(configPath),
       write: deps.write,
       colorEnabled: deps.colorEnabled(),
     })
@@ -158,7 +213,7 @@ export async function mainWith(args: string[], deps: CliMainDeps): Promise<void>
   const colorEnabled = deps.colorEnabled()
 
   const context = await deps.openCliContext({
-    loadConfig: () => deps.loadConfig(deps.configPath),
+    loadConfig: () => deps.loadConfig(configPath),
     buildChat: deps.buildChat,
     buildEmbeddings: deps.buildEmbeddings,
     openEngine: (config, engineDeps) => deps.openEngine(config.memoryDir, engineDeps),
@@ -184,7 +239,7 @@ export async function mainWith(args: string[], deps: CliMainDeps): Promise<void>
       deps.write('Reflection is up to date.\n')
     } else {
       const io = readlineChatIo()
-      const toolDeps = { updateStyle: deps.createStylePersister(config, deps.configPath) }
+      const toolDeps = { updateStyle: deps.createStylePersister(config, configPath) }
       try {
         await deps.runChat({ engine, config, chat, io, toolDeps, colorEnabled })
       } finally {
