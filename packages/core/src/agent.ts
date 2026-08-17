@@ -26,6 +26,13 @@ export type AgentEvent =
   | { type: 'thinking' }
   | { type: 'done' }
 
+export interface AgentSessionOptions {
+  // Injectable clock. Every transcript line and every rendered time in this
+  // session comes from a call to this, so a test can pin it without
+  // touching process-wide state.
+  now?: () => Date
+}
+
 const MAX_TOOL_ROUNDS = 8
 
 const GREETING_TIMEOUT_MS = 20_000
@@ -142,6 +149,7 @@ export class AgentSession {
 
   private readonly toolDeps: ToolDeps | undefined
   private readonly config: ReverieConfig
+  private readonly now: () => Date
 
   private constructor(
     engine: MemoryEngine,
@@ -151,6 +159,7 @@ export class AgentSession {
     sessionId: string,
     toolDeps: ToolDeps | undefined,
     config: ReverieConfig,
+    now: () => Date,
   ) {
     this.engine = engine
     this.chat = chat
@@ -159,6 +168,7 @@ export class AgentSession {
     this.sessionId = sessionId
     this.toolDeps = toolDeps
     this.config = config
+    this.now = now
   }
 
   static async start(
@@ -166,10 +176,20 @@ export class AgentSession {
     config: ReverieConfig,
     chat: ChatProvider,
     toolDeps?: ToolDeps,
+    options: AgentSessionOptions = {},
   ): Promise<AgentSession> {
     const system = await assembleSystemPrompt(engine, config)
     const sessionId = await engine.startSession()
-    return new AgentSession(engine, chat, config.models.chat, system, sessionId, toolDeps, config)
+    return new AgentSession(
+      engine,
+      chat,
+      config.models.chat,
+      system,
+      sessionId,
+      toolDeps,
+      config,
+      options.now ?? (() => new Date()),
+    )
   }
 
   async *send(userText: string): AsyncIterable<AgentEvent> {
@@ -355,8 +375,9 @@ export class AgentSession {
   // in-memory history, per the transcript-first discipline: nothing is
   // added to history until it is durably recorded.
   private async appendBoth(message: SessionMessage): Promise<void> {
+    const now = this.now()
     await this.engine.appendTranscript(this.sessionId, {
-      ts: new Date().toISOString(),
+      ts: now.toISOString(),
       role: message.role,
       content: message.content,
       ...(message.toolCalls ? { toolCalls: message.toolCalls } : {}),

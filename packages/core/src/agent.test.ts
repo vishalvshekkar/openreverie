@@ -728,4 +728,22 @@ describe('AgentSession', () => {
 
     await engine.close()
   })
+
+  it('writes transcript timestamps from the injected clock rather than the real one', async () => {
+    const chat = new FakeChatProvider([{ text: 'Noted.', toolCalls: [] }])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const session = await AgentSession.start(engine, testConfig(), chat, undefined, {
+      now: () => new Date('2026-08-16T20:00:00.000Z'),
+    })
+
+    await collect(session.send('Hello.'))
+
+    const transcript = await engine.readTranscript(session.sessionId)
+    expect(transcript.map((line) => line.ts)).toEqual([
+      '2026-08-16T20:00:00.000Z',
+      '2026-08-16T20:00:00.000Z',
+    ])
+
+    await engine.close()
+  })
 })
