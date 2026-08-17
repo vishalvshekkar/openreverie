@@ -626,4 +626,34 @@ describe('assembleSystemPrompt', () => {
 
     await engine.close()
   })
+
+  it('renders each recent session id so the model can pass one to read_transcript', async () => {
+    const startedAt = new Date('2026-08-15T09:00:00.000Z')
+    const store = await SessionStore.start(paths, startedAt, 'UTC')
+    await store.appendLine({ ts: startedAt.toISOString(), role: 'user', content: 'Hello.' })
+    await writeDocumentAtomic({
+      path: join(store.dir, 'summary.md'),
+      meta: {
+        id: newId('doc'),
+        kind: 'summary',
+        session: store.sessionId,
+        date: '2026-08-15',
+        items: [],
+      },
+      body: 'We talked about the move and how unsettled it left him.\n',
+    })
+
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])), {
+      maintenance: false,
+    })
+    await engine.updateProfile({ timezone: 'UTC' })
+    const prompt = await assembleSystemPrompt(engine, testConfig())
+
+    expect(prompt).toContain('## Recent sessions')
+    expect(prompt).toContain(
+      `2026-08-15 (${store.sessionId}): We talked about the move and how unsettled it left him.`,
+    )
+
+    await engine.close()
+  })
 })

@@ -115,7 +115,13 @@ function latestDailyRollupSection(context: SessionContext): string | undefined {
 
 function recentSummariesSection(context: SessionContext): string | undefined {
   if (context.recentSummaries.length === 0) return undefined
-  const parts = context.recentSummaries.map((summary) => `${summary.date}: ${summary.body.trim()}`)
+  // The id is rendered alongside the date because read_transcript takes a
+  // session id and the prompt is the only place the model could get one.
+  // Without it, the model can see that a session happened and can read its
+  // summary, but has no way to ask for the verbatim transcript behind it.
+  const parts = context.recentSummaries.map(
+    (summary) => `${summary.date} (${summary.sessionId}): ${summary.body.trim()}`,
+  )
   return `## Recent sessions\n\n${parts.join('\n\n')}`
 }
 
