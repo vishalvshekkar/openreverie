@@ -24,3 +24,4 @@ coverage/
 # Agent working directories: specs and plans are committed under docs/,
 # everything in here is scratch for a single session.
 .superpowers/
+.claude/
