@@ -162,6 +162,36 @@ export interface ListRealmsOptions {
   limit?: number
 }
 
+export interface PersonRow {
+  id: string
+  name: string
+  hasPage: boolean
+  docId?: string
+  firstSeen: string
+}
+
+// No hasPage and no docId. Entities never get a page in this release, and
+// emitting hasPage: false on every row would be noise implying a page might
+// exist. If entity pages ever arrive, the shape gains the fields then.
+export interface EntityRow {
+  id: string
+  name: string
+  firstSeen: string
+}
+
+export interface ListPeopleOptions {
+  nameContains?: string
+  hasPage?: boolean
+  offset?: number
+  limit?: number
+}
+
+export interface ListEntitiesOptions {
+  nameContains?: string
+  offset?: number
+  limit?: number
+}
+
 export interface EngineDeps {
   chat: ChatProvider
   embeddings: EmbeddingProvider
@@ -978,6 +1008,43 @@ export class MemoryEngine {
         if (docId) row.docId = docId
         return row
       })
+    return pageRows(rows, options.offset, options.limit)
+  }
+
+  // The escape hatch for everyone past PEOPLE_CAP. A person with no page has
+  // no document, so no chunk, no FTS row and no embedding: search_memory's
+  // document lane cannot find them under any query, and before this method
+  // and the node lane existed there was no way to reach them at all.
+  listPeople(options: ListPeopleOptions = {}): ListingEnvelope<PersonRow> {
+    const needle = options.nameContains?.toLowerCase()
+    const rows = [...this.graphState.nodes.values()]
+      .filter((node) => node.type === 'person')
+      .filter((node) => (needle === undefined ? true : node.label.toLowerCase().includes(needle)))
+      .filter((node) =>
+        options.hasPage === undefined ? true : (node.doc !== undefined) === options.hasPage,
+      )
+      .sort(compareNodesForListing)
+      .map((node) => {
+        const row: PersonRow = {
+          id: node.id,
+          name: node.label,
+          hasPage: node.doc !== undefined,
+          firstSeen: node.ts,
+        }
+        const docId = node.doc ? this.docIdByPath.get(node.doc) : undefined
+        if (docId) row.docId = docId
+        return row
+      })
+    return pageRows(rows, options.offset, options.limit)
+  }
+
+  listEntities(options: ListEntitiesOptions = {}): ListingEnvelope<EntityRow> {
+    const needle = options.nameContains?.toLowerCase()
+    const rows = [...this.graphState.nodes.values()]
+      .filter((node) => node.type === 'entity')
+      .filter((node) => (needle === undefined ? true : node.label.toLowerCase().includes(needle)))
+      .sort(compareNodesForListing)
+      .map((node) => ({ id: node.id, name: node.label, firstSeen: node.ts }))
     return pageRows(rows, options.offset, options.limit)
   }
 

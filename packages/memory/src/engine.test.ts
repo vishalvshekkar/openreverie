@@ -4310,3 +4310,152 @@ describe('listArcs and listRealms', () => {
     await rm(dir, { recursive: true, force: true })
   })
 })
+
+describe('listPeople and listEntities', () => {
+  async function seedPeople(dir: string, count: number, pagedCount: number): Promise<void> {
+    const paths = memoryPaths(dir)
+    await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([]))).then((e) => e.close())
+    for (let i = 0; i < count; i++) {
+      const hasPage = i < pagedCount
+      let personPath: string | undefined
+      if (hasPage) {
+        personPath = join(paths.peopleDir, `person-${i}.md`)
+        await writeDocumentAtomic({
+          path: personPath,
+          meta: { id: `doc_person_${i}`, name: `Person ${i}`, node: `person_${i}` },
+          body: `Person ${i} has a page.\n`,
+        })
+      }
+      await appendGraph(paths, [
+        {
+          ts: `2026-08-${String(1 + (i % 28)).padStart(2, '0')}T00:00:00.000Z`,
+          op: 'assert',
+          node: `person_${i}`,
+          type: 'person',
+          label: `Person ${i}`,
+          ...(personPath ? { doc: personPath } : {}),
+        },
+      ])
+    }
+  }
+
+  it('reaches a person past the prompt cap, with a docId only when a page exists', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'openreverie-people-'))
+    await seedPeople(dir, 45, 5)
+
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+    const all = engine.listPeople({ limit: 200 })
+    expect(all.total).toBe(45)
+    expect(all.returned).toBe(45)
+
+    const past = engine.listPeople({ offset: 40, limit: 50 })
+    expect(past.offset).toBe(40)
+    expect(past.returned).toBe(5)
+    expect(past.hasMore).toBe(false)
+
+    const paged = engine.listPeople({ hasPage: true, limit: 200 })
+    expect(paged.total).toBe(5)
+    for (const row of paged.rows) {
+      expect(row.hasPage).toBe(true)
+      expect(typeof row.docId).toBe('string')
+    }
+
+    const unpaged = engine.listPeople({ hasPage: false, limit: 200 })
+    expect(unpaged.total).toBe(40)
+    for (const row of unpaged.rows) {
+      expect(row.hasPage).toBe(false)
+      expect(row.docId).toBeUndefined()
+    }
+
+    const byName = engine.listPeople({ nameContains: 'person 41' })
+    expect(byName.total).toBe(1)
+    expect(byName.rows[0]).toMatchObject({ id: 'person_41', name: 'Person 41', hasPage: false })
+    expect(typeof byName.rows[0]?.firstSeen).toBe('string')
+
+    await engine.close()
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  it('pages through every person exactly once, in an order stable across rebuilds', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'openreverie-people-paging-'))
+    const paths = memoryPaths(dir)
+    await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([]))).then((e) => e.close())
+
+    // 45 people, of which five share an identical ts. Without the id
+    // tiebreak the order of that tied group depends on graph.jsonl's line
+    // order, which changes when the log is rewritten.
+    for (let i = 0; i < 45; i++) {
+      const ts =
+        i < 5
+          ? '2026-08-01T00:00:00.000Z'
+          : `2026-07-${String(1 + (i % 28)).padStart(2, '0')}T00:00:00.000Z`
+      await appendGraph(paths, [
+        { ts, op: 'assert', node: `person_${i}`, type: 'person', label: `Person ${i}` },
+      ])
+    }
+
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+    const collected: string[] = []
+    for (let offset = 0; offset < 45; offset += 7) {
+      collected.push(...engine.listPeople({ offset, limit: 7 }).rows.map((row) => row.id))
+    }
+    const unpaged = engine.listPeople({ limit: 200 }).rows.map((row) => row.id)
+    expect(collected).toEqual(unpaged)
+    expect(new Set(collected).size).toBe(45)
+    await engine.close()
+
+    // Rewrite graph.jsonl with the tied group in the opposite order, then
+    // reopen. The tiebreak is what keeps the total order identical, so
+    // paging still covers all 45 exactly once with no duplicate and no gap.
+    const original = (await readFile(paths.graphLog, 'utf8')).split('\n').filter(Boolean)
+    const tied = original.slice(0, 5).reverse()
+    const rest = original.slice(5)
+    await writeFile(paths.graphLog, `${[...tied, ...rest].join('\n')}\n`, 'utf8')
+
+    const reopened = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+    const afterRebuild: string[] = []
+    for (let offset = 0; offset < 45; offset += 7) {
+      afterRebuild.push(...reopened.listPeople({ offset, limit: 7 }).rows.map((row) => row.id))
+    }
+    expect(afterRebuild).toEqual(unpaged)
+    expect(new Set(afterRebuild).size).toBe(45)
+    await reopened.close()
+
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  it('lists entities with no page fields at all', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'openreverie-entities-'))
+    const paths = memoryPaths(dir)
+    await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([]))).then((e) => e.close())
+
+    for (let i = 0; i < 3; i++) {
+      await appendGraph(paths, [
+        {
+          ts: `2026-08-0${i + 1}T00:00:00.000Z`,
+          op: 'assert',
+          node: `entity_${i}`,
+          type: 'entity',
+          label: `Entity ${i}`,
+        },
+      ])
+    }
+
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+    const listed = engine.listEntities()
+    expect(listed.total).toBe(3)
+    expect(listed.rows[0]).toEqual({
+      id: 'entity_2',
+      name: 'Entity 2',
+      firstSeen: '2026-08-03T00:00:00.000Z',
+    })
+    expect(Object.keys(listed.rows[0] ?? {}).sort()).toEqual(['firstSeen', 'id', 'name'])
+
+    const filtered = engine.listEntities({ nameContains: 'entity 1' })
+    expect(filtered.total).toBe(1)
+    expect(filtered.rows[0]?.id).toBe('entity_1')
+
+    await engine.close()
+    await rm(dir, { recursive: true, force: true })
+  })
+})
