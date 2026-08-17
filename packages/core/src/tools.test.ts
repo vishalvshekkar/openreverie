@@ -388,6 +388,29 @@ describe('dispatchTool', () => {
     await engine.close()
   })
 
+  it('remember passes an event time through to the engine when the model states one', async () => {
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+    const sessionId = await engine.startSession()
+
+    const result = await dispatchTool(engine, sessionId, {
+      id: 'call_1',
+      name: 'remember',
+      arguments: JSON.stringify({
+        text: 'Watching Halcyon',
+        kind: 'event',
+        eventTime: 'tonight at 7:25pm',
+      }),
+    })
+
+    expect(JSON.parse(result)).toEqual({ ok: true })
+
+    const definition = toolDefinitions().find((tool) => tool.name === 'remember')
+    const properties = definition?.parameters.properties as Record<string, unknown>
+    expect(properties.eventTime).toBeDefined()
+
+    await engine.close()
+  })
+
   it('list_arcs and list_realms return cheap orientation lists', async () => {
     const paths = memoryPaths(dir)
     await MemoryEngine.open(dir, fakeDeps()).then((e) => e.close())

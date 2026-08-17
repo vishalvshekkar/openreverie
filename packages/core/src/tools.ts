@@ -49,6 +49,7 @@ const readTranscriptArgs = z.strictObject({
 const rememberArgs = z.strictObject({
   text: z.string(),
   kind: z.enum(['observation', 'feeling', 'event', 'intention']).optional(),
+  eventTime: z.string().optional(),
 })
 
 const noArgs = z.strictObject({})
@@ -187,6 +188,11 @@ export function toolDefinitions(): ToolDefinition[] {
             type: 'string',
             enum: ['observation', 'feeling', 'event', 'intention'],
             description: 'What sort of thing this is. Defaults to observation if omitted.',
+          },
+          eventTime: {
+            type: 'string',
+            description:
+              'When the thing happens or happened, in the person\'s own words ("tonight at 7.25", "last Tuesday"), only when they actually stated a time. Leave it out otherwise. This is separate from when they told you.',
           },
         },
         required: ['text'],
@@ -347,7 +353,7 @@ async function dispatchRemember(
   const parsed = rememberArgs.safeParse(value)
   if (!parsed.success) return errorJson(zodErrorMessage('remember', parsed.error))
 
-  await engine.remember(sessionId, parsed.data.text, parsed.data.kind)
+  await engine.remember(sessionId, parsed.data.text, parsed.data.kind, parsed.data.eventTime)
   return JSON.stringify({ ok: true })
 }
 

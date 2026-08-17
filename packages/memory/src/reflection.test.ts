@@ -931,6 +931,39 @@ describe('reflection', () => {
 
       expect(summaryDoc.meta.date).toBe('2026-08-15')
     })
+
+    it('accepts and mints an item carrying an event time distinct from its record time', async () => {
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('An evening plan.'),
+        items: [
+          { text: 'Watching Halcyon', kind: 'event', eventTime: 'tonight at 7:25pm' },
+          { text: 'Feeling behind lately', kind: 'feeling' },
+        ],
+      }
+      expect(reflectionOutputSchema.safeParse(out).success).toBe(true)
+
+      const store = await SessionStore.start(paths, new Date('2026-08-16T10:49:00Z'), 'UTC')
+      await store.appendLine({
+        ts: '2026-08-16T10:49:00.000Z',
+        utcOffsetMinutes: 330,
+        role: 'user',
+        content: 'Watching Halcyon tonight at 7.25pm',
+      })
+
+      const { mintedItems } = await applyReflection(
+        paths,
+        out,
+        store.sessionId,
+        [],
+        new Date('2026-08-16T10:49:00.000Z'),
+        new Map(),
+        async () => {},
+      )
+
+      expect(mintedItems[0]?.eventTime).toBe('tonight at 7:25pm')
+      expect(mintedItems[0]?.ts).toBe('2026-08-16T10:49:00.000Z')
+      expect(mintedItems[1]?.eventTime).toBeUndefined()
+    })
   })
 
   describe('narrative continuity across sessions', () => {

@@ -51,12 +51,18 @@ export interface ReflectionItem {
   id: string
   text: string
   kind: ReflectionItemKind
+  // Record time: when this entered memory. Always a UTC instant.
   ts: string
+  // Event time: when the thing happened or will happen, as the person
+  // stated it. Free text, not a parsed instant, because "tonight", "next
+  // week", and "sometime in the fall" cannot honestly be reduced to one.
+  // Absent when the person attached no particular moment to it.
+  eventTime?: string
 }
 
 export interface ReflectionOutput {
   summary: string
-  items: { text: string; kind: ReflectionItemKind }[]
+  items: { text: string; kind: ReflectionItemKind; eventTime?: string }[]
   attributions: { itemIndex: number; arcId: string; confidence: number }[]
   newArcs: {
     name: string
@@ -109,7 +115,13 @@ const reflectionItemKindSchema = z.enum(['observation', 'feeling', 'event', 'int
 
 export const reflectionOutputSchema: z.ZodType<ReflectionOutput> = z.object({
   summary: z.string(),
-  items: z.array(z.object({ text: z.string(), kind: reflectionItemKindSchema })),
+  items: z.array(
+    z.object({
+      text: z.string(),
+      kind: reflectionItemKindSchema,
+      eventTime: z.string().exactOptional(),
+    }),
+  ),
   attributions: z.array(
     z.object({ itemIndex: z.number(), arcId: z.string(), confidence: z.number().min(0).max(1) }),
   ),
@@ -205,7 +217,7 @@ function renderTranscript(transcript: TranscriptLine[]): string {
 
 const RESPONSE_SHAPE = `{
   "summary": string,
-  "items": [{"text": string, "kind": "observation" | "feeling" | "event" | "intention"}],
+  "items": [{"text": string, "kind": "observation" | "feeling" | "event" | "intention", "eventTime": string | undefined}],
   "attributions": [{"itemIndex": number, "arcId": string, "confidence": number}],
   "newArcs": [{"name": string, "realm": string, "reason": string, "itemIndexes": number[], "narrative": string}],
   "newPersons": [{"name": string, "reason": string, "itemIndexes": number[], "deservesPage": boolean, "narrative": string}],
@@ -255,6 +267,8 @@ function buildReflectionPrompt(context: ReflectionContext, transcript: Transcrip
     'For each entry in newArcs, newPersons with deservesPage true, and pagePromotions, narrative is the first paragraph of that document, written as if this session is the first time anything has been recorded about it.',
     '',
     'For each entry in arcUpdates and personUpdates, note is a short line describing what this session added or changed about an arc or person that already exists. Do not write full narrative prose in note; a separate pass uses it to rewrite the document.',
+    '',
+    'Each transcript line above is prefixed with the time it was written. When an item describes something happening at a time the person actually stated ("tonight at 7.25", "last Tuesday", "next month"), put that stated time in eventTime, in the person\'s own words, and leave eventTime out entirely otherwise. eventTime is when the thing happens; it is separate from when the person told you about it, and the two are allowed to differ. Do not invent or resolve a time the person did not state.',
     '',
     'Respond with only JSON matching this shape, no other text:',
     RESPONSE_SHAPE,
@@ -330,7 +344,13 @@ export async function reflectSession(
 
 function mintItems(items: ReflectionOutput['items'], now: Date): ReflectionItem[] {
   const ts = now.toISOString()
-  return items.map((item) => ({ id: newId('item'), text: item.text, kind: item.kind, ts }))
+  return items.map((item) => ({
+    id: newId('item'),
+    text: item.text,
+    kind: item.kind,
+    ts,
+    ...(item.eventTime !== undefined ? { eventTime: item.eventTime } : {}),
+  }))
 }
 
 function mergeLiveItems(minted: ReflectionItem[], liveItems: ReflectionItem[]): ReflectionItem[] {

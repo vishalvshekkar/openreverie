@@ -342,8 +342,15 @@ export class MemoryEngine {
     sessionId: string,
     text: string,
     kind: ReflectionItemKind = 'observation',
+    eventTime?: string,
   ): Promise<void> {
-    const item: ReflectionItem = { id: newId('item'), text, kind, ts: new Date().toISOString() }
+    const item: ReflectionItem = {
+      id: newId('item'),
+      text,
+      kind,
+      ts: new Date().toISOString(),
+      ...(eventTime !== undefined ? { eventTime } : {}),
+    }
     const items = this.liveItems.get(sessionId)
     if (items) {
       items.push(item)
