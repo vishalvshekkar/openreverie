@@ -9,6 +9,7 @@ import { newId, writeDocumentAtomic } from './documents.js'
 export interface MemoryPaths {
   root: string
   constitution: string
+  profile: string
   realmsDir: string
   arcsDir: string
   peopleDir: string
@@ -24,6 +25,7 @@ export function memoryPaths(root: string): MemoryPaths {
   return {
     root,
     constitution: join(root, 'constitution.md'),
+    profile: join(root, 'profile.md'),
     realmsDir: join(root, 'realms'),
     arcsDir: join(root, 'arcs'),
     peopleDir: join(root, 'people'),
