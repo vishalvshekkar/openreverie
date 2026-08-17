@@ -397,7 +397,7 @@ async function dispatchRemember(
 async function dispatchListArcs(engine: MemoryEngine, value: unknown): Promise<string> {
   const parsed = noArgs.safeParse(value)
   if (!parsed.success) return errorJson(zodErrorMessage('list_arcs', parsed.error))
-  return JSON.stringify(engine.listArcs())
+  return JSON.stringify(await engine.listArcs())
 }
 
 async function dispatchListRealms(engine: MemoryEngine, value: unknown): Promise<string> {

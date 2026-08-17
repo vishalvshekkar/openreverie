@@ -160,15 +160,15 @@ describe('end-to-end harness', () => {
       const promptWithNoPendingProposals = await assembleSystemPrompt(engine, testConfig())
       expect(promptWithNoPendingProposals).not.toContain('## Pending proposals')
 
-      const arcs = engine.listArcs()
+      const arcs = (await engine.listArcs()).rows
       const woodworkingArc = arcs.find((a) => a.label === WOODWORKING_ARC_NAME)
       const jobSearchArc = arcs.find((a) => a.label === JOB_SEARCH_ARC_NAME)
       if (!woodworkingArc || !jobSearchArc) {
         throw new Error('expected day one reflection to create both arcs directly')
       }
       // The two arcs live in two distinct realms.
-      const woodworkingRealm = engine.listRealms().find((r) => r.label === 'Craft and hobbies')
-      const jobSearchRealm = engine.listRealms().find((r) => r.label === 'Career')
+      const woodworkingRealm = engine.listRealms().rows.find((r) => r.label === 'Craft and hobbies')
+      const jobSearchRealm = engine.listRealms().rows.find((r) => r.label === 'Career')
       if (!woodworkingRealm || !jobSearchRealm) {
         throw new Error('expected day one reflection to create both realms directly')
       }

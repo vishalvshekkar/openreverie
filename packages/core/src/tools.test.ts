@@ -190,7 +190,14 @@ describe('dispatchTool', () => {
 
     const emptyCall: ToolCall = { id: 'call_3', name: 'list_arcs', arguments: '' }
     const result = await dispatchTool(engine, sessionId, emptyCall)
-    expect(JSON.parse(result)).toEqual([])
+    expect(JSON.parse(result)).toEqual({
+      total: 0,
+      offset: 0,
+      limit: 50,
+      returned: 0,
+      hasMore: false,
+      rows: [],
+    })
 
     await engine.close()
   })
@@ -456,12 +463,12 @@ describe('dispatchTool', () => {
     const sessionId = await engine.startSession()
 
     const arcsResult = await dispatchTool(engine, sessionId, call('list_arcs', {}))
-    const arcs = JSON.parse(arcsResult) as { id: string; label: string }[]
-    expect(arcs).toEqual([expect.objectContaining({ id: 'arc_y', label: 'Fitness' })])
+    const arcs = JSON.parse(arcsResult) as { rows: { id: string; label: string }[] }
+    expect(arcs.rows).toEqual([expect.objectContaining({ id: 'arc_y', label: 'Fitness' })])
 
     const realmsResult = await dispatchTool(engine, sessionId, call('list_realms', {}))
-    const realms = JSON.parse(realmsResult) as { id: string; label: string }[]
-    expect(realms).toEqual([expect.objectContaining({ id: 'realm_y', label: 'Health' })])
+    const realms = JSON.parse(realmsResult) as { rows: { id: string; label: string }[] }
+    expect(realms.rows).toEqual([expect.objectContaining({ id: 'realm_y', label: 'Health' })])
 
     await engine.close()
   })

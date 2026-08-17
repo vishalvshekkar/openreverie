@@ -405,9 +405,9 @@ describe('MemoryEngine', () => {
       // The new arc is materialized directly by reflection, with no proposal.
       const pending = await pendingProposals(paths)
       expect(pending.find((p) => p.kind === 'new_arc')).toBeUndefined()
-      const newArc = engine.listArcs().find((n) => n.label === 'presentation prep')
-      if (!newArc?.doc) throw new Error('expected the new arc to have a doc pointer')
-      expect(await readDocument(newArc.doc)).toMatchObject({
+      const newArc = (await engine.listArcs()).rows.find((n) => n.label === 'presentation prep')
+      if (!newArc?.docId) throw new Error('expected the new arc to have a docId')
+      expect(await engine.readDocumentById(newArc.docId)).toMatchObject({
         body: 'Presentation prep starts here.\n',
       })
       // Direct materialization from reflection: nobody affirmed this arc,
@@ -416,8 +416,8 @@ describe('MemoryEngine', () => {
         confidence: 1,
         confirmed: false,
       })
-      expect(engine.listArcs()).toHaveLength(2)
-      expect(engine.listRealms()).toHaveLength(1)
+      expect((await engine.listArcs()).total).toBe(2)
+      expect(engine.listRealms().total).toBe(1)
 
       // graphQuery surfaces the item filed under the pre-existing arc.
       const arcItems = engine.graphQuery({ kind: 'items_in_arc', arcId: 'arc_health' })
@@ -771,8 +771,8 @@ describe('MemoryEngine', () => {
       const realmDoc = await readDocument(realmNode.doc)
       expect(realmDoc.body).toBe('This realm is new. It grows as we talk.\n')
 
-      expect(engine.listArcs().some((n) => n.id === arcNode.id)).toBe(true)
-      expect(engine.listRealms().some((n) => n.id === realmNode.id)).toBe(true)
+      expect((await engine.listArcs()).rows.some((n) => n.id === arcNode.id)).toBe(true)
+      expect(engine.listRealms().rows.some((n) => n.id === realmNode.id)).toBe(true)
     })
 
     it('reuses an existing realm by id and dedupes arc filenames on a name collision', async () => {
@@ -4145,6 +4145,168 @@ describe('index schema migration', () => {
     expect(engine.warnings.some((w) => w.includes('search index schema'))).toBe(true)
     await engine.close()
 
+    await rm(dir, { recursive: true, force: true })
+  })
+})
+
+describe('listArcs and listRealms', () => {
+  it('returns docId, real status from frontmatter, and no filesystem path', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'openreverie-listings-'))
+    const paths = memoryPaths(dir)
+    await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([]))).then((e) => e.close())
+
+    const activeArcPath = join(paths.arcsDir, 'marathon.md')
+    await writeDocumentAtomic({
+      path: activeArcPath,
+      meta: {
+        id: 'doc_arc_active',
+        name: 'Marathon Training',
+        status: 'active',
+        updated: '2026-08-10',
+      },
+      body: 'Training for the fall marathon.\n',
+    })
+    const closedArcPath = join(paths.arcsDir, 'move.md')
+    await writeDocumentAtomic({
+      path: closedArcPath,
+      meta: { id: 'doc_arc_closed', name: 'Moving House', status: 'closed', updated: '2026-03-02' },
+      body: 'The move is done.\n',
+    })
+    const realmPath = join(paths.realmsDir, 'fitness.md')
+    await writeDocumentAtomic({
+      path: realmPath,
+      meta: { id: 'doc_realm', name: 'Fitness' },
+      body: 'Running, lifting, sleep.\n',
+    })
+
+    await appendGraph(paths, [
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'arc_active',
+        type: 'arc',
+        label: 'Marathon Training',
+        doc: activeArcPath,
+      },
+      {
+        ts: '2026-07-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'arc_closed',
+        type: 'arc',
+        label: 'Moving House',
+        doc: closedArcPath,
+      },
+      {
+        ts: '2026-06-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'arc_no_page',
+        type: 'arc',
+        label: 'Unpaged Arc',
+      },
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'realm_fitness',
+        type: 'realm',
+        label: 'Fitness',
+        doc: realmPath,
+      },
+    ])
+
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+
+    const all = await engine.listArcs()
+    expect(all.total).toBe(3)
+    expect(all.offset).toBe(0)
+    expect(all.limit).toBe(50)
+    expect(all.returned).toBe(3)
+    expect(all.hasMore).toBe(false)
+    expect(all.rows.map((row) => row.id)).toEqual(['arc_active', 'arc_closed', 'arc_no_page'])
+
+    const active = all.rows[0]
+    expect(active).toEqual({
+      id: 'arc_active',
+      type: 'arc',
+      label: 'Marathon Training',
+      assertedAt: '2026-08-01T00:00:00.000Z',
+      docId: 'doc_arc_active',
+      status: 'active',
+      lastTouched: '2026-08-10',
+    })
+    // The filesystem path is deliberately not part of the row.
+    expect(Object.keys(active ?? {})).not.toContain('doc')
+
+    // An arc with no page has no status to read, and status is absent
+    // rather than defaulted to active.
+    expect(all.rows[2]).toEqual({
+      id: 'arc_no_page',
+      type: 'arc',
+      label: 'Unpaged Arc',
+      assertedAt: '2026-06-01T00:00:00.000Z',
+    })
+
+    // The docId chains into read_document's engine method.
+    const arcDoc = await engine.readDocumentById('doc_arc_active')
+    expect(arcDoc?.body).toContain('Training for the fall marathon.')
+
+    const onlyActive = await engine.listArcs({ status: 'active' })
+    expect(onlyActive.total).toBe(1)
+    expect(onlyActive.rows.map((row) => row.id)).toEqual(['arc_active'])
+
+    const onlyClosed = await engine.listArcs({ status: 'closed' })
+    expect(onlyClosed.rows.map((row) => row.id)).toEqual(['arc_closed'])
+
+    const realms = engine.listRealms()
+    expect(realms.total).toBe(1)
+    expect(realms.rows).toEqual([
+      {
+        id: 'realm_fitness',
+        type: 'realm',
+        label: 'Fitness',
+        assertedAt: '2026-08-01T00:00:00.000Z',
+        docId: 'doc_realm',
+      },
+    ])
+
+    await engine.close()
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  it('pages arcs with a stable total order', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'openreverie-listings-page-'))
+    const paths = memoryPaths(dir)
+    await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([]))).then((e) => e.close())
+
+    for (let i = 0; i < 5; i++) {
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: `arc_${i}`,
+          type: 'arc',
+          label: `Arc ${i}`,
+        },
+      ])
+    }
+
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+    const first = await engine.listArcs({ limit: 2 })
+    expect(first.returned).toBe(2)
+    expect(first.hasMore).toBe(true)
+    const second = await engine.listArcs({ offset: 2, limit: 2 })
+    const third = await engine.listArcs({ offset: 4, limit: 2 })
+    expect(third.hasMore).toBe(false)
+
+    const paged = [...first.rows, ...second.rows, ...third.rows].map((row) => row.id)
+    const unpaged = (await engine.listArcs()).rows.map((row) => row.id)
+    expect(paged).toEqual(unpaged)
+    expect(new Set(paged).size).toBe(5)
+
+    // limit is clamped rather than trusted.
+    const clamped = await engine.listArcs({ limit: 5000 })
+    expect(clamped.limit).toBe(200)
+
+    await engine.close()
     await rm(dir, { recursive: true, force: true })
   })
 })

@@ -115,6 +115,53 @@ export interface PublicGraphEdge {
   assertedAt: string
 }
 
+// One shape for every listing tool, so no listing in this system can ever
+// silently truncate. `total` is always the true count of matching rows, so
+// the model can tell how much it has not seen.
+export interface ListingEnvelope<Row> {
+  total: number
+  offset: number
+  limit: number
+  returned: number
+  hasMore: boolean
+  rows: Row[]
+}
+
+export type ArcStatus = 'active' | 'dormant' | 'closed'
+
+// The graphSnapshot projection plus docId, plus the two fields that only
+// exist in the arc page's frontmatter. The raw `doc` filesystem path is
+// deliberately absent: the model cannot open a path, and a path in a tool
+// result invites quoting it back to the user as though it were meaningful.
+export interface ArcRow {
+  id: string
+  type: 'arc'
+  label: string
+  assertedAt: string
+  docId?: string
+  status?: string
+  lastTouched?: string
+}
+
+export interface RealmRow {
+  id: string
+  type: 'realm'
+  label: string
+  assertedAt: string
+  docId?: string
+}
+
+export interface ListArcsOptions {
+  status?: ArcStatus
+  offset?: number
+  limit?: number
+}
+
+export interface ListRealmsOptions {
+  offset?: number
+  limit?: number
+}
+
 export interface EngineDeps {
   chat: ChatProvider
   embeddings: EmbeddingProvider
@@ -879,12 +926,59 @@ export class MemoryEngine {
     return pendingProposals(this.paths)
   }
 
-  listArcs(): GraphNode[] {
-    return [...this.graphState.nodes.values()].filter((node) => node.type === 'arc')
+  // Async because arc status and lastTouched live in the arc page's
+  // frontmatter, not on the graph node, and the tool has been promising a
+  // status field it never returned. Arc counts are in the dozens, so a
+  // bounded set of document reads per call is acceptable.
+  async listArcs(options: ListArcsOptions = {}): Promise<ListingEnvelope<ArcRow>> {
+    const nodes = [...this.graphState.nodes.values()]
+      .filter((node) => node.type === 'arc')
+      .sort(compareNodesForListing)
+
+    const rows: ArcRow[] = []
+    for (const node of nodes) {
+      const row: ArcRow = {
+        id: node.id,
+        type: 'arc',
+        label: node.label,
+        assertedAt: node.ts,
+      }
+      const docId = node.doc ? this.docIdByPath.get(node.doc) : undefined
+      if (docId) row.docId = docId
+      if (node.doc) {
+        try {
+          const doc = await readDocument(node.doc)
+          if (typeof doc.meta.status === 'string') row.status = doc.meta.status
+          if (typeof doc.meta.updated === 'string') row.lastTouched = doc.meta.updated
+        } catch {
+          // The page does not read cleanly. Omit status and lastTouched
+          // rather than defaulting them: defaulting an unreadable arc to
+          // active is how a broken file becomes a wrong answer.
+        }
+      }
+      if (options.status !== undefined && row.status !== options.status) continue
+      rows.push(row)
+    }
+
+    return pageRows(rows, options.offset, options.limit)
   }
 
-  listRealms(): GraphNode[] {
-    return [...this.graphState.nodes.values()].filter((node) => node.type === 'realm')
+  listRealms(options: ListRealmsOptions = {}): ListingEnvelope<RealmRow> {
+    const rows = [...this.graphState.nodes.values()]
+      .filter((node) => node.type === 'realm')
+      .sort(compareNodesForListing)
+      .map((node) => {
+        const row: RealmRow = {
+          id: node.id,
+          type: 'realm',
+          label: node.label,
+          assertedAt: node.ts,
+        }
+        const docId = node.doc ? this.docIdByPath.get(node.doc) : undefined
+        if (docId) row.docId = docId
+        return row
+      })
+    return pageRows(rows, options.offset, options.limit)
   }
 
   async resolveProposal(id: string, resolution: ProposalResolution): Promise<void> {
@@ -1797,6 +1891,43 @@ function isoFromId(id: string, fallback: string): string {
 function byTsDescending(a: GraphNode, b: GraphNode): number {
   if (a.ts === b.ts) return 0
   return a.ts > b.ts ? -1 : 1
+}
+
+const LISTING_DEFAULT_LIMIT = 50
+const LISTING_MAX_LIMIT = 200
+
+// Slices one page out of an already-ordered row list and reports the true
+// total alongside it. offset and limit come from the model, so both are
+// clamped rather than trusted: a negative or non-numeric offset reads as 0,
+// and a missing or oversized limit reads as the default or the maximum.
+function pageRows<Row>(rows: Row[], offset?: number, limit?: number): ListingEnvelope<Row> {
+  const safeOffset =
+    offset !== undefined && Number.isFinite(offset) && offset > 0 ? Math.floor(offset) : 0
+  const requested =
+    limit !== undefined && Number.isFinite(limit) && limit > 0
+      ? Math.floor(limit)
+      : LISTING_DEFAULT_LIMIT
+  const safeLimit = Math.min(requested, LISTING_MAX_LIMIT)
+  const page = rows.slice(safeOffset, safeOffset + safeLimit)
+  return {
+    total: rows.length,
+    offset: safeOffset,
+    limit: safeLimit,
+    returned: page.length,
+    hasMore: safeOffset + page.length < rows.length,
+    rows: page,
+  }
+}
+
+// A total order for listing tools: most recently asserted first, ties broken
+// by node id descending. capPeople's paged-first rule is deliberately not
+// reused here. That rule decides who survives truncation in a fixed-size
+// prompt list; a paging tool truncates nothing, so what it needs instead is
+// an order that is identical across calls and across index rebuilds, which
+// is what the id tiebreak provides.
+function compareNodesForListing(a: GraphNode, b: GraphNode): number {
+  if (a.ts !== b.ts) return a.ts > b.ts ? -1 : 1
+  return a.id < b.id ? 1 : a.id > b.id ? -1 : 0
 }
 
 // Orders person nodes most-recently-created first. Under PEOPLE_CAP,
