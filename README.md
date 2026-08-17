@@ -67,6 +67,10 @@ With no arguments, the same binary starts the terminal chat REPL, loading your e
 - `reindex`: rebuilds the SQLite search index from your memory folder from scratch. Safe to run any time; the index is always derived and disposable.
 - `reflect`: runs maintenance on demand (reflects any stale unreflected sessions, builds any daily or weekly rollups that are due) instead of waiting for it to happen automatically.
 - `read`: prints part of your memory record straight from the files on disk. With no arguments it lists your constitution, arcs, realms, and people; `read constitution` prints the constitution in full; `read arc <name>`, `read realm <name>`, and `read person <name>` print one document by a case-insensitive substring match on its name. This is a plain filesystem read: it works even with no model provider configured or reachable, since seeing what is being kept about you should never depend on the network being up.
+- `doctor`: checks whether reverie is set up correctly (config file, API key, memory folder, its git state, the SQLite index) and prints one line per check. Never prints a secret value, and never opens a full engine or makes a network call.
+- `version` (or `--version`/`-v`): prints the installed version and exits.
+- `help [command]` (or `--help`/`-h`, or `<command> --help`): prints the command list, or one command's own help.
+- `--config <path>`: use a config file at this path instead of `~/.reverie/config.toml`, before or after the subcommand.
 
 ## Why this exists
 
