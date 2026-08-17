@@ -1,8 +1,15 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ReverieConfig } from '@openreverie/core'
-import { ensureMemoryTree, memoryPaths, newId, writeDocumentAtomic } from '@openreverie/memory'
+import {
+  ensureMemoryTree,
+  memoryPaths,
+  newId,
+  SessionStore,
+  writeDocumentAtomic,
+} from '@openreverie/memory'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mainWith } from './index.js'
 import { type MigrateDeps, runMigrate } from './migrate.js'
@@ -27,6 +34,28 @@ function fakeDeps(
     configPath,
     write: (text: string) => output.push(text),
   }
+}
+
+// Hashes every file under `root` recursively, in sorted path order, with
+// each entry's name folded in so renames register too. Excludes index.db
+// (a derived artifact) and any *.tmp-* file (an in-flight atomic write), the
+// two entries the seeded .gitignore already names.
+async function hashFolder(root: string): Promise<string> {
+  const hash = createHash('sha256')
+  const entries = await readdir(root, { withFileTypes: true })
+  const sorted = entries
+    .filter((entry) => entry.name !== 'index.db' && !entry.name.includes('.tmp-'))
+    .sort((a, b) => (a.name < b.name ? -1 : 1))
+  for (const entry of sorted) {
+    const full = join(root, entry.name)
+    hash.update(entry.name)
+    if (entry.isDirectory()) {
+      hash.update(await hashFolder(full))
+    } else {
+      hash.update(await readFile(full))
+    }
+  }
+  return hash.digest('hex')
 }
 
 describe('runMigrate', () => {
@@ -99,6 +128,66 @@ describe('runMigrate', () => {
 
     expect(exitCode).toBe(1)
     expect(output.join('')).toContain('No config found. Run: reverie setup')
+  })
+
+  it('--dry-run reports pending deletions and changes nothing on disk, proven by a folder hash', async () => {
+    const paths = memoryPaths(dir)
+    await ensureMemoryTree(paths)
+    await rm(paths.profile, { force: true })
+    await writeDocumentAtomic({
+      path: join(paths.rollupsDailyDir, '2026-08-14.md'),
+      meta: { id: newId('doc'), date: '2026-08-14' },
+      body: 'A rollup.\n',
+    })
+    await writeDocumentAtomic({
+      path: join(paths.rollupsDailyDir, '2026-08-15.md'),
+      meta: { id: newId('doc'), date: '2026-08-15' },
+      body: 'A rollup.\n',
+    })
+    await writeDocumentAtomic({
+      path: join(paths.rollupsWeeklyDir, '2026-W33.md'),
+      meta: { id: newId('doc'), week: '2026-W33' },
+      body: 'A week.\n',
+    })
+
+    const before = await hashFolder(dir)
+
+    const output: string[] = []
+    const exitCode = await runMigrate(['--dry-run'], fakeDeps(dir, output))
+
+    expect(exitCode).toBe(0)
+    expect(output.join('')).toContain('would delete 2 daily and 1 weekly rollup files')
+    expect(output.join('')).toContain('would write profile.md')
+
+    const after = await hashFolder(dir)
+    expect(after).toBe(before)
+  })
+
+  it('running twice does the work once: the second run reports nothing and leaves transcripts byte-identical', async () => {
+    const paths = memoryPaths(dir)
+    await ensureMemoryTree(paths)
+    await rm(paths.profile, { force: true })
+    await writeDocumentAtomic({
+      path: join(paths.rollupsDailyDir, '2026-08-15.md'),
+      meta: { id: newId('doc'), date: '2026-08-15' },
+      body: 'A rollup.\n',
+    })
+    const store = await SessionStore.start(paths, new Date('2026-08-15T21:00:00Z'))
+    await store.appendLine({ ts: '2026-08-15T21:00:00.000Z', role: 'user', content: 'hello' })
+
+    const transcriptBefore = await readFile(join(store.dir, 'transcript.jsonl'), 'utf8')
+
+    const first: string[] = []
+    const firstCode = await runMigrate([], fakeDeps(dir, first))
+    expect(firstCode).toBe(0)
+
+    const second: string[] = []
+    const secondCode = await runMigrate([], fakeDeps(dir, second))
+    expect(secondCode).toBe(0)
+    expect(second.join('')).toContain('Nothing to migrate')
+
+    const transcriptAfter = await readFile(join(store.dir, 'transcript.jsonl'), 'utf8')
+    expect(transcriptAfter).toBe(transcriptBefore)
   })
 })
 
