@@ -195,6 +195,36 @@ describe('MemoryIndex', () => {
       expect(() => index.searchText('kite', 10, maliciousKinds)).not.toThrow()
       expect(index.searchText('kite', 10, maliciousKinds)).toEqual([])
     })
+
+    it('stores a date span for dated kinds and nulls for living ones', async () => {
+      await index.upsertDocument(
+        doc({ meta: { id: 'doc_daily', date: '2026-08-12' } }),
+        'rollup_daily',
+        embedFn(),
+      )
+      await index.upsertDocument(
+        doc({ meta: { id: 'doc_weekly', week: '2026-W33' } }),
+        'rollup_weekly',
+        embedFn(),
+      )
+      await index.upsertDocument(
+        doc({ meta: { id: 'doc_arc', opened: '2026-01-04', updated: '2026-08-12' } }),
+        'arc',
+        embedFn(),
+      )
+
+      const db = new Database(dbPath)
+      const rows = db
+        .prepare('SELECT id, date_start, date_end FROM documents ORDER BY id')
+        .all() as { id: string; date_start: string | null; date_end: string | null }[]
+      db.close()
+
+      expect(rows).toEqual([
+        { id: 'doc_arc', date_start: null, date_end: null },
+        { id: 'doc_daily', date_start: '2026-08-12', date_end: '2026-08-12' },
+        { id: 'doc_weekly', date_start: '2026-08-10', date_end: '2026-08-16' },
+      ])
+    })
   })
 
   describe('removeDocumentsAtPath', () => {

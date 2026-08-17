@@ -6,6 +6,7 @@
 
 import { stat } from 'node:fs/promises'
 import Database from 'better-sqlite3'
+import { documentDateSpan } from './dateSpan.js'
 import type { Document } from './documents.js'
 import type { EdgeType, GraphEdge, GraphNode, GraphState, NodeType } from './graph.js'
 
@@ -182,16 +183,26 @@ export class MemoryIndex {
     const texts = buildChunks(doc)
     const vectors = texts.length > 0 ? await embed(texts) : []
     const mtime = await fileMtime(doc.path)
+    // Null for living documents (the constitution, and realm, arc and person
+    // pages) by design, so an after/before filter never excludes them. See
+    // dateSpan.ts for why no date is better than a wrong one here.
+    const span = documentDateSpan(kind, doc.meta)
 
     const run = this.db.transaction(() => {
       this.deleteChunksForDoc(docId)
 
       this.db
         .prepare(
-          `INSERT INTO documents (id, path, kind, mtime) VALUES (?, ?, ?, ?)
-           ON CONFLICT(id) DO UPDATE SET path = excluded.path, kind = excluded.kind, mtime = excluded.mtime`,
+          `INSERT INTO documents (id, path, kind, mtime, date_start, date_end)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             path = excluded.path,
+             kind = excluded.kind,
+             mtime = excluded.mtime,
+             date_start = excluded.date_start,
+             date_end = excluded.date_end`,
         )
-        .run(docId, doc.path, kind, mtime)
+        .run(docId, doc.path, kind, mtime, span?.start ?? null, span?.end ?? null)
 
       const insertChunk = this.db.prepare('INSERT INTO chunks (doc_id, seq, text) VALUES (?, ?, ?)')
       const insertFts = this.db.prepare('INSERT INTO chunks_fts (rowid, text) VALUES (?, ?)')
