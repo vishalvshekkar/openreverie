@@ -2,6 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { newId, writeDocumentAtomic } from '../documents.js'
 import { ensureMemoryTree, type MemoryPaths, memoryPaths } from '../paths.js'
 import { loadProfile } from '../profile.js'
 import {
@@ -11,6 +12,7 @@ import {
   runMigrations,
 } from './index.js'
 import { profileSeedMigration } from './profileSeed.js'
+import { utcToLocalRollupsMigration } from './utcToLocalRollups.js'
 
 describe('migrations log and runner', () => {
   let dir: string
@@ -101,6 +103,96 @@ describe('profile-seed migration', () => {
 
     const applied = await readAppliedMigrationIds(paths)
     expect(applied.has('profile-seed')).toBe(true)
+
+    const second = await runMigrations(ctx)
+    expect(second).toEqual([])
+  })
+})
+
+describe('utc-to-local-rollups migration', () => {
+  let dir: string
+  let paths: MemoryPaths
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'openreverie-utc-rollups-'))
+    paths = memoryPaths(dir)
+  })
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  it('is pending when rollups exist, and not pending when there are none', async () => {
+    await ensureMemoryTree(paths)
+    const ctx: MigrationContext = { paths, configPath: '/tmp/config.toml' }
+    await expect(utcToLocalRollupsMigration.isPending(ctx)).resolves.toBe(false)
+
+    await writeDocumentAtomic({
+      path: join(paths.rollupsDailyDir, '2026-08-15.md'),
+      meta: { id: newId('doc'), date: '2026-08-15' },
+      body: 'A rollup.\n',
+    })
+    await expect(utcToLocalRollupsMigration.isPending(ctx)).resolves.toBe(true)
+  })
+
+  it('is not pending once recorded in the log, even when rollups exist again', async () => {
+    await ensureMemoryTree(paths)
+    const ctx: MigrationContext = { paths, configPath: '/tmp/config.toml' }
+    await writeDocumentAtomic({
+      path: join(paths.rollupsDailyDir, '2026-08-15.md'),
+      meta: { id: newId('doc'), date: '2026-08-15' },
+      body: 'A rollup.\n',
+    })
+    await appendMigrationLog(paths, {
+      id: 'utc-to-local-rollups',
+      appliedAt: '2026-08-17T00:00:00.000Z',
+    })
+    await expect(utcToLocalRollupsMigration.isPending(ctx)).resolves.toBe(false)
+  })
+
+  it('apply deletes every daily and weekly rollup, and a dry run deletes nothing', async () => {
+    await ensureMemoryTree(paths)
+    const ctx: MigrationContext = { paths, configPath: '/tmp/config.toml' }
+    const dailyPath = join(paths.rollupsDailyDir, '2026-08-15.md')
+    const weeklyPath = join(paths.rollupsWeeklyDir, '2026-W33.md')
+    await writeDocumentAtomic({
+      path: dailyPath,
+      meta: { id: newId('doc'), date: '2026-08-15' },
+      body: 'A rollup.\n',
+    })
+    await writeDocumentAtomic({
+      path: weeklyPath,
+      meta: { id: newId('doc'), week: '2026-W33' },
+      body: 'A week.\n',
+    })
+
+    const dry = await utcToLocalRollupsMigration.apply(ctx, { dryRun: true })
+    expect(dry.applied).toBe(false)
+    expect(dry.details).toContain(dailyPath)
+    expect(dry.details).toContain(weeklyPath)
+    await expect(readFile(dailyPath, 'utf8')).resolves.toBeDefined()
+
+    const real = await utcToLocalRollupsMigration.apply(ctx, { dryRun: false })
+    expect(real.applied).toBe(true)
+    await expect(readFile(dailyPath, 'utf8')).rejects.toThrow()
+    await expect(readFile(weeklyPath, 'utf8')).rejects.toThrow()
+  })
+
+  it('runMigrations runs both migrations once and a second run is a no-op', async () => {
+    await ensureMemoryTree(paths)
+    await rm(paths.profile, { force: true })
+    await writeDocumentAtomic({
+      path: join(paths.rollupsDailyDir, '2026-08-15.md'),
+      meta: { id: newId('doc'), date: '2026-08-15' },
+      body: 'A rollup.\n',
+    })
+    const ctx: MigrationContext = { paths, configPath: '/tmp/config.toml' }
+
+    const first = await runMigrations(ctx)
+    expect(first.map((result) => result.id)).toEqual(['profile-seed', 'utc-to-local-rollups'])
+
+    await expect(readFile(paths.profile, 'utf8')).resolves.toBeDefined()
+    await expect(readFile(join(paths.rollupsDailyDir, '2026-08-15.md'), 'utf8')).rejects.toThrow()
 
     const second = await runMigrations(ctx)
     expect(second).toEqual([])
