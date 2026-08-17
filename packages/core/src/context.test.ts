@@ -5,12 +5,14 @@ import {
   appendGraph,
   type EngineDeps,
   ensureMemoryTree,
+  loadProfile,
   MemoryEngine,
   type MemoryPaths,
   memoryPaths,
   newId,
   SessionStore,
   writeDocumentAtomic,
+  writeProfile,
 } from '@openreverie/memory'
 import { FakeChatProvider, FakeEmbeddingProvider } from '@openreverie/providers'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -36,6 +38,14 @@ function fakeDeps(chat: FakeChatProvider): EngineDeps {
     reflectionModel: 'fake-reflect',
     embeddingModel: 'fake-embed',
   }
+}
+
+async function pinTimezoneUtc(paths: MemoryPaths): Promise<void> {
+  const profile = await loadProfile(paths)
+  await writeProfile(paths, {
+    meta: { ...profile.meta, timezone: 'UTC', timezoneSource: 'user-confirmed' },
+    body: profile.body,
+  })
 }
 
 describe('assembleSystemPrompt', () => {
@@ -337,6 +347,7 @@ describe('assembleSystemPrompt', () => {
   })
 
   it('shows the date of each recent session next to its summary', async () => {
+    await pinTimezoneUtc(paths)
     const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000)
     const store = await SessionStore.start(paths, twoDaysAgo)
     await store.appendLine({
@@ -362,6 +373,7 @@ describe('assembleSystemPrompt', () => {
   })
 
   it('shows the date of each recent intention next to its text', async () => {
+    await pinTimezoneUtc(paths)
     const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)
     const store = await SessionStore.start(paths, yesterday)
     await store.appendLine({ ts: yesterday.toISOString(), role: 'user', content: 'Hi.' })

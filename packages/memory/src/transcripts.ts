@@ -11,6 +11,7 @@ import type { ToolCall } from '@openreverie/providers'
 import { decodeTime } from 'ulid'
 import { newId, readDocument } from './documents.js'
 import type { MemoryPaths } from './paths.js'
+import { formatLocalDate } from './time.js'
 
 export interface TranscriptLine {
   ts: string
@@ -53,9 +54,17 @@ export class SessionStore {
     this.dir = dir
   }
 
-  static async start(paths: MemoryPaths, now: Date): Promise<SessionStore> {
+  // The directory's date prefix is a disambiguator, not a claim: every
+  // consumer that needs a session's logical day derives it (see
+  // listSessions), and every consumer that needs its path uses dirName.
+  // Naming a new directory with the local day just keeps the common case
+  // free of divergence for a human browsing the folder. The timezone
+  // defaults to UTC because a bare call has no profile to read; the only
+  // production caller, MemoryEngine.startSession, always passes the real
+  // zone.
+  static async start(paths: MemoryPaths, now: Date, timezone = 'UTC'): Promise<SessionStore> {
     const sessionId = newId('session')
-    const dir = join(paths.sessionsDir, `${formatDate(now)}-${sessionId}`)
+    const dir = join(paths.sessionsDir, `${formatLocalDate(now, timezone)}-${sessionId}`)
     await mkdir(dir, { recursive: true })
     await appendFile(join(dir, TRANSCRIPT_FILE), '', 'utf8')
     return new SessionStore(sessionId, dir)
@@ -210,13 +219,6 @@ function createdAtForSession(sessionId: string, fallback: string): string {
   } catch {
     return fallback
   }
-}
-
-function formatDate(date: Date): string {
-  const year = date.getUTCFullYear()
-  const month = String(date.getUTCMonth() + 1).padStart(2, '0')
-  const day = String(date.getUTCDate()).padStart(2, '0')
-  return `${year}-${month}-${day}`
 }
 
 async function findSessionDir(paths: MemoryPaths, sessionId: string): Promise<string> {

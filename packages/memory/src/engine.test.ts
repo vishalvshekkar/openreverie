@@ -97,6 +97,14 @@ function isoDate(date: Date): string {
   return date.toISOString().slice(0, 10)
 }
 
+async function pinTimezoneUtc(paths: MemoryPaths): Promise<void> {
+  const profile = await loadProfile(paths)
+  await writeProfile(paths, {
+    meta: { ...profile.meta, timezone: 'UTC', timezoneSource: 'user-confirmed' },
+    body: profile.body,
+  })
+}
+
 function emptyReflectionOutput(summary: string): ReflectionOutput {
   return {
     summary,
@@ -143,6 +151,7 @@ describe('MemoryEngine', () => {
       dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-public-projections-'))
       paths = memoryPaths(dir)
       await ensureMemoryTree(paths)
+      await pinTimezoneUtc(paths)
       personPageId = newId('doc')
       const personPagePath = join(paths.peopleDir, 'mina.md')
       await writeDocumentAtomic({
@@ -297,6 +306,7 @@ describe('MemoryEngine', () => {
       // Pre-seed an arc and its realm so the scripted reflection can
       // attribute an item to it with high confidence.
       await ensureMemoryTree(paths)
+      await pinTimezoneUtc(paths)
       const arcDocId = newId('doc')
       const arcDocPath = join(paths.arcsDir, 'health.md')
       await writeDocumentAtomic({
@@ -461,6 +471,7 @@ describe('MemoryEngine', () => {
       dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-maint-'))
       paths = memoryPaths(dir)
       await ensureMemoryTree(paths)
+      await pinTimezoneUtc(paths)
     })
 
     afterEach(async () => {
@@ -584,6 +595,7 @@ describe('MemoryEngine', () => {
       dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-empty-'))
       paths = memoryPaths(dir)
       await ensureMemoryTree(paths)
+      await pinTimezoneUtc(paths)
     })
 
     afterEach(async () => {
@@ -704,6 +716,7 @@ describe('MemoryEngine', () => {
       dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-proposals-'))
       paths = memoryPaths(dir)
       await ensureMemoryTree(paths)
+      await pinTimezoneUtc(paths)
       engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
     })
 
@@ -1062,6 +1075,7 @@ describe('MemoryEngine', () => {
       dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-save-by-default-'))
       paths = memoryPaths(dir)
       await ensureMemoryTree(paths)
+      await pinTimezoneUtc(paths)
     })
 
     afterEach(async () => {
@@ -1432,6 +1446,7 @@ describe('MemoryEngine', () => {
       // that is not valid JSON at all, the kind appendFile's lack of crash
       // atomicity or a synced, hand-edited folder can produce.
       await ensureMemoryTree(paths)
+      await pinTimezoneUtc(paths)
       await writeFile(paths.proposals, '{"id":"prop_broken","kind":"new_arc"\n', 'utf8')
 
       const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
@@ -1447,6 +1462,7 @@ describe('MemoryEngine', () => {
 
     it('a genuinely corrupt proposal queue does not block a second open() either, so reindex keeps working', async () => {
       await ensureMemoryTree(paths)
+      await pinTimezoneUtc(paths)
       await writeFile(paths.proposals, '{"id":"prop_broken","kind":"new_arc"\n', 'utf8')
 
       const first = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
@@ -1702,6 +1718,7 @@ describe('MemoryEngine', () => {
       dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-nodes-'))
       paths = memoryPaths(dir)
       await ensureMemoryTree(paths)
+      await pinTimezoneUtc(paths)
     })
 
     afterEach(async () => {
@@ -2385,6 +2402,7 @@ describe('MemoryEngine', () => {
       dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-people-'))
       paths = memoryPaths(dir)
       await ensureMemoryTree(paths)
+      await pinTimezoneUtc(paths)
       engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
     })
 
@@ -2420,6 +2438,7 @@ describe('MemoryEngine', () => {
       dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-docid-'))
       paths = memoryPaths(dir)
       await ensureMemoryTree(paths)
+      await pinTimezoneUtc(paths)
     })
 
     afterEach(async () => {
@@ -2493,6 +2512,7 @@ describe('MemoryEngine', () => {
       dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-idempotent-'))
       paths = memoryPaths(dir)
       await ensureMemoryTree(paths)
+      await pinTimezoneUtc(paths)
     })
 
     afterEach(async () => {
@@ -2555,6 +2575,7 @@ describe('MemoryEngine', () => {
       dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-corrupt-'))
       paths = memoryPaths(dir)
       await ensureMemoryTree(paths)
+      await pinTimezoneUtc(paths)
     })
 
     afterEach(async () => {
@@ -2599,6 +2620,7 @@ describe('MemoryEngine', () => {
       dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-reindex-'))
       paths = memoryPaths(dir)
       await ensureMemoryTree(paths)
+      await pinTimezoneUtc(paths)
     })
 
     afterEach(async () => {
@@ -2642,6 +2664,7 @@ describe('MemoryEngine', () => {
       dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-context-'))
       paths = memoryPaths(dir)
       await ensureMemoryTree(paths)
+      await pinTimezoneUtc(paths)
     })
 
     afterEach(async () => {
@@ -2721,6 +2744,7 @@ describe('MemoryEngine', () => {
       dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-people-context-'))
       paths = memoryPaths(dir)
       await ensureMemoryTree(paths)
+      await pinTimezoneUtc(paths)
     })
 
     afterEach(async () => {
@@ -2917,6 +2941,7 @@ describe('MemoryEngine', () => {
       dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-recent-'))
       paths = memoryPaths(dir)
       await ensureMemoryTree(paths)
+      await pinTimezoneUtc(paths)
     })
 
     afterEach(async () => {
@@ -3057,6 +3082,7 @@ describe('MemoryEngine', () => {
       dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-firstsession-'))
       paths = memoryPaths(dir)
       await ensureMemoryTree(paths)
+      await pinTimezoneUtc(paths)
     })
 
     afterEach(async () => {
@@ -3168,6 +3194,7 @@ describe('MemoryEngine', () => {
       dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-warnings-'))
       paths = memoryPaths(dir)
       await ensureMemoryTree(paths)
+      await pinTimezoneUtc(paths)
     })
 
     afterEach(async () => {
@@ -3595,6 +3622,7 @@ describe('buildReflectionContext people and entities wiring', () => {
     dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-people-'))
     paths = memoryPaths(dir)
     await ensureMemoryTree(paths)
+    await pinTimezoneUtc(paths)
   })
 
   afterEach(async () => {
@@ -3804,6 +3832,7 @@ describe('MemoryEngine profile', () => {
   it('updateProfile keeps unrelated frontmatter keys that were already in the file', async () => {
     const paths = memoryPaths(dir)
     await ensureMemoryTree(paths)
+    await pinTimezoneUtc(paths)
     const seeded = await loadProfile(paths)
     await writeProfile(paths, { meta: { ...seeded.meta, pronouns: 'she/her' }, body: seeded.body })
 
@@ -3815,6 +3844,115 @@ describe('MemoryEngine profile', () => {
     const onDisk = await loadProfile(paths)
     expect(onDisk.meta.pronouns).toBe('she/her')
     expect(onDisk.meta.timezone).toBe('Europe/Berlin')
+
+    await engine.close()
+  })
+})
+
+describe('local day boundaries', () => {
+  let dir: string
+  let paths: MemoryPaths
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-localday-'))
+    paths = memoryPaths(dir)
+    await ensureMemoryTree(paths)
+  })
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  it('builds the daily and the completed weekly rollup using the local day, not the UTC day', async () => {
+    // 2026-08-16T20:00:00Z is 2026-08-17 01:30 in Asia/Kolkata. Local today
+    // is therefore 2026-08-17 (a Monday, ISO week 2026-W34), which makes
+    // 2026-08-16 (a Sunday, ISO week 2026-W33) both strictly before today
+    // and in a completed week. Under UTC, today would be 2026-08-16, which
+    // is neither, and zero rollups would be built.
+    const now = new Date('2026-08-16T20:00:00.000Z')
+
+    const store = await SessionStore.start(paths, new Date('2026-08-16T09:00:00.000Z'), 'UTC')
+    await store.appendLine({
+      ts: '2026-08-16T09:00:00.000Z',
+      role: 'user',
+      content: 'A good Sunday.',
+    })
+    await writeDocumentAtomic({
+      path: join(store.dir, 'summary.md'),
+      meta: {
+        id: newId('doc'),
+        kind: 'summary',
+        session: store.sessionId,
+        date: '2026-08-16',
+        items: [],
+      },
+      body: 'A good Sunday.\n',
+    })
+
+    // Two completions: the daily rollup, then the weekly. runMaintenance
+    // re-reads the daily rollup files from disk after its daily loop, so
+    // the weekly leg fires in the same pass as the daily one.
+    const chat = new FakeChatProvider([
+      { text: 'A quiet Sunday.', toolCalls: [] },
+      { text: 'A quiet week.', toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat), { maintenance: false })
+    await engine.updateProfile({ timezone: 'Asia/Kolkata' })
+
+    await engine.runMaintenance(now)
+
+    await expect(readDocument(join(paths.rollupsDailyDir, '2026-08-16.md'))).resolves.toBeDefined()
+    await expect(readDocument(join(paths.rollupsWeeklyDir, '2026-W33.md'))).resolves.toBeDefined()
+
+    await engine.close()
+  })
+
+  it('windows recent summaries against the local day, not the UTC day', async () => {
+    // Local today is 2026-08-17, so the seven-day cutoff is 2026-08-10 and
+    // a session dated 2026-08-10 is still inside the window. Under UTC the
+    // cutoff would be 2026-08-09.
+    const now = new Date('2026-08-16T20:00:00.000Z')
+
+    const store = await SessionStore.start(paths, new Date('2026-08-10T09:00:00.000Z'), 'UTC')
+    await store.appendLine({
+      ts: '2026-08-10T09:00:00.000Z',
+      role: 'user',
+      content: 'Monday.',
+    })
+    await writeDocumentAtomic({
+      path: join(store.dir, 'summary.md'),
+      meta: {
+        id: newId('doc'),
+        kind: 'summary',
+        session: store.sessionId,
+        date: '2026-08-10',
+        items: [],
+      },
+      body: 'Monday happened.\n',
+    })
+
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])), {
+      maintenance: false,
+    })
+    await engine.updateProfile({ timezone: 'Asia/Kolkata' })
+
+    const context = await engine.sessionContext(now)
+    expect(context.recentSummaries.map((summary) => summary.date)).toContain('2026-08-10')
+
+    await engine.close()
+  })
+
+  it('names a new session directory with the local day', async () => {
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])), {
+      maintenance: false,
+    })
+    await engine.updateProfile({ timezone: 'Asia/Kolkata' })
+
+    const sessionId = await engine.startSession(new Date('2026-08-16T20:00:00.000Z'))
+
+    const sessions = await SessionStore.listSessions(paths)
+    const created = sessions.find((session) => session.sessionId === sessionId)
+    expect(created?.dirName).toBe(`2026-08-17-${sessionId}`)
 
     await engine.close()
   })

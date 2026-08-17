@@ -61,7 +61,7 @@ import {
   pendingWeeklyRollups,
 } from './rollups.js'
 import { type DocKind, MemoryIndex, type SearchHit } from './sqlite.js'
-import { isValidIanaTimeZone, systemTimeZone } from './time.js'
+import { addDaysLocal, formatLocalDate, isValidIanaTimeZone, systemTimeZone } from './time.js'
 import { type PublicTranscriptLine, SessionStore, type TranscriptLine } from './transcripts.js'
 
 export type { SequencedGraphRecord } from './graph.js'
@@ -328,7 +328,7 @@ export class MemoryEngine {
   }
 
   async startSession(now: Date = new Date()): Promise<string> {
-    const store = await SessionStore.start(this.paths, now)
+    const store = await SessionStore.start(this.paths, now, this.timezone())
     this.liveItems.set(store.sessionId, [])
     return store.sessionId
   }
@@ -628,7 +628,7 @@ export class MemoryEngine {
     }
 
     const sessions = await SessionStore.listSessions(this.paths)
-    const recentCutoff = addDaysUTC(now, -RECENT_SUMMARIES_WINDOW_DAYS)
+    const recentCutoff = addDaysLocal(now, -RECENT_SUMMARIES_WINDOW_DAYS, this.timezone())
     // Sort by calendar date, most recent first. Session ids are ULIDs
     // built from the wall clock at creation time, not from the session's
     // own date, so they only break ties between two sessions that land on
@@ -1066,7 +1066,7 @@ export class MemoryEngine {
       }
     }
 
-    const today = formatDateUTC(now)
+    const today = formatLocalDate(now, this.timezone())
 
     // A date whose only session was skipped has no content to roll up:
     // excluding skipped sessions here means such a date never becomes
@@ -1234,7 +1234,7 @@ export class MemoryEngine {
   private async writeSkippedSummary(sessionId: string, now: Date): Promise<void> {
     const sessions = await SessionStore.listSessions(this.paths)
     const session = sessions.find((s) => s.sessionId === sessionId)
-    const date = session?.date ?? formatDateUTC(now)
+    const date = session?.date ?? formatLocalDate(now, this.timezone())
     // Resolved by id suffix, never rebuilt from the date. A derived date
     // that differs from the directory prefix would otherwise create a
     // second directory beside the real one, holding a summary for a session
@@ -1791,20 +1791,6 @@ function stringMeta(docs: Document[], key: string): string[] {
     if (typeof value === 'string') values.push(value)
   }
   return values
-}
-
-function formatDateUTC(date: Date): string {
-  const year = date.getUTCFullYear()
-  const month = String(date.getUTCMonth() + 1).padStart(2, '0')
-  const day = String(date.getUTCDate()).padStart(2, '0')
-  return `${year}-${month}-${day}`
-}
-
-function addDaysUTC(date: Date, days: number): string {
-  const shifted = new Date(
-    Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() + days),
-  )
-  return formatDateUTC(shifted)
 }
 
 function kebabCase(name: string): string {

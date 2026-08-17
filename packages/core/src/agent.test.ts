@@ -1,7 +1,15 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { type EngineDeps, MemoryEngine } from '@openreverie/memory'
+import {
+  type EngineDeps,
+  ensureMemoryTree,
+  loadProfile,
+  MemoryEngine,
+  type MemoryPaths,
+  memoryPaths,
+  writeProfile,
+} from '@openreverie/memory'
 import { type ChatProvider, FakeChatProvider, FakeEmbeddingProvider } from '@openreverie/providers'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { type AgentEvent, AgentSession } from './agent.js'
@@ -11,6 +19,8 @@ let dir: string
 
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'openreverie-agent-'))
+  await ensureMemoryTree(memoryPaths(dir))
+  await pinTimezoneUtc(memoryPaths(dir))
 })
 
 afterEach(async () => {
@@ -34,6 +44,14 @@ function fakeDeps(chat: ChatProvider): EngineDeps {
     reflectionModel: 'fake-reflect',
     embeddingModel: 'fake-embed',
   }
+}
+
+async function pinTimezoneUtc(paths: MemoryPaths): Promise<void> {
+  const profile = await loadProfile(paths)
+  await writeProfile(paths, {
+    meta: { ...profile.meta, timezone: 'UTC', timezoneSource: 'user-confirmed' },
+    body: profile.body,
+  })
 }
 
 function emptyReflectionOutput(summary: string) {

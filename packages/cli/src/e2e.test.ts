@@ -25,7 +25,16 @@ import {
   assembleSystemPrompt,
   type ReverieConfig,
 } from '@openreverie/core'
-import { type EngineDeps, MemoryEngine, memoryPaths, readDocument } from '@openreverie/memory'
+import {
+  type EngineDeps,
+  ensureMemoryTree,
+  loadProfile,
+  MemoryEngine,
+  type MemoryPaths,
+  memoryPaths,
+  readDocument,
+  writeProfile,
+} from '@openreverie/memory'
 import {
   FakeChatProvider,
   type FakeChatResult,
@@ -63,6 +72,8 @@ let dir: string
 
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'openreverie-e2e-'))
+  await ensureMemoryTree(memoryPaths(dir))
+  await pinTimezoneUtc(memoryPaths(dir))
 })
 
 afterEach(async () => {
@@ -86,6 +97,14 @@ function fakeDeps(chat: FakeChatProvider): EngineDeps {
     reflectionModel: 'm',
     embeddingModel: 'm',
   }
+}
+
+async function pinTimezoneUtc(paths: MemoryPaths): Promise<void> {
+  const profile = await loadProfile(paths)
+  await writeProfile(paths, {
+    meta: { ...profile.meta, timezone: 'UTC', timezoneSource: 'user-confirmed' },
+    body: profile.body,
+  })
 }
 
 function transcriptPath(date: string, sessionId: string): string {
