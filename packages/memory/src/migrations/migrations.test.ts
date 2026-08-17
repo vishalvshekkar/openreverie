@@ -1,15 +1,16 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { type MemoryPaths, memoryPaths } from '../paths.js'
+import { ensureMemoryTree, type MemoryPaths, memoryPaths } from '../paths.js'
+import { loadProfile } from '../profile.js'
 import {
   appendMigrationLog,
-  listMigrations,
   type MigrationContext,
   readAppliedMigrationIds,
   runMigrations,
 } from './index.js'
+import { profileSeedMigration } from './profileSeed.js'
 
 describe('migrations log and runner', () => {
   let dir: string
@@ -46,10 +47,62 @@ describe('migrations log and runner', () => {
     await writeFile(paths.migrationsLog, 'not json\n', 'utf8')
     await expect(readAppliedMigrationIds(paths)).rejects.toThrow('line 1')
   })
+})
 
-  it('lists nothing and runs nothing against an empty registry', async () => {
+describe('profile-seed migration', () => {
+  let dir: string
+  let paths: MemoryPaths
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'openreverie-profile-seed-'))
+    paths = memoryPaths(dir)
+  })
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  it('is pending when profile.md is absent and not pending once it exists', async () => {
+    await ensureMemoryTree(paths)
+    await rm(paths.profile, { force: true })
+
     const ctx: MigrationContext = { paths, configPath: '/tmp/config.toml' }
-    await expect(listMigrations(ctx)).resolves.toEqual([])
-    await expect(runMigrations(ctx)).resolves.toEqual([])
+    await expect(profileSeedMigration.isPending(ctx)).resolves.toBe(true)
+
+    await profileSeedMigration.apply(ctx, { dryRun: false })
+    await expect(profileSeedMigration.isPending(ctx)).resolves.toBe(false)
+  })
+
+  it('apply writes a system-default profile on disk, and a dry run does not', async () => {
+    await ensureMemoryTree(paths)
+    await rm(paths.profile, { force: true })
+    const ctx: MigrationContext = { paths, configPath: '/tmp/config.toml' }
+
+    const dry = await profileSeedMigration.apply(ctx, { dryRun: true })
+    expect(dry.applied).toBe(false)
+    expect(dry.summary).toContain('would write')
+    await expect(readFile(paths.profile, 'utf8')).rejects.toThrow()
+
+    const real = await profileSeedMigration.apply(ctx, { dryRun: false })
+    expect(real.applied).toBe(true)
+    expect(real.summary).toContain('wrote')
+    const profile = await loadProfile(paths)
+    expect(profile.meta.timezoneSource).toBe('system-default')
+    expect(typeof profile.meta.timezone).toBe('string')
+  })
+
+  it('runMigrations applies it once and records it, and a second run does nothing', async () => {
+    await ensureMemoryTree(paths)
+    await rm(paths.profile, { force: true })
+    const ctx: MigrationContext = { paths, configPath: '/tmp/config.toml' }
+
+    const first = await runMigrations(ctx)
+    expect(first.map((result) => result.id)).toEqual(['profile-seed'])
+
+    const applied = await readAppliedMigrationIds(paths)
+    expect(applied.has('profile-seed')).toBe(true)
+
+    const second = await runMigrations(ctx)
+    expect(second).toEqual([])
   })
 })
