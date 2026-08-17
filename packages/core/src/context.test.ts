@@ -420,7 +420,7 @@ describe('assembleSystemPrompt', () => {
     await engine.close()
   })
 
-  it("states today's date near the top, in the same form as recent session dates", async () => {
+  it('states the timezone in a Time section near the top, with no clock in it', async () => {
     await writeDocumentAtomic({
       path: paths.constitution,
       meta: { id: newId('doc') },
@@ -447,12 +447,30 @@ describe('assembleSystemPrompt', () => {
     ])
 
     const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+    await engine.updateProfile({ timezone: 'Asia/Kolkata' })
     const prompt = await assembleSystemPrompt(engine, testConfig())
 
-    const today = new Date().toISOString().slice(0, 10)
-    expect(prompt).toContain('## Today')
-    expect(prompt).toContain(today)
-    expect(prompt.indexOf('## Today')).toBeLessThan(prompt.indexOf('## Constitution'))
+    expect(prompt).toContain('## Time')
+    expect(prompt).toContain("This person's timezone is Asia/Kolkata.")
+    expect(prompt).toContain('stamped with the local date and time it was sent')
+    expect(prompt).not.toContain('## Today')
+    expect(prompt.indexOf('## Time')).toBeLessThan(prompt.indexOf('## Constitution'))
+    // Nothing in this section moves on its own: a clock read here would
+    // cost the whole conversation history's cache on every turn.
+    expect(prompt).not.toContain(new Date().toISOString().slice(0, 10))
+
+    await engine.close()
+  })
+
+  it('says plainly when the timezone is only a system default, and drops that line once confirmed', async () => {
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+
+    const seeded = await assembleSystemPrompt(engine, testConfig())
+    expect(seeded).toContain('This timezone is a system default, not yet confirmed by the person.')
+
+    await engine.updateProfile({ timezone: 'Asia/Kolkata' })
+    const confirmed = await assembleSystemPrompt(engine, testConfig())
+    expect(confirmed).not.toContain('This timezone is a system default')
 
     await engine.close()
   })
@@ -548,13 +566,14 @@ describe('assembleSystemPrompt', () => {
       await engine.close()
     })
 
-    it("still states today's date during a first conversation", async () => {
+    it('still states the Time section during a first conversation', async () => {
       const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      await engine.updateProfile({ timezone: 'Asia/Kolkata' })
       const prompt = await assembleSystemPrompt(engine, testConfig())
 
-      const today = new Date().toISOString().slice(0, 10)
-      expect(prompt).toContain('## Today')
-      expect(prompt).toContain(today)
+      expect(prompt).toContain('## Time')
+      expect(prompt).toContain("This person's timezone is Asia/Kolkata.")
+      expect(prompt).not.toContain('## Today')
 
       await engine.close()
     })

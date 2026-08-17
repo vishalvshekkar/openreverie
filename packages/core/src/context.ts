@@ -1,19 +1,26 @@
 // Session context assembly: the system prompt handed to the chat provider
 // at the start of a session. It is the persona for the configured safety
-// mode, followed by today's date, followed by a snapshot of memory state
-// pulled from MemoryEngine.sessionContext(): the constitution, realms,
-// active arcs, known people and entities, recent intentions, the latest
-// daily rollup, and session summaries from the last week. A section with
-// nothing to say is left out entirely rather than rendered as an empty
+// mode, followed by a static timezone section, followed by a snapshot of
+// memory state pulled from MemoryEngine.sessionContext(): the constitution,
+// realms, active arcs, known people and entities, recent intentions, the
+// latest daily rollup, and session summaries from the last week. A section
+// with nothing to say is left out entirely rather than rendered as an empty
 // header, so the model never sees "## Realms" with nothing under it.
 //
-// The model is never told the current date anywhere else. Recent sessions
-// and the latest daily rollup are rendered with absolute dates
-// (2026-08-12), and without today's date stated somewhere the model has no
-// way to tell whether that was yesterday or last week. Today's date always
-// comes from context.today, the same clock MemoryEngine.sessionContext used
-// to compute the recent-sessions window, never from a second call to
-// Date() here.
+// Single-clock discipline, in its current form: exactly one channel carries
+// the current time to the model, and it is not this file. The time reaches
+// the model only as the stamp on the newest user message (see
+// AgentSession.appendBoth). This assembler never reads a clock for the
+// model's benefit at all. What it renders about time is the person's
+// timezone, which does not move.
+//
+// That matters for caching as much as for correctness. The provider's
+// prefix cache matches the longest identical leading run of the whole
+// request, and the system message sits in front of every conversation turn,
+// so a single moving byte in here reprocesses the entire history on every
+// turn. Recent sessions and the latest daily rollup are still rendered with
+// absolute dates (2026-08-12); the newest message's own stamp is what lets
+// the model read those as recent or old.
 
 import type { MemoryEngine, SessionContext } from '@openreverie/memory'
 import type { ReverieConfig } from './config.js'
@@ -27,12 +34,12 @@ export async function assembleSystemPrompt(
   const persona = buildPersona(config.safety.mode, config.safety.resources, config.style)
 
   if (context.isFirstSession) {
-    return [persona, todaySection(context), firstConversationSection()].join('\n\n')
+    return [persona, timeSection(context), firstConversationSection()].join('\n\n')
   }
 
   const sections = [
     persona,
-    todaySection(context),
+    timeSection(context),
     constitutionSection(context),
     realmsSection(context),
     arcsSection(context),
@@ -60,8 +67,19 @@ Then get to know them gently, one question at a time, waiting for their answer b
 The memory is empty right now: there is nothing to search, nothing to retrieve, no earlier session to reference. Do not call a memory tool looking for history that is not there. Do not tell them you can continue where an earlier conversation left off, or greet them as though you already know them. There is no earlier conversation. This is the first one. During a first conversation, this guidance outranks the engagement setting.`
 }
 
-function todaySection(context: SessionContext): string {
-  return `## Today\n\nToday's date is ${context.today}.`
+function timeSection(context: SessionContext): string {
+  const lines = [
+    '## Time',
+    '',
+    `This person's timezone is ${context.timezone}. Every message from them is stamped with the local date and time it was sent, in square brackets at the start of the message. Read the newest stamp as the current time, and read the gaps between stamps as elapsed time: something the person described as happening later in the day may already have happened by a later message.`,
+  ]
+  if (context.timezoneSource === 'system-default') {
+    lines.push(
+      '',
+      'This timezone is a system default, not yet confirmed by the person. Confirm it naturally if the moment allows, rather than assuming it is correct.',
+    )
+  }
+  return lines.join('\n')
 }
 
 function constitutionSection(context: SessionContext): string | undefined {

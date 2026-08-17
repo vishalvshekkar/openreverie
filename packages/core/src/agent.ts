@@ -15,6 +15,7 @@
 // the in-memory history exists only for the life of this session object.
 
 import type { MemoryEngine } from '@openreverie/memory'
+import { renderLocalTime } from '@openreverie/memory'
 import type { ChatProvider, ToolCall } from '@openreverie/providers'
 import type { ReverieConfig } from './config.js'
 import { assembleSystemPrompt } from './context.js'
@@ -239,10 +240,17 @@ export class AgentSession {
     yield { type: 'thinking' }
     let text = ''
     let errored = false
+    // The greeting is the only model call with no user message to carry a
+    // stamp, and it is the first call of the session. One clock read here
+    // produces the line appended to this call's system string. Nothing
+    // later reuses that string (every later request's prefix is
+    // this.system plus messages), so this suffix costs no cache. No other
+    // call site gets a system-string suffix.
+    const openedAt = this.now()
     try {
       const stream = this.chat.stream({
         model: this.model,
-        system: `${this.system}\n\n${GREETING_INSTRUCTION}`,
+        system: `${this.system}\n\n${GREETING_INSTRUCTION}\n\nThe current local time is ${renderLocalTime(openedAt, this.engine.timezone())}.`,
         messages: [],
         tools: [],
       })

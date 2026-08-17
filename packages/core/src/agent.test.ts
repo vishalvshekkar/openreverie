@@ -451,7 +451,10 @@ describe('AgentSession', () => {
       { text: 'Good to see you again. How has the week been?', toolCalls: [] },
     ])
     const engine = await MemoryEngine.open(dir, fakeDeps(chat))
-    const session = await AgentSession.start(engine, testConfig(), chat)
+    await engine.updateProfile({ timezone: 'Asia/Kolkata' })
+    const session = await AgentSession.start(engine, testConfig(), chat, undefined, {
+      now: () => new Date('2026-08-16T20:00:00.000Z'),
+    })
 
     const events = await collect(session.greet())
 
@@ -471,12 +474,13 @@ describe('AgentSession', () => {
     expect(chat.requests[0]?.messages).toEqual([])
     expect(chat.requests[0]?.tools).toEqual([])
 
-    // The greeting request must carry today's date and the greeting
-    // instruction, both folded into the session's system prompt: today's
-    // date is the only way the model can tell a recent-sessions entry
-    // dated five days ago from one dated yesterday.
-    const today = new Date().toISOString().slice(0, 10)
-    expect(chat.requests[0]?.system).toContain(today)
+    // The greeting is the one model call with no user message to carry a
+    // stamp, so its current local time is appended to the system string for
+    // that call only. Nothing later reuses that string, so this costs no
+    // cache: every later request's prefix is this.system plus messages.
+    expect(chat.requests[0]?.system).toContain(
+      'The current local time is Mon 2026-08-17 01:30 Asia/Kolkata.',
+    )
     expect(chat.requests[0]?.system).toContain('## Speak first')
 
     await engine.close()

@@ -154,12 +154,16 @@ export interface SessionContext {
   recentIntentions: { text: string; date: string }[]
   latestDailyRollup?: { date: string; body: string }
   recentSummaries: { sessionId: string; date: string; body: string }[]
-  // Today's date, in the same YYYY-MM-DD form used for recent session
-  // dates and the daily rollup date, built from the same clock passed to
-  // sessionContext. The model is never told the current date any other
-  // way, so this is the only anchor it has for reading an absolute date
-  // like "2026-08-12" as recent or old.
-  today: string
+  // The person's IANA timezone, and whether it is a fact they confirmed or
+  // only the default read off the machine at folder creation. The model is
+  // never told the current time through this context: the current time
+  // reaches it only as the stamp on the newest user message, which is the
+  // one part of the request that legitimately grows every turn. Everything
+  // rendered from these two fields is static for the life of a session, so
+  // the request prefix stays byte-stable and the provider's prefix cache
+  // keeps matching.
+  timezone: string
+  timezoneSource: 'system-default' | 'user-confirmed'
   // True when this memory has no reflected sessions and no arcs at all
   // (of any status), meaning the person has never actually talked with
   // reverie before. The session that was just started to hold the current
@@ -710,7 +714,8 @@ export class MemoryEngine {
       recentIntentions: recentIntentions.slice(0, RECENT_INTENTIONS_CAP),
       ...(latestDailyRollup ? { latestDailyRollup } : {}),
       recentSummaries,
-      today: formatDateUTC(now),
+      timezone: this.timezone(),
+      timezoneSource: this.timezoneSource(),
       isFirstSession,
     }
   }
