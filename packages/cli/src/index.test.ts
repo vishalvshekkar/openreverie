@@ -37,9 +37,7 @@ function testDeps(overrides: Partial<CliMainDeps> = {}): {
     countMemoryDocuments: async () => {
       throw new Error('countMemoryDocuments should not be called')
     },
-    runChat: async () => {
-      throw new Error('runChat should not be called')
-    },
+    runChat: async () => ({ interrupted: false }),
     createStylePersister: () => async (patch) => ({
       engagement: 'balanced',
       tone: 'warm',
@@ -317,5 +315,42 @@ describe('mainWith doctor', () => {
 
     expect(contextOpened).toBe(false)
     process.exitCode = 0
+  })
+})
+
+describe('mainWith chat interrupt exit code', () => {
+  it('sets exitCode 4 when runChat reports interrupted: true', async () => {
+    const dir = '/fake/memory'
+    const { deps } = testDeps({
+      openCliContext: async () => ({
+        ok: true,
+        engine: { warnings: [], close: async () => {} } as never,
+        config: { memoryDir: dir, safety: { mode: 'companion' } } as never,
+        chat: {} as never,
+      }),
+      runChat: async () => ({ interrupted: true }),
+    })
+
+    await mainWith([], deps)
+
+    expect(process.exitCode).toBe(4)
+    process.exitCode = 0
+  })
+
+  it('leaves exitCode unset (0) when runChat reports interrupted: false', async () => {
+    const dir = '/fake/memory'
+    const { deps } = testDeps({
+      openCliContext: async () => ({
+        ok: true,
+        engine: { warnings: [], close: async () => {} } as never,
+        config: { memoryDir: dir, safety: { mode: 'companion' } } as never,
+        chat: {} as never,
+      }),
+      runChat: async () => ({ interrupted: false }),
+    })
+
+    await mainWith([], deps)
+
+    expect(process.exitCode).toBe(0)
   })
 })

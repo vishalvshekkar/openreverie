@@ -209,7 +209,7 @@ describe('runChat', () => {
     const config = testConfig(dir)
     const { io, output } = scriptedIo(['hello', '/bye'])
 
-    await expect(runChat({ engine, config, chat, io })).resolves.toBeUndefined()
+    await expect(runChat({ engine, config, chat, io })).resolves.toEqual({ interrupted: false })
 
     const joined = output.join('')
     expect(joined).toContain('Hi there. Good to hear from you.')
@@ -322,7 +322,7 @@ describe('runChat', () => {
     const config = testConfig(dir)
     const { io, output } = scriptedIo(['hello', '/bye'])
 
-    await expect(runChat({ engine, config, chat, io })).resolves.toBeUndefined()
+    await expect(runChat({ engine, config, chat, io })).resolves.toEqual({ interrupted: false })
 
     const joined = output.join('')
     expect(joined).toContain('reflecting on this session...')
@@ -417,7 +417,7 @@ describe('runChat', () => {
       const config = testConfig(dir)
       const { io, output } = scriptedIo(['hello', '/bye'])
 
-      await expect(runChat({ engine, config, chat, io })).resolves.toBeUndefined()
+      await expect(runChat({ engine, config, chat, io })).resolves.toEqual({ interrupted: false })
 
       const joined = output.join('')
       expect(joined).toContain('could not finish reflecting')
@@ -453,7 +453,7 @@ describe('runChat', () => {
     // The pending question is still alive (not aborted): answering it
     // normally proves the REPL kept waiting rather than exiting.
     answerPending('/bye')
-    await expect(done).resolves.toBeUndefined()
+    await expect(done).resolves.toEqual({ interrupted: false })
 
     const joinedAfter = output.join('')
     expect(joinedAfter).toContain('reflecting on this session...')
@@ -475,7 +475,7 @@ describe('runChat', () => {
 
     // If the pending question is never unblocked, this hangs until the
     // test's own timeout, which is exactly the bug (C1) this test guards.
-    await expect(done).resolves.toBeUndefined()
+    await expect(done).resolves.toEqual({ interrupted: true })
 
     expect(cancelCount.value).toBeGreaterThanOrEqual(1)
     const joined = output.join('').toLowerCase()
@@ -490,6 +490,36 @@ describe('runChat', () => {
     const summaries = await sessionSummaryFiles(dir)
     expect(summaries).toHaveLength(0)
 
+    await engine.close()
+  })
+
+  it('reports interrupted: true when a second Ctrl-C ends the session idle at the prompt', async () => {
+    const chat = new FakeChatProvider([])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const { io, output, triggerInterrupt } = pendingQuestionIo()
+
+    const done = runChat({ engine, config, chat, io })
+    await waitForPrompt(output)
+
+    triggerInterrupt() // first: reminder only, question() stays pending
+    triggerInterrupt() // second: aborts the pending question() and exits
+
+    const result = await done
+
+    expect(result).toEqual({ interrupted: true })
+    await engine.close()
+  })
+
+  it('reports interrupted: false on a normal /bye exit', async () => {
+    const chat = new FakeChatProvider([{ text: emptyReflectionJson('done'), toolCalls: [] }])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const { io } = scriptedIo(['/bye'])
+
+    const result = await runChat({ engine, config, chat, io })
+
+    expect(result).toEqual({ interrupted: false })
     await engine.close()
   })
 
@@ -528,7 +558,7 @@ describe('runChat', () => {
       cancelPending() {},
     }
 
-    await expect(runChat({ engine, config, chat, io })).resolves.toBeUndefined()
+    await expect(runChat({ engine, config, chat, io })).resolves.toEqual({ interrupted: false })
 
     const joined = output.join('')
     expect(joined).toContain('Hel')
@@ -572,7 +602,7 @@ describe('runChat', () => {
       cancelPending() {},
     }
 
-    await expect(runChat({ engine, config, chat, io })).resolves.toBeUndefined()
+    await expect(runChat({ engine, config, chat, io })).resolves.toEqual({ interrupted: true })
 
     const joined = output.join('')
     expect(joined).toContain('Hel')
@@ -599,7 +629,7 @@ describe('runChat', () => {
     const config = testConfig(dir)
     const { io, output } = scriptedIo(['hello', '/bye'])
 
-    await expect(runChat({ engine, config, chat, io })).resolves.toBeUndefined()
+    await expect(runChat({ engine, config, chat, io })).resolves.toEqual({ interrupted: false })
 
     const joined = output.join('')
     expect(joined).toContain('partial')
@@ -635,7 +665,7 @@ describe('runChat', () => {
     const config = testConfig(dir)
     const { io, output } = scriptedIo(['/bye'])
 
-    await expect(runChat({ engine, config, chat, io })).resolves.toBeUndefined()
+    await expect(runChat({ engine, config, chat, io })).resolves.toEqual({ interrupted: false })
 
     const joined = output.join('')
     expect(joined).toContain('you> ')
@@ -715,7 +745,7 @@ describe('runChat', () => {
       cancelPending() {},
     }
 
-    await expect(runChat({ engine, config, chat, io })).resolves.toBeUndefined()
+    await expect(runChat({ engine, config, chat, io })).resolves.toEqual({ interrupted: true })
 
     const joined = output.join('')
     expect(joined).toContain('Hel')

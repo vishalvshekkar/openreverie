@@ -148,7 +148,7 @@ export async function runChat(deps: {
   setInterval?: (fn: () => void, ms: number) => unknown
   clearInterval?: (handle: unknown) => void
   now?: () => number
-}): Promise<void> {
+}): Promise<{ interrupted: boolean }> {
   const {
     engine,
     config,
@@ -217,7 +217,7 @@ export async function runChat(deps: {
   )
 
   if (interruptLevel >= 2) {
-    return
+    return { interrupted: true }
   }
 
   for (;;) {
@@ -230,7 +230,7 @@ export async function runChat(deps: {
     }
 
     if (interruptLevel >= 2) {
-      return
+      return { interrupted: true }
     }
 
     const trimmed = line.trim()
@@ -251,7 +251,7 @@ export async function runChat(deps: {
             'it will be reflected the next time reverie starts.\n',
         )
       }
-      return
+      return { interrupted: false }
     }
     if (trimmed === '') {
       continue
@@ -312,7 +312,7 @@ export async function runChat(deps: {
     }
 
     if (interruptLevel >= 2) {
-      return
+      return { interrupted: true }
     }
   }
 }

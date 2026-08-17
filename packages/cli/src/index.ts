@@ -280,7 +280,10 @@ export async function mainWith(args: string[], deps: CliMainDeps): Promise<void>
       const io = readlineChatIo()
       const toolDeps = { updateStyle: deps.createStylePersister(config, configPath) }
       try {
-        await deps.runChat({ engine, config, chat, io, toolDeps, colorEnabled })
+        const chatResult = await deps.runChat({ engine, config, chat, io, toolDeps, colorEnabled })
+        if (chatResult.interrupted) {
+          process.exitCode = 4
+        }
       } finally {
         io.close()
       }
