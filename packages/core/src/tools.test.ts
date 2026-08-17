@@ -641,3 +641,74 @@ describe('dispatchTool', () => {
     })
   })
 })
+
+it('list_arcs filters by status and pages, and its description matches what it returns', async () => {
+  const paths = memoryPaths(dir)
+  await MemoryEngine.open(dir, fakeDeps()).then((e) => e.close())
+
+  const openPath = join(paths.arcsDir, 'open.md')
+  await writeDocumentAtomic({
+    path: openPath,
+    meta: { id: 'doc_open_arc', name: 'Open Arc', status: 'active', updated: '2026-08-10' },
+    body: 'Still going.\n',
+  })
+  const donePath = join(paths.arcsDir, 'done.md')
+  await writeDocumentAtomic({
+    path: donePath,
+    meta: { id: 'doc_done_arc', name: 'Done Arc', status: 'closed', updated: '2026-02-02' },
+    body: 'Finished.\n',
+  })
+  await appendGraph(paths, [
+    {
+      ts: '2026-08-01T00:00:00.000Z',
+      op: 'assert',
+      node: 'arc_open',
+      type: 'arc',
+      label: 'Open Arc',
+      doc: openPath,
+    },
+    {
+      ts: '2026-02-01T00:00:00.000Z',
+      op: 'assert',
+      node: 'arc_done',
+      type: 'arc',
+      label: 'Done Arc',
+      doc: donePath,
+    },
+  ])
+
+  const engine = await MemoryEngine.open(dir, fakeDeps())
+  const sessionId = await engine.startSession()
+
+  const closedResult = await dispatchTool(
+    engine,
+    sessionId,
+    call('list_arcs', { status: 'closed' }),
+  )
+  const closed = JSON.parse(closedResult) as {
+    total: number
+    rows: { id: string; status: string; docId: string }[]
+  }
+  expect(closed.total).toBe(1)
+  expect(closed.rows[0]).toMatchObject({ id: 'arc_done', status: 'closed', docId: 'doc_done_arc' })
+
+  const pagedResult = await dispatchTool(engine, sessionId, call('list_arcs', { limit: 1 }))
+  const paged = JSON.parse(pagedResult) as { total: number; returned: number; hasMore: boolean }
+  expect(paged).toMatchObject({ total: 2, returned: 1, hasMore: true })
+
+  const badStatus = await dispatchTool(engine, sessionId, call('list_arcs', { status: 'sideways' }))
+  expect(JSON.parse(badStatus).error).toMatch(/list_arcs/)
+
+  const realmsPaged = await dispatchTool(engine, sessionId, call('list_realms', { limit: 1 }))
+  expect(JSON.parse(realmsPaged)).toMatchObject({ offset: 0, limit: 1 })
+
+  const defs = toolDefinitions()
+  const listArcs = defs.find((d) => d.name === 'list_arcs')
+  if (!listArcs) throw new Error('expected a list_arcs tool definition')
+  expect(listArcs.description).toContain('docId')
+  expect(listArcs.description).toContain('dormant')
+  const listArcsProps = (listArcs.parameters as { properties: Record<string, unknown> }).properties
+  expect(Object.keys(listArcsProps).sort()).toEqual(['limit', 'offset', 'status'])
+
+  await engine.close()
+})

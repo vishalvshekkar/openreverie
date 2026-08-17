@@ -10,7 +10,13 @@
 // model, so the model sees its own mistake in the transcript and can
 // correct it, rather than the whole session crashing on a bad call.
 
-import type { DocKind, GraphQuery, MemoryEngine } from '@openreverie/memory'
+import type {
+  DocKind,
+  GraphQuery,
+  ListArcsOptions,
+  ListRealmsOptions,
+  MemoryEngine,
+} from '@openreverie/memory'
 import type { ToolCall, ToolDefinition } from '@openreverie/providers'
 import { z } from 'zod'
 import type { StyleConfig } from './config.js'
@@ -52,7 +58,16 @@ const rememberArgs = z.strictObject({
   eventTime: z.string().optional(),
 })
 
-const noArgs = z.strictObject({})
+const listArcsArgs = z.strictObject({
+  status: z.enum(['active', 'dormant', 'closed']).optional(),
+  offset: z.number().optional(),
+  limit: z.number().optional(),
+})
+
+const listRealmsArgs = z.strictObject({
+  offset: z.number().optional(),
+  limit: z.number().optional(),
+})
 
 const updateStyleArgs = z
   .strictObject({
@@ -216,22 +231,51 @@ export function toolDefinitions(): ToolDefinition[] {
     {
       name: 'list_arcs',
       description:
-        'List every arc currently tracked, with its id, name, and status. Cheap orientation: use this to see what ' +
-        'is currently open before deciding whether to search or read further.',
+        'List the arcs (ongoing storylines) tracked in memory, with each arc id, name, status, when it was last ' +
+        'touched, and the docId of its page when it has one. Pass that docId to read_document for the full ' +
+        'narrative. Status comes from the arc page itself and is absent when the arc has no page or its page ' +
+        'cannot be read. The system prompt preloads active arcs only, so this is the only way to reach a dormant ' +
+        'or closed arc. Cheap orientation: use it to see what is open before deciding whether to search or read ' +
+        'further. Results come back as a page: total is the true count, and hasMore says whether more remain.',
       parameters: {
         type: 'object',
-        properties: {},
+        properties: {
+          status: {
+            type: 'string',
+            enum: ['active', 'dormant', 'closed'],
+            description: 'Return only arcs with this status. Omit to get arcs of every status.',
+          },
+          offset: {
+            type: 'number',
+            description: 'How many rows to skip. Defaults to 0.',
+          },
+          limit: {
+            type: 'number',
+            description: 'How many rows to return. Defaults to 50, and is capped at 200.',
+          },
+        },
         additionalProperties: false,
       },
     },
     {
       name: 'list_realms',
       description:
-        'List every realm (life domain) currently tracked, with its id and name. Cheap orientation, like list_arcs, ' +
-        'for getting your bearings before a deeper lookup.',
+        'List the realms (life domains) tracked in memory, with each realm id, name, and the docId of its page ' +
+        'when it has one. Pass that docId to read_document for the full text. Cheap orientation, like list_arcs, ' +
+        'for getting your bearings before a deeper lookup. Results come back as a page: total is the true count, ' +
+        'and hasMore says whether more remain.',
       parameters: {
         type: 'object',
-        properties: {},
+        properties: {
+          offset: {
+            type: 'number',
+            description: 'How many rows to skip. Defaults to 0.',
+          },
+          limit: {
+            type: 'number',
+            description: 'How many rows to return. Defaults to 50, and is capped at 200.',
+          },
+        },
         additionalProperties: false,
       },
     },
@@ -395,15 +439,29 @@ async function dispatchRemember(
 }
 
 async function dispatchListArcs(engine: MemoryEngine, value: unknown): Promise<string> {
-  const parsed = noArgs.safeParse(value)
+  const parsed = listArcsArgs.safeParse(value)
   if (!parsed.success) return errorJson(zodErrorMessage('list_arcs', parsed.error))
-  return JSON.stringify(await engine.listArcs())
+
+  // Rebuilt key by key rather than spread: exactOptionalPropertyTypes
+  // distinguishes an absent key from a key present and undefined, and zod's
+  // .optional() types as `T | undefined`.
+  const options: ListArcsOptions = {}
+  if (parsed.data.status !== undefined) options.status = parsed.data.status
+  if (parsed.data.offset !== undefined) options.offset = parsed.data.offset
+  if (parsed.data.limit !== undefined) options.limit = parsed.data.limit
+
+  return JSON.stringify(await engine.listArcs(options))
 }
 
 async function dispatchListRealms(engine: MemoryEngine, value: unknown): Promise<string> {
-  const parsed = noArgs.safeParse(value)
+  const parsed = listRealmsArgs.safeParse(value)
   if (!parsed.success) return errorJson(zodErrorMessage('list_realms', parsed.error))
-  return JSON.stringify(engine.listRealms())
+
+  const options: ListRealmsOptions = {}
+  if (parsed.data.offset !== undefined) options.offset = parsed.data.offset
+  if (parsed.data.limit !== undefined) options.limit = parsed.data.limit
+
+  return JSON.stringify(engine.listRealms(options))
 }
 
 async function dispatchUpdateStyle(deps: ToolDeps | undefined, value: unknown): Promise<string> {
