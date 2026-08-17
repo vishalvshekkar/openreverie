@@ -3,6 +3,7 @@
 // truth, SQLite (FTS5 + vectors) as a derived, rebuildable index.
 // See docs/superpowers/specs for the design.
 
+export * from './dateSpan.js'
 export * from './documents.js'
 export * from './engine.js'
 export * from './gitSync.js'
