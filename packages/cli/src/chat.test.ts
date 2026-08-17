@@ -822,6 +822,71 @@ describe('openCliContext', () => {
       await rm(dir, { recursive: true, force: true })
     }
   })
+
+  it('tags a config load failure with kind: config', async () => {
+    const result = await openCliContext({
+      loadConfig: async () => {
+        throw new Error('No config found. Run: reverie setup')
+      },
+      buildChat: () => {
+        throw new Error('should not be called')
+      },
+      buildEmbeddings: () => {
+        throw new Error('should not be called')
+      },
+      openEngine: async () => {
+        throw new Error('should not be called')
+      },
+    })
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.kind).toBe('config')
+    }
+  })
+
+  it('tags a provider construction failure with kind: provider', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'openreverie-cli-context-kind-'))
+    try {
+      const result = await openCliContext({
+        loadConfig: async () => testConfig(dir),
+        buildChat: () => {
+          throw new Error('unknown provider: openai2')
+        },
+        buildEmbeddings: () => new FakeEmbeddingProvider(),
+        openEngine: async (config, deps) => MemoryEngine.open(config.memoryDir, deps),
+      })
+
+      expect(result.ok).toBe(false)
+      if (!result.ok) {
+        expect(result.kind).toBe('provider')
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('tags an engine-open failure with kind: config', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'openreverie-cli-context-openfail-'))
+    try {
+      const result = await openCliContext({
+        loadConfig: async () => testConfig(dir),
+        buildChat: () => new FakeChatProvider([]),
+        buildEmbeddings: () => new FakeEmbeddingProvider(),
+        openEngine: async () => {
+          throw new Error('engine open failed: disk full')
+        },
+      })
+
+      expect(result.ok).toBe(false)
+      if (!result.ok) {
+        expect(result.kind).toBe('config')
+        expect(result.message).toBe('engine open failed: disk full')
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('countMemoryDocuments', () => {

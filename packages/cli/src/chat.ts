@@ -348,7 +348,7 @@ export interface CliEngineDeps {
 
 export type CliContextResult =
   | { ok: true; engine: MemoryEngine; config: ReverieConfig; chat: ChatProvider }
-  | { ok: false; message: string }
+  | { ok: false; kind: 'config' | 'provider'; message: string }
 
 // Loads config, builds the configured providers, and opens the engine, in
 // that order, stopping at the first failure. Every failure (missing
@@ -360,7 +360,7 @@ export async function openCliContext(deps: CliEngineDeps): Promise<CliContextRes
   try {
     config = await deps.loadConfig()
   } catch (err) {
-    return { ok: false, message: errorMessage(err) }
+    return { ok: false, kind: 'config', message: errorMessage(err) }
   }
 
   let chat: ChatProvider
@@ -369,7 +369,7 @@ export async function openCliContext(deps: CliEngineDeps): Promise<CliContextRes
     chat = deps.buildChat(config)
     embeddings = deps.buildEmbeddings(config)
   } catch (err) {
-    return { ok: false, message: errorMessage(err) }
+    return { ok: false, kind: 'provider', message: errorMessage(err) }
   }
 
   try {
@@ -381,7 +381,7 @@ export async function openCliContext(deps: CliEngineDeps): Promise<CliContextRes
     })
     return { ok: true, engine, config, chat }
   } catch (err) {
-    return { ok: false, message: errorMessage(err) }
+    return { ok: false, kind: 'config', message: errorMessage(err) }
   }
 }
 

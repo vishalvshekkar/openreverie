@@ -250,7 +250,7 @@ export async function mainWith(args: string[], deps: CliMainDeps): Promise<void>
 
   if (!context.ok) {
     deps.write(`${context.message}\n`)
-    process.exitCode = 1
+    process.exitCode = context.kind === 'config' ? 2 : 3
     return
   }
 

@@ -250,3 +250,25 @@ describe('mainWith --help', () => {
     process.exitCode = 0
   })
 })
+
+describe('mainWith exit codes for openCliContext failures', () => {
+  it('exits 2 for a config-kind failure', async () => {
+    const { deps, output } = testDeps({
+      openCliContext: async () => ({ ok: false, kind: 'config', message: 'bad config' }),
+    })
+    await mainWith(['reflect'], deps)
+    expect(output()).toBe('bad config\n')
+    expect(process.exitCode).toBe(2)
+    process.exitCode = 0
+  })
+
+  it('exits 3 for a provider-kind failure', async () => {
+    const { deps, output } = testDeps({
+      openCliContext: async () => ({ ok: false, kind: 'provider', message: 'bad provider' }),
+    })
+    await mainWith(['reflect'], deps)
+    expect(output()).toBe('bad provider\n')
+    expect(process.exitCode).toBe(3)
+    process.exitCode = 0
+  })
+})
