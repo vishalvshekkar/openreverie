@@ -36,6 +36,7 @@ import {
   type SequencedGraphRecord,
 } from './graph.js'
 import { ensureMemoryTree, type MemoryPaths, memoryPaths } from './paths.js'
+import { loadProfile, type Profile, writeProfile } from './profile.js'
 import {
   type Proposal,
   type ProposalResolution,
@@ -60,6 +61,7 @@ import {
   pendingWeeklyRollups,
 } from './rollups.js'
 import { type DocKind, MemoryIndex, type SearchHit } from './sqlite.js'
+import { isValidIanaTimeZone, systemTimeZone } from './time.js'
 import { type PublicTranscriptLine, SessionStore, type TranscriptLine } from './transcripts.js'
 
 export type { SequencedGraphRecord } from './graph.js'
@@ -208,6 +210,11 @@ export class MemoryEngine {
   private graphState: GraphState
   private docPaths = new Map<string, string>()
   private docIdByPath = new Map<string, string>()
+  // The loaded profile.md, cached for cheap synchronous reads the same way
+  // graphState and docPaths are. Source of truth is the file; this copy is
+  // refreshed on every write that touches it, so the next read inside this
+  // process sees the new value without a second file read racing the first.
+  private profileCache: Profile
   private readonly liveItems = new Map<string, ReflectionItem[]>()
   readonly warnings: string[] = []
 
@@ -224,11 +231,13 @@ export class MemoryEngine {
     deps: EngineDeps,
     index: MemoryIndex,
     graphState: GraphState,
+    profile: Profile,
   ) {
     this.paths = paths
     this.deps = deps
     this.index = index
     this.graphState = graphState
+    this.profileCache = profile
   }
 
   static async open(
@@ -241,7 +250,11 @@ export class MemoryEngine {
     const index = MemoryIndex.open(paths.indexDb)
     const graphState = await readGraph(paths)
     index.replaceGraph(graphState)
-    const engine = new MemoryEngine(paths, deps, index, graphState)
+    // Loaded before the engine is constructed, and therefore before
+    // runMaintenance() runs below: maintenance computes local calendar days
+    // from this timezone, so a profile loaded after it would be too late.
+    const profile = await loadProfile(paths)
+    const engine = new MemoryEngine(paths, deps, index, graphState, profile)
     engine.clearWarnings()
     // runMaintenance() before refreshDocPaths(): runMaintenance clears
     // warnings as its own first step, which would otherwise wipe out any
@@ -269,6 +282,45 @@ export class MemoryEngine {
 
   async close(): Promise<void> {
     this.index.close()
+  }
+
+  profile(): Profile {
+    return this.profileCache
+  }
+
+  // Every caller that needs a zone goes through here rather than reading
+  // the optional field itself, so there is exactly one place that decides
+  // what happens when profile.md carries no timezone: fall back to the
+  // machine's own zone, which Intl always answers with.
+  timezone(): string {
+    const stored = this.profileCache.meta.timezone
+    return typeof stored === 'string' && stored.length > 0 ? stored : systemTimeZone()
+  }
+
+  timezoneSource(): 'system-default' | 'user-confirmed' {
+    return this.profileCache.meta.timezoneSource === 'user-confirmed'
+      ? 'user-confirmed'
+      : 'system-default'
+  }
+
+  // Writes a confirmed personal fact into profile.md and refreshes the
+  // cached copy. Called by the live update_profile tool and by reflection's
+  // profileUpdates backstop; both are the person telling us, so the source
+  // is always 'user-confirmed'.
+  async updateProfile(patch: { timezone?: string }): Promise<Profile> {
+    const current = this.profileCache
+    const meta: Profile['meta'] = { ...current.meta }
+    if (patch.timezone !== undefined) {
+      if (!isValidIanaTimeZone(patch.timezone)) {
+        throw new Error(`"${patch.timezone}" is not a recognized IANA timezone name.`)
+      }
+      meta.timezone = patch.timezone
+      meta.timezoneSource = 'user-confirmed'
+    }
+    const next: Profile = { meta, body: current.body }
+    await writeProfile(this.paths, next)
+    this.profileCache = next
+    return next
   }
 
   async startSession(now: Date = new Date()): Promise<string> {

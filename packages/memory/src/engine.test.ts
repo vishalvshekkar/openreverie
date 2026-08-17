@@ -13,6 +13,7 @@ import { listDocuments, newId, readDocument, writeDocumentAtomic } from './docum
 import { type EngineDeps, MemoryEngine } from './engine.js'
 import { appendGraph, readGraph } from './graph.js'
 import { ensureMemoryTree, type MemoryPaths, memoryPaths } from './paths.js'
+import { loadProfile, writeProfile } from './profile.js'
 import { appendProposals, type Proposal, pendingProposals } from './proposals.js'
 import { applyReflection, type ReflectionItem, type ReflectionOutput } from './reflection.js'
 import { SessionStore } from './transcripts.js'
@@ -3775,6 +3776,78 @@ describe('buildReflectionContext people and entities wiring', () => {
     // Only 30 of the 35 entity lines actually appear (plus the note above).
     expect(prompt).not.toContain('entity_0: Entity 0')
     expect(prompt).toContain('entity_34: Entity 34')
+
+    await engine.close()
+  })
+})
+
+describe('MemoryEngine profile', () => {
+  let dir: string
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-profile-'))
+  })
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  it('caches the seeded profile on open and reports it as a system default', async () => {
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])), {
+      maintenance: false,
+    })
+
+    expect(engine.timezoneSource()).toBe('system-default')
+    expect(typeof engine.timezone()).toBe('string')
+    expect(engine.timezone().length).toBeGreaterThan(0)
+
+    await engine.close()
+  })
+
+  it('updateProfile writes a confirmed timezone to disk and refreshes the cached copy', async () => {
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])), {
+      maintenance: false,
+    })
+
+    const updated = await engine.updateProfile({ timezone: 'Asia/Kolkata' })
+
+    expect(updated.meta.timezone).toBe('Asia/Kolkata')
+    expect(engine.timezone()).toBe('Asia/Kolkata')
+    expect(engine.timezoneSource()).toBe('user-confirmed')
+
+    const onDisk = await loadProfile(memoryPaths(dir))
+    expect(onDisk.meta.timezone).toBe('Asia/Kolkata')
+    expect(onDisk.meta.timezoneSource).toBe('user-confirmed')
+
+    await engine.close()
+  })
+
+  it('updateProfile rejects a timezone Intl does not recognize and leaves the cache untouched', async () => {
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])), {
+      maintenance: false,
+    })
+    const before = engine.timezone()
+
+    await expect(engine.updateProfile({ timezone: 'Nowhere/Fake' })).rejects.toThrow('Nowhere/Fake')
+    expect(engine.timezone()).toBe(before)
+
+    await engine.close()
+  })
+
+  it('updateProfile keeps unrelated frontmatter keys that were already in the file', async () => {
+    const paths = memoryPaths(dir)
+    await ensureMemoryTree(paths)
+    const seeded = await loadProfile(paths)
+    await writeProfile(paths, { meta: { ...seeded.meta, pronouns: 'she/her' }, body: seeded.body })
+
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])), {
+      maintenance: false,
+    })
+    await engine.updateProfile({ timezone: 'Europe/Berlin' })
+
+    const onDisk = await loadProfile(paths)
+    expect(onDisk.meta.pronouns).toBe('she/her')
+    expect(onDisk.meta.timezone).toBe('Europe/Berlin')
 
     await engine.close()
   })
