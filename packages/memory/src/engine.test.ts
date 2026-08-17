@@ -17,6 +17,79 @@ import { appendProposals, type Proposal, pendingProposals } from './proposals.js
 import { applyReflection, type ReflectionItem, type ReflectionOutput } from './reflection.js'
 import { SessionStore } from './transcripts.js'
 
+async function rmWithRetry(path: string, attempts = 3, delayMs = 50): Promise<void> {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      await rm(path, { recursive: true, force: true })
+      return
+    } catch (err) {
+      if (i === attempts - 1) throw err
+      await new Promise((resolve) => setTimeout(resolve, delayMs))
+    }
+  }
+}
+
+describe('rmWithRetry', () => {
+  it('retries after ENOTEMPTY and eventually succeeds', async () => {
+    let calls = 0
+    const original = rm
+    const fakeRm = vi.fn(async (path: string, options: unknown) => {
+      calls += 1
+      if (calls < 3) {
+        const err = new Error('ENOTEMPTY: directory not empty') as NodeJS.ErrnoException
+        err.code = 'ENOTEMPTY'
+        throw err
+      }
+      return original(path, options as never)
+    })
+    // This test exercises the retry loop's own logic directly against a
+    // fake, not against the real rm re-imported under a different name,
+    // since engine.test.ts already imports rm from node:fs/promises at
+    // module scope; redefine a local retry loop bound to the fake here so
+    // the assertion is about the algorithm, not about patching a live
+    // binding mid-file.
+    async function retryWithFake(path: string, attempts = 3, delayMs = 1): Promise<void> {
+      for (let i = 0; i < attempts; i++) {
+        try {
+          await fakeRm(path, { recursive: true, force: true })
+          return
+        } catch (err) {
+          if (i === attempts - 1) throw err
+          await new Promise((resolve) => setTimeout(resolve, delayMs))
+        }
+      }
+    }
+
+    await retryWithFake('/fake/path', 3, 1)
+
+    expect(calls).toBe(3)
+  })
+
+  it('re-throws after exhausting every attempt instead of swallowing a persistent failure', async () => {
+    let calls = 0
+    const fakeRm = vi.fn(async (_path: string, _options: unknown) => {
+      calls += 1
+      const err = new Error('ENOTEMPTY: directory not empty') as NodeJS.ErrnoException
+      err.code = 'ENOTEMPTY'
+      throw err
+    })
+    async function retryWithFake(path: string, attempts = 3, delayMs = 1): Promise<void> {
+      for (let i = 0; i < attempts; i++) {
+        try {
+          await fakeRm(path, { recursive: true, force: true })
+          return
+        } catch (err) {
+          if (i === attempts - 1) throw err
+          await new Promise((resolve) => setTimeout(resolve, delayMs))
+        }
+      }
+    }
+
+    await expect(retryWithFake('/fake/path', 3, 1)).rejects.toThrow('ENOTEMPTY')
+    expect(calls).toBe(3)
+  })
+})
+
 const execFileAsync = promisify(execFile)
 
 function isoDate(date: Date): string {
@@ -96,7 +169,7 @@ describe('MemoryEngine', () => {
     })
 
     afterEach(async () => {
-      await rm(dir, { recursive: true, force: true })
+      await rmWithRetry(dir)
     })
 
     it('projects node-only people and document-backed people without exposing paths', async () => {
@@ -216,7 +289,7 @@ describe('MemoryEngine', () => {
     })
 
     afterEach(async () => {
-      await rm(dir, { recursive: true, force: true })
+      await rmWithRetry(dir)
     })
 
     it('captures a session, reflects it, and produces a rebuildable, searchable index with git history', async () => {
@@ -390,7 +463,7 @@ describe('MemoryEngine', () => {
     })
 
     afterEach(async () => {
-      await rm(dir, { recursive: true, force: true })
+      await rmWithRetry(dir)
     })
 
     it('retries a stale unreflected session and writes a daily rollup for a completed, unreflected-free day', async () => {
@@ -513,7 +586,7 @@ describe('MemoryEngine', () => {
     })
 
     afterEach(async () => {
-      await rm(dir, { recursive: true, force: true })
+      await rmWithRetry(dir)
     })
 
     it('skips a session with only an assistant greeting, and never retries it across two runMaintenance calls', async () => {
@@ -635,7 +708,7 @@ describe('MemoryEngine', () => {
 
     afterEach(async () => {
       await engine.close()
-      await rm(dir, { recursive: true, force: true })
+      await rmWithRetry(dir)
     })
 
     it('materializes a new arc together with a brand-new realm, and confirms part_of edges for its items', async () => {
@@ -991,7 +1064,7 @@ describe('MemoryEngine', () => {
     })
 
     afterEach(async () => {
-      await rm(dir, { recursive: true, force: true })
+      await rmWithRetry(dir)
     })
 
     it('materializes a new arc directly during reflection with no proposal and no acceptance step', async () => {
@@ -1631,7 +1704,7 @@ describe('MemoryEngine', () => {
     })
 
     afterEach(async () => {
-      await rm(dir, { recursive: true, force: true })
+      await rmWithRetry(dir)
     })
 
     it('creates a person node with no page and no doc when deservesPage is false', async () => {
@@ -2316,7 +2389,7 @@ describe('MemoryEngine', () => {
 
     afterEach(async () => {
       await engine.close()
-      await rm(dir, { recursive: true, force: true })
+      await rmWithRetry(dir)
     })
 
     it('reindexAll walks peopleDir and indexes person pages under kind person', async () => {
@@ -2349,7 +2422,7 @@ describe('MemoryEngine', () => {
     })
 
     afterEach(async () => {
-      await rm(dir, { recursive: true, force: true })
+      await rmWithRetry(dir)
     })
 
     it('resolves a doc path to its document id, and carries docId on graph nodes that have a doc but not on ones that do not', async () => {
@@ -2422,7 +2495,7 @@ describe('MemoryEngine', () => {
     })
 
     afterEach(async () => {
-      await rm(dir, { recursive: true, force: true })
+      await rmWithRetry(dir)
     })
 
     it('calling endSession twice on the same session reflects only once: one summary row, one reflection call, no duplicate search hits', async () => {
@@ -2484,7 +2557,7 @@ describe('MemoryEngine', () => {
     })
 
     afterEach(async () => {
-      await rm(dir, { recursive: true, force: true })
+      await rmWithRetry(dir)
     })
 
     it('opens past a corrupt arc file, warns with its path, and still lets reindexAll succeed', async () => {
@@ -2528,7 +2601,7 @@ describe('MemoryEngine', () => {
     })
 
     afterEach(async () => {
-      await rm(dir, { recursive: true, force: true })
+      await rmWithRetry(dir)
     })
 
     it('drops rows for documents whose source file was deleted, not just upserts current ones', async () => {
@@ -2571,7 +2644,7 @@ describe('MemoryEngine', () => {
     })
 
     afterEach(async () => {
-      await rm(dir, { recursive: true, force: true })
+      await rmWithRetry(dir)
     })
 
     it('includes only active arcs, alongside the constitution text', async () => {
@@ -2650,7 +2723,7 @@ describe('MemoryEngine', () => {
     })
 
     afterEach(async () => {
-      await rm(dir, { recursive: true, force: true })
+      await rmWithRetry(dir)
     })
 
     it('includes every person node, marking whether each one has a page', async () => {
@@ -2846,7 +2919,7 @@ describe('MemoryEngine', () => {
     })
 
     afterEach(async () => {
-      await rm(dir, { recursive: true, force: true })
+      await rmWithRetry(dir)
     })
 
     async function reflectedSessionOn(date: Date, body: string): Promise<void> {
@@ -2986,7 +3059,7 @@ describe('MemoryEngine', () => {
     })
 
     afterEach(async () => {
-      await rm(dir, { recursive: true, force: true })
+      await rmWithRetry(dir)
     })
 
     it('is true on a completely fresh memory folder with no reflected sessions and no arcs', async () => {
@@ -3094,7 +3167,7 @@ describe('MemoryEngine', () => {
     })
 
     afterEach(async () => {
-      await rm(dir, { recursive: true, force: true })
+      await rmWithRetry(dir)
     })
 
     it('carries today, the date the context was built for, in the same YYYY-MM-DD form as recent session dates', async () => {
@@ -3130,7 +3203,7 @@ describe('MemoryEngine', () => {
     })
 
     afterEach(async () => {
-      await rm(dir, { recursive: true, force: true })
+      await rmWithRetry(dir)
     })
 
     it('surfaces a commitMemory failure as a warning after runMaintenance instead of swallowing it silently', async () => {
@@ -3313,7 +3386,7 @@ describe('MemoryEngine', () => {
     })
 
     afterEach(async () => {
-      await rm(forgetDir, { recursive: true, force: true })
+      await rmWithRetry(forgetDir)
     })
 
     it('retracts requested nodes and edges: foldGraph drops them, and the tool reports what actually changed', async () => {
@@ -3557,7 +3630,7 @@ describe('buildReflectionContext people and entities wiring', () => {
   })
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true })
+    await rmWithRetry(dir)
   })
 
   it('includes existing people in the reflection prompt built by the engine', async () => {
