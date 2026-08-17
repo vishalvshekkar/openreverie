@@ -32,6 +32,7 @@ import {
 } from './chat.js'
 import { runRead } from './read.js'
 import { runSetup } from './setup.js'
+import { readOwnVersion } from './version.js'
 import { runWebCommand } from './web.js'
 
 const KNOWN_SUBCOMMANDS = new Set(['setup', 'web', 'read', 'reindex', 'reflect'])
@@ -116,9 +117,16 @@ export interface CliMainDeps {
   configPath: string
   write: (text: string) => void
   colorEnabled: () => boolean
+  readVersion: () => string
 }
 
 export async function mainWith(args: string[], deps: CliMainDeps): Promise<void> {
+  if (args.includes('--version') || args.includes('-v') || args[0] === 'version') {
+    deps.write(`${deps.readVersion()}\n`)
+    process.exitCode = 0
+    return
+  }
+
   const subcommand = args[0]
 
   if (subcommand !== undefined && !KNOWN_SUBCOMMANDS.has(subcommand)) {
@@ -204,6 +212,7 @@ const defaultDeps: CliMainDeps = {
   configPath: defaultConfigPath(),
   write: (text) => process.stdout.write(text),
   colorEnabled: colorsEnabled,
+  readVersion: readOwnVersion,
 }
 
 // The entry guard compares the real path of the invoked script with this

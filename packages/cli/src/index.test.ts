@@ -89,3 +89,34 @@ describe('mainWith unknown subcommand', () => {
     process.exitCode = 0
   })
 })
+
+describe('mainWith --version', () => {
+  it('prints the bare version and exits 0 for --version, without touching config', async () => {
+    const { deps, output } = testDeps({ readVersion: () => '1.2.3' })
+    await mainWith(['--version'], deps)
+    expect(output()).toBe('1.2.3\n')
+    expect(process.exitCode).toBe(0)
+    process.exitCode = 0
+  })
+
+  it('prints the bare version for -v', async () => {
+    const { deps, output } = testDeps({ readVersion: () => '1.2.3' })
+    await mainWith(['-v'], deps)
+    expect(output()).toBe('1.2.3\n')
+    process.exitCode = 0
+  })
+
+  it('prints the bare version for the version subcommand', async () => {
+    const { deps, output } = testDeps({ readVersion: () => '1.2.3' })
+    await mainWith(['version'], deps)
+    expect(output()).toBe('1.2.3\n')
+    process.exitCode = 0
+  })
+
+  it('wins over other garbage arguments, per spec 1.2', async () => {
+    const { deps, output } = testDeps({ readVersion: () => '1.2.3' })
+    await mainWith(['--version', '--config', '/bogus'], deps)
+    expect(output()).toBe('1.2.3\n')
+    process.exitCode = 0
+  })
+})
