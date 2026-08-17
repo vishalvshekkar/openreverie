@@ -240,4 +240,59 @@ describe('SessionStore', () => {
       /Malformed JSON in transcript for session.*line 2/,
     )
   })
+
+  it('reports the summary-derived date while still reporting the directory name it lives in', async () => {
+    const store = await SessionStore.start(paths, new Date('2026-08-15T21:00:00Z'), 'UTC')
+    await store.appendLine({
+      ts: '2026-08-15T21:00:00.000Z',
+      utcOffsetMinutes: 330,
+      role: 'user',
+      content: 'Late one.',
+    })
+    await writeFile(
+      join(store.dir, 'summary.md'),
+      '---\nid: doc_x\ndate: 2026-08-16\n---\nSummary text.\n',
+      'utf8',
+    )
+
+    const sessions = await SessionStore.listSessions(paths)
+    expect(sessions).toEqual([
+      {
+        sessionId: store.sessionId,
+        dirName: `2026-08-15-${store.sessionId}`,
+        date: '2026-08-16',
+        reflected: true,
+        skipped: false,
+      },
+    ])
+  })
+
+  it('derives an unreflected session date from the first transcript line, and falls back to the prefix without an offset', async () => {
+    const withOffset = await SessionStore.start(paths, new Date('2026-08-15T21:00:00Z'), 'UTC')
+    await withOffset.appendLine({
+      ts: '2026-08-15T21:00:00.000Z',
+      utcOffsetMinutes: 330,
+      role: 'user',
+      content: 'Late one.',
+    })
+
+    const withoutOffset = await SessionStore.start(paths, new Date('2026-08-14T21:00:00Z'), 'UTC')
+    await withoutOffset.appendLine({
+      ts: '2026-08-14T21:00:00.000Z',
+      role: 'user',
+      content: 'A line written before offsets existed.',
+    })
+
+    const empty = await SessionStore.start(paths, new Date('2026-08-13T21:00:00Z'), 'UTC')
+
+    const sessions = await SessionStore.listSessions(paths)
+    const byId = new Map(sessions.map((session) => [session.sessionId, session.date]))
+    expect(byId.get(withOffset.sessionId)).toBe('2026-08-16')
+    expect(byId.get(withoutOffset.sessionId)).toBe('2026-08-14')
+    expect(byId.get(empty.sessionId)).toBe('2026-08-13')
+
+    const first = await SessionStore.readFirstLine(paths, withOffset.sessionId)
+    expect(first?.content).toBe('Late one.')
+    expect(await SessionStore.readFirstLine(paths, empty.sessionId)).toBeUndefined()
+  })
 })

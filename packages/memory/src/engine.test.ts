@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -16,6 +16,7 @@ import { ensureMemoryTree, type MemoryPaths, memoryPaths } from './paths.js'
 import { loadProfile, writeProfile } from './profile.js'
 import { appendProposals, type Proposal, pendingProposals } from './proposals.js'
 import { applyReflection, type ReflectionItem, type ReflectionOutput } from './reflection.js'
+import { buildDailyRollup } from './rollups.js'
 import { SessionStore } from './transcripts.js'
 
 async function rmWithRetry(path: string, attempts = 3, delayMs = 50): Promise<void> {
@@ -3953,6 +3954,96 @@ describe('local day boundaries', () => {
     const sessions = await SessionStore.listSessions(paths)
     const created = sessions.find((session) => session.sessionId === sessionId)
     expect(created?.dirName).toBe(`2026-08-17-${sessionId}`)
+
+    await engine.close()
+  })
+})
+
+describe('a session whose logical date differs from its directory prefix', () => {
+  let dir: string
+  let paths: MemoryPaths
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-divergent-'))
+    paths = memoryPaths(dir)
+    await ensureMemoryTree(paths)
+    await pinTimezoneUtc(paths)
+  })
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  // The directory is 2026-08-15-<id>; the summary inside it says 2026-08-16.
+  async function seedDivergentSession(summaryBody: string): Promise<string> {
+    const store = await SessionStore.start(paths, new Date('2026-08-15T21:00:00Z'), 'UTC')
+    await store.appendLine({
+      ts: '2026-08-15T21:00:00.000Z',
+      utcOffsetMinutes: 330,
+      role: 'user',
+      content: 'Late one.',
+    })
+    await writeDocumentAtomic({
+      path: join(store.dir, 'summary.md'),
+      meta: {
+        id: newId('doc'),
+        kind: 'summary',
+        session: store.sessionId,
+        date: '2026-08-16',
+        items: [],
+      },
+      body: summaryBody,
+    })
+    return store.sessionId
+  }
+
+  it('sessionContext reads the summary out of the directory that actually exists', async () => {
+    const sessionId = await seedDivergentSession('A late Saturday night.\n')
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])), {
+      maintenance: false,
+    })
+
+    const context = await engine.sessionContext(new Date('2026-08-17T12:00:00.000Z'))
+
+    const entry = context.recentSummaries.find((summary) => summary.sessionId === sessionId)
+    expect(entry?.date).toBe('2026-08-16')
+    expect(entry?.body.trim()).toBe('A late Saturday night.')
+
+    await engine.close()
+  })
+
+  it('buildDailyRollup finds the divergent session summary for its logical date', async () => {
+    await seedDivergentSession('A late Saturday night.\n')
+    const chat = new FakeChatProvider([{ text: 'A quiet late night.', toolCalls: [] }])
+
+    const doc = await buildDailyRollup({ chat, model: 'fake-reflect', paths }, '2026-08-16')
+
+    expect(doc.body.trim()).toBe('A quiet late night.')
+
+    await expect(readDocument(join(paths.rollupsDailyDir, '2026-08-16.md'))).resolves.toBeDefined()
+  })
+
+  it('a skipped summary is written into the existing directory, never into a second one', async () => {
+    const store = await SessionStore.start(paths, new Date('2026-08-15T21:00:00Z'), 'UTC')
+    await store.appendLine({
+      ts: '2026-08-15T21:00:00.000Z',
+      utcOffsetMinutes: 330,
+      role: 'assistant',
+      content: 'Good to see you.',
+    })
+
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])), {
+      maintenance: false,
+    })
+    await engine.runMaintenance(new Date('2026-08-17T12:00:00.000Z'))
+
+    const entries = await readdir(paths.sessionsDir, { withFileTypes: true })
+    const dirs = entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name)
+    expect(dirs).toEqual([`2026-08-15-${store.sessionId}`])
+
+    const summary = await readDocument(join(store.dir, 'summary.md'))
+    expect(summary.meta.skipped).toBe(true)
+    expect(summary.meta.date).toBe('2026-08-16')
 
     await engine.close()
   })

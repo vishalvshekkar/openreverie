@@ -5,13 +5,14 @@
 // deletes a line once it is written. There is deliberately no delete or
 // rewrite API here.
 
-import { access, appendFile, mkdir, readdir, readFile } from 'node:fs/promises'
+import type { FileHandle } from 'node:fs/promises'
+import { access, appendFile, mkdir, open, readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { ToolCall } from '@openreverie/providers'
 import { decodeTime } from 'ulid'
 import { newId, readDocument } from './documents.js'
 import type { MemoryPaths } from './paths.js'
-import { formatLocalDate } from './time.js'
+import { formatLocalDate, localDateFromStored } from './time.js'
 
 export interface TranscriptLine {
   // A UTC instant, ISO 8601: record time, when this line was written down.
@@ -165,6 +166,18 @@ export class SessionStore {
     return findSessionDir(paths, sessionId)
   }
 
+  // The first line of a session's transcript, read through a bounded chunk
+  // rather than by parsing the whole file. Used to derive a session's
+  // logical local day without paying O(every transcript ever written) on a
+  // path that runs at every session start.
+  static async readFirstLine(
+    paths: MemoryPaths,
+    sessionId: string,
+  ): Promise<TranscriptLine | undefined> {
+    const dir = await findSessionDir(paths, sessionId)
+    return readFirstTranscriptLine(dir)
+  }
+
   static async listSessions(paths: MemoryPaths): Promise<
     {
       sessionId: string
@@ -190,27 +203,44 @@ export class SessionStore {
     for (const dirName of dirNames) {
       const match = dirName.match(SESSION_DIR_PATTERN)
       if (!match) continue
-      const date = match[1] as string
+      const prefixDate = match[1] as string
       const sessionId = match[2] as string
-      const summaryPath = join(paths.sessionsDir, dirName, SUMMARY_FILE)
+      const sessionDirPath = join(paths.sessionsDir, dirName)
+      const summaryPath = join(sessionDirPath, SUMMARY_FILE)
       const reflected = await pathExists(summaryPath)
-      // A session only ever counts as skipped when its summary is both
-      // present and explicitly marked that way: this is the single place
-      // every consumer (recentSummaries, isFirstSession, rollup dates,
-      // search indexing) reads that distinction from, instead of each one
-      // re-reading summary.md's frontmatter itself.
+
       let skipped = false
+      let summaryDate: string | undefined
       if (reflected) {
         try {
           const doc = await readDocument(summaryPath)
           skipped = doc.meta.skipped === true
+          if (typeof doc.meta.date === 'string') summaryDate = doc.meta.date
         } catch {
           // A summary.md that fails to parse is reflected (it exists) but
           // its skipped status is unknowable; treat it as not skipped
-          // rather than throwing listSessions out for every caller.
+          // rather than throwing listSessions out for every caller. The
+          // same catch means "no date available", so the derivation falls
+          // through to the transcript below instead of inventing one,
+          // which keeps a hand-broken summary from re-dating its session.
           skipped = false
         }
       }
+
+      // Cheapest source first. A reflected session's date was already
+      // derived and frozen into its summary at reflection time, so reading
+      // it back costs nothing extra: listSessions is opening that file for
+      // the skipped check anyway.
+      let date = prefixDate
+      if (summaryDate !== undefined) {
+        date = summaryDate
+      } else {
+        const first = await readFirstTranscriptLine(sessionDirPath)
+        if (first !== undefined && typeof first.utcOffsetMinutes === 'number') {
+          date = localDateFromStored(first.ts, first.utcOffsetMinutes)
+        }
+      }
+
       // dirName is the directory exactly as readdir produced it. It is the
       // only value here that may ever be used to build a path. date is for
       // windowing, grouping, and display only.
@@ -239,6 +269,30 @@ async function findSessionDir(paths: MemoryPaths, sessionId: string): Promise<st
     throw new Error(`No session directory found for ${sessionId} in ${paths.sessionsDir}.`)
   }
   return join(paths.sessionsDir, match.name)
+}
+
+const FIRST_LINE_CHUNK_BYTES = 8192
+
+// One handle, one chunk, split at the first newline, one JSON.parse, handle
+// closed. 8 KB is more than enough for a first line. Anything unreadable,
+// unparseable, or absent comes back as undefined rather than throwing: the
+// caller's job is to fall back, not to fail.
+async function readFirstTranscriptLine(dir: string): Promise<TranscriptLine | undefined> {
+  let handle: FileHandle | undefined
+  try {
+    handle = await open(join(dir, TRANSCRIPT_FILE), 'r')
+    const buffer = Buffer.alloc(FIRST_LINE_CHUNK_BYTES)
+    const { bytesRead } = await handle.read(buffer, 0, FIRST_LINE_CHUNK_BYTES, 0)
+    const text = buffer.subarray(0, bytesRead).toString('utf8')
+    const newline = text.indexOf('\n')
+    const first = newline >= 0 ? text.slice(0, newline) : text
+    if (first.trim().length === 0) return undefined
+    return JSON.parse(first) as TranscriptLine
+  } catch {
+    return undefined
+  } finally {
+    await handle?.close()
+  }
 }
 
 async function pathExists(path: string): Promise<boolean> {
