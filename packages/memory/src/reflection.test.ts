@@ -16,7 +16,7 @@ import {
   resolveNarratives,
   rewriteNarrative,
 } from './reflection.js'
-import type { TranscriptLine } from './transcripts.js'
+import { SessionStore, type TranscriptLine } from './transcripts.js'
 
 const TRANSCRIPT: TranscriptLine[] = [
   { ts: '2026-08-13T09:00:00.000Z', role: 'user', content: 'I went for a long run this morning.' },
@@ -877,6 +877,50 @@ describe('reflection', () => {
       expect(itemNodes).toHaveLength(1)
 
       await expect(readDocument(join(sessionDir, 'summary.md'))).rejects.toThrow()
+    })
+
+    it('writes the local date derived from the transcript first line, not the directory prefix', async () => {
+      const store = await SessionStore.start(paths, new Date('2026-08-15T21:00:00Z'), 'UTC')
+      await store.appendLine({
+        ts: '2026-08-15T21:00:00.000Z',
+        utcOffsetMinutes: 330,
+        role: 'user',
+        content: 'Late one.',
+      })
+
+      const { summaryDoc } = await applyReflection(
+        paths,
+        emptyReflectionOutput('A late Saturday night.'),
+        store.sessionId,
+        [],
+        new Date('2026-08-16T04:00:00.000Z'),
+        new Map(),
+        async () => {},
+      )
+
+      expect(summaryDoc.meta.date).toBe('2026-08-16')
+      expect(summaryDoc.path).toBe(join(store.dir, 'summary.md'))
+    })
+
+    it('falls back to the directory prefix when the first line carries no offset', async () => {
+      const store = await SessionStore.start(paths, new Date('2026-08-15T21:00:00Z'), 'UTC')
+      await store.appendLine({
+        ts: '2026-08-15T21:00:00.000Z',
+        role: 'user',
+        content: 'A line written before offsets existed.',
+      })
+
+      const { summaryDoc } = await applyReflection(
+        paths,
+        emptyReflectionOutput('An older session.'),
+        store.sessionId,
+        [],
+        new Date('2026-08-16T04:00:00.000Z'),
+        new Map(),
+        async () => {},
+      )
+
+      expect(summaryDoc.meta.date).toBe('2026-08-15')
     })
   })
 

@@ -24,8 +24,7 @@
 // person already captured as a node-only in a past session, once they
 // recur.
 
-import { readdir } from 'node:fs/promises'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import type { ChatProvider } from '@openreverie/providers'
 import { z } from 'zod'
 import {
@@ -43,7 +42,8 @@ import {
   readGraph,
 } from './graph.js'
 import type { MemoryPaths } from './paths.js'
-import type { TranscriptLine } from './transcripts.js'
+import { localDateFromStored } from './time.js'
+import { SessionStore, type TranscriptLine } from './transcripts.js'
 
 export type ReflectionItemKind = 'observation' | 'feeling' | 'event' | 'intention'
 
@@ -336,18 +336,26 @@ function mergeLiveItems(minted: ReflectionItem[], liveItems: ReflectionItem[]): 
   return merged
 }
 
-async function findSessionDir(
+// The directory is resolved by id suffix, never by date. The date is
+// derived from the transcript's own first line, because summary.md's date
+// frontmatter is the one place a session's logical local day is durably
+// recorded, and SessionStore.listSessions reads it straight back out. With
+// no recorded offset there is no honest local date to compute, so the
+// directory's own prefix stands rather than a guess built from whatever
+// timezone the profile happens to hold today.
+async function resolveSession(
   paths: MemoryPaths,
   sessionId: string,
 ): Promise<{ dir: string; date: string }> {
-  const entries = await readdir(paths.sessionsDir, { withFileTypes: true })
-  const match = entries.find((entry) => entry.isDirectory() && entry.name.endsWith(`-${sessionId}`))
-  if (!match) {
-    throw new Error(`No session directory found for ${sessionId} in ${paths.sessionsDir}.`)
+  const dir = await SessionStore.sessionDir(paths, sessionId)
+  const prefixMatch = basename(dir).match(/^(\d{4}-\d{2}-\d{2})-/)
+  const prefixDate = prefixMatch?.[1] ?? basename(dir)
+
+  const first = await SessionStore.readFirstLine(paths, sessionId)
+  if (first !== undefined && typeof first.utcOffsetMinutes === 'number') {
+    return { dir, date: localDateFromStored(first.ts, first.utcOffsetMinutes) }
   }
-  const dateMatch = match.name.match(/^(\d{4}-\d{2}-\d{2})-/)
-  const date = dateMatch?.[1] ?? match.name
-  return { dir: join(paths.sessionsDir, match.name), date }
+  return { dir, date: prefixDate }
 }
 
 export function resolveItemIds(indexes: number[], mintedItems: ReflectionItem[]): string[] {
@@ -587,7 +595,7 @@ export async function applyReflection(
   const mintedItems = mintItems(out.items, now)
   const mergedItems = mergeLiveItems(mintedItems, liveItems)
 
-  const { dir, date } = await findSessionDir(paths, sessionId)
+  const { dir, date } = await resolveSession(paths, sessionId)
   const summaryPath = join(dir, 'summary.md')
 
   const graphState = await readGraph(paths)
