@@ -7,8 +7,15 @@ import { randomBytes } from 'node:crypto'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import type { StyleConfig } from '@openreverie/memory'
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml'
 import { z } from 'zod'
+
+// StyleConfig lives in @openreverie/memory because style is stored in
+// profile.md, whose schema lives there. Re-exported here so existing
+// importers of @openreverie/core keep working; config.toml itself no
+// longer holds style.
+export type { StyleConfig }
 
 export interface CrisisResource {
   label: string
@@ -19,12 +26,6 @@ export const defaultCrisisResources: CrisisResource[] = [
   { label: '988 Suicide and Crisis Lifeline (US)', contact: 'Call or text 988' },
   { label: 'Find A Helpline (international)', contact: 'findahelpline.com' },
 ]
-
-export interface StyleConfig {
-  engagement: 'leading' | 'balanced' | 'following'
-  tone: 'warm' | 'playful' | 'snarky' | 'direct' | 'formal'
-  orientation: 'listening' | 'balanced' | 'solutions'
-}
 
 export interface ReverieConfig {
   memoryDir: string
