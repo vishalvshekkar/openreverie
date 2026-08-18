@@ -39,8 +39,9 @@ knows what to verify rather than assume.
 | 15 apply budget to capped sections | DONE | `0ac3459` |
 | 16 reflection gets full constitution | DONE | `a3c0840` |
 | (extra) arcs marker on character cap | DONE | `fa95c0e` |
-| 17 weekly rollup shelf | **ONGOING, see below** | none yet |
-| 18 DocKind wiring test (P8) | **ONGOING, see below** | none yet |
+| 17 weekly rollup shelf | DONE | `e0c8bbd` |
+| 18 DocKind wiring test (P8) | DONE | `a8c523d` |
+| (extra) rollup escape-hatch row must never be capped away | **ONGOING**, see below | none yet |
 | 19 final verification + README | TODO (orchestrator does this personally) | none yet |
 
 ### All five Phase D epochs, and what is left
@@ -59,7 +60,7 @@ been started.
 | --- | --- | --- | --- | --- | --- |
 | 1 | **cli-polish** `2026-08-17-cli-polish-and-ci-fix-plan.md` | Terminal UX cleanup and the CI fix. Independent of everything else. | 10 | nothing | **DONE**, merged into design (verified) |
 | 2 | **time** `2026-08-17-time-as-first-class-plan.md` | Local time as a first class fact: `profile.md` holds the timezone, messages are stamped in local time, session dates and daily/weekly rollups use the local calendar day instead of UTC. Shipped the `reverie migrate` subcommand and the migration registry. | 23 | nothing | **DONE**, merged into design |
-| 3 | **retrieval** `2026-08-17-context-and-retrieval-plan.md` | Close the loop where the prompt says more exists but gives no way to reach it. Node listing tools, a graph-node search lane, truncation markers that name their tool and carry a docId, and a hard per-section character budget for the prompt. | 19 | time (one fix only) | **16 of 19 committed**, see the retrieval table above. Tasks 17, 18 ONGOING; 19 TODO |
+| 3 | **retrieval** `2026-08-17-context-and-retrieval-plan.md` | Close the loop where the prompt says more exists but gives no way to reach it. Node listing tools, a graph-node search lane, truncation markers that name their tool and carry a docId, and a hard per-section character budget for the prompt. | 19 | time (one fix only) | **18 of 19 committed**, see the retrieval table above. Task 19 TODO |
 | 4 | **modes** `2026-08-17-modes-profile-settings-plan.md` | Conversation modes, the profile's personal fields, and settings. Moves `StyleConfig` down into memory, adds the mode catalogue and the mode overlay in the persona, replaces `update_style` with `set_mode`, takes style out of `config.toml`, adds a CLI command table with `/mode` `/style` `/settings` `/whoami`, a persistent status line, the `mode` stream event, session mode over HTTP, profile and settings endpoints, and two new web destinations. | 24 (Task 0, Tasks 1-22, plus Task 7A) | time | **NOT STARTED.** Worktree exists and `pnpm install` is done. Task 0 steps 1-5 verified this session, step 6 still to run |
 | 5 | **journal** `2026-08-17-journal-mode-plan.md` | Journaling as its own mode: a `journal/` document kind, entry assembly from a transcript, six journaling methods, `journaling.md` protocol read/write, the `update_journaling_protocol` tool, reflection's `journalingUpdate` backstop, server and web wiring, and a safety invariant test. | 16 | time, modes | **NOT STARTED.** No worktree yet |
 
@@ -131,6 +132,45 @@ Three possible worlds:
 **Baseline test count at `fa95c0e` is: Test Files 49 passed (49) / Tests 806 passed (806).**
 Tasks 17 and 18 must RAISE that number. A flat or falling count means tests were parked or
 deleted. That is the failure mode this repo has been bitten by repeatedly.
+
+## ONGOING: the rollup escape-hatch row can be capped away
+
+Found and verified this session, after Task 17 was committed at `e0c8bbd`. If the fix is not in
+the tree when you pick this up, do it.
+
+`rollupsAvailableSection` in `packages/core/src/context.ts` builds up to four rows and passes
+ALL of them through `capRows(lines, ROLLUPS_AVAILABLE_CAP)` where the cap is 800. The last row
+is the escape hatch:
+
+```
+Read any of these with read_document, or find one by period with search_memory using kinds and a date range.
+```
+
+Measured directly with `node`, using 12 weekly rollups at the real 27-character docId shape:
+
+| Daily rollup total | Rows kept | Characters |
+| --- | --- | --- |
+| 1 day | 4 of 4 | 800 of 800 |
+| 2 days | **3 of 4** | 692 of 800 |
+| 365 days | **3 of 4** | 694 of 800 |
+
+The escape-hatch row survives only in the single case of exactly one daily rollup, where it
+lands at exactly 800/800 with zero margin. For any real user with 12 weekly rollups and more
+than one daily rollup, the row is silently dropped: the model is shown a shelf of rollup docIds
+and never told that `read_document` is what takes them off it. That is the same P1 defect class
+this whole release exists to remove, reintroduced by capping the escape hatch alongside the data.
+
+The existing Task 17 test does not catch it because it uses a smaller fixture.
+
+**The fix**: cap only the DATA rows, then always append the instructional row after `capRows`.
+The instruction is not data competing for budget; it is the thing that makes the data reachable,
+and it must never be the row that loses. Add a test with 12 weekly rollups and more than one
+daily rollup asserting the `read_document` sentence is present. Falsify it by moving the row back
+inside the `capRows` input and confirming it fails.
+
+Do NOT fix this by raising `ROLLUPS_AVAILABLE_CAP`. `packages/core/src/budget.test.ts` asserts
+that the sum of `SECTION_CAPS` stays under `PROMPT_BUDGET_TOTAL`, and the sum is already 27,800
+of 28,000. Raising the cap buys a little headroom and leaves the same bug one longer docId away.
 
 ## Repository and exact git state
 
