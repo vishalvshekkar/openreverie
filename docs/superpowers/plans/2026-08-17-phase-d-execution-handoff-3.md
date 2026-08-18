@@ -71,8 +71,8 @@ read each other's half-written build output.
 | --- | --- | --- | --- | --- | --- |
 | A | 1, 2, 3 | `memory/style.ts` (new), `memory/profile.ts`, `core/config.ts` | sonnet | DONE, 841 tests | `351092e` `d0e8015` `efa565b` |
 | B | 4, 5 | `memory/engine.ts`, `core/tools.ts`, `memory/reflection.ts` | sonnet | DONE, 858 tests | `0db42b1` `e0277e7` |
-| C | 6 | `core/modes.ts` (new catalogue) | sonnet | **ONGOING** | |
-| D | 7, 7A, 8 | `core/personas.ts` **SAFETY** | sonnet impl, **you falsify** | TODO | |
+| C | 6 | `core/modes.ts` (new catalogue) | sonnet | DONE, 867 tests | `9b091df` |
+| D | 7, 7A, 8 | `core/personas.ts` **SAFETY** | sonnet impl, **you falsify** | **ONGOING** | |
 | E | 9 | `core/context.ts` profile block, 2000 char cap | sonnet | TODO | |
 | F | 10, 11 | `memory/transcripts.ts`, `memory/engine.ts` | sonnet | TODO | |
 | G | 12 | `set_mode` replaces `update_style`, tools/agent/cli | sonnet | TODO | |
