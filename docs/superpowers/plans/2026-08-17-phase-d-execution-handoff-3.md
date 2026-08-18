@@ -57,7 +57,7 @@ read each other's half-written build output.
 
 | Batch | Tasks | Shared files | Model | State | Commits |
 | --- | --- | --- | --- | --- | --- |
-| A | 1, 2, 3 | `memory/style.ts` (new), `memory/profile.ts`, `core/config.ts` | sonnet | TODO | |
+| A | 1, 2, 3 | `memory/style.ts` (new), `memory/profile.ts`, `core/config.ts` | sonnet | **ONGOING** | |
 | B | 4, 5 | `memory/engine.ts`, `core/tools.ts`, `memory/reflection.ts` | sonnet | TODO | |
 | C | 6 | `core/modes.ts` (new catalogue) | sonnet | TODO | |
 | D | 7, 7A, 8 | `core/personas.ts` **SAFETY** | sonnet impl, **you falsify** | TODO | |
@@ -165,6 +165,29 @@ Three possible worlds:
 **Baseline test count at `fa95c0e` is: Test Files 49 passed (49) / Tests 806 passed (806).**
 Tasks 17 and 18 must RAISE that number. A flat or falling count means tests were parked or
 deleted. That is the failure mode this repo has been bitten by repeatedly.
+
+## VERIFY THE ONGOING MODES BATCH BEFORE YOU CONTINUE
+
+Modes Batch A (Tasks 1, 2, 3) was dispatched and the session may have ended before it was
+verified. In `.claude/worktrees/modes`:
+
+```bash
+git log --oneline -3     # tip should be 6dc3339 if nothing was committed
+git status --short       # uncommitted agent work?
+pnpm lint && pnpm build && pnpm test
+```
+
+Baseline before Batch A is **Test Files 50 / Tests 812** at `6dc3339`. Batch A must raise that.
+Expected files: `packages/memory/src/style.ts` (new), `style.test.ts` (new),
+`importDirection.test.ts` (new), `packages/memory/src/index.ts`, `packages/core/src/config.ts`,
+`packages/memory/src/profile.ts`, `packages/memory/src/profile.test.ts`.
+Anything outside that list deserves a second look.
+
+Task 1 moves `StyleConfig` and its enums DOWN from `core` into `memory`. Before accepting it,
+grep for stragglers yourself:
+`grep -rn "StyleConfig" packages/*/src | grep -v node_modules`
+
+Commit messages: the plan gives one per task at the end of each task's step list.
 
 ## FIXED: the rollup escape-hatch row could be capped away
 
