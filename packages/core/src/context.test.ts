@@ -1086,4 +1086,46 @@ describe('assembleSystemPrompt rollup shelf', () => {
 
     await engine.close()
   })
+
+  it('keeps the read_document escape hatch even when the rollup index fills the cap', async () => {
+    // The escape-hatch row is what turns a list of docIds into something the
+    // model can act on. With a full twelve-week index and more than one daily
+    // rollup it is the row the character cap would drop, which would hand the
+    // model a shelf and no way to take anything off it.
+    await appendGraph(paths, [
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'arc_any',
+        type: 'arc',
+        label: 'Any Arc',
+      },
+    ])
+
+    for (let w = 19; w <= 33; w++) {
+      const week = `2026-W${String(w).padStart(2, '0')}`
+      await writeDocumentAtomic({
+        path: join(paths.rollupsWeeklyDir, `${week}.md`),
+        meta: { id: newId('doc'), kind: 'rollup_weekly', week },
+        body: `Week ${w} content.\n`,
+      })
+    }
+    for (const date of ['2026-08-09', '2026-08-10']) {
+      await writeDocumentAtomic({
+        path: join(paths.rollupsDailyDir, `${date}.md`),
+        meta: { id: newId('doc'), date },
+        body: 'A steady day.\n',
+      })
+    }
+
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])), {
+      maintenance: false,
+    })
+    const prompt = await assembleSystemPrompt(engine, testConfig())
+
+    expect(prompt).toContain('Daily rollups: 2 days covered')
+    expect(prompt).toContain('Read any of these with read_document')
+
+    await engine.close()
+  })
 })

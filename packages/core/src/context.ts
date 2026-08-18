@@ -174,11 +174,17 @@ function rollupsAvailableSection(context: SessionContext): string | undefined {
       `Daily rollups: ${context.dailyRollups.total} ${dayWord} covered${range}. The newest is shown above in full.`,
     )
   }
-  lines.push(
-    'Read any of these with read_document, or find one by period with search_memory using kinds and a date range.',
-  )
+  // The escape hatch is appended after the cap, never inside it. It is not
+  // data competing for the budget: it is the sentence that makes the docIds
+  // above usable at all. Capping it alongside the rows means a full twelve
+  // week index drops the one line that says how to read any of them, which
+  // is the defect this release exists to remove.
   const capped = capRows(lines, ROLLUPS_AVAILABLE_CAP)
-  return `## Rollups available\n\n${capped.rows.join('\n')}`
+  const rows = [
+    ...capped.rows,
+    'Read any of these with read_document, or find one by period with search_memory using kinds and a date range.',
+  ]
+  return `## Rollups available\n\n${rows.join('\n')}`
 }
 
 function recentSummariesSection(context: SessionContext): string | undefined {
