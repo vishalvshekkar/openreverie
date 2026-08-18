@@ -2788,6 +2788,7 @@ describe('MemoryEngine', () => {
         ]),
       )
       expect(context.peopleTruncated).toBe(false)
+      expect(context.peopleTotal).toBe(2)
 
       await engine.close()
     })
@@ -2808,6 +2809,7 @@ describe('MemoryEngine', () => {
 
       expect(context.entities).toEqual([{ id: 'entity_1', name: 'Dune' }])
       expect(context.entitiesTruncated).toBe(false)
+      expect(context.entitiesTotal).toBe(1)
 
       await engine.close()
     })
@@ -2845,6 +2847,7 @@ describe('MemoryEngine', () => {
 
       expect(context.people).toHaveLength(40)
       expect(context.peopleTruncated).toBe(true)
+      expect(context.peopleTotal).toBe(45)
       for (let i = 0; i < 5; i++) {
         expect(context.people.some((p) => p.id === `person_paged_${i}`)).toBe(true)
       }
@@ -2878,6 +2881,7 @@ describe('MemoryEngine', () => {
 
       expect(context.entities).toHaveLength(30)
       expect(context.entitiesTruncated).toBe(true)
+      expect(context.entitiesTotal).toBe(35)
       // The 5 oldest (indexes 0 through 4) are dropped; the 30 most
       // recent (indexes 5 through 34) survive.
       for (let i = 0; i < 5; i++) {

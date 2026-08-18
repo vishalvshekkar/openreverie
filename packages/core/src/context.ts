@@ -131,8 +131,12 @@ function peopleSection(context: SessionContext): string | undefined {
     (person) => `- ${person.name} (${person.id}, ${person.hasPage ? 'has a page' : 'no page yet'})`,
   )
   if (context.peopleTruncated) {
+    // The marker names the tool that closes the gap. A marker that says
+    // more exist without saying how to reach them tells the model something
+    // exists and gives it no way to fetch it, which is the defect this
+    // release exists to remove.
     lines.push(
-      '(list truncated: paged people are kept first, then the most recently created; older, unpaged people exist but are not shown here)',
+      `(showing ${context.people.length} of ${context.peopleTotal} people, paged people first then most recently added. Call list_people to page through the rest, or search_memory by name.)`,
     )
   }
   return `## People\n\n${lines.join('\n')}`
@@ -143,7 +147,7 @@ function entitiesSection(context: SessionContext): string | undefined {
   const lines = context.entities.map((entity) => `- ${entity.name}`)
   if (context.entitiesTruncated) {
     lines.push(
-      '(list truncated to the most recently created entries; older ones exist but are not shown here)',
+      `(showing ${context.entities.length} of ${context.entitiesTotal} entities, most recently added first. Call list_entities to page through the rest, or search_memory by name.)`,
     )
   }
   return `## Entities\n\n${lines.join('\n')}`

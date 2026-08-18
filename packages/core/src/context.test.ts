@@ -425,7 +425,7 @@ describe('assembleSystemPrompt', () => {
     const prompt = await assembleSystemPrompt(engine, testConfig())
 
     expect(prompt).toContain('## People')
-    expect(prompt).toContain('list truncated')
+    expect(prompt).toContain('Call list_people to page through the rest')
     expect(prompt).toContain('Person 44 (person_44, no page yet)')
     expect(prompt).not.toContain('Person 0 (person_0, no page yet)')
 
@@ -653,6 +653,77 @@ describe('assembleSystemPrompt', () => {
     expect(prompt).toContain(
       `2026-08-15 (${store.sessionId}): We talked about the move and how unsettled it left him.`,
     )
+
+    await engine.close()
+  })
+
+  it('names the tool that reaches the people and entities the prompt could not show', async () => {
+    const records = []
+    for (let i = 0; i < 45; i++) {
+      records.push({
+        ts: `2026-08-${String(1 + (i % 28)).padStart(2, '0')}T00:00:00.000Z`,
+        op: 'assert' as const,
+        node: `person_${i}`,
+        type: 'person' as const,
+        label: `Person ${i}`,
+      })
+    }
+    for (let i = 0; i < 35; i++) {
+      records.push({
+        ts: `2026-08-${String(1 + (i % 28)).padStart(2, '0')}T00:00:00.000Z`,
+        op: 'assert' as const,
+        node: `entity_${i}`,
+        type: 'entity' as const,
+        label: `Entity ${i}`,
+      })
+    }
+    // An arc so this is not treated as a first session, which would replace
+    // every optional section with the onboarding block.
+    records.push({
+      ts: '2026-08-01T00:00:00.000Z',
+      op: 'assert' as const,
+      node: 'arc_any',
+      type: 'arc' as const,
+      label: 'Any Arc',
+    })
+    await appendGraph(paths, records)
+
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+    const prompt = await assembleSystemPrompt(engine, testConfig())
+
+    expect(prompt).toContain(
+      '(showing 40 of 45 people, paged people first then most recently added. Call list_people to page through the rest, or search_memory by name.)',
+    )
+    expect(prompt).toContain(
+      '(showing 30 of 35 entities, most recently added first. Call list_entities to page through the rest, or search_memory by name.)',
+    )
+
+    await engine.close()
+  })
+
+  it('shows no truncation marker when nothing was truncated', async () => {
+    await appendGraph(paths, [
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'arc_any',
+        type: 'arc',
+        label: 'Any Arc',
+      },
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'person_only',
+        type: 'person',
+        label: 'Only Person',
+      },
+    ])
+
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+    const prompt = await assembleSystemPrompt(engine, testConfig())
+
+    expect(prompt).toContain('## People')
+    expect(prompt).not.toContain('Call list_people')
 
     await engine.close()
   })

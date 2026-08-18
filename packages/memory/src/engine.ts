@@ -226,6 +226,10 @@ export interface SessionContext {
   // True when there are more person nodes than PEOPLE_CAP, so `people`
   // above is a partial list rather than the complete roster.
   peopleTruncated: boolean
+  // The true number of person nodes, whether or not they fit under
+  // PEOPLE_CAP. The prompt's truncation marker states it, so the model
+  // knows how much of the roster it is not being shown.
+  peopleTotal: number
   // Every entity node (a film, a book, a company, a place, a band, a work
   // of fiction), up to ENTITIES_CAP, most recently created first. Entities
   // never get a page in this release, so there is no page status to carry
@@ -233,6 +237,8 @@ export interface SessionContext {
   entities: { id: string; name: string }[]
   // True when there are more entity nodes than ENTITIES_CAP.
   entitiesTruncated: boolean
+  // The true number of entity nodes, for the same reason as peopleTotal.
+  entitiesTotal: number
   // Text and the date of the session that captured it, for items of kind
   // 'intention', pulled from recent session summaries' own frontmatter
   // (the same read sessionContext already does for recentSummaries below,
@@ -843,8 +849,10 @@ export class MemoryEngine {
       arcs,
       people,
       peopleTruncated: cappedPeople.truncated,
+      peopleTotal: personNodes.length,
       entities,
       entitiesTruncated: cappedEntities.truncated,
+      entitiesTotal: entityNodes.length,
       recentIntentions: recentIntentions.slice(0, RECENT_INTENTIONS_CAP),
       ...(latestDailyRollup ? { latestDailyRollup } : {}),
       recentSummaries,
