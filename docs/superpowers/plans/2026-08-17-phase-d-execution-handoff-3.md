@@ -73,8 +73,8 @@ read each other's half-written build output.
 | B | 4, 5 | `memory/engine.ts`, `core/tools.ts`, `memory/reflection.ts` | sonnet | DONE, 858 tests | `0db42b1` `e0277e7` |
 | C | 6 | `core/modes.ts` (new catalogue) | sonnet | DONE, 867 tests | `9b091df` |
 | D | 7, 7A, 8 | `core/personas.ts` **SAFETY** | sonnet impl, orchestrator falsified | DONE, 884 tests | `bc2530c` (combined, shared file) |
-| E | 9 | `core/context.ts` profile block, 2000 char cap | sonnet | **ONGOING** | |
-| F | 10, 11 | `memory/transcripts.ts`, `memory/engine.ts` | sonnet | TODO | |
+| E | 9 | `core/context.ts` profile block, 2000 char cap | sonnet | DONE, 897 tests | `8087dab` |
+| F | 10, 11 | `memory/transcripts.ts`, `memory/engine.ts` | sonnet | **ONGOING** | |
 | G | 12 | `set_mode` replaces `update_style`, tools/agent/cli | sonnet | TODO | |
 | H | 13 | style leaves `config.toml`, migration plus 9 fixtures | sonnet | TODO | |
 | I | 14, 15 | `cli/commands.ts`, the `/mode` `/style` `/settings` `/whoami` table | sonnet | TODO | |
@@ -180,17 +180,38 @@ deleted. That is the failure mode this repo has been bitten by repeatedly.
 
 ## VERIFY THE ONGOING MODES BATCH BEFORE YOU CONTINUE
 
-Modes Batch E (Task 9, the `## Profile` block in the assembled prompt) was dispatched and the
-session may have ended before it was verified. In `.claude/worktrees/modes`:
+Modes Batch F (Tasks 10, 11: `synthetic: true` on `TranscriptLine`, and a session's mode
+persisting to disk) was dispatched and the session may have ended before it was verified.
+In `.claude/worktrees/modes`:
 
 ```bash
-git log --oneline -3     # tip should be bc2530c if nothing was committed
+git log --oneline -3     # tip should be 8087dab if nothing was committed
 git status --short       # uncommitted agent work?
 pnpm lint && pnpm build && pnpm test
 ```
 
-Baseline before Batch E is **Test Files 53 / Tests 884** at `bc2530c`. Batch E must raise that.
-Expected files: `packages/core/src/context.ts`, `packages/core/src/context.test.ts`. Nothing else.
+Baseline before Batch F is **Test Files 53 / Tests 897** at `8087dab`. Batch F must raise that.
+Expected files: `packages/memory/src/transcripts.ts`, `transcripts.test.ts`,
+`packages/memory/src/engine.ts`, `engine.test.ts`, and for Task 10 also
+`packages/server/src/app.ts` and `packages/web/src/api.ts`.
+
+Remember `AGENTS.md`: transcripts are sacred, append-only, never modified or deleted by code.
+Task 10 adds a field to a transcript line; it must not rewrite existing lines.
+
+### Two things Batch E settled that later batches depend on
+
+1. **The prompt now reads style from `engine.currentStyle()` (the profile), not `config.style`.**
+   That broke `agent.test.ts`'s update_style reassembly test, because `update_style` still writes
+   `config.toml` through its persister. Fixed in `8087dab` with a one-line write-through in
+   `packages/core/src/agent.ts` calling `engine.updateProfileSettings({ style })`. Task 12
+   retires `update_style` and Task 13 takes style out of `config.toml`; when you do those, this
+   write-through is the line that should disappear, and the double write with it.
+2. **`capBody` must NOT be used for the profile body.** `profile.md` is unindexed by design:
+   `walkAllDocuments` never includes `paths.profile`, so it has no docId, and `capBody`'s marker
+   names a `read_document` call that could not work. `budget.ts` documents this above
+   `PROFILE_BODY_CAP`. The profile section uses a local slice plus a plain marker instead. The
+   orchestrator initially instructed the subagent to use `capBody` here and was wrong; the
+   subagent pushed back with evidence and was right.
 
 ### The safety batch is DONE and was falsified by the orchestrator, not a subagent
 
