@@ -42,7 +42,8 @@ knows what to verify rather than assume.
 | 17 weekly rollup shelf | DONE | `e0c8bbd` |
 | 18 DocKind wiring test (P8) | DONE | `a8c523d` |
 | (extra) rollup escape-hatch row must never be capped away | DONE | `6c82ce5` |
-| 19 final verification + README | TODO (orchestrator does this personally) | none yet |
+| 19 final verification + README | DONE | `17dd15e` |
+| **retrieval merged into design** | DONE | merge `a0bd482`, worktree removed |
 
 ### All five Phase D epochs, and what is left
 
@@ -60,7 +61,7 @@ been started.
 | --- | --- | --- | --- | --- | --- |
 | 1 | **cli-polish** `2026-08-17-cli-polish-and-ci-fix-plan.md` | Terminal UX cleanup and the CI fix. Independent of everything else. | 10 | nothing | **DONE**, merged into design (verified) |
 | 2 | **time** `2026-08-17-time-as-first-class-plan.md` | Local time as a first class fact: `profile.md` holds the timezone, messages are stamped in local time, session dates and daily/weekly rollups use the local calendar day instead of UTC. Shipped the `reverie migrate` subcommand and the migration registry. | 23 | nothing | **DONE**, merged into design |
-| 3 | **retrieval** `2026-08-17-context-and-retrieval-plan.md` | Close the loop where the prompt says more exists but gives no way to reach it. Node listing tools, a graph-node search lane, truncation markers that name their tool and carry a docId, and a hard per-section character budget for the prompt. | 19 | time (one fix only) | **18 of 19 committed**, see the retrieval table above. Task 19 TODO |
+| 3 | **retrieval (DONE)** `2026-08-17-context-and-retrieval-plan.md` | Close the loop where the prompt says more exists but gives no way to reach it. Node listing tools, a graph-node search lane, truncation markers that name their tool and carry a docId, and a hard per-section character budget for the prompt. | 19 | time (one fix only) | **COMPLETE**, all 19 tasks plus two extra defect fixes. Merged into design as `a0bd482` |
 | 4 | **modes** `2026-08-17-modes-profile-settings-plan.md` | Conversation modes, the profile's personal fields, and settings. Moves `StyleConfig` down into memory, adds the mode catalogue and the mode overlay in the persona, replaces `update_style` with `set_mode`, takes style out of `config.toml`, adds a CLI command table with `/mode` `/style` `/settings` `/whoami`, a persistent status line, the `mode` stream event, session mode over HTTP, profile and settings endpoints, and two new web destinations. | 24 (Task 0, Tasks 1-22, plus Task 7A) | time | **NOT STARTED.** Worktree exists and `pnpm install` is done. Task 0 steps 1-5 verified this session, step 6 still to run |
 | 5 | **journal** `2026-08-17-journal-mode-plan.md` | Journaling as its own mode: a `journal/` document kind, entry assembly from a transcript, six journaling methods, `journaling.md` protocol read/write, the `update_journaling_protocol` tool, reflection's `journalingUpdate` backstop, server and web wiring, and a safety invariant test. | 16 | time, modes | **NOT STARTED.** No worktree yet |
 
