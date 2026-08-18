@@ -20,18 +20,32 @@
 import { z } from 'zod'
 import { newId, readDocument, writeDocumentAtomic } from './documents.js'
 import type { MemoryPaths } from './paths.js'
+import { type StyleMeta, styleMetaSchema } from './style.js'
 import { isValidIanaTimeZone, systemTimeZone } from './time.js'
 
 export interface ProfileMeta {
   id: string
   timezone?: string
   timezoneSource?: 'system-default' | 'user-confirmed'
+  preferredName?: string
+  pronouns?: string
+  location?: string
+  birthday?: string
+  occupation?: string
+  birthdayGreetings?: boolean
+  style?: StyleMeta
+  [key: string]: unknown
 }
 
 export interface Profile {
   meta: ProfileMeta & { [key: string]: unknown }
   body: string
 }
+
+// MM-DD or YYYY-MM-DD. The year is optional because plenty of people
+// will say the day without the year, and a profile field records what
+// was actually said rather than demanding a shape nobody offered.
+export const BIRTHDAY_PATTERN = /^(\d{4}-)?\d{2}-\d{2}$/
 
 export const profileMetaSchema = z
   .object({
@@ -41,9 +55,15 @@ export const profileMetaSchema = z
       .refine(isValidIanaTimeZone, { message: 'is not a recognized IANA timezone' })
       .optional(),
     timezoneSource: z.enum(['system-default', 'user-confirmed']).optional(),
+    preferredName: z.string().optional(),
+    pronouns: z.string().optional(),
+    location: z.string().optional(),
+    birthday: z.string().regex(BIRTHDAY_PATTERN).optional(),
+    occupation: z.string().optional(),
+    birthdayGreetings: z.boolean().optional(),
+    style: styleMetaSchema.optional(),
   })
   .passthrough()
-
 export const PROFILE_STARTER_BODY = `This file holds structured facts about you that reverie needs to read back
 out in code, starting with your timezone. It is machine managed and safe to
 hand edit; keep the frontmatter valid YAML.

@@ -104,3 +104,53 @@ describe('loadProfile and writeProfile', () => {
     expect(doc.body.length).toBeGreaterThan(0)
   })
 })
+
+describe('profileMetaSchema personal fields', () => {
+  it('accepts every field from the spec, all optional', () => {
+    const parsed = profileMetaSchema.safeParse({
+      id: 'doc_1',
+      preferredName: 'Vish',
+      pronouns: 'he/him or they/them',
+      location: 'Bengaluru',
+      timezone: 'Asia/Kolkata',
+      timezoneSource: 'user-confirmed',
+      birthday: '1990-04-02',
+      occupation: 'nurse',
+      birthdayGreetings: true,
+      style: { engagement: 'leading', tone: 'direct', orientation: 'solutions' },
+    })
+    expect(parsed.success).toBe(true)
+  })
+
+  it('invents no defaults: a file with only an id yields nothing else', () => {
+    const parsed = profileMetaSchema.parse({ id: 'doc_1' })
+    expect(parsed).toEqual({ id: 'doc_1' })
+    expect(parsed.style).toBeUndefined()
+    expect(parsed.preferredName).toBeUndefined()
+  })
+
+  it('does not return warm as a tone for a file with no style block', () => {
+    const parsed = profileMetaSchema.parse({ id: 'doc_1', timezone: 'Asia/Kolkata' })
+    expect(parsed.style?.tone).toBeUndefined()
+  })
+
+  it('accepts a birthday with and without a year', () => {
+    expect(profileMetaSchema.safeParse({ id: 'd', birthday: '04-02' }).success).toBe(true)
+    expect(profileMetaSchema.safeParse({ id: 'd', birthday: '1990-04-02' }).success).toBe(true)
+  })
+
+  it('rejects a birthday that is neither shape', () => {
+    expect(profileMetaSchema.safeParse({ id: 'd', birthday: 'April 2nd' }).success).toBe(false)
+  })
+
+  it('rejects a style axis value outside its enum', () => {
+    expect(profileMetaSchema.safeParse({ id: 'd', style: { tone: 'sardonic' } }).success).toBe(
+      false,
+    )
+  })
+
+  it('passes an unknown key through unchanged, because the profile is an open set', () => {
+    const parsed = profileMetaSchema.parse({ id: 'd', favouriteTea: 'assam' })
+    expect(parsed.favouriteTea).toBe('assam')
+  })
+})
