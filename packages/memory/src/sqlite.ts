@@ -10,14 +10,22 @@ import { documentDateSpan } from './dateSpan.js'
 import type { Document } from './documents.js'
 import type { EdgeType, GraphEdge, GraphNode, GraphState, NodeType } from './graph.js'
 
-export type DocKind =
-  | 'constitution'
-  | 'realm'
-  | 'arc'
-  | 'summary'
-  | 'rollup_daily'
-  | 'rollup_weekly'
-  | 'person'
+// The closed set of document kinds, kept as a const array so the
+// table-driven wiring test (packages/core/src/docKinds.test.ts) can
+// enumerate the union at runtime. Adding a kind here and wiring none of its
+// touchpoints makes that test fail, which is the enforcement mechanism for
+// the P8 rule: every document type must declare how the model reads it.
+export const DOC_KINDS = [
+  'constitution',
+  'realm',
+  'arc',
+  'summary',
+  'rollup_daily',
+  'rollup_weekly',
+  'person',
+] as const
+
+export type DocKind = (typeof DOC_KINDS)[number]
 
 export interface IndexedChunk {
   docId: string
