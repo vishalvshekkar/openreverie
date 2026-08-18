@@ -57,8 +57,8 @@ read each other's half-written build output.
 
 | Batch | Tasks | Shared files | Model | State | Commits |
 | --- | --- | --- | --- | --- | --- |
-| A | 1, 2, 3 | `memory/style.ts` (new), `memory/profile.ts`, `core/config.ts` | sonnet | **ONGOING** | |
-| B | 4, 5 | `memory/engine.ts`, `core/tools.ts`, `memory/reflection.ts` | sonnet | TODO | |
+| A | 1, 2, 3 | `memory/style.ts` (new), `memory/profile.ts`, `core/config.ts` | sonnet | DONE, 841 tests | `351092e` `d0e8015` `efa565b` |
+| B | 4, 5 | `memory/engine.ts`, `core/tools.ts`, `memory/reflection.ts` | sonnet | **ONGOING** | |
 | C | 6 | `core/modes.ts` (new catalogue) | sonnet | TODO | |
 | D | 7, 7A, 8 | `core/personas.ts` **SAFETY** | sonnet impl, **you falsify** | TODO | |
 | E | 9 | `core/context.ts` profile block, 2000 char cap | sonnet | TODO | |
@@ -168,26 +168,27 @@ deleted. That is the failure mode this repo has been bitten by repeatedly.
 
 ## VERIFY THE ONGOING MODES BATCH BEFORE YOU CONTINUE
 
-Modes Batch A (Tasks 1, 2, 3) was dispatched and the session may have ended before it was
-verified. In `.claude/worktrees/modes`:
+Modes Batch B (Tasks 4, 5) was dispatched and the session may have ended before it was verified.
+In `.claude/worktrees/modes`:
 
 ```bash
-git log --oneline -3     # tip should be 6dc3339 if nothing was committed
+git log --oneline -4     # tip should be efa565b if nothing was committed
 git status --short       # uncommitted agent work?
 pnpm lint && pnpm build && pnpm test
 ```
 
-Baseline before Batch A is **Test Files 50 / Tests 812** at `6dc3339`. Batch A must raise that.
-Expected files: `packages/memory/src/style.ts` (new), `style.test.ts` (new),
-`importDirection.test.ts` (new), `packages/memory/src/index.ts`, `packages/core/src/config.ts`,
-`packages/memory/src/profile.ts`, `packages/memory/src/profile.test.ts`.
+Baseline before Batch B is **Test Files 52 / Tests 841** at `efa565b`. Batch B must raise that.
+Expected files: `packages/memory/src/engine.ts`, `engine.test.ts`, `packages/core/src/tools.ts`,
+`tools.test.ts`, `packages/memory/src/reflection.ts`, `reflection.test.ts`.
 Anything outside that list deserves a second look.
 
-Task 1 moves `StyleConfig` and its enums DOWN from `core` into `memory`. Before accepting it,
-grep for stragglers yourself:
-`grep -rn "StyleConfig" packages/*/src | grep -v node_modules`
+Task 4 widens the live `update_profile` tool to the full field set and adds engine plumbing.
+Task 5 makes reflection write the profile fields and STOP writing them into the constitution.
+Task 5 is worth your own eye: it changes what reflection writes where, and the constitution is
+the document whose accidental truncation Task 16 of the retrieval plan exists to prevent.
 
-Commit messages: the plan gives one per task at the end of each task's step list.
+Commit messages: the plan gives one per task at the end of each task's step list. Get them with
+`grep -n 'git commit -m' <plan>` and read the following lines; they are multi-line messages.
 
 ## FIXED: the rollup escape-hatch row could be capped away
 
