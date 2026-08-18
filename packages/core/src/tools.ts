@@ -107,9 +107,12 @@ export function toolDefinitions(): ToolDefinition[] {
       description:
         'Search memory before answering from a vague impression of what was probably said. Use this whenever the ' +
         'conversation touches something that might already be recorded: an ongoing arc, a past event, a person, a ' +
-        'decision made earlier. It runs a hybrid search over items, session summaries, rollups, and arc and realm ' +
-        'pages, and returns ranked hits with a snippet from each. Retrieve before asserting: check the record rather ' +
-        'than guess.',
+        'decision made earlier. Retrieve before asserting: check the record rather than guess. Results come back ' +
+        'in two parts. documents are ranked passages from pages, summaries and rollups, each with a snippet. ' +
+        'nodes are graph nodes whose name matches the query, including people and things that have no page of ' +
+        'their own; a node hit carries an id you can pass to graph_query, and a docId only when a page exists. A ' +
+        'node hit with hasPage: false means this person or thing is known and recorded, and there is nothing ' +
+        'written about them beyond their name and their links.',
       parameters: {
         type: 'object',
         properties: {

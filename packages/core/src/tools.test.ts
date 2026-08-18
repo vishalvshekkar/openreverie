@@ -138,6 +138,15 @@ describe('toolDefinitions', () => {
     expect(properties.after.description).toContain('on or after')
     expect(properties.before.description).toContain('on or before')
   })
+
+  it('explains both search lanes and what a node-only hit means', () => {
+    const defs = toolDefinitions()
+    const searchMemory = defs.find((d) => d.name === 'search_memory')
+    if (!searchMemory) throw new Error('expected a search_memory tool definition')
+    expect(searchMemory.description).toContain('two parts')
+    expect(searchMemory.description).toContain('hasPage: false')
+    expect(searchMemory.description).toContain('graph_query')
+  })
 })
 
 describe('dispatchTool', () => {
