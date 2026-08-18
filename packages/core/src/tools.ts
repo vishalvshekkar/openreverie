@@ -14,6 +14,8 @@ import type {
   DocKind,
   GraphQuery,
   ListArcsOptions,
+  ListEntitiesOptions,
+  ListPeopleOptions,
   ListRealmsOptions,
   MemoryEngine,
 } from '@openreverie/memory'
@@ -65,6 +67,19 @@ const listArcsArgs = z.strictObject({
 })
 
 const listRealmsArgs = z.strictObject({
+  offset: z.number().optional(),
+  limit: z.number().optional(),
+})
+
+const listPeopleArgs = z.strictObject({
+  nameContains: z.string().optional(),
+  hasPage: z.boolean().optional(),
+  offset: z.number().optional(),
+  limit: z.number().optional(),
+})
+
+const listEntitiesArgs = z.strictObject({
+  nameContains: z.string().optional(),
   offset: z.number().optional(),
   limit: z.number().optional(),
 })
@@ -280,6 +295,69 @@ export function toolDefinitions(): ToolDefinition[] {
       },
     },
     {
+      name: 'list_people',
+      description:
+        'List the people recorded in memory, with each person id, name, whether they have a page, the docId of ' +
+        'that page when they do, and when they were first recorded. The system prompt shows only the most recent ' +
+        'forty, so this is how you reach anyone older, and how you look someone up by name without guessing. A ' +
+        'person with no page is still fully recorded: they have an id you can pass to graph_query, and nothing ' +
+        'written about them beyond their name and their links. Results come back as a page: total is the true ' +
+        'count of matching people, and hasMore says whether more remain.',
+      parameters: {
+        type: 'object',
+        properties: {
+          nameContains: {
+            type: 'string',
+            description:
+              'Return only people whose name contains this text, case-insensitively. Omit to list everyone.',
+          },
+          hasPage: {
+            type: 'boolean',
+            description:
+              'Return only people who have a page (true) or only those who do not (false). Omit for both.',
+          },
+          offset: {
+            type: 'number',
+            description: 'How many rows to skip. Defaults to 0.',
+          },
+          limit: {
+            type: 'number',
+            description: 'How many rows to return. Defaults to 50, and is capped at 200.',
+          },
+        },
+        additionalProperties: false,
+      },
+    },
+    {
+      name: 'list_entities',
+      description:
+        'List the entities recorded in memory (films, books, companies, places, bands, works of fiction), with ' +
+        'each entity id, name, and when it was first recorded. The system prompt shows only the most recent ' +
+        'thirty, so this is how you reach anything older. Entities have no pages in this release, so there is ' +
+        'nothing to read beyond the name and what the graph links to it; pass the id to graph_query for that. ' +
+        'Results come back as a page: total is the true count of matching entities, and hasMore says whether ' +
+        'more remain.',
+      parameters: {
+        type: 'object',
+        properties: {
+          nameContains: {
+            type: 'string',
+            description:
+              'Return only entities whose name contains this text, case-insensitively. Omit to list everything.',
+          },
+          offset: {
+            type: 'number',
+            description: 'How many rows to skip. Defaults to 0.',
+          },
+          limit: {
+            type: 'number',
+            description: 'How many rows to return. Defaults to 50, and is capped at 200.',
+          },
+        },
+        additionalProperties: false,
+      },
+    },
+    {
       name: 'update_style',
       description:
         'Change how you converse with this person going forward: engagement (leading, balanced, following), tone ' +
@@ -361,6 +439,10 @@ export async function dispatchTool(
         return await dispatchListArcs(engine, parsedArgs.value)
       case 'list_realms':
         return await dispatchListRealms(engine, parsedArgs.value)
+      case 'list_people':
+        return await dispatchListPeople(engine, parsedArgs.value)
+      case 'list_entities':
+        return await dispatchListEntities(engine, parsedArgs.value)
       case 'update_style':
         return await dispatchUpdateStyle(deps, parsedArgs.value)
       case 'update_profile':
@@ -462,6 +544,31 @@ async function dispatchListRealms(engine: MemoryEngine, value: unknown): Promise
   if (parsed.data.limit !== undefined) options.limit = parsed.data.limit
 
   return JSON.stringify(engine.listRealms(options))
+}
+
+async function dispatchListPeople(engine: MemoryEngine, value: unknown): Promise<string> {
+  const parsed = listPeopleArgs.safeParse(value)
+  if (!parsed.success) return errorJson(zodErrorMessage('list_people', parsed.error))
+
+  const options: ListPeopleOptions = {}
+  if (parsed.data.nameContains !== undefined) options.nameContains = parsed.data.nameContains
+  if (parsed.data.hasPage !== undefined) options.hasPage = parsed.data.hasPage
+  if (parsed.data.offset !== undefined) options.offset = parsed.data.offset
+  if (parsed.data.limit !== undefined) options.limit = parsed.data.limit
+
+  return JSON.stringify(engine.listPeople(options))
+}
+
+async function dispatchListEntities(engine: MemoryEngine, value: unknown): Promise<string> {
+  const parsed = listEntitiesArgs.safeParse(value)
+  if (!parsed.success) return errorJson(zodErrorMessage('list_entities', parsed.error))
+
+  const options: ListEntitiesOptions = {}
+  if (parsed.data.nameContains !== undefined) options.nameContains = parsed.data.nameContains
+  if (parsed.data.offset !== undefined) options.offset = parsed.data.offset
+  if (parsed.data.limit !== undefined) options.limit = parsed.data.limit
+
+  return JSON.stringify(engine.listEntities(options))
 }
 
 async function dispatchUpdateStyle(deps: ToolDeps | undefined, value: unknown): Promise<string> {

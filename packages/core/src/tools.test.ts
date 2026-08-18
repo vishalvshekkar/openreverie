@@ -61,13 +61,15 @@ function emptyReflectionOutput(summary: string) {
 }
 
 describe('toolDefinitions', () => {
-  it('lists exactly the nine memory and style tools with non-empty descriptions and a JSON schema', () => {
+  it('lists exactly the eleven memory and style tools with non-empty descriptions and a JSON schema', () => {
     const defs = toolDefinitions()
     const names = defs.map((d) => d.name).sort()
     expect(names).toEqual(
       [
         'graph_query',
         'list_arcs',
+        'list_entities',
+        'list_people',
         'list_realms',
         'read_document',
         'read_transcript',
@@ -640,6 +642,58 @@ describe('dispatchTool', () => {
       await engine.close()
     })
   })
+})
+
+it('list_people and list_entities page through nodes the prompt could not show', async () => {
+  const paths = memoryPaths(dir)
+  await MemoryEngine.open(dir, fakeDeps()).then((e) => e.close())
+
+  for (let i = 0; i < 3; i++) {
+    await appendGraph(paths, [
+      {
+        ts: `2026-08-0${i + 1}T00:00:00.000Z`,
+        op: 'assert',
+        node: `person_${i}`,
+        type: 'person',
+        label: `Person ${i}`,
+      },
+      {
+        ts: `2026-08-0${i + 1}T00:00:00.000Z`,
+        op: 'assert',
+        node: `entity_${i}`,
+        type: 'entity',
+        label: `Entity ${i}`,
+      },
+    ])
+  }
+
+  const engine = await MemoryEngine.open(dir, fakeDeps())
+  const sessionId = await engine.startSession()
+
+  const peopleResult = await dispatchTool(
+    engine,
+    sessionId,
+    call('list_people', { nameContains: 'person 1' }),
+  )
+  const people = JSON.parse(peopleResult) as {
+    total: number
+    rows: { id: string; name: string; hasPage: boolean }[]
+  }
+  expect(people.total).toBe(1)
+  expect(people.rows[0]).toMatchObject({ id: 'person_1', name: 'Person 1', hasPage: false })
+
+  const entitiesResult = await dispatchTool(engine, sessionId, call('list_entities', { limit: 2 }))
+  const entities = JSON.parse(entitiesResult) as {
+    total: number
+    returned: number
+    hasMore: boolean
+  }
+  expect(entities).toMatchObject({ total: 3, returned: 2, hasMore: true })
+
+  const badArg = await dispatchTool(engine, sessionId, call('list_people', { sortBy: 'name' }))
+  expect(JSON.parse(badArg).error).toMatch(/list_people/)
+
+  await engine.close()
 })
 
 it('list_arcs filters by status and pages, and its description matches what it returns', async () => {
