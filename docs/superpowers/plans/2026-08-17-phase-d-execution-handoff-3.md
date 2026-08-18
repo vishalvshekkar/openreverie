@@ -41,7 +41,7 @@ knows what to verify rather than assume.
 | (extra) arcs marker on character cap | DONE | `fa95c0e` |
 | 17 weekly rollup shelf | DONE | `e0c8bbd` |
 | 18 DocKind wiring test (P8) | DONE | `a8c523d` |
-| (extra) rollup escape-hatch row must never be capped away | **ONGOING**, see below | none yet |
+| (extra) rollup escape-hatch row must never be capped away | DONE | `6c82ce5` |
 | 19 final verification + README | TODO (orchestrator does this personally) | none yet |
 
 ### All five Phase D epochs, and what is left
@@ -133,10 +133,10 @@ Three possible worlds:
 Tasks 17 and 18 must RAISE that number. A flat or falling count means tests were parked or
 deleted. That is the failure mode this repo has been bitten by repeatedly.
 
-## ONGOING: the rollup escape-hatch row can be capped away
+## FIXED: the rollup escape-hatch row could be capped away
 
-Found and verified this session, after Task 17 was committed at `e0c8bbd`. If the fix is not in
-the tree when you pick this up, do it.
+Found, verified and fixed this session in `6c82ce5`, after Task 17 was committed at `e0c8bbd`.
+Recorded here because the reasoning matters and the same pattern may exist elsewhere.
 
 `rollupsAvailableSection` in `packages/core/src/context.ts` builds up to four rows and passes
 ALL of them through `capRows(lines, ROLLUPS_AVAILABLE_CAP)` where the cap is 800. The last row
@@ -162,11 +162,16 @@ this whole release exists to remove, reintroduced by capping the escape hatch al
 
 The existing Task 17 test does not catch it because it uses a smaller fixture.
 
-**The fix**: cap only the DATA rows, then always append the instructional row after `capRows`.
-The instruction is not data competing for budget; it is the thing that makes the data reachable,
-and it must never be the row that loses. Add a test with 12 weekly rollups and more than one
-daily rollup asserting the `read_document` sentence is present. Falsify it by moving the row back
-inside the `capRows` input and confirming it fails.
+**The fix applied**: cap only the DATA rows, then always append the instructional row after
+`capRows`. The instruction is not data competing for budget; it is the thing that makes the data
+reachable, and it must never be the row that loses. A test with 12 weekly rollups and 2 daily
+rollups now asserts the `read_document` sentence is present, and it was falsified by moving the
+row back inside the `capRows` input and confirming it fails.
+
+**Watch for the same pattern elsewhere.** Any section that passes its own escape-hatch text
+through `capRows` alongside its data has this bug latent in it. The other sections currently
+append their markers after building rows, so they are fine today, but the modes and journal plans
+both add new prompt sections and could reintroduce it.
 
 Do NOT fix this by raising `ROLLUPS_AVAILABLE_CAP`. `packages/core/src/budget.test.ts` asserts
 that the sum of `SECTION_CAPS` stays under `PROMPT_BUDGET_TOTAL`, and the sum is already 27,800
