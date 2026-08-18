@@ -35,6 +35,7 @@ import {
   REALMS_SECTION_CAP,
   RECENT_INTENTIONS_SECTION_CAP,
   RECENT_SUMMARY_CAP,
+  ROLLUPS_AVAILABLE_CAP,
 } from './budget.js'
 import type { ReverieConfig } from './config.js'
 import { buildPersona } from './personas.js'
@@ -60,6 +61,7 @@ export async function assembleSystemPrompt(
     entitiesSection(context),
     recentIntentionsSection(context),
     latestDailyRollupSection(context),
+    rollupsAvailableSection(context),
     recentSummariesSection(context),
   ].filter((section): section is string => section !== undefined)
 
@@ -146,6 +148,37 @@ function latestDailyRollupSection(context: SessionContext): string | undefined {
   const body = context.latestDailyRollup.body.trim()
   const capped = capBody(body, LATEST_DAILY_ROLLUP_CAP, context.latestDailyRollup.docId)
   return `## Latest daily rollup\n\nDate: ${context.latestDailyRollup.date}\n\n${capped.text}`
+}
+
+function rollupsAvailableSection(context: SessionContext): string | undefined {
+  if (context.weeklyRollupsTotal === 0) return undefined
+  const lines: string[] = []
+  lines.push(
+    `Weekly rollups, most recent first: ${context.weeklyRollups
+      .map((r) => `${r.week} (${r.docId})`)
+      .join(', ')}`,
+  )
+  if (context.weeklyRollupsTotal > context.weeklyRollups.length) {
+    lines.push(
+      `${context.weeklyRollups.length} shown, ${context.weeklyRollupsTotal} exist` +
+        (context.earliestWeek !== undefined ? `, running back to ${context.earliestWeek}.` : '.'),
+    )
+  }
+  if (context.dailyRollups.total > 0) {
+    const range =
+      context.dailyRollups.earliest !== undefined && context.dailyRollups.latest !== undefined
+        ? `, from ${context.dailyRollups.earliest} to ${context.dailyRollups.latest}`
+        : ''
+    const dayWord = context.dailyRollups.total === 1 ? 'day' : 'days'
+    lines.push(
+      `Daily rollups: ${context.dailyRollups.total} ${dayWord} covered${range}. The newest is shown above in full.`,
+    )
+  }
+  lines.push(
+    'Read any of these with read_document, or find one by period with search_memory using kinds and a date range.',
+  )
+  const capped = capRows(lines, ROLLUPS_AVAILABLE_CAP)
+  return `## Rollups available\n\n${capped.rows.join('\n')}`
 }
 
 function recentSummariesSection(context: SessionContext): string | undefined {

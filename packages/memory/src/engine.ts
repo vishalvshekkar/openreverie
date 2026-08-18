@@ -261,6 +261,21 @@ export interface SessionContext {
   recentIntentions: { text: string; date: string }[]
   latestDailyRollup?: { date: string; body: string; docId: string }
   recentSummaries: { sessionId: string; date: string; body: string; docId: string }[]
+  // The newest WEEKLY_INDEX_CAP weekly rollups, newest first, each with the
+  // docId the model needs to fetch it. Never the rollup bodies: those
+  // accumulate at 52 per year without bound, and preloading them would
+  // recreate the unbounded-prompt problem the budget exists to fix.
+  weeklyRollups: { week: string; docId: string }[]
+  // The true number of weekly rollups on disk, whether or not they fit in
+  // the shelf, so the shelf can say how many exist beyond what it lists.
+  weeklyRollupsTotal: number
+  // The oldest weekly rollup week, for the "running back to" line. Absent
+  // when there are no weekly rollups.
+  earliestWeek?: string
+  // Count and range of daily rollups, computed for free during the same
+  // walk that finds the newest one. earliest and latest are absent when
+  // there are no daily rollups.
+  dailyRollups: { total: number; earliest?: string; latest?: string }
   // The person's IANA timezone, and whether it is a fact they confirmed or
   // only the default read off the machine at folder creation. The model is
   // never told the current time through this context: the current time
@@ -319,6 +334,12 @@ const ENTITIES_CAP = 30
 // there by id and label only, which stays short), so it lives here next to
 // the chat-prompt caps.
 const ARCS_CAP = 30
+// How many of the most recent weekly rollups are listed in the prompt
+// shelf, each with its docId. Twelve is a quarter, which covers "a month
+// ago" without listing years. Older weeks are stated as a count and a
+// range, not enumerated, which is what keeps the shelf inside its
+// character budget.
+const WEEKLY_INDEX_CAP = 12
 const PERSON_STARTER_BODY = 'This page is new. It grows as we talk.\n'
 
 export class MemoryEngine {
@@ -801,12 +822,43 @@ export class MemoryEngine {
     }
 
     let latestDailyRollup: { date: string; body: string; docId: string } | undefined
+    let dailyTotal = 0
+    let dailyEarliest: string | undefined
+    let dailyLatest: string | undefined
     for (const doc of await listDocuments(this.paths.rollupsDailyDir, this.onDocSkip)) {
       if (typeof doc.meta.date !== 'string') continue
+      dailyTotal += 1
+      if (dailyEarliest === undefined || doc.meta.date < dailyEarliest)
+        dailyEarliest = doc.meta.date
+      if (dailyLatest === undefined || doc.meta.date > dailyLatest) dailyLatest = doc.meta.date
       if (!latestDailyRollup || doc.meta.date > latestDailyRollup.date) {
         latestDailyRollup = { date: doc.meta.date, body: doc.body, docId: doc.meta.id }
       }
     }
+    const dailyRollups = {
+      total: dailyTotal,
+      ...(dailyEarliest !== undefined ? { earliest: dailyEarliest } : {}),
+      ...(dailyLatest !== undefined ? { latest: dailyLatest } : {}),
+    }
+
+    // The weekly shelf. Only the id-bearing index is preloaded, never the
+    // bodies. One directory read plus a frontmatter parse per weekly file,
+    // on the same order as the daily walk already performed beside it.
+    const weeklyDocs = await listDocuments(this.paths.rollupsWeeklyDir, this.onDocSkip)
+    const weeklyRollups: SessionContext['weeklyRollups'] = []
+    let weeklyRollupsTotal = 0
+    let earliestWeek: string | undefined
+    for (const doc of weeklyDocs) {
+      if (typeof doc.meta.week !== 'string') continue
+      weeklyRollupsTotal += 1
+      if (earliestWeek === undefined || doc.meta.week < earliestWeek) {
+        earliestWeek = doc.meta.week
+      }
+      weeklyRollups.push({ week: doc.meta.week, docId: doc.meta.id })
+    }
+    // ISO week ids sort lexicographically in chronological order, so a
+    // descending sort puts the newest week first.
+    weeklyRollups.sort((a, b) => (a.week > b.week ? -1 : 1))
 
     const sessions = await SessionStore.listSessions(this.paths)
     const recentCutoff = addDaysLocal(now, -RECENT_SUMMARIES_WINDOW_DAYS, this.timezone())
@@ -905,6 +957,10 @@ export class MemoryEngine {
       recentIntentions: recentIntentions.slice(0, RECENT_INTENTIONS_CAP),
       ...(latestDailyRollup ? { latestDailyRollup } : {}),
       recentSummaries,
+      weeklyRollups: weeklyRollups.slice(0, WEEKLY_INDEX_CAP),
+      weeklyRollupsTotal,
+      ...(earliestWeek !== undefined ? { earliestWeek } : {}),
+      dailyRollups,
       timezone: this.timezone(),
       timezoneSource: this.timezoneSource(),
       isFirstSession,

@@ -1017,3 +1017,73 @@ describe('assembleSystemPrompt budget', () => {
     await engine.close()
   })
 })
+
+describe('assembleSystemPrompt rollup shelf', () => {
+  let dir: string
+  let paths: MemoryPaths
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'openreverie-context-shelf-'))
+    paths = memoryPaths(dir)
+    await ensureMemoryTree(paths)
+  })
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  it('preloads a compact index of weekly rollups, each with a docId, never the content', async () => {
+    await appendGraph(paths, [
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'arc_any',
+        type: 'arc',
+        label: 'Any Arc',
+      },
+    ])
+
+    const ids: string[] = []
+    for (let w = 19; w <= 33; w++) {
+      const week = `2026-W${String(w).padStart(2, '0')}`
+      const docId = newId('doc')
+      ids.push(docId)
+      await writeDocumentAtomic({
+        path: join(paths.rollupsWeeklyDir, `${week}.md`),
+        meta: { id: docId, kind: 'rollup_weekly', week },
+        body: `Week ${w} content that must never be preloaded.\n`,
+      })
+    }
+    await writeDocumentAtomic({
+      path: join(paths.rollupsDailyDir, '2026-08-10.md'),
+      meta: { id: newId('doc'), date: '2026-08-10' },
+      body: 'A steady day.\n',
+    })
+
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])), {
+      maintenance: false,
+    })
+    const prompt = await assembleSystemPrompt(engine, testConfig())
+
+    expect(prompt).toContain('## Rollups available')
+    expect(prompt).toContain('2026-W33 (')
+    expect(prompt).toContain('12 shown, 15 exist')
+    expect(prompt).toContain('running back to 2026-W19.')
+    expect(prompt).toContain('Daily rollups: 1 day covered')
+    // The three oldest weeks are beyond the twelve-week index and appear
+    // only in the count-and-range line, never as listable keys.
+    expect(prompt).not.toContain('2026-W19 (')
+    // Content is never preloaded.
+    expect(prompt).not.toContain('Week 33 content')
+
+    // Every listed docId appears in the prompt and resolves through
+    // read_document.
+    for (const id of ids.slice(ids.length - 12)) {
+      expect(prompt).toContain(id)
+      const doc = await engine.readDocumentById(id)
+      expect(doc?.body).toContain('Week')
+    }
+
+    await engine.close()
+  })
+})
