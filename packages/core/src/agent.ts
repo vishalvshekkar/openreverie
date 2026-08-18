@@ -366,6 +366,11 @@ export class AgentSession {
         if (toolCall.name === 'update_style' && !this.resultHasError(result)) {
           const resultData = JSON.parse(result)
           this.config.style = resultData.style
+          // The prompt reads style from the profile now, not from config, so
+          // the new style has to land there or the reassembly below rebuilds
+          // the identical prompt. update_style still writes config.toml
+          // through its persister until that path is retired.
+          await this.engine.updateProfileSettings({ style: resultData.style })
           this.system = await assembleSystemPrompt(this.engine, this.config)
         }
 
