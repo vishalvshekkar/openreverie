@@ -528,10 +528,48 @@ describe('dispatchTool', () => {
       arguments: JSON.stringify({ timezone: 'Nowhere/Fake' }),
     })
 
-    expect(JSON.parse(result).error).toContain('Nowhere/Fake')
+    expect(JSON.parse(result).error).toContain('not a recognized IANA timezone')
     expect(engine.timezone()).toBe(before)
 
     await engine.close()
+  })
+
+  describe('update_profile allowlist', () => {
+    it('accepts every allowlisted field', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const sessionId = await engine.startSession()
+      const result = await dispatchTool(
+        engine,
+        sessionId,
+        call('update_profile', {
+          preferredName: 'Vish',
+          pronouns: 'they/them',
+          location: 'Bengaluru',
+          timezone: 'Asia/Kolkata',
+          birthday: '04-02',
+          occupation: 'nurse',
+          birthdayGreetings: false,
+        }),
+      )
+      expect(JSON.parse(result).error).toBeUndefined()
+      expect(engine.profile().meta.preferredName).toBe('Vish')
+
+      await engine.close()
+    })
+
+    it('refuses a style write, because style is never model-writable', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const sessionId = await engine.startSession()
+      const result = await dispatchTool(
+        engine,
+        sessionId,
+        call('update_profile', { style: { tone: 'direct' } }),
+      )
+      expect(JSON.parse(result).error).toMatch(/update_profile/)
+      expect(engine.profile().meta.style).toBeUndefined()
+
+      await engine.close()
+    })
   })
 
   describe('update_style', () => {

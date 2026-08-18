@@ -19,6 +19,7 @@ import type {
   ListRealmsOptions,
   MemoryEngine,
 } from '@openreverie/memory'
+import { updateProfileArgsSchema } from '@openreverie/memory'
 import type { ToolCall, ToolDefinition } from '@openreverie/providers'
 import { z } from 'zod'
 import type { StyleConfig } from './config.js'
@@ -95,10 +96,6 @@ const updateStyleArgs = z
       value.engagement !== undefined || value.tone !== undefined || value.orientation !== undefined,
     { message: 'at least one of engagement, tone, or orientation is required' },
   )
-
-const updateProfileArgs = z.strictObject({
-  timezone: z.string(),
-})
 
 export function toolDefinitions(): ToolDefinition[] {
   return [
@@ -394,21 +391,41 @@ export function toolDefinitions(): ToolDefinition[] {
     {
       name: 'update_profile',
       description:
-        'Record a structured personal fact reverie has to read back out in code. Right now that is the ' +
-        "person's timezone, as an IANA name such as Asia/Kolkata or America/New_York. Call this as soon as the " +
-        'person tells you where they are or corrects the timezone you were assuming, rather than waiting for the ' +
-        'end of the conversation. The local times shown on their messages start using it from that point onward.',
+        'Record a plain fact about the person in their profile, the moment you learn it: what they want to be ' +
+        'called, their pronouns, where they live, their timezone, their birthday, what they do. Also record their ' +
+        'answer about birthday greetings when they give it. Write a fact only when they have actually told you; ' +
+        'never infer one, not pronouns from a name, not a location from a timezone, not a birthday from an ' +
+        'offhand remark about turning thirty. This is for the current value of a fact. What a fact means to them, ' +
+        'and how it changed, belongs in the record you write at the end of a session, not here. You cannot change ' +
+        'how you talk with them from this tool; that is /style in the terminal or the settings pane in the browser.',
       parameters: {
         type: 'object',
         properties: {
+          preferredName: {
+            type: 'string',
+            description: 'What to call them, which is not necessarily their legal name.',
+          },
+          pronouns: {
+            type: 'string',
+            description: 'Free text, exactly as they said it. Not a fixed list.',
+          },
+          location: { type: 'string', description: 'Where they live, as they say it.' },
           timezone: {
             type: 'string',
+            description: 'Their IANA timezone, for example Asia/Kolkata or Europe/Berlin.',
+          },
+          birthday: {
+            type: 'string',
+            description: 'MM-DD, or YYYY-MM-DD when they gave the year. Never guess a year.',
+          },
+          occupation: { type: 'string', description: 'Their current role, as they describe it.' },
+          birthdayGreetings: {
+            type: 'boolean',
             description:
-              'The IANA timezone name for where the person actually is, for example Asia/Kolkata or ' +
-              'America/New_York. Not an abbreviation like IST or EST, and not a UTC offset.',
+              'Whether they want you to say something on their birthday. Set this from their own answer, ' +
+              'never on your own judgment.',
           },
         },
-        required: ['timezone'],
         additionalProperties: false,
       },
     },
@@ -603,20 +620,22 @@ async function dispatchUpdateStyle(deps: ToolDeps | undefined, value: unknown): 
 
 // Unlike update_style, this does not go through ToolDeps. Style lives in
 // config.toml, whose path is a CLI concern core must not know; the profile
-// lives in the memory folder, which MemoryEngine already owns. An
-// unrecognized zone name throws inside updateProfile and is turned into a
-// tool error by dispatchTool's own catch, so the model sees its mistake in
-// the transcript and can correct it.
+// lives in the memory folder, which MemoryEngine already owns. The schema
+// is the shared MODEL-WRITE allowlist from @openreverie/memory, so this
+// tool and MemoryEngine.updateProfile can never disagree about what a
+// model may write. An invalid field (an unrecognized timezone, a malformed
+// birthday) is a validation failure here, reported as a tool error rather
+// than thrown, so the model sees its own mistake in the transcript and can
+// correct it.
 async function dispatchUpdateProfile(engine: MemoryEngine, value: unknown): Promise<string> {
-  const parsed = updateProfileArgs.safeParse(value)
+  const parsed = updateProfileArgsSchema.safeParse(value)
   if (!parsed.success) return errorJson(zodErrorMessage('update_profile', parsed.error))
 
-  const profile = await engine.updateProfile({ timezone: parsed.data.timezone })
+  const profile = await engine.updateProfile(parsed.data)
   return JSON.stringify({
     ok: true,
     timezone: profile.meta.timezone,
-    message:
-      'Saved. Local times on their messages use this from now on, in this conversation and in future ones.',
+    message: 'Saved.',
   })
 }
 

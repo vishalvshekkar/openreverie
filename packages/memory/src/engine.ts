@@ -37,7 +37,17 @@ import {
   type SequencedGraphRecord,
 } from './graph.js'
 import { ensureMemoryTree, type MemoryPaths, memoryPaths } from './paths.js'
-import { loadProfile, type Profile, writeProfile } from './profile.js'
+import {
+  loadProfile,
+  MODEL_WRITE_FIELDS,
+  type Profile,
+  type ProfileMeta,
+  type ProfileSettingsPatch,
+  type ProfileUpdates,
+  profileSettingsPatchSchema,
+  updateProfileArgsSchema,
+  writeProfile,
+} from './profile.js'
 import {
   type Proposal,
   type ProposalResolution,
@@ -62,7 +72,8 @@ import {
   pendingWeeklyRollups,
 } from './rollups.js'
 import { type DocKind, MemoryIndex, type SearchHit } from './sqlite.js'
-import { addDaysLocal, formatLocalDate, isValidIanaTimeZone, systemTimeZone } from './time.js'
+import { resolveStyle, type StyleConfig } from './style.js'
+import { addDaysLocal, formatLocalDate, systemTimeZone } from './time.js'
 import { type PublicTranscriptLine, SessionStore, type TranscriptLine } from './transcripts.js'
 
 export type { SequencedGraphRecord } from './graph.js'
@@ -463,21 +474,69 @@ export class MemoryEngine {
       : 'system-default'
   }
 
-  // Writes a confirmed personal fact into profile.md and refreshes the
-  // cached copy. Called by the live update_profile tool and by reflection's
-  // profileUpdates backstop; both are the person telling us, so the source
-  // is always 'user-confirmed'.
-  async updateProfile(patch: { timezone?: string }): Promise<Profile> {
-    const current = this.profileCache
-    const meta: Profile['meta'] = { ...current.meta }
-    if (patch.timezone !== undefined) {
-      if (!isValidIanaTimeZone(patch.timezone)) {
-        throw new Error(`"${patch.timezone}" is not a recognized IANA timezone name.`)
+  // The three style axes, with the balanced/warm/listening defaults applied
+  // at read time rather than baked into the file schema, so an unset axis in
+  // profile.md is never mistaken for a chosen one.
+  currentStyle(): StyleConfig {
+    return resolveStyle(this.profileCache.meta.style)
+  }
+
+  // The MODEL-WRITE path: the live update_profile tool and reflection's
+  // profileUpdates both land here. The seven-key allowlist is enforced by
+  // the schema, so there is no representable call that writes style.
+  // Setting a timezone here is a confirmation, so timezoneSource follows.
+  async updateProfile(updates: ProfileUpdates): Promise<Profile> {
+    const parsed = updateProfileArgsSchema.safeParse(updates)
+    if (!parsed.success) {
+      throw new Error(
+        `Invalid profile update: ${parsed.error.issues
+          .map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`)
+          .join('; ')}`,
+      )
+    }
+    const meta: ProfileMeta = { ...this.profileCache.meta }
+    for (const [key, value] of Object.entries(parsed.data)) {
+      if (value !== undefined) meta[key] = value
+    }
+    if (parsed.data.timezone !== undefined) meta.timezoneSource = 'user-confirmed'
+    const next: Profile = { meta, body: this.profileCache.body }
+    await writeProfile(this.paths, next)
+    this.profileCache = next
+    return next
+  }
+
+  // The human path: /style, reverie setup, and the settings pane. It
+  // accepts style and prose, which no model surface may ever write, and it
+  // treats null as "clear this field" so a blank settings box means unknown
+  // rather than an empty string.
+  async updateProfileSettings(patch: ProfileSettingsPatch): Promise<Profile> {
+    const parsed = profileSettingsPatchSchema.safeParse(patch)
+    if (!parsed.success) {
+      throw new Error(
+        `Invalid profile settings: ${parsed.error.issues
+          .map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`)
+          .join('; ')}`,
+      )
+    }
+    const meta: ProfileMeta = { ...this.profileCache.meta }
+    const mutableMeta: Record<string, unknown> = meta
+    for (const key of MODEL_WRITE_FIELDS) {
+      const value = parsed.data[key]
+      if (value === undefined) continue
+      if (value === null) {
+        delete mutableMeta[key]
+      } else {
+        mutableMeta[key] = value
       }
-      meta.timezone = patch.timezone
+    }
+    if (parsed.data.style !== undefined) {
+      meta.style = { ...(meta.style ?? {}), ...parsed.data.style }
+    }
+    if (parsed.data.timezone !== undefined && parsed.data.timezone !== null) {
       meta.timezoneSource = 'user-confirmed'
     }
-    const next: Profile = { meta, body: current.body }
+    const body = parsed.data.prose !== undefined ? parsed.data.prose : this.profileCache.body
+    const next: Profile = { meta, body }
     await writeProfile(this.paths, next)
     this.profileCache = next
     return next
