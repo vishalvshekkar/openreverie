@@ -3,7 +3,16 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { type MemoryPaths, memoryPaths } from './paths.js'
-import { loadProfile, profileMetaSchema, starterProfileDocument, writeProfile } from './profile.js'
+import {
+  loadProfile,
+  MODEL_WRITE_FIELDS,
+  profileMetaSchema,
+  profileSettingsPatchSchema,
+  profileUpdatesSchema,
+  starterProfileDocument,
+  updateProfileArgsSchema,
+  writeProfile,
+} from './profile.js'
 
 describe('profileMetaSchema', () => {
   it('accepts a valid IANA timezone', () => {
@@ -152,5 +161,101 @@ describe('profileMetaSchema personal fields', () => {
   it('passes an unknown key through unchanged, because the profile is an open set', () => {
     const parsed = profileMetaSchema.parse({ id: 'd', favouriteTea: 'assam' })
     expect(parsed.favouriteTea).toBe('assam')
+  })
+})
+
+describe('MODEL-WRITE profile schemas', () => {
+  const allowed = {
+    preferredName: 'Vish',
+    pronouns: 'they/them',
+    location: 'Bengaluru',
+    timezone: 'Asia/Kolkata',
+    birthday: '04-02',
+    occupation: 'nurse',
+    birthdayGreetings: false,
+  }
+
+  it('updateProfileArgsSchema accepts every allowlisted field', () => {
+    expect(updateProfileArgsSchema.safeParse(allowed).success).toBe(true)
+  })
+
+  it('profileUpdatesSchema accepts every allowlisted field', () => {
+    expect(profileUpdatesSchema.safeParse(allowed).success).toBe(true)
+  })
+
+  it('both accept an empty object, since every key is optional', () => {
+    expect(updateProfileArgsSchema.safeParse({}).success).toBe(true)
+    expect(profileUpdatesSchema.safeParse({}).success).toBe(true)
+  })
+
+  // This is the test that keeps the style/mode split real. Adding style to
+  // either allowlist makes the corresponding assertion fail, because the
+  // schema would then accept exactly what the rule says it must not.
+  it('updateProfileArgsSchema rejects a style key', () => {
+    const parsed = updateProfileArgsSchema.safeParse({ style: { tone: 'direct' } })
+    expect(parsed.success).toBe(false)
+  })
+
+  it('profileUpdatesSchema rejects a style key', () => {
+    const parsed = profileUpdatesSchema.safeParse({ style: { tone: 'direct' } })
+    expect(parsed.success).toBe(false)
+  })
+
+  it('both reject a nested style axis smuggled in at the top level', () => {
+    expect(updateProfileArgsSchema.safeParse({ tone: 'direct' }).success).toBe(false)
+    expect(profileUpdatesSchema.safeParse({ orientation: 'solutions' }).success).toBe(false)
+  })
+
+  it('the allowlist is exactly the seven fields from the spec', () => {
+    expect([...MODEL_WRITE_FIELDS].sort()).toEqual(
+      [
+        'birthday',
+        'birthdayGreetings',
+        'location',
+        'occupation',
+        'preferredName',
+        'pronouns',
+        'timezone',
+      ].sort(),
+    )
+  })
+
+  it('rejects a timezone Intl does not recognize', () => {
+    expect(updateProfileArgsSchema.safeParse({ timezone: 'Mars/Olympus' }).success).toBe(false)
+  })
+
+  it('rejects a birthday that is neither MM-DD nor YYYY-MM-DD', () => {
+    expect(profileUpdatesSchema.safeParse({ birthday: 'next tuesday' }).success).toBe(false)
+  })
+})
+
+describe('profileSettingsPatchSchema', () => {
+  it('accepts style and prose, which no MODEL-WRITE schema may accept', () => {
+    const parsed = profileSettingsPatchSchema.safeParse({
+      style: { tone: 'direct' },
+      prose: 'Prefers to be called Vish by everyone except his mother.',
+    })
+    expect(parsed.success).toBe(true)
+  })
+
+  it('accepts null to clear a field', () => {
+    expect(profileSettingsPatchSchema.safeParse({ location: null }).success).toBe(true)
+  })
+
+  it('rejects infrastructure keys that belong to config.toml', () => {
+    for (const body of [
+      { provider: { apiKey: 'sk-test' } },
+      { safety: { mode: 'firewall' } },
+      { models: { chat: 'gpt-5' } },
+      { memoryDir: '/tmp/elsewhere' },
+    ]) {
+      expect(profileSettingsPatchSchema.safeParse(body).success).toBe(false)
+    }
+  })
+
+  it('rejects timezoneSource, which is not a setting', () => {
+    expect(profileSettingsPatchSchema.safeParse({ timezoneSource: 'user-confirmed' }).success).toBe(
+      false,
+    )
   })
 })

@@ -64,6 +64,85 @@ export const profileMetaSchema = z
     style: styleMetaSchema.optional(),
   })
   .passthrough()
+
+// Three schemas, three boundaries, deliberately not shared.
+//
+// profileMetaSchema above is the FILE schema: passthrough, because
+// profile.md is an open, growing set the user may hand-edit.
+//
+// The two below are the MODEL-WRITE schemas, one per model surface: the
+// live update_profile tool's arguments, and reflection's profileUpdates
+// field. Both are strict objects over the same seven-key allowlist.
+// Neither has a style key, at all, ever: the model may write facts it
+// was told and consent answers it collected, and it may never write
+// style. That absence is what makes the rule enforceable rather than a
+// convention, because there is no representable call that sets one.
+//
+// They are declared separately rather than shared because they answer to
+// two different boundaries, and a mistake in one must not be silently
+// papered over by the other.
+
+export const MODEL_WRITE_FIELDS = [
+  'preferredName',
+  'pronouns',
+  'location',
+  'timezone',
+  'birthday',
+  'occupation',
+  'birthdayGreetings',
+] as const
+
+export const updateProfileArgsSchema = z.strictObject({
+  preferredName: z.string().optional(),
+  pronouns: z.string().optional(),
+  location: z.string().optional(),
+  timezone: z
+    .string()
+    .refine(isValidIanaTimeZone, { message: 'is not a recognized IANA timezone' })
+    .optional(),
+  birthday: z.string().regex(BIRTHDAY_PATTERN).optional(),
+  occupation: z.string().optional(),
+  birthdayGreetings: z.boolean().optional(),
+})
+
+export const profileUpdatesSchema = z.strictObject({
+  preferredName: z.string().optional(),
+  pronouns: z.string().optional(),
+  location: z.string().optional(),
+  timezone: z
+    .string()
+    .refine(isValidIanaTimeZone, { message: 'is not a recognized IANA timezone' })
+    .optional(),
+  birthday: z.string().regex(BIRTHDAY_PATTERN).optional(),
+  occupation: z.string().optional(),
+  birthdayGreetings: z.boolean().optional(),
+})
+
+export type ProfileUpdates = z.infer<typeof updateProfileArgsSchema>
+
+// The HTTP surface: the PATCH /api/v1/profile body. A third strict
+// object, distinct from both MODEL-WRITE schemas rather than a reuse of
+// either. It legitimately includes style and prose, because the settings
+// pane is not a model surface: it is the same kind of write /style and
+// reverie setup already make. null clears a field.
+export const profileSettingsPatchSchema = z.strictObject({
+  preferredName: z.string().nullable().optional(),
+  pronouns: z.string().nullable().optional(),
+  location: z.string().nullable().optional(),
+  timezone: z
+    .string()
+    .refine(isValidIanaTimeZone, { message: 'is not a recognized IANA timezone' })
+    .nullable()
+    .optional(),
+  birthday: z.string().regex(BIRTHDAY_PATTERN).nullable().optional(),
+  occupation: z.string().nullable().optional(),
+  birthdayGreetings: z.boolean().nullable().optional(),
+  style: styleMetaSchema.optional(),
+  prose: z.string().optional(),
+})
+
+export type ProfileSettingsPatch = z.infer<typeof profileSettingsPatchSchema>
+
 export const PROFILE_STARTER_BODY = `This file holds structured facts about you that reverie needs to read back
 out in code, starting with your timezone. It is machine managed and safe to
 hand edit; keep the frontmatter valid YAML.
