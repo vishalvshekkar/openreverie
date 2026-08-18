@@ -43,14 +43,62 @@ knows what to verify rather than assume.
 | 18 DocKind wiring test (P8) | **ONGOING, see below** | none yet |
 | 19 final verification + README | TODO (orchestrator does this personally) | none yet |
 
-### Other plans
+### All five Phase D epochs, and what is left
 
-| Plan file | Tasks | State |
-| --- | --- | --- |
-| `2026-08-17-cli-polish-and-ci-fix-plan.md` | 10 | DONE (earlier session) |
-| `2026-08-17-time-as-first-class-plan.md` | 23 | DONE, merged into design |
-| `2026-08-17-modes-profile-settings-plan.md` | 24 (Task 0 + 1-22) | NOT STARTED, prep done, see below |
-| `2026-08-17-journal-mode-plan.md` | 16 | NOT STARTED, needs modes first |
+Phase D is five plans, not one. The original brief for the whole phase is
+`docs/superpowers/plans/2026-08-17-execution-handoff.md`; read its "The five plans" section
+once for the original intent. Every plan names its spec in its own header, and the specs live
+in `docs/superpowers/specs/` dated `2026-08-16`. Read the spec alongside the plan whenever a
+task's intent is unclear.
+
+**Phase D is not finished until all five have shipped and merged into `feat/phase-d-design`,
+and design has merged to `main`.** Two of the five are done. One is nearly done. Two have not
+been started.
+
+| # | Epoch | What it is | Tasks | Depends on | State |
+| --- | --- | --- | --- | --- | --- |
+| 1 | **cli-polish** `2026-08-17-cli-polish-and-ci-fix-plan.md` | Terminal UX cleanup and the CI fix. Independent of everything else. | 10 | nothing | **DONE**, merged into design (verified) |
+| 2 | **time** `2026-08-17-time-as-first-class-plan.md` | Local time as a first class fact: `profile.md` holds the timezone, messages are stamped in local time, session dates and daily/weekly rollups use the local calendar day instead of UTC. Shipped the `reverie migrate` subcommand and the migration registry. | 23 | nothing | **DONE**, merged into design |
+| 3 | **retrieval** `2026-08-17-context-and-retrieval-plan.md` | Close the loop where the prompt says more exists but gives no way to reach it. Node listing tools, a graph-node search lane, truncation markers that name their tool and carry a docId, and a hard per-section character budget for the prompt. | 19 | time (one fix only) | **16 of 19 committed**, see the retrieval table above. Tasks 17, 18 ONGOING; 19 TODO |
+| 4 | **modes** `2026-08-17-modes-profile-settings-plan.md` | Conversation modes, the profile's personal fields, and settings. Moves `StyleConfig` down into memory, adds the mode catalogue and the mode overlay in the persona, replaces `update_style` with `set_mode`, takes style out of `config.toml`, adds a CLI command table with `/mode` `/style` `/settings` `/whoami`, a persistent status line, the `mode` stream event, session mode over HTTP, profile and settings endpoints, and two new web destinations. | 24 (Task 0, Tasks 1-22, plus Task 7A) | time | **NOT STARTED.** Worktree exists and `pnpm install` is done. Task 0 steps 1-5 verified this session, step 6 still to run |
+| 5 | **journal** `2026-08-17-journal-mode-plan.md` | Journaling as its own mode: a `journal/` document kind, entry assembly from a transcript, six journaling methods, `journaling.md` protocol read/write, the `update_journaling_protocol` tool, reflection's `journalingUpdate` backstop, server and web wiring, and a safety invariant test. | 16 | time, modes | **NOT STARTED.** No worktree yet |
+
+Merge state verified this session with `git merge-base --is-ancestor`: both
+`feat/phase-d-cli-polish` and `feat/phase-d-time` are ancestors of `feat/phase-d-design`, and
+`git log feat/phase-d-design..feat/phase-d-cli-polish` is empty. Those two branches still exist
+but carry nothing unmerged; they can be deleted whenever the human wants. Do not delete them on
+your own initiative.
+
+Dependency graph, from the original brief:
+
+```
+cli-polish            independent                      DONE
+time                  before modes and journal         DONE
+  modes               before journal                   NOT STARTED
+    journal                                            NOT STARTED
+  retrieval           needs only the sessionId fix     17/19
+```
+
+So the remaining critical path is: **finish retrieval, merge it, then modes, merge it, then
+journal, merge it, then design to main.** modes is the long pole at 24 tasks, and journal at 16
+cannot start until modes is merged.
+
+### Worktree conventions for the two plans not yet started
+
+The established pattern, one worktree per plan branched from `feat/phase-d-design`:
+
+```bash
+git worktree add .claude/worktrees/<plan-name> -b feat/phase-d-<plan-name> feat/phase-d-design
+```
+
+The modes worktree already exists but predates retrieval; see "Merge order" below before using
+it. The journal worktree does not exist yet and must be branched from design **after** modes has
+merged into design, not before.
+
+Merge a worktree back into design only after the whole plan is complete and you have personally
+run `pnpm lint`, `pnpm build` and `pnpm test` in it. Run the full gate again on design after the
+merge, because a merge can break what neither branch broke alone. Then
+`git worktree remove .claude/worktrees/<plan-name>`.
 
 ## VERIFY THE ONGOING WORK BEFORE YOU CONTINUE
 
@@ -136,6 +184,15 @@ From the plan, use verbatim:
    modes-merged design and run the journal plan. Its Task 13 safety-invariant falsification
    (six combinations, position plus bytes) is yours, never a subagent's.
 7. Update the README honestly after each plan ships. The Status section must never overstate.
+8. When all five epochs have merged into `feat/phase-d-design` and the full gate is green there,
+   Phase D is complete. Merging `feat/phase-d-design` into `main` and cutting a release is the
+   human's call, not yours: raise it and wait. `main` is currently at `e72377b`
+   (the v0.5.0 merge), so design is a long way ahead of it and that merge deserves a human eye.
+
+Note the ordering constraint that makes this sequential rather than parallel: journal depends on
+modes, and modes depends on time (done). retrieval and modes could in principle have run in
+parallel, but retrieval is nearly finished and modes has not started, so just finish retrieval
+first and take its merged result into modes.
 
 ## Merge order: why modes must take design first
 
