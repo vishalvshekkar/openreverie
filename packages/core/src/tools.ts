@@ -469,8 +469,8 @@ async function dispatchSearchMemory(engine: MemoryEngine, value: unknown): Promi
       }
     : undefined
 
-  const hits = await engine.search(query, filters, limit)
-  return JSON.stringify(hits)
+  const results = await engine.search(query, filters, limit)
+  return JSON.stringify(results)
 }
 
 async function dispatchGraphQuery(engine: MemoryEngine, value: unknown): Promise<string> {

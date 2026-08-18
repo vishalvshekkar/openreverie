@@ -18,7 +18,7 @@
 // full reasoning.
 
 import type { EmbeddingProvider } from '@openreverie/providers'
-import type { DocKind, MemoryIndex, SearchHit } from './sqlite.js'
+import type { DocKind, MemoryIndex, NodeMatch, SearchHit } from './sqlite.js'
 
 export interface SearchFilters {
   kinds?: DocKind[]
@@ -29,6 +29,16 @@ export interface SearchFilters {
 const CANDIDATE_LIMIT = 20
 const DEFAULT_LIMIT = 8
 const RRF_K = 60
+const NODE_HITS_CAP = 10
+
+// Two lanes, returned separately. `documents` are ranked passages fused from
+// the FTS and cosine lists. `nodes` are graph nodes whose name matched, and
+// they are deliberately not fused in: a node has no chunk, so it has no rank
+// in either list, and any score invented for it would corrupt a real ranking.
+export interface SearchResults {
+  documents: SearchHit[]
+  nodes: NodeMatch[]
+}
 
 export async function searchMemory(
   index: MemoryIndex,
@@ -37,7 +47,7 @@ export async function searchMemory(
   query: string,
   filters?: SearchFilters,
   limit = DEFAULT_LIMIT,
-): Promise<SearchHit[]> {
+): Promise<SearchResults> {
   const textHits = index.searchText(
     query,
     CANDIDATE_LIMIT,
@@ -57,7 +67,10 @@ export async function searchMemory(
     : []
 
   const fused = fuseByReciprocalRank([textHits, vectorHits])
-  return fused.slice(0, limit)
+  return {
+    documents: fused.slice(0, limit),
+    nodes: index.searchNodes(query, NODE_HITS_CAP),
+  }
 }
 
 // Reciprocal rank fusion: each hit's score is the sum, over every list it

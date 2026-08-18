@@ -35,6 +35,17 @@ export interface SearchHit {
   score: number
 }
 
+// A graph node whose name matched a search query. Separate from SearchHit
+// on purpose: a node has no chunk, no FTS rank and no cosine score, so it
+// carries no score at all rather than an invented one.
+export interface NodeMatch {
+  id: string
+  type: NodeType
+  label: string
+  doc: string | null
+  ts: string
+}
+
 export type EmbedFn = (texts: string[]) => Promise<number[][]>
 
 const MAX_CHUNK_CHARS = 1200
@@ -422,6 +433,52 @@ export class MemoryIndex {
     return scored.slice(0, limit)
   }
 
+  // A full scan of the nodes table, case-folded, matched by substring. See
+  // the comment on nodeQueryTokens for the matching rule, and the spec for
+  // why this is a scan rather than an FTS5 table: node counts are in the
+  // hundreds to low thousands, replaceGraph rewrites this table wholesale on
+  // every open, and name lookup wants mid-token substring behavior that FTS5
+  // does not give.
+  searchNodes(query: string, limit: number): NodeMatch[] {
+    const tokens = nodeQueryTokens(query)
+    if (tokens.length === 0) {
+      return []
+    }
+    const rows = this.db.prepare('SELECT id, type, label, doc, ts FROM nodes').all() as NodeRow[]
+
+    const scored: { row: NodeRow; tier: number }[] = []
+    for (const row of rows) {
+      const label = row.label.toLowerCase()
+      let tier = 3
+      for (const token of tokens) {
+        if (label === token) {
+          tier = Math.min(tier, 0)
+        } else if (label.startsWith(token)) {
+          tier = Math.min(tier, 1)
+        } else if (label.includes(token)) {
+          tier = Math.min(tier, 2)
+        }
+      }
+      if (tier < 3) {
+        scored.push({ row, tier })
+      }
+    }
+
+    scored.sort((a, b) => {
+      if (a.tier !== b.tier) return a.tier - b.tier
+      if (a.row.ts !== b.row.ts) return a.row.ts > b.row.ts ? -1 : 1
+      return a.row.id < b.row.id ? 1 : a.row.id > b.row.id ? -1 : 0
+    })
+
+    return scored.slice(0, limit).map(({ row }) => ({
+      id: row.id,
+      type: row.type,
+      label: row.label,
+      doc: row.doc,
+      ts: row.ts,
+    }))
+  }
+
   neighbors(nodeId: string): { edge: GraphEdge; node: GraphNode }[] {
     const rows = this.db
       .prepare(
@@ -567,6 +624,23 @@ function toFtsQuery(query: string): string | null {
     return null
   }
   return terms.map((term) => `"${term.replace(/"/g, '""')}"`).join(' ')
+}
+
+// Splits a search query into the tokens the node scan matches on. The query
+// is case-folded and split on non-word characters. Tokens shorter than three
+// characters are dropped, because a two-letter fragment matches a large
+// share of any name list, unless the entire query is one token, in which
+// case it is kept: a two-letter nickname is a real name someone might search
+// for on its own.
+export function nodeQueryTokens(query: string): string[] {
+  const raw = query
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter((token) => token.length > 0)
+  if (raw.length === 1) {
+    return raw
+  }
+  return raw.filter((token) => token.length >= 3)
 }
 
 // The date predicate shared by searchText and searchVector. Filtering is by

@@ -31,6 +31,7 @@ import {
   type GraphNode,
   type GraphRecord,
   type GraphState,
+  type NodeType,
   readGraph,
   readGraphRecords,
   type SequencedGraphRecord,
@@ -190,6 +191,19 @@ export interface ListEntitiesOptions {
   nameContains?: string
   offset?: number
   limit?: number
+}
+
+export interface NodeHit {
+  nodeId: string
+  name: string
+  type: NodeType
+  hasPage: boolean
+  docId?: string
+}
+
+export interface EngineSearchResult {
+  documents: SearchHit[]
+  nodes: NodeHit[]
 }
 
 export interface EngineDeps {
@@ -840,8 +854,12 @@ export class MemoryEngine {
     }
   }
 
-  async search(query: string, filters?: SearchFilters, limit?: number): Promise<SearchHit[]> {
-    return searchMemory(
+  async search(
+    query: string,
+    filters?: SearchFilters,
+    limit?: number,
+  ): Promise<EngineSearchResult> {
+    const results = await searchMemory(
       this.index,
       this.deps.embeddings,
       this.deps.embeddingModel,
@@ -849,6 +867,21 @@ export class MemoryEngine {
       filters,
       limit,
     )
+    // The nodes table stores a filesystem path, not a document id, so the
+    // path-to-docId projection happens here, exactly as withDocId does for
+    // graphQuery. A node with no page has neither.
+    const nodes: NodeHit[] = results.nodes.map((node) => {
+      const hit: NodeHit = {
+        nodeId: node.id,
+        name: node.label,
+        type: node.type,
+        hasPage: node.doc !== null,
+      }
+      const docId = node.doc ? this.docIdByPath.get(node.doc) : undefined
+      if (docId) hit.docId = docId
+      return hit
+    })
+    return { documents: results.documents, nodes }
   }
 
   graphQuery(query: GraphQuery): unknown[] {

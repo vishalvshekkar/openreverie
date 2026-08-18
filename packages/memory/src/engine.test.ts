@@ -439,7 +439,7 @@ describe('MemoryEngine', () => {
       expect(byId?.path).toBe(join(sessionDir, 'summary.md'))
 
       // Search finds the reflected item text.
-      const hits = await engine.search('anxious')
+      const hits = (await engine.search('anxious')).documents
       expect(hits.length).toBeGreaterThan(0)
 
       // Prove index.db is fully rebuildable from the folder: delete it,
@@ -451,10 +451,10 @@ describe('MemoryEngine', () => {
 
       engine = await MemoryEngine.open(dir, deps)
       const hitsBeforeRebuild = await engine.search('anxious')
-      expect(hitsBeforeRebuild).toEqual([])
+      expect(hitsBeforeRebuild.documents).toEqual([])
 
       await engine.reindexAll()
-      const hitsAfterRebuild = await engine.search('anxious')
+      const hitsAfterRebuild = (await engine.search('anxious')).documents
       expect(hitsAfterRebuild.length).toBeGreaterThan(0)
 
       await engine.close()
@@ -683,14 +683,14 @@ describe('MemoryEngine', () => {
       const noSkippedDocId = (hits: { docId: string }[]) =>
         expect(hits.some((h) => h.docId === skippedDocId)).toBe(false)
 
-      const hits = await engine.search('nothing to reflect on')
+      const hits = (await engine.search('nothing to reflect on')).documents
       noSkippedDocId(hits)
 
       // Nor should a full index rebuild reintroduce it: walkAllDocuments
       // (which both reindexAll and the docId cache read from) must skip
       // it exactly the same way the initial write path does.
       await engine.reindexAll()
-      noSkippedDocId(await engine.search('nothing to reflect on'))
+      noSkippedDocId((await engine.search('nothing to reflect on')).documents)
 
       // Same guarantee from a truly empty index.db, not just a wipe-and-
       // reinsert on top of an existing one.
@@ -698,7 +698,7 @@ describe('MemoryEngine', () => {
       await rm(paths.indexDb)
       engine = await MemoryEngine.open(dir, fakeDeps(chat))
       await engine.reindexAll()
-      noSkippedDocId(await engine.search('nothing to reflect on'))
+      noSkippedDocId((await engine.search('nothing to reflect on')).documents)
 
       // And the docId cache used by readDocumentById never resolves to
       // it either: it was never added to docPaths/docIdByPath in the
@@ -912,7 +912,7 @@ describe('MemoryEngine', () => {
       expect(typeof personDoc.meta.opened).toBe('string')
       expect(personDoc.body).toBe('This page is new. It grows as we talk.\n')
 
-      const hits = await engine.search('grows as we talk')
+      const hits = (await engine.search('grows as we talk')).documents
       expect(hits.some((h) => h.docId === personDoc.meta.id)).toBe(true)
     })
 
@@ -2424,10 +2424,10 @@ describe('MemoryEngine', () => {
 
       await engine.reindexAll()
 
-      const hits = await engine.search('kayaking')
+      const hits = (await engine.search('kayaking')).documents
       expect(hits.some((h) => h.docId === personDocId && h.kind === 'person')).toBe(true)
 
-      const filteredHits = await engine.search('kayaking', { kinds: ['person'] })
+      const filteredHits = (await engine.search('kayaking', { kinds: ['person'] })).documents
       expect(filteredHits.some((h) => h.docId === personDocId)).toBe(true)
     })
   })
@@ -2551,7 +2551,7 @@ describe('MemoryEngine', () => {
         `${isoDate(startedAt)}-${sessionId}`,
         'summary.md',
       )
-      const hits = await engine.search('reflection')
+      const hits = (await engine.search('reflection')).documents
       const summaryHits = hits.filter((h) => h.path === summaryPath)
       expect(summaryHits).toHaveLength(1)
 
@@ -2641,7 +2641,7 @@ describe('MemoryEngine', () => {
       const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
       await engine.reindexAll()
 
-      const hitsBeforeDelete = await engine.search('kayaking')
+      const hitsBeforeDelete = (await engine.search('kayaking')).documents
       expect(hitsBeforeDelete.some((h) => h.docId === tempRealmDocId)).toBe(true)
 
       await rm(tempRealmPath)
@@ -2651,7 +2651,7 @@ describe('MemoryEngine', () => {
       // out-ranked: a vector-search fallback can still surface unrelated
       // documents for any query, so absence of the specific docId is the
       // correct assertion, not an empty result set.
-      const hitsAfterDelete = await engine.search('kayaking')
+      const hitsAfterDelete = (await engine.search('kayaking')).documents
       expect(hitsAfterDelete.some((h) => h.docId === tempRealmDocId)).toBe(false)
 
       await engine.close()
@@ -4132,7 +4132,7 @@ describe('index schema migration', () => {
     })
     await engine.reindexAll()
     const before = await engine.search('kayaking')
-    expect(before.some((hit) => hit.docId === 'doc_migration_realm')).toBe(true)
+    expect(before.documents.some((hit) => hit.docId === 'doc_migration_realm')).toBe(true)
     await engine.close()
 
     const db = new Database(paths.indexDb)
@@ -4141,7 +4141,7 @@ describe('index schema migration', () => {
 
     engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
     const after = await engine.search('kayaking')
-    expect(after.some((hit) => hit.docId === 'doc_migration_realm')).toBe(true)
+    expect(after.documents.some((hit) => hit.docId === 'doc_migration_realm')).toBe(true)
     expect(engine.warnings.some((w) => w.includes('search index schema'))).toBe(true)
     await engine.close()
 
@@ -4454,6 +4454,58 @@ describe('listPeople and listEntities', () => {
     const filtered = engine.listEntities({ nameContains: 'entity 1' })
     expect(filtered.total).toBe(1)
     expect(filtered.rows[0]?.id).toBe('entity_1')
+
+    await engine.close()
+    await rm(dir, { recursive: true, force: true })
+  })
+})
+
+describe('search node lane', () => {
+  it('finds a person with no page by name and gives back an id, not a docId', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'openreverie-node-lane-'))
+    const paths = memoryPaths(dir)
+    await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([]))).then((e) => e.close())
+
+    const pagedPath = join(paths.peopleDir, 'priya.md')
+    await writeDocumentAtomic({
+      path: pagedPath,
+      meta: { id: 'doc_priya', name: 'Priya', node: 'person_priya' },
+      body: 'Priya runs the reading group.\n',
+    })
+    await appendGraph(paths, [
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'person_priya',
+        type: 'person',
+        label: 'Priya',
+        doc: pagedPath,
+      },
+      {
+        ts: '2026-08-02T00:00:00.000Z',
+        op: 'assert',
+        node: 'person_dara',
+        type: 'person',
+        label: 'Dara',
+      },
+    ])
+
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+
+    const unpaged = await engine.search('Dara')
+    expect(unpaged.nodes).toEqual([
+      { nodeId: 'person_dara', name: 'Dara', type: 'person', hasPage: false },
+    ])
+    expect(unpaged.documents.some((hit) => hit.docId === 'doc_dara')).toBe(false)
+
+    const paged = await engine.search('Priya')
+    expect(paged.nodes[0]).toEqual({
+      nodeId: 'person_priya',
+      name: 'Priya',
+      type: 'person',
+      hasPage: true,
+      docId: 'doc_priya',
+    })
 
     await engine.close()
     await rm(dir, { recursive: true, force: true })

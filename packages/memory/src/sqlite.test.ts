@@ -504,6 +504,90 @@ describe('MemoryIndex', () => {
     })
   })
 
+  describe('searchNodes', () => {
+    function graphWith(
+      nodes: { id: string; type: string; label: string; doc?: string; ts: string }[],
+    ) {
+      return {
+        nodes: new Map(
+          nodes.map((n) => [
+            n.id,
+            { id: n.id, type: n.type, label: n.label, ...(n.doc ? { doc: n.doc } : {}), ts: n.ts },
+          ]),
+        ),
+        edges: new Map(),
+      } as unknown as GraphState
+    }
+
+    it('matches by case-folded substring and orders by match quality then recency', () => {
+      index.replaceGraph(
+        graphWith([
+          { id: 'person_1', type: 'person', label: 'Renata', ts: '2026-08-01T00:00:00.000Z' },
+          {
+            id: 'person_2',
+            type: 'person',
+            label: 'Nicolette',
+            ts: '2026-08-02T00:00:00.000Z',
+          },
+          { id: 'person_3', type: 'person', label: 'col', ts: '2026-07-01T00:00:00.000Z' },
+          { id: 'entity_1', type: 'entity', label: 'Unrelated', ts: '2026-08-03T00:00:00.000Z' },
+        ]),
+      )
+
+      const hits = index.searchNodes('col', 10)
+      // Exact label match first, then the prefix match, then the mid-word
+      // substring match. "Unrelated" does not match at all.
+      expect(hits.map((h) => h.id)).toEqual(['person_3', 'person_1', 'person_2'])
+    })
+
+    it('drops short tokens unless the whole query is one token', () => {
+      index.replaceGraph(
+        graphWith([
+          { id: 'person_1', type: 'person', label: 'Jo', ts: '2026-08-01T00:00:00.000Z' },
+          { id: 'person_2', type: 'person', label: 'Anderson', ts: '2026-08-02T00:00:00.000Z' },
+        ]),
+      )
+
+      // A single short token is kept: a two-letter nickname is a real name.
+      expect(index.searchNodes('jo', 10).map((h) => h.id)).toEqual(['person_1'])
+      // In a multi-token query the short token is dropped, so only
+      // "anderson" is matched and Jo does not come back.
+      expect(index.searchNodes('jo anderson', 10).map((h) => h.id)).toEqual(['person_2'])
+    })
+
+    it('returns every node type, with the page path when there is one, and honours the limit', () => {
+      index.replaceGraph(
+        graphWith([
+          {
+            id: 'arc_1',
+            type: 'arc',
+            label: 'Kayaking',
+            doc: '/memory/arcs/kayaking.md',
+            ts: '2026-08-01T00:00:00.000Z',
+          },
+          { id: 'item_1', type: 'item', label: 'Kayaking again', ts: '2026-08-02T00:00:00.000Z' },
+          { id: 'entity_1', type: 'entity', label: 'Kayaks Inc', ts: '2026-08-03T00:00:00.000Z' },
+        ]),
+      )
+
+      const hits = index.searchNodes('kayaking', 10)
+      expect(hits.map((h) => h.type).sort()).toEqual(['arc', 'item'])
+      expect(hits.find((h) => h.id === 'arc_1')?.doc).toBe('/memory/arcs/kayaking.md')
+      expect(hits.find((h) => h.id === 'item_1')?.doc).toBeNull()
+      expect(index.searchNodes('kayaking', 1)).toHaveLength(1)
+    })
+
+    it('returns nothing for a query with no usable tokens', () => {
+      index.replaceGraph(
+        graphWith([
+          { id: 'person_1', type: 'person', label: 'Jo', ts: '2026-08-01T00:00:00.000Z' },
+        ]),
+      )
+      expect(index.searchNodes('   ', 10)).toEqual([])
+      expect(index.searchNodes('a b', 10)).toEqual([])
+    })
+  })
+
   describe('schema version', () => {
     it('marks a fresh database as current, not rebuilt', () => {
       expect(index.schemaRebuilt).toBe(false)

@@ -65,7 +65,7 @@ describe('searchMemory', () => {
       embedFn(embeddings),
     )
 
-    const hits = await searchMemory(index, embeddings, MODEL, query)
+    const hits = (await searchMemory(index, embeddings, MODEL, query)).documents
 
     expect(hits.length).toBe(2)
     expect(hits[0]?.docId).toBe('doc_both')
@@ -87,7 +87,8 @@ describe('searchMemory', () => {
       embedFn(embeddings),
     )
 
-    const hits = await searchMemory(index, embeddings, MODEL, query, { kinds: ['realm'] })
+    const hits = (await searchMemory(index, embeddings, MODEL, query, { kinds: ['realm'] }))
+      .documents
 
     expect(hits.map((h) => h.docId)).toEqual(['doc_realm'])
   })
@@ -129,7 +130,8 @@ describe('searchMemory', () => {
       )
     }
 
-    const hits = await searchMemory(index, embeddings, MODEL, query, { kinds: ['summary'] })
+    const hits = (await searchMemory(index, embeddings, MODEL, query, { kinds: ['summary'] }))
+      .documents
 
     expect(hits.map((h) => h.docId).sort()).toEqual(bIds)
   })
@@ -145,7 +147,7 @@ describe('searchMemory', () => {
       )
     }
 
-    const hits = await searchMemory(index, embeddings, MODEL, query, undefined, 2)
+    const hits = (await searchMemory(index, embeddings, MODEL, query, undefined, 2)).documents
 
     expect(hits.length).toBe(2)
   })
@@ -161,7 +163,7 @@ describe('searchMemory', () => {
       )
     }
 
-    const hits = await searchMemory(index, embeddings, MODEL, query)
+    const hits = (await searchMemory(index, embeddings, MODEL, query)).documents
 
     expect(hits.length).toBe(8)
   })
@@ -190,10 +192,11 @@ describe('searchMemory', () => {
 
     // Unfiltered first. Without this assertion the filtered one below
     // would still pass if the filter were deleted and nothing had ranked.
-    const unfiltered = await searchMemory(index, embeddings, MODEL, query)
+    const unfiltered = (await searchMemory(index, embeddings, MODEL, query)).documents
     expect(unfiltered.map((h) => h.docId).sort()).toEqual(['doc_august', 'doc_may'])
 
-    const filtered = await searchMemory(index, embeddings, MODEL, query, { after: '2026-07-01' })
+    const filtered = (await searchMemory(index, embeddings, MODEL, query, { after: '2026-07-01' }))
+      .documents
     expect(filtered.map((h) => h.docId)).toEqual(['doc_august'])
   })
 
@@ -221,7 +224,8 @@ describe('searchMemory', () => {
       embedFn(embeddings),
     )
 
-    const hits = await searchMemory(index, embeddings, MODEL, query, { after: '2026-07-01' })
+    const hits = (await searchMemory(index, embeddings, MODEL, query, { after: '2026-07-01' }))
+      .documents
     expect(hits.map((h) => h.docId)).toEqual(['doc_arc'])
   })
 
@@ -239,17 +243,22 @@ describe('searchMemory', () => {
       embedFn(embeddings),
     )
 
-    const midWeek = await searchMemory(index, embeddings, MODEL, query, { after: '2026-08-14' })
+    const midWeek = (await searchMemory(index, embeddings, MODEL, query, { after: '2026-08-14' }))
+      .documents
     expect(midWeek.map((h) => h.docId)).toEqual(['doc_week'])
 
-    const beforeMidWeek = await searchMemory(index, embeddings, MODEL, query, {
-      before: '2026-08-11',
-    })
+    const beforeMidWeek = (
+      await searchMemory(index, embeddings, MODEL, query, {
+        before: '2026-08-11',
+      })
+    ).documents
     expect(beforeMidWeek.map((h) => h.docId)).toEqual(['doc_week'])
 
-    const afterTheWeek = await searchMemory(index, embeddings, MODEL, query, {
-      after: '2026-08-17',
-    })
+    const afterTheWeek = (
+      await searchMemory(index, embeddings, MODEL, query, {
+        after: '2026-08-17',
+      })
+    ).documents
     expect(afterTheWeek.map((h) => h.docId)).toEqual([])
   })
 
@@ -289,7 +298,7 @@ describe('searchMemory', () => {
       embedFn(embeddings),
     )
 
-    const hits = await searchMemory(index, embeddings, MODEL, query)
+    const hits = (await searchMemory(index, embeddings, MODEL, query)).documents
 
     expect(hits.length).toBe(2)
     expect(hits[0]?.docId).toBe('doc_both')
@@ -306,9 +315,41 @@ describe('searchMemory', () => {
       embedFn(embeddings),
     )
 
-    const hits = await searchMemory(index, embeddings, MODEL, query)
+    const hits = (await searchMemory(index, embeddings, MODEL, query)).documents
 
     expect(hits.length).toBe(1)
     expect(hits[0]?.docId).toBe('doc_dup')
+  })
+
+  it('returns node matches in their own lane, never fused into the document ranking', async () => {
+    const query = 'renata'
+
+    await index.upsertDocument(
+      doc({ meta: { id: 'doc_note' }, body: 'A note that mentions renata once.' }),
+      'realm',
+      embedFn(embeddings),
+    )
+    index.replaceGraph({
+      nodes: new Map([
+        [
+          'person_renata',
+          {
+            id: 'person_renata',
+            type: 'person' as const,
+            label: 'Renata',
+            ts: '2026-08-01T00:00:00.000Z',
+          },
+        ],
+      ]),
+      edges: new Map(),
+    })
+
+    const results = await searchMemory(index, embeddings, MODEL, query)
+
+    expect(results.documents.map((h) => h.docId)).toEqual(['doc_note'])
+    expect(results.nodes.map((n) => n.id)).toEqual(['person_renata'])
+    // A node hit carries no score field at all: it has no rank in either
+    // list and any score given to it for fusion would be fabricated.
+    expect(Object.keys(results.nodes[0] ?? {}).sort()).toEqual(['doc', 'id', 'label', 'ts', 'type'])
   })
 })

@@ -225,9 +225,9 @@ describe('dispatchTool', () => {
       sessionId,
       call('search_memory', { query: 'kayaking', kinds: ['summary'], limit: 5 }),
     )
-    const hits = JSON.parse(result) as { docId: string; kind: string }[]
-    expect(hits.length).toBeGreaterThan(0)
-    expect(hits[0]?.kind).toBe('summary')
+    const results = JSON.parse(result) as { documents: { docId: string; kind: string }[] }
+    expect(results.documents.length).toBeGreaterThan(0)
+    expect(results.documents[0]?.kind).toBe('summary')
 
     await engine.close()
   })

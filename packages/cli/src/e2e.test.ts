@@ -211,7 +211,7 @@ describe('end-to-end harness', () => {
       expect(constitutionDoc.body.length).toBeGreaterThan(0)
 
       // Search finds a distinctive detail from day one.
-      const searchHits = await engine.search(DISTINCTIVE_DAY_ONE_PHRASE)
+      const searchHits = (await engine.search(DISTINCTIVE_DAY_ONE_PHRASE)).documents
       expect(searchHits.length).toBeGreaterThan(0)
 
       // The graph knows which items were filed under each arc: the item
@@ -284,10 +284,10 @@ describe('end-to-end harness', () => {
 
       const rebuiltEngine = await MemoryEngine.open(dir, fakeDeps(chat))
       const hitsBeforeRebuild = await rebuiltEngine.search(DISTINCTIVE_DAY_ONE_PHRASE)
-      expect(hitsBeforeRebuild).toEqual([])
+      expect(hitsBeforeRebuild.documents).toEqual([])
 
       await rebuiltEngine.reindexAll()
-      const hitsAfterRebuild = await rebuiltEngine.search(DISTINCTIVE_DAY_ONE_PHRASE)
+      const hitsAfterRebuild = (await rebuiltEngine.search(DISTINCTIVE_DAY_ONE_PHRASE)).documents
       expect(hitsAfterRebuild.length).toBeGreaterThan(0)
 
       const woodworkingItemsAfterRebuild = rebuiltEngine.graphQuery({
