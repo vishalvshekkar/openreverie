@@ -599,6 +599,21 @@ describe('assembleSystemPrompt', () => {
 
       await engine.close()
     })
+
+    it('leaves the onboarding questions conversational and mentions no profile field', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const prompt = await assembleSystemPrompt(engine, testConfig())
+
+      expect(prompt).toContain('their name and how they would like to be addressed')
+      expect(prompt).toContain('where they live and their timezone')
+      expect(prompt).not.toContain('profile.md')
+      expect(prompt).not.toContain('update_profile')
+
+      const firstConversation = prompt.slice(prompt.indexOf('## First conversation'))
+      expect(firstConversation).not.toContain('birthday')
+
+      await engine.close()
+    })
   })
 
   it('never contains an em dash character', async () => {
