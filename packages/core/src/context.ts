@@ -133,7 +133,7 @@ function arcsSection(context: SessionContext): string | undefined {
   })
   const capped = capRows(lines, ARCS_SECTION_CAP)
   const rows = capped.rows
-  if (context.arcsTruncated) {
+  if (context.arcsTruncated || capped.shown < lines.length) {
     rows.push(
       `(showing ${capped.shown} of ${context.arcsTotal} active arcs, most recently touched first. Call list_arcs for the rest, including dormant and closed ones.)`,
     )

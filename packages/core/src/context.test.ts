@@ -880,6 +880,47 @@ describe('assembleSystemPrompt budget', () => {
 
     await engine.close()
   })
+
+  it('marks the arcs list when the character cap cuts it short, even under the row cap', async () => {
+    // Fewer arcs than ARCS_CAP, so arcsTruncated stays false, but each row is
+    // long enough that ARCS_SECTION_CAP cuts the list short anyway. Without
+    // the character-cap check the section would drop arcs and say nothing
+    // about it, which is the silent shelf this release exists to remove.
+    const records: Parameters<typeof appendGraph>[1] = []
+    const longName = 'Arc With A Deliberately Long Name That Eats The Character Budget'
+    for (let i = 0; i < 20; i++) {
+      const name = `${longName} ${String(i).padStart(2, '0')}`
+      const arcPath = join(paths.arcsDir, `long-arc-${i}.md`)
+      await writeDocumentAtomic({
+        path: arcPath,
+        meta: {
+          id: newId('doc'),
+          name,
+          status: 'active',
+          updated: `2026-08-${String(i + 1).padStart(2, '0')}`,
+        },
+        body: `Arc ${i}.\n`,
+      })
+      records.push({
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: `arc_long_${i}`,
+        type: 'arc',
+        label: name,
+        doc: arcPath,
+      })
+    }
+    await appendGraph(paths, records)
+
+    const engine = await openEngine()
+    const prompt = await assembleSystemPrompt(engine, testConfig())
+
+    expect(prompt).toContain(
+      'of 20 active arcs, most recently touched first. Call list_arcs for the rest',
+    )
+
+    await engine.close()
+  })
   it('shows no arcs marker when under the cap, and orders undated arcs last', async () => {
     const datedPath = join(paths.arcsDir, 'touched.md')
     await writeDocumentAtomic({
