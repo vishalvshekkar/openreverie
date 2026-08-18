@@ -45,6 +45,38 @@ knows what to verify rather than assume.
 | 19 final verification + README | DONE | `17dd15e` |
 | **retrieval merged into design** | DONE | merge `a0bd482`, worktree removed |
 
+### Modes plan (`2026-08-17-modes-profile-settings-plan.md`), 24 tasks
+
+Worktree `.claude/worktrees/modes`, branch `feat/phase-d-modes`. Design was merged in and
+`pnpm install` re-run. **Task 0 gate is fully passed, all six steps**, baseline
+Test Files 50 / Tests 812. Do not re-run Task 0.
+
+Batching below is by shared files, derived from every task's `**Files**` block. Run them
+SEQUENTIALLY in the one worktree: two agents running `npx tsc -b` against the same `dist/` will
+read each other's half-written build output.
+
+| Batch | Tasks | Shared files | Model | State | Commits |
+| --- | --- | --- | --- | --- | --- |
+| A | 1, 2, 3 | `memory/style.ts` (new), `memory/profile.ts`, `core/config.ts` | sonnet | TODO | |
+| B | 4, 5 | `memory/engine.ts`, `core/tools.ts`, `memory/reflection.ts` | sonnet | TODO | |
+| C | 6 | `core/modes.ts` (new catalogue) | sonnet | TODO | |
+| D | 7, 7A, 8 | `core/personas.ts` **SAFETY** | sonnet impl, **you falsify** | TODO | |
+| E | 9 | `core/context.ts` profile block, 2000 char cap | sonnet | TODO | |
+| F | 10, 11 | `memory/transcripts.ts`, `memory/engine.ts` | sonnet | TODO | |
+| G | 12 | `set_mode` replaces `update_style`, tools/agent/cli | sonnet | TODO | |
+| H | 13 | style leaves `config.toml`, migration plus 9 fixtures | sonnet | TODO | |
+| I | 14, 15 | `cli/commands.ts`, the `/mode` `/style` `/settings` `/whoami` table | sonnet | TODO | |
+| J | 16 | persistent status line, `cli/strip.ts` | sonnet | TODO | |
+| K | 17, 18 | `server/registry.ts`, `web/api.ts`, mode stream event and mode over HTTP | sonnet | TODO | |
+| L | 19 | profile/settings endpoints, **the API key that must never be reachable** | sonnet impl, **you verify the key test** | TODO | |
+| M | 20, 21 | `web/views/*` journal and settings destinations, mode picker | sonnet | TODO | |
+| N | 22 | README | **you, personally** | TODO | |
+
+Batch D is the safety batch: Task 7 (stance doctrine), Task 7A (the one identity sentence the
+model may narrate), Task 8 (mode overlay plus the safety invariant). Do the falsification of
+every safety-related assertion yourself. Batch L exposes profile and settings over HTTP and must
+never make the provider API key reachable; verify that test yourself too.
+
 ### All five Phase D epochs, and what is left
 
 Phase D is five plans, not one. The original brief for the whole phase is
