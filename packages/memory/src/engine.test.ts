@@ -8,6 +8,7 @@ import {
   FakeChatProvider,
   FakeEmbeddingProvider,
 } from '@openreverie/providers'
+import Database from 'better-sqlite3'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { listDocuments, newId, readDocument, writeDocumentAtomic } from './documents.js'
 import { type EngineDeps, MemoryEngine } from './engine.js'
@@ -404,9 +405,9 @@ describe('MemoryEngine', () => {
       // The new arc is materialized directly by reflection, with no proposal.
       const pending = await pendingProposals(paths)
       expect(pending.find((p) => p.kind === 'new_arc')).toBeUndefined()
-      const newArc = engine.listArcs().find((n) => n.label === 'presentation prep')
-      if (!newArc?.doc) throw new Error('expected the new arc to have a doc pointer')
-      expect(await readDocument(newArc.doc)).toMatchObject({
+      const newArc = (await engine.listArcs()).rows.find((n) => n.label === 'presentation prep')
+      if (!newArc?.docId) throw new Error('expected the new arc to have a docId')
+      expect(await engine.readDocumentById(newArc.docId)).toMatchObject({
         body: 'Presentation prep starts here.\n',
       })
       // Direct materialization from reflection: nobody affirmed this arc,
@@ -415,8 +416,8 @@ describe('MemoryEngine', () => {
         confidence: 1,
         confirmed: false,
       })
-      expect(engine.listArcs()).toHaveLength(2)
-      expect(engine.listRealms()).toHaveLength(1)
+      expect((await engine.listArcs()).total).toBe(2)
+      expect(engine.listRealms().total).toBe(1)
 
       // graphQuery surfaces the item filed under the pre-existing arc.
       const arcItems = engine.graphQuery({ kind: 'items_in_arc', arcId: 'arc_health' })
@@ -438,7 +439,7 @@ describe('MemoryEngine', () => {
       expect(byId?.path).toBe(join(sessionDir, 'summary.md'))
 
       // Search finds the reflected item text.
-      const hits = await engine.search('anxious')
+      const hits = (await engine.search('anxious')).documents
       expect(hits.length).toBeGreaterThan(0)
 
       // Prove index.db is fully rebuildable from the folder: delete it,
@@ -450,10 +451,10 @@ describe('MemoryEngine', () => {
 
       engine = await MemoryEngine.open(dir, deps)
       const hitsBeforeRebuild = await engine.search('anxious')
-      expect(hitsBeforeRebuild).toEqual([])
+      expect(hitsBeforeRebuild.documents).toEqual([])
 
       await engine.reindexAll()
-      const hitsAfterRebuild = await engine.search('anxious')
+      const hitsAfterRebuild = (await engine.search('anxious')).documents
       expect(hitsAfterRebuild.length).toBeGreaterThan(0)
 
       await engine.close()
@@ -682,14 +683,14 @@ describe('MemoryEngine', () => {
       const noSkippedDocId = (hits: { docId: string }[]) =>
         expect(hits.some((h) => h.docId === skippedDocId)).toBe(false)
 
-      const hits = await engine.search('nothing to reflect on')
+      const hits = (await engine.search('nothing to reflect on')).documents
       noSkippedDocId(hits)
 
       // Nor should a full index rebuild reintroduce it: walkAllDocuments
       // (which both reindexAll and the docId cache read from) must skip
       // it exactly the same way the initial write path does.
       await engine.reindexAll()
-      noSkippedDocId(await engine.search('nothing to reflect on'))
+      noSkippedDocId((await engine.search('nothing to reflect on')).documents)
 
       // Same guarantee from a truly empty index.db, not just a wipe-and-
       // reinsert on top of an existing one.
@@ -697,7 +698,7 @@ describe('MemoryEngine', () => {
       await rm(paths.indexDb)
       engine = await MemoryEngine.open(dir, fakeDeps(chat))
       await engine.reindexAll()
-      noSkippedDocId(await engine.search('nothing to reflect on'))
+      noSkippedDocId((await engine.search('nothing to reflect on')).documents)
 
       // And the docId cache used by readDocumentById never resolves to
       // it either: it was never added to docPaths/docIdByPath in the
@@ -770,8 +771,8 @@ describe('MemoryEngine', () => {
       const realmDoc = await readDocument(realmNode.doc)
       expect(realmDoc.body).toBe('This realm is new. It grows as we talk.\n')
 
-      expect(engine.listArcs().some((n) => n.id === arcNode.id)).toBe(true)
-      expect(engine.listRealms().some((n) => n.id === realmNode.id)).toBe(true)
+      expect((await engine.listArcs()).rows.some((n) => n.id === arcNode.id)).toBe(true)
+      expect(engine.listRealms().rows.some((n) => n.id === realmNode.id)).toBe(true)
     })
 
     it('reuses an existing realm by id and dedupes arc filenames on a name collision', async () => {
@@ -911,7 +912,7 @@ describe('MemoryEngine', () => {
       expect(typeof personDoc.meta.opened).toBe('string')
       expect(personDoc.body).toBe('This page is new. It grows as we talk.\n')
 
-      const hits = await engine.search('grows as we talk')
+      const hits = (await engine.search('grows as we talk')).documents
       expect(hits.some((h) => h.docId === personDoc.meta.id)).toBe(true)
     })
 
@@ -2423,10 +2424,10 @@ describe('MemoryEngine', () => {
 
       await engine.reindexAll()
 
-      const hits = await engine.search('kayaking')
+      const hits = (await engine.search('kayaking')).documents
       expect(hits.some((h) => h.docId === personDocId && h.kind === 'person')).toBe(true)
 
-      const filteredHits = await engine.search('kayaking', { kinds: ['person'] })
+      const filteredHits = (await engine.search('kayaking', { kinds: ['person'] })).documents
       expect(filteredHits.some((h) => h.docId === personDocId)).toBe(true)
     })
   })
@@ -2550,7 +2551,7 @@ describe('MemoryEngine', () => {
         `${isoDate(startedAt)}-${sessionId}`,
         'summary.md',
       )
-      const hits = await engine.search('reflection')
+      const hits = (await engine.search('reflection')).documents
       const summaryHits = hits.filter((h) => h.path === summaryPath)
       expect(summaryHits).toHaveLength(1)
 
@@ -2640,7 +2641,7 @@ describe('MemoryEngine', () => {
       const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
       await engine.reindexAll()
 
-      const hitsBeforeDelete = await engine.search('kayaking')
+      const hitsBeforeDelete = (await engine.search('kayaking')).documents
       expect(hitsBeforeDelete.some((h) => h.docId === tempRealmDocId)).toBe(true)
 
       await rm(tempRealmPath)
@@ -2650,7 +2651,7 @@ describe('MemoryEngine', () => {
       // out-ranked: a vector-search fallback can still surface unrelated
       // documents for any query, so absence of the specific docId is the
       // correct assertion, not an empty result set.
-      const hitsAfterDelete = await engine.search('kayaking')
+      const hitsAfterDelete = (await engine.search('kayaking')).documents
       expect(hitsAfterDelete.some((h) => h.docId === tempRealmDocId)).toBe(false)
 
       await engine.close()
@@ -2787,6 +2788,7 @@ describe('MemoryEngine', () => {
         ]),
       )
       expect(context.peopleTruncated).toBe(false)
+      expect(context.peopleTotal).toBe(2)
 
       await engine.close()
     })
@@ -2807,6 +2809,7 @@ describe('MemoryEngine', () => {
 
       expect(context.entities).toEqual([{ id: 'entity_1', name: 'Dune' }])
       expect(context.entitiesTruncated).toBe(false)
+      expect(context.entitiesTotal).toBe(1)
 
       await engine.close()
     })
@@ -2844,6 +2847,7 @@ describe('MemoryEngine', () => {
 
       expect(context.people).toHaveLength(40)
       expect(context.peopleTruncated).toBe(true)
+      expect(context.peopleTotal).toBe(45)
       for (let i = 0; i < 5; i++) {
         expect(context.people.some((p) => p.id === `person_paged_${i}`)).toBe(true)
       }
@@ -2877,6 +2881,7 @@ describe('MemoryEngine', () => {
 
       expect(context.entities).toHaveLength(30)
       expect(context.entitiesTruncated).toBe(true)
+      expect(context.entitiesTotal).toBe(35)
       // The 5 oldest (indexes 0 through 4) are dropped; the 30 most
       // recent (indexes 5 through 34) survive.
       for (let i = 0; i < 5; i++) {
@@ -4115,5 +4120,435 @@ describe('reflection profileUpdates', () => {
     expect(engine.timezone()).toBe('UTC')
 
     await engine.close()
+  })
+})
+
+describe('index schema migration', () => {
+  it('rebuilds the index from the folder instead of leaving it empty', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'openreverie-migration-'))
+    const paths = memoryPaths(dir)
+
+    let engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+    await writeDocumentAtomic({
+      path: join(paths.realmsDir, 'fitness.md'),
+      meta: { id: 'doc_migration_realm', name: 'Fitness' },
+      body: 'Kayaking on the lake every Sunday morning.\n',
+    })
+    await engine.reindexAll()
+    const before = await engine.search('kayaking')
+    expect(before.documents.some((hit) => hit.docId === 'doc_migration_realm')).toBe(true)
+    await engine.close()
+
+    const db = new Database(paths.indexDb)
+    db.pragma('user_version = 1')
+    db.close()
+
+    engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+    const after = await engine.search('kayaking')
+    expect(after.documents.some((hit) => hit.docId === 'doc_migration_realm')).toBe(true)
+    expect(engine.warnings.some((w) => w.includes('search index schema'))).toBe(true)
+    await engine.close()
+
+    await rm(dir, { recursive: true, force: true })
+  })
+})
+
+describe('listArcs and listRealms', () => {
+  it('returns docId, real status from frontmatter, and no filesystem path', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'openreverie-listings-'))
+    const paths = memoryPaths(dir)
+    await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([]))).then((e) => e.close())
+
+    const activeArcPath = join(paths.arcsDir, 'marathon.md')
+    await writeDocumentAtomic({
+      path: activeArcPath,
+      meta: {
+        id: 'doc_arc_active',
+        name: 'Marathon Training',
+        status: 'active',
+        updated: '2026-08-10',
+      },
+      body: 'Training for the fall marathon.\n',
+    })
+    const closedArcPath = join(paths.arcsDir, 'move.md')
+    await writeDocumentAtomic({
+      path: closedArcPath,
+      meta: { id: 'doc_arc_closed', name: 'Moving House', status: 'closed', updated: '2026-03-02' },
+      body: 'The move is done.\n',
+    })
+    const realmPath = join(paths.realmsDir, 'fitness.md')
+    await writeDocumentAtomic({
+      path: realmPath,
+      meta: { id: 'doc_realm', name: 'Fitness' },
+      body: 'Running, lifting, sleep.\n',
+    })
+
+    await appendGraph(paths, [
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'arc_active',
+        type: 'arc',
+        label: 'Marathon Training',
+        doc: activeArcPath,
+      },
+      {
+        ts: '2026-07-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'arc_closed',
+        type: 'arc',
+        label: 'Moving House',
+        doc: closedArcPath,
+      },
+      {
+        ts: '2026-06-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'arc_no_page',
+        type: 'arc',
+        label: 'Unpaged Arc',
+      },
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'realm_fitness',
+        type: 'realm',
+        label: 'Fitness',
+        doc: realmPath,
+      },
+    ])
+
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+
+    const all = await engine.listArcs()
+    expect(all.total).toBe(3)
+    expect(all.offset).toBe(0)
+    expect(all.limit).toBe(50)
+    expect(all.returned).toBe(3)
+    expect(all.hasMore).toBe(false)
+    expect(all.rows.map((row) => row.id)).toEqual(['arc_active', 'arc_closed', 'arc_no_page'])
+
+    const active = all.rows[0]
+    expect(active).toEqual({
+      id: 'arc_active',
+      type: 'arc',
+      label: 'Marathon Training',
+      assertedAt: '2026-08-01T00:00:00.000Z',
+      docId: 'doc_arc_active',
+      status: 'active',
+      lastTouched: '2026-08-10',
+    })
+    // The filesystem path is deliberately not part of the row.
+    expect(Object.keys(active ?? {})).not.toContain('doc')
+
+    // An arc with no page has no status to read, and status is absent
+    // rather than defaulted to active.
+    expect(all.rows[2]).toEqual({
+      id: 'arc_no_page',
+      type: 'arc',
+      label: 'Unpaged Arc',
+      assertedAt: '2026-06-01T00:00:00.000Z',
+    })
+
+    // The docId chains into read_document's engine method.
+    const arcDoc = await engine.readDocumentById('doc_arc_active')
+    expect(arcDoc?.body).toContain('Training for the fall marathon.')
+
+    const onlyActive = await engine.listArcs({ status: 'active' })
+    expect(onlyActive.total).toBe(1)
+    expect(onlyActive.rows.map((row) => row.id)).toEqual(['arc_active'])
+
+    const onlyClosed = await engine.listArcs({ status: 'closed' })
+    expect(onlyClosed.rows.map((row) => row.id)).toEqual(['arc_closed'])
+
+    const realms = engine.listRealms()
+    expect(realms.total).toBe(1)
+    expect(realms.rows).toEqual([
+      {
+        id: 'realm_fitness',
+        type: 'realm',
+        label: 'Fitness',
+        assertedAt: '2026-08-01T00:00:00.000Z',
+        docId: 'doc_realm',
+      },
+    ])
+
+    await engine.close()
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  it('pages arcs with a stable total order', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'openreverie-listings-page-'))
+    const paths = memoryPaths(dir)
+    await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([]))).then((e) => e.close())
+
+    for (let i = 0; i < 5; i++) {
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: `arc_${i}`,
+          type: 'arc',
+          label: `Arc ${i}`,
+        },
+      ])
+    }
+
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+    const first = await engine.listArcs({ limit: 2 })
+    expect(first.returned).toBe(2)
+    expect(first.hasMore).toBe(true)
+    const second = await engine.listArcs({ offset: 2, limit: 2 })
+    const third = await engine.listArcs({ offset: 4, limit: 2 })
+    expect(third.hasMore).toBe(false)
+
+    const paged = [...first.rows, ...second.rows, ...third.rows].map((row) => row.id)
+    const unpaged = (await engine.listArcs()).rows.map((row) => row.id)
+    expect(paged).toEqual(unpaged)
+    expect(new Set(paged).size).toBe(5)
+
+    // limit is clamped rather than trusted.
+    const clamped = await engine.listArcs({ limit: 5000 })
+    expect(clamped.limit).toBe(200)
+
+    await engine.close()
+    await rm(dir, { recursive: true, force: true })
+  })
+})
+
+describe('listPeople and listEntities', () => {
+  async function seedPeople(dir: string, count: number, pagedCount: number): Promise<void> {
+    const paths = memoryPaths(dir)
+    await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([]))).then((e) => e.close())
+    for (let i = 0; i < count; i++) {
+      const hasPage = i < pagedCount
+      let personPath: string | undefined
+      if (hasPage) {
+        personPath = join(paths.peopleDir, `person-${i}.md`)
+        await writeDocumentAtomic({
+          path: personPath,
+          meta: { id: `doc_person_${i}`, name: `Person ${i}`, node: `person_${i}` },
+          body: `Person ${i} has a page.\n`,
+        })
+      }
+      await appendGraph(paths, [
+        {
+          ts: `2026-08-${String(1 + (i % 28)).padStart(2, '0')}T00:00:00.000Z`,
+          op: 'assert',
+          node: `person_${i}`,
+          type: 'person',
+          label: `Person ${i}`,
+          ...(personPath ? { doc: personPath } : {}),
+        },
+      ])
+    }
+  }
+
+  it('reaches a person past the prompt cap, with a docId only when a page exists', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'openreverie-people-'))
+    await seedPeople(dir, 45, 5)
+
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+    const all = engine.listPeople({ limit: 200 })
+    expect(all.total).toBe(45)
+    expect(all.returned).toBe(45)
+
+    const past = engine.listPeople({ offset: 40, limit: 50 })
+    expect(past.offset).toBe(40)
+    expect(past.returned).toBe(5)
+    expect(past.hasMore).toBe(false)
+
+    const paged = engine.listPeople({ hasPage: true, limit: 200 })
+    expect(paged.total).toBe(5)
+    for (const row of paged.rows) {
+      expect(row.hasPage).toBe(true)
+      expect(typeof row.docId).toBe('string')
+    }
+
+    const unpaged = engine.listPeople({ hasPage: false, limit: 200 })
+    expect(unpaged.total).toBe(40)
+    for (const row of unpaged.rows) {
+      expect(row.hasPage).toBe(false)
+      expect(row.docId).toBeUndefined()
+    }
+
+    const byName = engine.listPeople({ nameContains: 'person 41' })
+    expect(byName.total).toBe(1)
+    expect(byName.rows[0]).toMatchObject({ id: 'person_41', name: 'Person 41', hasPage: false })
+    expect(typeof byName.rows[0]?.firstSeen).toBe('string')
+
+    await engine.close()
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  it('pages through every person exactly once, in an order stable across rebuilds', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'openreverie-people-paging-'))
+    const paths = memoryPaths(dir)
+    await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([]))).then((e) => e.close())
+
+    // 45 people, of which five share an identical ts. Without the id
+    // tiebreak the order of that tied group depends on graph.jsonl's line
+    // order, which changes when the log is rewritten.
+    for (let i = 0; i < 45; i++) {
+      const ts =
+        i < 5
+          ? '2026-08-01T00:00:00.000Z'
+          : `2026-07-${String(1 + (i % 28)).padStart(2, '0')}T00:00:00.000Z`
+      await appendGraph(paths, [
+        { ts, op: 'assert', node: `person_${i}`, type: 'person', label: `Person ${i}` },
+      ])
+    }
+
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+    const collected: string[] = []
+    for (let offset = 0; offset < 45; offset += 7) {
+      collected.push(...engine.listPeople({ offset, limit: 7 }).rows.map((row) => row.id))
+    }
+    const unpaged = engine.listPeople({ limit: 200 }).rows.map((row) => row.id)
+    expect(collected).toEqual(unpaged)
+    expect(new Set(collected).size).toBe(45)
+    await engine.close()
+
+    // Rewrite graph.jsonl with the tied group in the opposite order, then
+    // reopen. The tiebreak is what keeps the total order identical, so
+    // paging still covers all 45 exactly once with no duplicate and no gap.
+    const original = (await readFile(paths.graphLog, 'utf8')).split('\n').filter(Boolean)
+    const tied = original.slice(0, 5).reverse()
+    const rest = original.slice(5)
+    await writeFile(paths.graphLog, `${[...tied, ...rest].join('\n')}\n`, 'utf8')
+
+    const reopened = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+    const afterRebuild: string[] = []
+    for (let offset = 0; offset < 45; offset += 7) {
+      afterRebuild.push(...reopened.listPeople({ offset, limit: 7 }).rows.map((row) => row.id))
+    }
+    expect(afterRebuild).toEqual(unpaged)
+    expect(new Set(afterRebuild).size).toBe(45)
+    await reopened.close()
+
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  it('lists entities with no page fields at all', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'openreverie-entities-'))
+    const paths = memoryPaths(dir)
+    await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([]))).then((e) => e.close())
+
+    for (let i = 0; i < 3; i++) {
+      await appendGraph(paths, [
+        {
+          ts: `2026-08-0${i + 1}T00:00:00.000Z`,
+          op: 'assert',
+          node: `entity_${i}`,
+          type: 'entity',
+          label: `Entity ${i}`,
+        },
+      ])
+    }
+
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+    const listed = engine.listEntities()
+    expect(listed.total).toBe(3)
+    expect(listed.rows[0]).toEqual({
+      id: 'entity_2',
+      name: 'Entity 2',
+      firstSeen: '2026-08-03T00:00:00.000Z',
+    })
+    expect(Object.keys(listed.rows[0] ?? {}).sort()).toEqual(['firstSeen', 'id', 'name'])
+
+    const filtered = engine.listEntities({ nameContains: 'entity 1' })
+    expect(filtered.total).toBe(1)
+    expect(filtered.rows[0]?.id).toBe('entity_1')
+
+    await engine.close()
+    await rm(dir, { recursive: true, force: true })
+  })
+})
+
+describe('search node lane', () => {
+  it('finds a person with no page by name and gives back an id, not a docId', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'openreverie-node-lane-'))
+    const paths = memoryPaths(dir)
+    await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([]))).then((e) => e.close())
+
+    const pagedPath = join(paths.peopleDir, 'priya.md')
+    await writeDocumentAtomic({
+      path: pagedPath,
+      meta: { id: 'doc_priya', name: 'Priya', node: 'person_priya' },
+      body: 'Priya runs the reading group.\n',
+    })
+    await appendGraph(paths, [
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'person_priya',
+        type: 'person',
+        label: 'Priya',
+        doc: pagedPath,
+      },
+      {
+        ts: '2026-08-02T00:00:00.000Z',
+        op: 'assert',
+        node: 'person_dara',
+        type: 'person',
+        label: 'Dara',
+      },
+    ])
+
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+
+    const unpaged = await engine.search('Dara')
+    expect(unpaged.nodes).toEqual([
+      { nodeId: 'person_dara', name: 'Dara', type: 'person', hasPage: false },
+    ])
+    expect(unpaged.documents.some((hit) => hit.docId === 'doc_dara')).toBe(false)
+
+    const paged = await engine.search('Priya')
+    expect(paged.nodes[0]).toEqual({
+      nodeId: 'person_priya',
+      name: 'Priya',
+      type: 'person',
+      hasPage: true,
+      docId: 'doc_priya',
+    })
+
+    await engine.close()
+    await rm(dir, { recursive: true, force: true })
+  })
+})
+
+describe('reflection receives the full constitution', () => {
+  it('the reflection prompt carries the whole constitution body, sentinel included', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'openreverie-reflect-full-'))
+    const paths = memoryPaths(dir)
+    await ensureMemoryTree(paths)
+
+    const sentinel = 'THE SENTINEL SENTENCE THAT MUST SURVIVE REFLECTION'
+    const body = `${'p'.repeat(12000)}\n\n${sentinel}`
+    await writeDocumentAtomic({
+      path: paths.constitution,
+      meta: { id: newId('doc') },
+      body,
+    })
+
+    const chat = new FakeChatProvider([
+      { text: JSON.stringify(emptyReflectionOutput('A session.')), toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+    const sessionId = await engine.startSession()
+    await engine.appendTranscript(sessionId, {
+      ts: new Date().toISOString(),
+      role: 'user',
+      content: 'Hello there.',
+    })
+    await engine.endSession(sessionId)
+
+    const prompt = chat.requests[0]?.messages[0]?.content ?? ''
+    expect(prompt).toContain('p'.repeat(12000))
+    expect(prompt).toContain(sentinel)
+    expect(prompt).not.toContain('(truncated:')
+
+    await engine.close()
+    await rm(dir, { recursive: true, force: true })
   })
 })

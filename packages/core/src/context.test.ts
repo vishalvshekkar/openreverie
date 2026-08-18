@@ -425,7 +425,7 @@ describe('assembleSystemPrompt', () => {
     const prompt = await assembleSystemPrompt(engine, testConfig())
 
     expect(prompt).toContain('## People')
-    expect(prompt).toContain('list truncated')
+    expect(prompt).toContain('Call list_people to page through the rest')
     expect(prompt).toContain('Person 44 (person_44, no page yet)')
     expect(prompt).not.toContain('Person 0 (person_0, no page yet)')
 
@@ -653,6 +653,478 @@ describe('assembleSystemPrompt', () => {
     expect(prompt).toContain(
       `2026-08-15 (${store.sessionId}): We talked about the move and how unsettled it left him.`,
     )
+
+    await engine.close()
+  })
+
+  it('names the tool that reaches the people and entities the prompt could not show', async () => {
+    const records = []
+    for (let i = 0; i < 45; i++) {
+      records.push({
+        ts: `2026-08-${String(1 + (i % 28)).padStart(2, '0')}T00:00:00.000Z`,
+        op: 'assert' as const,
+        node: `person_${i}`,
+        type: 'person' as const,
+        label: `Person ${i}`,
+      })
+    }
+    for (let i = 0; i < 35; i++) {
+      records.push({
+        ts: `2026-08-${String(1 + (i % 28)).padStart(2, '0')}T00:00:00.000Z`,
+        op: 'assert' as const,
+        node: `entity_${i}`,
+        type: 'entity' as const,
+        label: `Entity ${i}`,
+      })
+    }
+    // An arc so this is not treated as a first session, which would replace
+    // every optional section with the onboarding block.
+    records.push({
+      ts: '2026-08-01T00:00:00.000Z',
+      op: 'assert' as const,
+      node: 'arc_any',
+      type: 'arc' as const,
+      label: 'Any Arc',
+    })
+    await appendGraph(paths, records)
+
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+    const prompt = await assembleSystemPrompt(engine, testConfig())
+
+    expect(prompt).toContain(
+      '(showing 40 of 45 people, paged people first then most recently added. Call list_people to page through the rest, or search_memory by name.)',
+    )
+    expect(prompt).toContain(
+      '(showing 30 of 35 entities, most recently added first. Call list_entities to page through the rest, or search_memory by name.)',
+    )
+
+    await engine.close()
+  })
+
+  it('shows no truncation marker when nothing was truncated', async () => {
+    await appendGraph(paths, [
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'arc_any',
+        type: 'arc',
+        label: 'Any Arc',
+      },
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'person_only',
+        type: 'person',
+        label: 'Only Person',
+      },
+    ])
+
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+    const prompt = await assembleSystemPrompt(engine, testConfig())
+
+    expect(prompt).toContain('## People')
+    expect(prompt).not.toContain('Call list_people')
+
+    await engine.close()
+  })
+})
+
+describe('assembleSystemPrompt budget', () => {
+  let dir: string
+  let paths: MemoryPaths
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'openreverie-context-budget-'))
+    paths = memoryPaths(dir)
+    await ensureMemoryTree(paths)
+  })
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  async function openEngine(): Promise<MemoryEngine> {
+    return MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])), { maintenance: false })
+  }
+
+  it('caps the constitution and hands back its docId for the full text', async () => {
+    const docId = newId('doc')
+    const sentinel = 'THE SENTINEL SENTENCE THAT IS NEVER SHOWN'
+    const body = `${'a'.repeat(6000)}\n\n${'b'.repeat(1000)}\n\n${sentinel}`
+    await writeDocumentAtomic({ path: paths.constitution, meta: { id: docId }, body })
+    await appendGraph(paths, [
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'arc_any',
+        type: 'arc',
+        label: 'Any Arc',
+      },
+    ])
+
+    const engine = await openEngine()
+    const prompt = await assembleSystemPrompt(engine, testConfig())
+
+    expect(prompt).toContain('(truncated: showing the first 6,000 of')
+    expect(prompt).toContain(`Call read_document with docId ${docId} for the full text.`)
+    expect(prompt).not.toContain(sentinel)
+
+    const full = await engine.readDocumentById(docId)
+    expect(full?.body).toContain(sentinel)
+
+    await engine.close()
+  })
+
+  it('leaves a short constitution uncapped and with no truncation marker', async () => {
+    await writeDocumentAtomic({
+      path: paths.constitution,
+      meta: { id: newId('doc') },
+      body: 'The user prefers direct, unflinching honesty.\n',
+    })
+    await appendGraph(paths, [
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'arc_any',
+        type: 'arc',
+        label: 'Any Arc',
+      },
+    ])
+
+    const engine = await openEngine()
+    const prompt = await assembleSystemPrompt(engine, testConfig())
+
+    expect(prompt).toContain('The user prefers direct, unflinching honesty.')
+    expect(prompt).not.toContain('(truncated:')
+
+    await engine.close()
+  })
+
+  it('clips each realm first line to 160 characters', async () => {
+    await writeDocumentAtomic({
+      path: join(paths.realmsDir, 'fitness.md'),
+      meta: { id: newId('doc'), name: 'Fitness' },
+      body: `${'x'.repeat(200)}\n`,
+    })
+    await appendGraph(paths, [
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'realm_fitness',
+        type: 'realm',
+        label: 'Fitness',
+        doc: join(paths.realmsDir, 'fitness.md'),
+      },
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'arc_any',
+        type: 'arc',
+        label: 'Any Arc',
+      },
+    ])
+
+    const engine = await openEngine()
+    const prompt = await assembleSystemPrompt(engine, testConfig())
+
+    expect(prompt).toContain('x'.repeat(160))
+    expect(prompt).not.toContain('x'.repeat(161))
+
+    await engine.close()
+  })
+
+  it('caps active arcs at 30 and names list_arcs for the rest', async () => {
+    const records: Parameters<typeof appendGraph>[1] = []
+    // Distinct, short (date-only) "last touched" values, one calendar day
+    // apart and strictly increasing with i. A full ISO-with-time stamp
+    // (as used elsewhere in this file) makes each of these 33 rows long
+    // enough that 30 of them exceed ARCS_SECTION_CAP (2000 characters),
+    // which would make the character-level list cap truncate below the
+    // row-level ARCS_CAP this test means to exercise. Date-only values
+    // keep the 30 rows this test expects to see comfortably under budget.
+    const baseDate = new Date('2026-09-02T00:00:00.000Z')
+    for (let i = 0; i < 33; i++) {
+      const arcPath = join(paths.arcsDir, `arc-${i}.md`)
+      const touched = new Date(baseDate.getTime() - (32 - i) * 24 * 60 * 60 * 1000)
+        .toISOString()
+        .slice(0, 10)
+      await writeDocumentAtomic({
+        path: arcPath,
+        meta: {
+          id: newId('doc'),
+          name: `Active Arc ${String(i).padStart(2, '0')}`,
+          status: 'active',
+          updated: touched,
+        },
+        body: `Arc ${i}.\n`,
+      })
+      records.push({
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: `arc_${i}`,
+        type: 'arc',
+        label: `Active Arc ${String(i).padStart(2, '0')}`,
+        doc: arcPath,
+      })
+    }
+    await appendGraph(paths, records)
+
+    const engine = await openEngine()
+    const prompt = await assembleSystemPrompt(engine, testConfig())
+
+    expect(prompt).toContain(
+      '(showing 30 of 33 active arcs, most recently touched first. Call list_arcs for the rest, including dormant and closed ones.)',
+    )
+    expect(prompt).toContain('Active Arc 32')
+    expect(prompt).not.toContain('Active Arc 00')
+
+    await engine.close()
+  })
+
+  it('marks the arcs list when the character cap cuts it short, even under the row cap', async () => {
+    // Fewer arcs than ARCS_CAP, so arcsTruncated stays false, but each row is
+    // long enough that ARCS_SECTION_CAP cuts the list short anyway. Without
+    // the character-cap check the section would drop arcs and say nothing
+    // about it, which is the silent shelf this release exists to remove.
+    const records: Parameters<typeof appendGraph>[1] = []
+    const longName = 'Arc With A Deliberately Long Name That Eats The Character Budget'
+    for (let i = 0; i < 20; i++) {
+      const name = `${longName} ${String(i).padStart(2, '0')}`
+      const arcPath = join(paths.arcsDir, `long-arc-${i}.md`)
+      await writeDocumentAtomic({
+        path: arcPath,
+        meta: {
+          id: newId('doc'),
+          name,
+          status: 'active',
+          updated: `2026-08-${String(i + 1).padStart(2, '0')}`,
+        },
+        body: `Arc ${i}.\n`,
+      })
+      records.push({
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: `arc_long_${i}`,
+        type: 'arc',
+        label: name,
+        doc: arcPath,
+      })
+    }
+    await appendGraph(paths, records)
+
+    const engine = await openEngine()
+    const prompt = await assembleSystemPrompt(engine, testConfig())
+
+    expect(prompt).toContain(
+      'of 20 active arcs, most recently touched first. Call list_arcs for the rest',
+    )
+
+    await engine.close()
+  })
+  it('shows no arcs marker when under the cap, and orders undated arcs last', async () => {
+    const datedPath = join(paths.arcsDir, 'touched.md')
+    await writeDocumentAtomic({
+      path: datedPath,
+      meta: { id: newId('doc'), name: 'Touched Arc', status: 'active', updated: '2026-08-10' },
+      body: 'Touched.\n',
+    })
+    await appendGraph(paths, [
+      {
+        ts: '2026-08-02T00:00:00.000Z',
+        op: 'assert',
+        node: 'arc_loose_two',
+        type: 'arc',
+        label: 'Loose Two',
+      },
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'arc_touched',
+        type: 'arc',
+        label: 'Touched Arc',
+        doc: datedPath,
+      },
+      {
+        ts: '2026-08-03T00:00:00.000Z',
+        op: 'assert',
+        node: 'arc_loose_one',
+        type: 'arc',
+        label: 'Loose One',
+      },
+    ])
+
+    const engine = await openEngine()
+    const prompt = await assembleSystemPrompt(engine, testConfig())
+
+    expect(prompt).toContain('## Active arcs')
+    expect(prompt).not.toContain('Call list_arcs for the rest')
+
+    const touched = prompt.indexOf('Touched Arc')
+    const looseOne = prompt.indexOf('Loose One')
+    const looseTwo = prompt.indexOf('Loose Two')
+    expect(touched).toBeGreaterThan(-1)
+    expect(touched).toBeLessThan(looseOne)
+    expect(looseOne).toBeLessThan(looseTwo)
+
+    await engine.close()
+  })
+
+  it('caps an over-long daily rollup and hands back its docId', async () => {
+    const docId = newId('doc')
+    const sentinel = 'THE ROLLUP SENTINEL'
+    await writeDocumentAtomic({
+      path: join(paths.rollupsDailyDir, '2026-08-10.md'),
+      meta: { id: docId, date: '2026-08-10' },
+      body: `${'c'.repeat(2500)}\n\n${sentinel}`,
+    })
+    await appendGraph(paths, [
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'arc_any',
+        type: 'arc',
+        label: 'Any Arc',
+      },
+    ])
+
+    const engine = await openEngine()
+    const prompt = await assembleSystemPrompt(engine, testConfig())
+
+    expect(prompt).toContain('(truncated: showing the first 2,500 of')
+    expect(prompt).toContain(`Call read_document with docId ${docId} for the full text.`)
+    expect(prompt).not.toContain(sentinel)
+
+    await engine.close()
+  })
+
+  it('caps each recent session summary independently', async () => {
+    const store = await SessionStore.start(paths, new Date(Date.now() - 24 * 60 * 60 * 1000))
+    const docId = newId('doc')
+    const sentinel = 'THE SUMMARY SENTINEL'
+    await writeDocumentAtomic({
+      path: join(store.dir, 'summary.md'),
+      meta: { id: docId },
+      body: `${'d'.repeat(2000)}\n\n${sentinel}`,
+    })
+
+    const engine = await openEngine()
+    const prompt = await assembleSystemPrompt(engine, testConfig())
+
+    expect(prompt).toContain('(truncated: showing the first 2,000 of')
+    expect(prompt).toContain(`Call read_document with docId ${docId} for the full text.`)
+    expect(prompt).not.toContain(sentinel)
+
+    await engine.close()
+  })
+})
+
+describe('assembleSystemPrompt rollup shelf', () => {
+  let dir: string
+  let paths: MemoryPaths
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'openreverie-context-shelf-'))
+    paths = memoryPaths(dir)
+    await ensureMemoryTree(paths)
+  })
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  it('preloads a compact index of weekly rollups, each with a docId, never the content', async () => {
+    await appendGraph(paths, [
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'arc_any',
+        type: 'arc',
+        label: 'Any Arc',
+      },
+    ])
+
+    const ids: string[] = []
+    for (let w = 19; w <= 33; w++) {
+      const week = `2026-W${String(w).padStart(2, '0')}`
+      const docId = newId('doc')
+      ids.push(docId)
+      await writeDocumentAtomic({
+        path: join(paths.rollupsWeeklyDir, `${week}.md`),
+        meta: { id: docId, kind: 'rollup_weekly', week },
+        body: `Week ${w} content that must never be preloaded.\n`,
+      })
+    }
+    await writeDocumentAtomic({
+      path: join(paths.rollupsDailyDir, '2026-08-10.md'),
+      meta: { id: newId('doc'), date: '2026-08-10' },
+      body: 'A steady day.\n',
+    })
+
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])), {
+      maintenance: false,
+    })
+    const prompt = await assembleSystemPrompt(engine, testConfig())
+
+    expect(prompt).toContain('## Rollups available')
+    expect(prompt).toContain('2026-W33 (')
+    expect(prompt).toContain('12 shown, 15 exist')
+    expect(prompt).toContain('running back to 2026-W19.')
+    expect(prompt).toContain('Daily rollups: 1 day covered')
+    // The three oldest weeks are beyond the twelve-week index and appear
+    // only in the count-and-range line, never as listable keys.
+    expect(prompt).not.toContain('2026-W19 (')
+    // Content is never preloaded.
+    expect(prompt).not.toContain('Week 33 content')
+
+    // Every listed docId appears in the prompt and resolves through
+    // read_document.
+    for (const id of ids.slice(ids.length - 12)) {
+      expect(prompt).toContain(id)
+      const doc = await engine.readDocumentById(id)
+      expect(doc?.body).toContain('Week')
+    }
+
+    await engine.close()
+  })
+
+  it('keeps the read_document escape hatch even when the rollup index fills the cap', async () => {
+    // The escape-hatch row is what turns a list of docIds into something the
+    // model can act on. With a full twelve-week index and more than one daily
+    // rollup it is the row the character cap would drop, which would hand the
+    // model a shelf and no way to take anything off it.
+    await appendGraph(paths, [
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'arc_any',
+        type: 'arc',
+        label: 'Any Arc',
+      },
+    ])
+
+    for (let w = 19; w <= 33; w++) {
+      const week = `2026-W${String(w).padStart(2, '0')}`
+      await writeDocumentAtomic({
+        path: join(paths.rollupsWeeklyDir, `${week}.md`),
+        meta: { id: newId('doc'), kind: 'rollup_weekly', week },
+        body: `Week ${w} content.\n`,
+      })
+    }
+    for (const date of ['2026-08-09', '2026-08-10']) {
+      await writeDocumentAtomic({
+        path: join(paths.rollupsDailyDir, `${date}.md`),
+        meta: { id: newId('doc'), date },
+        body: 'A steady day.\n',
+      })
+    }
+
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])), {
+      maintenance: false,
+    })
+    const prompt = await assembleSystemPrompt(engine, testConfig())
+
+    expect(prompt).toContain('Daily rollups: 2 days covered')
+    expect(prompt).toContain('Read any of these with read_document')
 
     await engine.close()
   })

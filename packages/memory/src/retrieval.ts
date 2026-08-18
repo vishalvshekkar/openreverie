@@ -1,22 +1,24 @@
 // Hybrid retrieval: merges FTS text search and cosine vector search with
-// reciprocal rank fusion, then applies the caller's date filters. Kind
-// filtering happens earlier, inside the index (SQL WHERE), so a kind that
-// is common but outranked elsewhere can't be pushed out of the top-20
-// candidate windows before this function ever sees it.
+// reciprocal rank fusion.
 //
-// A note on date filtering: SearchFilters compares after/before against
-// the document's meta date "when present". MemoryIndex, though, never
-// persists document meta to SQLite: the documents table (and therefore
-// every SearchHit) only carries docId, path, kind, snippet, and score.
-// The one place a date reliably survives into a SearchHit is the path
-// itself, for the kinds whose file layout encodes it (see dateFromPath
-// below). So date filtering here reads the date out of the path when one
-// is present, and treats any hit without one as undated: undated hits are
-// never excluded by an after/before filter, which matches "when present"
-// in the brief.
+// Both the caller's kind filter and the caller's after/before date filter
+// are applied inside the index, in the SQL WHERE clauses of searchText and
+// searchVector, not here. That is deliberate and it is the same argument in
+// both cases: this module only ever sees the top-20 candidate window from
+// each search, so anything filtered out afterwards has already cost a
+// candidate slot, and a narrow filter could come back empty while matching
+// documents sat just outside the window.
+//
+// Date filtering compares against the span stored on each document row
+// (date_start, date_end), written at index time by documentDateSpan. Session
+// summaries, daily rollups and weekly rollups have a real span. Living
+// documents (the constitution, and realm, arc and person pages) have none:
+// they carry NULL and are never excluded by a date filter, because no single
+// date on them means "when this content is about". See dateSpan.ts for the
+// full reasoning.
 
 import type { EmbeddingProvider } from '@openreverie/providers'
-import type { DocKind, MemoryIndex, SearchHit } from './sqlite.js'
+import type { DocKind, MemoryIndex, NodeMatch, SearchHit } from './sqlite.js'
 
 export interface SearchFilters {
   kinds?: DocKind[]
@@ -27,6 +29,16 @@ export interface SearchFilters {
 const CANDIDATE_LIMIT = 20
 const DEFAULT_LIMIT = 8
 const RRF_K = 60
+const NODE_HITS_CAP = 10
+
+// Two lanes, returned separately. `documents` are ranked passages fused from
+// the FTS and cosine lists. `nodes` are graph nodes whose name matched, and
+// they are deliberately not fused in: a node has no chunk, so it has no rank
+// in either list, and any score invented for it would corrupt a real ranking.
+export interface SearchResults {
+  documents: SearchHit[]
+  nodes: NodeMatch[]
+}
 
 export async function searchMemory(
   index: MemoryIndex,
@@ -35,19 +47,30 @@ export async function searchMemory(
   query: string,
   filters?: SearchFilters,
   limit = DEFAULT_LIMIT,
-): Promise<SearchHit[]> {
-  const textHits = index.searchText(query, CANDIDATE_LIMIT, filters?.kinds)
+): Promise<SearchResults> {
+  const textHits = index.searchText(
+    query,
+    CANDIDATE_LIMIT,
+    filters?.kinds,
+    filters?.after,
+    filters?.before,
+  )
   const [queryVector] = await embeddings.embed(embeddingModel, [query])
   const vectorHits = queryVector
-    ? await index.searchVector(queryVector, CANDIDATE_LIMIT, filters?.kinds)
+    ? await index.searchVector(
+        queryVector,
+        CANDIDATE_LIMIT,
+        filters?.kinds,
+        filters?.after,
+        filters?.before,
+      )
     : []
 
   const fused = fuseByReciprocalRank([textHits, vectorHits])
-  // Date filtering is post-fusion by design: it stays here rather than
-  // moving into the index because MemoryIndex never persists document
-  // dates to SQL (see the module comment above).
-  const filtered = fused.filter((hit) => passesDateFilters(hit, filters))
-  return filtered.slice(0, limit)
+  return {
+    documents: fused.slice(0, limit),
+    nodes: index.searchNodes(query, NODE_HITS_CAP),
+  }
 }
 
 // Reciprocal rank fusion: each hit's score is the sum, over every list it
@@ -107,40 +130,4 @@ function dedupeByDocId(hits: SearchHit[]): SearchHit[] {
     deduped.push(hit)
   }
   return deduped
-}
-
-function passesDateFilters(hit: SearchHit, filters?: SearchFilters): boolean {
-  const date = dateFromPath(hit.path)
-  if (date === undefined) {
-    return true
-  }
-  if (filters?.after && date < filters.after) {
-    return false
-  }
-  if (filters?.before && date > filters.before) {
-    return false
-  }
-  return true
-}
-
-const DATE_AT_SEGMENT_START = /^(\d{4}-\d{2}-\d{2})/
-
-// Reads a YYYY-MM-DD date from the start of a path segment, checking the
-// filename first and then each parent directory. This covers the two
-// places a date is actually encoded: rollups/daily/<date>.md (in the
-// filename) and sessions/<date>-<sessionId>/summary.md (in the parent
-// directory). Deliberately not a search over the whole path string: the
-// memory root itself is a user-chosen directory and could contain a
-// date-like substring (a dated backup folder, say) that has nothing to do
-// with the document's own date, so only a segment that starts with the
-// date counts.
-function dateFromPath(path: string): string | undefined {
-  const segments = path.split('/')
-  for (let i = segments.length - 1; i >= 0; i--) {
-    const match = DATE_AT_SEGMENT_START.exec(segments[i] ?? '')
-    if (match) {
-      return match[1]
-    }
-  }
-  return undefined
 }

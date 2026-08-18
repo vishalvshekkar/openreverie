@@ -8,6 +8,8 @@ import { ensureMemoryTree, type MemoryPaths, memoryPaths } from './paths.js'
 import {
   buildDailyRollup,
   buildWeeklyRollup,
+  isoMondayOf,
+  isoSundayOf,
   isoWeekOf,
   pendingDailyRollups,
   pendingWeeklyRollups,
@@ -328,5 +330,52 @@ describe('buildWeeklyRollup', () => {
     const deps: RollupDeps = { chat, model: 'test-model', paths }
 
     await expect(buildWeeklyRollup(deps, '2026-W32')).rejects.toThrow()
+  })
+})
+
+describe('isoMondayOf and isoSundayOf', () => {
+  it('returns the Monday and Sunday of an ordinary mid-year week', () => {
+    expect(isoMondayOf('2026-W33')).toBe('2026-08-10')
+    expect(isoSundayOf('2026-W33')).toBe('2026-08-16')
+    expect(isoMondayOf('2026-W32')).toBe('2026-08-03')
+    expect(isoSundayOf('2026-W32')).toBe('2026-08-09')
+  })
+
+  it('handles weeks whose Monday falls in the previous calendar year', () => {
+    // 2026-W01 starts on Monday 2025-12-29. A naive
+    // "January 1st plus (week - 1) times seven days" calculation gets
+    // this wrong by several days.
+    expect(isoMondayOf('2026-W01')).toBe('2025-12-29')
+    expect(isoSundayOf('2026-W01')).toBe('2026-01-04')
+    expect(isoMondayOf('2025-W01')).toBe('2024-12-30')
+    expect(isoSundayOf('2025-W01')).toBe('2025-01-05')
+  })
+
+  it('handles a 53-week year whose last week ends in the next calendar year', () => {
+    // 2026 is a 53-week ISO year: 2026-W53 runs Monday 2026-12-28
+    // through Sunday 2027-01-03.
+    expect(isoMondayOf('2026-W53')).toBe('2026-12-28')
+    expect(isoSundayOf('2026-W53')).toBe('2027-01-03')
+  })
+
+  it('round-trips against isoWeekOf for every day across four years', () => {
+    const start = Date.UTC(2024, 0, 1)
+    const end = Date.UTC(2027, 11, 31)
+    for (let t = start; t <= end; t += 86400000) {
+      const date = new Date(t).toISOString().slice(0, 10)
+      const week = isoWeekOf(date)
+      const monday = isoMondayOf(week)
+      const sunday = isoSundayOf(week)
+      expect(isoWeekOf(monday)).toBe(week)
+      expect(isoWeekOf(sunday)).toBe(week)
+      expect(monday <= date).toBe(true)
+      expect(date <= sunday).toBe(true)
+    }
+  })
+
+  it('rejects a malformed week identifier', () => {
+    expect(() => isoMondayOf('2026-33')).toThrow(/expected a YYYY-Www week id/)
+    expect(() => isoMondayOf('not-a-week')).toThrow(/expected a YYYY-Www week id/)
+    expect(() => isoSundayOf('2026-W00')).toThrow(/week number out of range/)
   })
 })

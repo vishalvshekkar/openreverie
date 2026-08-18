@@ -61,13 +61,15 @@ function emptyReflectionOutput(summary: string) {
 }
 
 describe('toolDefinitions', () => {
-  it('lists exactly the nine memory and style tools with non-empty descriptions and a JSON schema', () => {
+  it('lists exactly the eleven memory and style tools with non-empty descriptions and a JSON schema', () => {
     const defs = toolDefinitions()
     const names = defs.map((d) => d.name).sort()
     expect(names).toEqual(
       [
         'graph_query',
         'list_arcs',
+        'list_entities',
+        'list_people',
         'list_realms',
         'read_document',
         'read_transcript',
@@ -116,6 +118,34 @@ describe('toolDefinitions', () => {
     const defs = toolDefinitions()
     const names = defs.map((d) => d.name)
     expect(names).not.toContain('forget')
+  })
+
+  it('says plainly which kinds the date filters apply to and which they never exclude', () => {
+    const defs = toolDefinitions()
+    const searchMemory = defs.find((d) => d.name === 'search_memory')
+    if (!searchMemory) throw new Error('expected a search_memory tool definition')
+    const properties = (
+      searchMemory.parameters as {
+        properties: { after: { description: string }; before: { description: string } }
+      }
+    ).properties
+
+    for (const description of [properties.after.description, properties.before.description]) {
+      expect(description).toContain('weekly rollup matches if any day of its week falls in range')
+      expect(description).toContain('never excluded')
+      expect(description).toContain('kinds')
+    }
+    expect(properties.after.description).toContain('on or after')
+    expect(properties.before.description).toContain('on or before')
+  })
+
+  it('explains both search lanes and what a node-only hit means', () => {
+    const defs = toolDefinitions()
+    const searchMemory = defs.find((d) => d.name === 'search_memory')
+    if (!searchMemory) throw new Error('expected a search_memory tool definition')
+    expect(searchMemory.description).toContain('two parts')
+    expect(searchMemory.description).toContain('hasPage: false')
+    expect(searchMemory.description).toContain('graph_query')
   })
 })
 
@@ -171,7 +201,14 @@ describe('dispatchTool', () => {
 
     const emptyCall: ToolCall = { id: 'call_3', name: 'list_arcs', arguments: '' }
     const result = await dispatchTool(engine, sessionId, emptyCall)
-    expect(JSON.parse(result)).toEqual([])
+    expect(JSON.parse(result)).toEqual({
+      total: 0,
+      offset: 0,
+      limit: 50,
+      returned: 0,
+      hasMore: false,
+      rows: [],
+    })
 
     await engine.close()
   })
@@ -197,9 +234,9 @@ describe('dispatchTool', () => {
       sessionId,
       call('search_memory', { query: 'kayaking', kinds: ['summary'], limit: 5 }),
     )
-    const hits = JSON.parse(result) as { docId: string; kind: string }[]
-    expect(hits.length).toBeGreaterThan(0)
-    expect(hits[0]?.kind).toBe('summary')
+    const results = JSON.parse(result) as { documents: { docId: string; kind: string }[] }
+    expect(results.documents.length).toBeGreaterThan(0)
+    expect(results.documents[0]?.kind).toBe('summary')
 
     await engine.close()
   })
@@ -437,12 +474,12 @@ describe('dispatchTool', () => {
     const sessionId = await engine.startSession()
 
     const arcsResult = await dispatchTool(engine, sessionId, call('list_arcs', {}))
-    const arcs = JSON.parse(arcsResult) as { id: string; label: string }[]
-    expect(arcs).toEqual([expect.objectContaining({ id: 'arc_y', label: 'Fitness' })])
+    const arcs = JSON.parse(arcsResult) as { rows: { id: string; label: string }[] }
+    expect(arcs.rows).toEqual([expect.objectContaining({ id: 'arc_y', label: 'Fitness' })])
 
     const realmsResult = await dispatchTool(engine, sessionId, call('list_realms', {}))
-    const realms = JSON.parse(realmsResult) as { id: string; label: string }[]
-    expect(realms).toEqual([expect.objectContaining({ id: 'realm_y', label: 'Health' })])
+    const realms = JSON.parse(realmsResult) as { rows: { id: string; label: string }[] }
+    expect(realms.rows).toEqual([expect.objectContaining({ id: 'realm_y', label: 'Health' })])
 
     await engine.close()
   })
@@ -614,4 +651,127 @@ describe('dispatchTool', () => {
       await engine.close()
     })
   })
+})
+
+it('list_people and list_entities page through nodes the prompt could not show', async () => {
+  const paths = memoryPaths(dir)
+  await MemoryEngine.open(dir, fakeDeps()).then((e) => e.close())
+
+  for (let i = 0; i < 3; i++) {
+    await appendGraph(paths, [
+      {
+        ts: `2026-08-0${i + 1}T00:00:00.000Z`,
+        op: 'assert',
+        node: `person_${i}`,
+        type: 'person',
+        label: `Person ${i}`,
+      },
+      {
+        ts: `2026-08-0${i + 1}T00:00:00.000Z`,
+        op: 'assert',
+        node: `entity_${i}`,
+        type: 'entity',
+        label: `Entity ${i}`,
+      },
+    ])
+  }
+
+  const engine = await MemoryEngine.open(dir, fakeDeps())
+  const sessionId = await engine.startSession()
+
+  const peopleResult = await dispatchTool(
+    engine,
+    sessionId,
+    call('list_people', { nameContains: 'person 1' }),
+  )
+  const people = JSON.parse(peopleResult) as {
+    total: number
+    rows: { id: string; name: string; hasPage: boolean }[]
+  }
+  expect(people.total).toBe(1)
+  expect(people.rows[0]).toMatchObject({ id: 'person_1', name: 'Person 1', hasPage: false })
+
+  const entitiesResult = await dispatchTool(engine, sessionId, call('list_entities', { limit: 2 }))
+  const entities = JSON.parse(entitiesResult) as {
+    total: number
+    returned: number
+    hasMore: boolean
+  }
+  expect(entities).toMatchObject({ total: 3, returned: 2, hasMore: true })
+
+  const badArg = await dispatchTool(engine, sessionId, call('list_people', { sortBy: 'name' }))
+  expect(JSON.parse(badArg).error).toMatch(/list_people/)
+
+  await engine.close()
+})
+
+it('list_arcs filters by status and pages, and its description matches what it returns', async () => {
+  const paths = memoryPaths(dir)
+  await MemoryEngine.open(dir, fakeDeps()).then((e) => e.close())
+
+  const openPath = join(paths.arcsDir, 'open.md')
+  await writeDocumentAtomic({
+    path: openPath,
+    meta: { id: 'doc_open_arc', name: 'Open Arc', status: 'active', updated: '2026-08-10' },
+    body: 'Still going.\n',
+  })
+  const donePath = join(paths.arcsDir, 'done.md')
+  await writeDocumentAtomic({
+    path: donePath,
+    meta: { id: 'doc_done_arc', name: 'Done Arc', status: 'closed', updated: '2026-02-02' },
+    body: 'Finished.\n',
+  })
+  await appendGraph(paths, [
+    {
+      ts: '2026-08-01T00:00:00.000Z',
+      op: 'assert',
+      node: 'arc_open',
+      type: 'arc',
+      label: 'Open Arc',
+      doc: openPath,
+    },
+    {
+      ts: '2026-02-01T00:00:00.000Z',
+      op: 'assert',
+      node: 'arc_done',
+      type: 'arc',
+      label: 'Done Arc',
+      doc: donePath,
+    },
+  ])
+
+  const engine = await MemoryEngine.open(dir, fakeDeps())
+  const sessionId = await engine.startSession()
+
+  const closedResult = await dispatchTool(
+    engine,
+    sessionId,
+    call('list_arcs', { status: 'closed' }),
+  )
+  const closed = JSON.parse(closedResult) as {
+    total: number
+    rows: { id: string; status: string; docId: string }[]
+  }
+  expect(closed.total).toBe(1)
+  expect(closed.rows[0]).toMatchObject({ id: 'arc_done', status: 'closed', docId: 'doc_done_arc' })
+
+  const pagedResult = await dispatchTool(engine, sessionId, call('list_arcs', { limit: 1 }))
+  const paged = JSON.parse(pagedResult) as { total: number; returned: number; hasMore: boolean }
+  expect(paged).toMatchObject({ total: 2, returned: 1, hasMore: true })
+
+  const badStatus = await dispatchTool(engine, sessionId, call('list_arcs', { status: 'sideways' }))
+  expect(JSON.parse(badStatus).error).toMatch(/list_arcs/)
+
+  const realmsPaged = await dispatchTool(engine, sessionId, call('list_realms', { limit: 1 }))
+  expect(JSON.parse(realmsPaged)).toMatchObject({ offset: 0, limit: 1 })
+
+  const defs = toolDefinitions()
+  const listArcs = defs.find((d) => d.name === 'list_arcs')
+  if (!listArcs) throw new Error('expected a list_arcs tool definition')
+  expect(listArcs.description).toContain('docId')
+  expect(listArcs.description).toContain('dormant')
+  const listArcsProps = (listArcs.parameters as { properties: Record<string, unknown> }).properties
+  expect(Object.keys(listArcsProps).sort()).toEqual(['limit', 'offset', 'status'])
+
+  await engine.close()
 })

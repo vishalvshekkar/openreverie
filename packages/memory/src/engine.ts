@@ -31,6 +31,7 @@ import {
   type GraphNode,
   type GraphRecord,
   type GraphState,
+  type NodeType,
   readGraph,
   readGraphRecords,
   type SequencedGraphRecord,
@@ -115,6 +116,96 @@ export interface PublicGraphEdge {
   assertedAt: string
 }
 
+// One shape for every listing tool, so no listing in this system can ever
+// silently truncate. `total` is always the true count of matching rows, so
+// the model can tell how much it has not seen.
+export interface ListingEnvelope<Row> {
+  total: number
+  offset: number
+  limit: number
+  returned: number
+  hasMore: boolean
+  rows: Row[]
+}
+
+export type ArcStatus = 'active' | 'dormant' | 'closed'
+
+// The graphSnapshot projection plus docId, plus the two fields that only
+// exist in the arc page's frontmatter. The raw `doc` filesystem path is
+// deliberately absent: the model cannot open a path, and a path in a tool
+// result invites quoting it back to the user as though it were meaningful.
+export interface ArcRow {
+  id: string
+  type: 'arc'
+  label: string
+  assertedAt: string
+  docId?: string
+  status?: string
+  lastTouched?: string
+}
+
+export interface RealmRow {
+  id: string
+  type: 'realm'
+  label: string
+  assertedAt: string
+  docId?: string
+}
+
+export interface ListArcsOptions {
+  status?: ArcStatus
+  offset?: number
+  limit?: number
+}
+
+export interface ListRealmsOptions {
+  offset?: number
+  limit?: number
+}
+
+export interface PersonRow {
+  id: string
+  name: string
+  hasPage: boolean
+  docId?: string
+  firstSeen: string
+}
+
+// No hasPage and no docId. Entities never get a page in this release, and
+// emitting hasPage: false on every row would be noise implying a page might
+// exist. If entity pages ever arrive, the shape gains the fields then.
+export interface EntityRow {
+  id: string
+  name: string
+  firstSeen: string
+}
+
+export interface ListPeopleOptions {
+  nameContains?: string
+  hasPage?: boolean
+  offset?: number
+  limit?: number
+}
+
+export interface ListEntitiesOptions {
+  nameContains?: string
+  offset?: number
+  limit?: number
+}
+
+export interface NodeHit {
+  nodeId: string
+  name: string
+  type: NodeType
+  hasPage: boolean
+  docId?: string
+}
+
+export interface EngineSearchResult {
+  documents: SearchHit[]
+  nodes: NodeHit[]
+}
+
 export interface EngineDeps {
   chat: ChatProvider
   embeddings: EmbeddingProvider
@@ -124,8 +215,18 @@ export interface EngineDeps {
 
 export interface SessionContext {
   constitution: string
+  // The constitution document's id, so the truncation marker capBody emits
+  // can hand the model a key read_document accepts. The prompt shows at most
+  // CONSTITUTION_CAP characters; the id is how it fetches the rest.
+  constitutionDocId: string
   realms: { id: string; name: string; firstLine: string }[]
   arcs: { id: string; name: string; status: string; lastTouched?: string }[]
+  // True when there are more active arcs than ARCS_CAP, so `arcs` above is
+  // the most recently touched subset rather than the complete active roster.
+  arcsTruncated: boolean
+  // The true number of active arcs, for the same reason peopleTotal and
+  // entitiesTotal exist: the marker states how many were not shown.
+  arcsTotal: number
   // Every person node, paged or not, up to PEOPLE_CAP, most recently
   // created first (paged people kept over unpaged ones when the cap cuts
   // the list short). This is what lets the model know a person exists in
@@ -135,6 +236,10 @@ export interface SessionContext {
   // True when there are more person nodes than PEOPLE_CAP, so `people`
   // above is a partial list rather than the complete roster.
   peopleTruncated: boolean
+  // The true number of person nodes, whether or not they fit under
+  // PEOPLE_CAP. The prompt's truncation marker states it, so the model
+  // knows how much of the roster it is not being shown.
+  peopleTotal: number
   // Every entity node (a film, a book, a company, a place, a band, a work
   // of fiction), up to ENTITIES_CAP, most recently created first. Entities
   // never get a page in this release, so there is no page status to carry
@@ -142,6 +247,8 @@ export interface SessionContext {
   entities: { id: string; name: string }[]
   // True when there are more entity nodes than ENTITIES_CAP.
   entitiesTruncated: boolean
+  // The true number of entity nodes, for the same reason as peopleTotal.
+  entitiesTotal: number
   // Text and the date of the session that captured it, for items of kind
   // 'intention', pulled from recent session summaries' own frontmatter
   // (the same read sessionContext already does for recentSummaries below,
@@ -152,8 +259,23 @@ export interface SessionContext {
   // model cannot tell an intention from yesterday apart from one from last
   // week.
   recentIntentions: { text: string; date: string }[]
-  latestDailyRollup?: { date: string; body: string }
-  recentSummaries: { sessionId: string; date: string; body: string }[]
+  latestDailyRollup?: { date: string; body: string; docId: string }
+  recentSummaries: { sessionId: string; date: string; body: string; docId: string }[]
+  // The newest WEEKLY_INDEX_CAP weekly rollups, newest first, each with the
+  // docId the model needs to fetch it. Never the rollup bodies: those
+  // accumulate at 52 per year without bound, and preloading them would
+  // recreate the unbounded-prompt problem the budget exists to fix.
+  weeklyRollups: { week: string; docId: string }[]
+  // The true number of weekly rollups on disk, whether or not they fit in
+  // the shelf, so the shelf can say how many exist beyond what it lists.
+  weeklyRollupsTotal: number
+  // The oldest weekly rollup week, for the "running back to" line. Absent
+  // when there are no weekly rollups.
+  earliestWeek?: string
+  // Count and range of daily rollups, computed for free during the same
+  // walk that finds the newest one. earliest and latest are absent when
+  // there are no daily rollups.
+  dailyRollups: { total: number; earliest?: string; latest?: string }
   // The person's IANA timezone, and whether it is a fact they confirmed or
   // only the default read off the machine at folder creation. The model is
   // never told the current time through this context: the current time
@@ -205,6 +327,19 @@ const RECENT_INTENTIONS_CAP = 5
 // every turn after a couple of years of daily use.
 const PEOPLE_CAP = 40
 const ENTITIES_CAP = 30
+// Active arcs rendered in the prompt. Active-only filtering bounds arcs
+// against closed ones and nothing bounds them against each other, so a
+// user with many open storylines would otherwise grow this section without
+// bound. The reflection prompt does not share this cap (arcs are listed
+// there by id and label only, which stays short), so it lives here next to
+// the chat-prompt caps.
+const ARCS_CAP = 30
+// How many of the most recent weekly rollups are listed in the prompt
+// shelf, each with its docId. Twelve is a quarter, which covers "a month
+// ago" without listing years. Older weeks are stated as a count and a
+// range, not enumerated, which is what keeps the shelf inside its
+// character budget.
+const WEEKLY_INDEX_CAP = 12
 const PERSON_STARTER_BODY = 'This page is new. It grows as we talk.\n'
 
 export class MemoryEngine {
@@ -279,6 +414,27 @@ export class MemoryEngine {
     // refreshDocPaths() last.
     if (options.maintenance !== false) {
       await engine.drainLegacyProposals()
+    }
+    // After runMaintenance and drainLegacyProposals, not before: both of
+    // those clear warnings as their own first step, so a warning pushed
+    // earlier would be wiped before anyone could read it. Nothing in the
+    // maintenance path searches the index (reflection reads graph state and
+    // the folder; the rollup builders read the folder), so running it
+    // against a freshly emptied index is safe, and running the rebuild
+    // afterwards also picks up whatever maintenance just wrote.
+    //
+    // Rebuild rather than leave the index empty: a silently empty search
+    // index is the exact failure this release exists to remove. The cost is
+    // one embedding pass over the whole folder, once. Nothing is lost if it
+    // is interrupted, since the version is only advanced when the tables are
+    // recreated and the index is derived from the folder either way.
+    if (index.schemaRebuilt) {
+      await engine.reindexAll()
+      engine.warnings.push(
+        'The search index schema changed in this version, so index.db was rebuilt from your memory folder. ' +
+          'This happens once, on the first launch after the upgrade, and it re-embeds every document in the folder. ' +
+          'Nothing was lost: the index is derived from your files, and it is rebuilt again on the next launch if this one was interrupted.',
+      )
     }
     await engine.refreshDocPaths()
     return engine
@@ -605,6 +761,13 @@ export class MemoryEngine {
     const constitutionDoc = await readDocument(this.paths.constitution)
 
     const arcs: SessionContext['arcs'] = []
+    const arcRows: {
+      id: string
+      name: string
+      status: string
+      lastTouched?: string
+      ts: string
+    }[] = []
     for (const node of this.graphState.nodes.values()) {
       if (node.type !== 'arc') continue
       let status = 'active'
@@ -623,8 +786,25 @@ export class MemoryEngine {
       // assembled context; dormant and closed arcs never age out of
       // graphState on their own, so they must be filtered here instead.
       if (status !== 'active') continue
-      arcs.push({ id: node.id, name: node.label, status, ...(lastTouched ? { lastTouched } : {}) })
+      arcRows.push({
+        id: node.id,
+        name: node.label,
+        status,
+        ...(lastTouched ? { lastTouched } : {}),
+        ts: node.ts,
+      })
     }
+    arcRows.sort(compareArcs)
+    const arcsTotal = arcRows.length
+    for (const row of arcRows.slice(0, ARCS_CAP)) {
+      arcs.push({
+        id: row.id,
+        name: row.name,
+        status: row.status,
+        ...(row.lastTouched ? { lastTouched: row.lastTouched } : {}),
+      })
+    }
+    const arcsTruncated = arcsTotal > ARCS_CAP
 
     const realms: SessionContext['realms'] = []
     for (const node of this.graphState.nodes.values()) {
@@ -641,13 +821,44 @@ export class MemoryEngine {
       realms.push({ id: node.id, name: node.label, firstLine })
     }
 
-    let latestDailyRollup: { date: string; body: string } | undefined
+    let latestDailyRollup: { date: string; body: string; docId: string } | undefined
+    let dailyTotal = 0
+    let dailyEarliest: string | undefined
+    let dailyLatest: string | undefined
     for (const doc of await listDocuments(this.paths.rollupsDailyDir, this.onDocSkip)) {
       if (typeof doc.meta.date !== 'string') continue
+      dailyTotal += 1
+      if (dailyEarliest === undefined || doc.meta.date < dailyEarliest)
+        dailyEarliest = doc.meta.date
+      if (dailyLatest === undefined || doc.meta.date > dailyLatest) dailyLatest = doc.meta.date
       if (!latestDailyRollup || doc.meta.date > latestDailyRollup.date) {
-        latestDailyRollup = { date: doc.meta.date, body: doc.body }
+        latestDailyRollup = { date: doc.meta.date, body: doc.body, docId: doc.meta.id }
       }
     }
+    const dailyRollups = {
+      total: dailyTotal,
+      ...(dailyEarliest !== undefined ? { earliest: dailyEarliest } : {}),
+      ...(dailyLatest !== undefined ? { latest: dailyLatest } : {}),
+    }
+
+    // The weekly shelf. Only the id-bearing index is preloaded, never the
+    // bodies. One directory read plus a frontmatter parse per weekly file,
+    // on the same order as the daily walk already performed beside it.
+    const weeklyDocs = await listDocuments(this.paths.rollupsWeeklyDir, this.onDocSkip)
+    const weeklyRollups: SessionContext['weeklyRollups'] = []
+    let weeklyRollupsTotal = 0
+    let earliestWeek: string | undefined
+    for (const doc of weeklyDocs) {
+      if (typeof doc.meta.week !== 'string') continue
+      weeklyRollupsTotal += 1
+      if (earliestWeek === undefined || doc.meta.week < earliestWeek) {
+        earliestWeek = doc.meta.week
+      }
+      weeklyRollups.push({ week: doc.meta.week, docId: doc.meta.id })
+    }
+    // ISO week ids sort lexicographically in chronological order, so a
+    // descending sort puts the newest week first.
+    weeklyRollups.sort((a, b) => (a.week > b.week ? -1 : 1))
 
     const sessions = await SessionStore.listSessions(this.paths)
     const recentCutoff = addDaysLocal(now, -RECENT_SUMMARIES_WINDOW_DAYS, this.timezone())
@@ -668,7 +879,12 @@ export class MemoryEngine {
     for (const session of recentCandidates) {
       const summaryPath = join(this.paths.sessionsDir, session.dirName, 'summary.md')
       const doc = await readDocument(summaryPath)
-      recentSummaries.push({ sessionId: session.sessionId, date: session.date, body: doc.body })
+      recentSummaries.push({
+        sessionId: session.sessionId,
+        date: session.date,
+        body: doc.body,
+        docId: doc.meta.id,
+      })
       // doc.meta.items is the same mergedItems array applyReflection wrote
       // into this summary's frontmatter (see reflection.ts). A hand-written
       // summary.md (several tests build one directly) has no items key at
@@ -727,23 +943,36 @@ export class MemoryEngine {
 
     return {
       constitution: constitutionDoc.body,
+      constitutionDocId: constitutionDoc.meta.id,
       realms,
       arcs,
+      arcsTruncated,
+      arcsTotal,
       people,
       peopleTruncated: cappedPeople.truncated,
+      peopleTotal: personNodes.length,
       entities,
       entitiesTruncated: cappedEntities.truncated,
+      entitiesTotal: entityNodes.length,
       recentIntentions: recentIntentions.slice(0, RECENT_INTENTIONS_CAP),
       ...(latestDailyRollup ? { latestDailyRollup } : {}),
       recentSummaries,
+      weeklyRollups: weeklyRollups.slice(0, WEEKLY_INDEX_CAP),
+      weeklyRollupsTotal,
+      ...(earliestWeek !== undefined ? { earliestWeek } : {}),
+      dailyRollups,
       timezone: this.timezone(),
       timezoneSource: this.timezoneSource(),
       isFirstSession,
     }
   }
 
-  async search(query: string, filters?: SearchFilters, limit?: number): Promise<SearchHit[]> {
-    return searchMemory(
+  async search(
+    query: string,
+    filters?: SearchFilters,
+    limit?: number,
+  ): Promise<EngineSearchResult> {
+    const results = await searchMemory(
       this.index,
       this.deps.embeddings,
       this.deps.embeddingModel,
@@ -751,6 +980,21 @@ export class MemoryEngine {
       filters,
       limit,
     )
+    // The nodes table stores a filesystem path, not a document id, so the
+    // path-to-docId projection happens here, exactly as withDocId does for
+    // graphQuery. A node with no page has neither.
+    const nodes: NodeHit[] = results.nodes.map((node) => {
+      const hit: NodeHit = {
+        nodeId: node.id,
+        name: node.label,
+        type: node.type,
+        hasPage: node.doc !== null,
+      }
+      const docId = node.doc ? this.docIdByPath.get(node.doc) : undefined
+      if (docId) hit.docId = docId
+      return hit
+    })
+    return { documents: results.documents, nodes }
   }
 
   graphQuery(query: GraphQuery): unknown[] {
@@ -858,12 +1102,96 @@ export class MemoryEngine {
     return pendingProposals(this.paths)
   }
 
-  listArcs(): GraphNode[] {
-    return [...this.graphState.nodes.values()].filter((node) => node.type === 'arc')
+  // Async because arc status and lastTouched live in the arc page's
+  // frontmatter, not on the graph node, and the tool has been promising a
+  // status field it never returned. Arc counts are in the dozens, so a
+  // bounded set of document reads per call is acceptable.
+  async listArcs(options: ListArcsOptions = {}): Promise<ListingEnvelope<ArcRow>> {
+    const nodes = [...this.graphState.nodes.values()]
+      .filter((node) => node.type === 'arc')
+      .sort(compareNodesForListing)
+
+    const rows: ArcRow[] = []
+    for (const node of nodes) {
+      const row: ArcRow = {
+        id: node.id,
+        type: 'arc',
+        label: node.label,
+        assertedAt: node.ts,
+      }
+      const docId = node.doc ? this.docIdByPath.get(node.doc) : undefined
+      if (docId) row.docId = docId
+      if (node.doc) {
+        try {
+          const doc = await readDocument(node.doc)
+          if (typeof doc.meta.status === 'string') row.status = doc.meta.status
+          if (typeof doc.meta.updated === 'string') row.lastTouched = doc.meta.updated
+        } catch {
+          // The page does not read cleanly. Omit status and lastTouched
+          // rather than defaulting them: defaulting an unreadable arc to
+          // active is how a broken file becomes a wrong answer.
+        }
+      }
+      if (options.status !== undefined && row.status !== options.status) continue
+      rows.push(row)
+    }
+
+    return pageRows(rows, options.offset, options.limit)
   }
 
-  listRealms(): GraphNode[] {
-    return [...this.graphState.nodes.values()].filter((node) => node.type === 'realm')
+  listRealms(options: ListRealmsOptions = {}): ListingEnvelope<RealmRow> {
+    const rows = [...this.graphState.nodes.values()]
+      .filter((node) => node.type === 'realm')
+      .sort(compareNodesForListing)
+      .map((node) => {
+        const row: RealmRow = {
+          id: node.id,
+          type: 'realm',
+          label: node.label,
+          assertedAt: node.ts,
+        }
+        const docId = node.doc ? this.docIdByPath.get(node.doc) : undefined
+        if (docId) row.docId = docId
+        return row
+      })
+    return pageRows(rows, options.offset, options.limit)
+  }
+
+  // The escape hatch for everyone past PEOPLE_CAP. A person with no page has
+  // no document, so no chunk, no FTS row and no embedding: search_memory's
+  // document lane cannot find them under any query, and before this method
+  // and the node lane existed there was no way to reach them at all.
+  listPeople(options: ListPeopleOptions = {}): ListingEnvelope<PersonRow> {
+    const needle = options.nameContains?.toLowerCase()
+    const rows = [...this.graphState.nodes.values()]
+      .filter((node) => node.type === 'person')
+      .filter((node) => (needle === undefined ? true : node.label.toLowerCase().includes(needle)))
+      .filter((node) =>
+        options.hasPage === undefined ? true : (node.doc !== undefined) === options.hasPage,
+      )
+      .sort(compareNodesForListing)
+      .map((node) => {
+        const row: PersonRow = {
+          id: node.id,
+          name: node.label,
+          hasPage: node.doc !== undefined,
+          firstSeen: node.ts,
+        }
+        const docId = node.doc ? this.docIdByPath.get(node.doc) : undefined
+        if (docId) row.docId = docId
+        return row
+      })
+    return pageRows(rows, options.offset, options.limit)
+  }
+
+  listEntities(options: ListEntitiesOptions = {}): ListingEnvelope<EntityRow> {
+    const needle = options.nameContains?.toLowerCase()
+    const rows = [...this.graphState.nodes.values()]
+      .filter((node) => node.type === 'entity')
+      .filter((node) => (needle === undefined ? true : node.label.toLowerCase().includes(needle)))
+      .sort(compareNodesForListing)
+      .map((node) => ({ id: node.id, name: node.label, firstSeen: node.ts }))
+    return pageRows(rows, options.offset, options.limit)
   }
 
   async resolveProposal(id: string, resolution: ProposalResolution): Promise<void> {
@@ -1178,6 +1506,13 @@ export class MemoryEngine {
   // --- private helpers ---
 
   private async buildReflectionContext(): Promise<ReflectionContext> {
+    // The constitution is passed through whole, never capped. Reflection
+    // emits its constitution update as a complete replacement body, so a
+    // model shown a truncated constitution and asked to produce the update
+    // would rewrite only what it saw and delete the tail it never saw from
+    // disk. capBody (in @openreverie/core) applies to assembleSystemPrompt
+    // only and must never be applied here. See the test "the reflection
+    // prompt carries the whole constitution body, sentinel included".
     const constitutionDoc = await readDocument(this.paths.constitution)
     const arcs = [...this.graphState.nodes.values()].filter((node) => node.type === 'arc')
     const realms = [...this.graphState.nodes.values()].filter((node) => node.type === 'realm')
@@ -1776,6 +2111,63 @@ function isoFromId(id: string, fallback: string): string {
 function byTsDescending(a: GraphNode, b: GraphNode): number {
   if (a.ts === b.ts) return 0
   return a.ts > b.ts ? -1 : 1
+}
+
+// Orders active arcs for the prompt: most recently touched first, and arcs
+// whose page could not be read (no lastTouched) sort last, ordered among
+// themselves by node ts descending. Without that rule the ARCS_CAP cut
+// would drop a nondeterministic arc, since the undated group's order would
+// otherwise depend on graph.jsonl's insertion order.
+function compareArcs(
+  a: { lastTouched?: string; ts: string; id: string },
+  b: { lastTouched?: string; ts: string; id: string },
+): number {
+  if (a.lastTouched !== undefined && b.lastTouched !== undefined) {
+    if (a.lastTouched !== b.lastTouched) return a.lastTouched > b.lastTouched ? -1 : 1
+  } else if (a.lastTouched !== undefined) {
+    return -1
+  } else if (b.lastTouched !== undefined) {
+    return 1
+  }
+  if (a.ts !== b.ts) return a.ts > b.ts ? -1 : 1
+  return a.id < b.id ? 1 : a.id > b.id ? -1 : 0
+}
+
+const LISTING_DEFAULT_LIMIT = 50
+const LISTING_MAX_LIMIT = 200
+
+// Slices one page out of an already-ordered row list and reports the true
+// total alongside it. offset and limit come from the model, so both are
+// clamped rather than trusted: a negative or non-numeric offset reads as 0,
+// and a missing or oversized limit reads as the default or the maximum.
+function pageRows<Row>(rows: Row[], offset?: number, limit?: number): ListingEnvelope<Row> {
+  const safeOffset =
+    offset !== undefined && Number.isFinite(offset) && offset > 0 ? Math.floor(offset) : 0
+  const requested =
+    limit !== undefined && Number.isFinite(limit) && limit > 0
+      ? Math.floor(limit)
+      : LISTING_DEFAULT_LIMIT
+  const safeLimit = Math.min(requested, LISTING_MAX_LIMIT)
+  const page = rows.slice(safeOffset, safeOffset + safeLimit)
+  return {
+    total: rows.length,
+    offset: safeOffset,
+    limit: safeLimit,
+    returned: page.length,
+    hasMore: safeOffset + page.length < rows.length,
+    rows: page,
+  }
+}
+
+// A total order for listing tools: most recently asserted first, ties broken
+// by node id descending. capPeople's paged-first rule is deliberately not
+// reused here. That rule decides who survives truncation in a fixed-size
+// prompt list; a paging tool truncates nothing, so what it needs instead is
+// an order that is identical across calls and across index rebuilds, which
+// is what the id tiebreak provides.
+function compareNodesForListing(a: GraphNode, b: GraphNode): number {
+  if (a.ts !== b.ts) return a.ts > b.ts ? -1 : 1
+  return a.id < b.id ? 1 : a.id > b.id ? -1 : 0
 }
 
 // Orders person nodes most-recently-created first. Under PEOPLE_CAP,

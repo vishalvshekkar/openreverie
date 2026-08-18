@@ -10,7 +10,15 @@
 // model, so the model sees its own mistake in the transcript and can
 // correct it, rather than the whole session crashing on a bad call.
 
-import type { DocKind, GraphQuery, MemoryEngine } from '@openreverie/memory'
+import type {
+  DocKind,
+  GraphQuery,
+  ListArcsOptions,
+  ListEntitiesOptions,
+  ListPeopleOptions,
+  ListRealmsOptions,
+  MemoryEngine,
+} from '@openreverie/memory'
 import type { ToolCall, ToolDefinition } from '@openreverie/providers'
 import { z } from 'zod'
 import type { StyleConfig } from './config.js'
@@ -52,7 +60,29 @@ const rememberArgs = z.strictObject({
   eventTime: z.string().optional(),
 })
 
-const noArgs = z.strictObject({})
+const listArcsArgs = z.strictObject({
+  status: z.enum(['active', 'dormant', 'closed']).optional(),
+  offset: z.number().optional(),
+  limit: z.number().optional(),
+})
+
+const listRealmsArgs = z.strictObject({
+  offset: z.number().optional(),
+  limit: z.number().optional(),
+})
+
+const listPeopleArgs = z.strictObject({
+  nameContains: z.string().optional(),
+  hasPage: z.boolean().optional(),
+  offset: z.number().optional(),
+  limit: z.number().optional(),
+})
+
+const listEntitiesArgs = z.strictObject({
+  nameContains: z.string().optional(),
+  offset: z.number().optional(),
+  limit: z.number().optional(),
+})
 
 const updateStyleArgs = z
   .strictObject({
@@ -77,9 +107,12 @@ export function toolDefinitions(): ToolDefinition[] {
       description:
         'Search memory before answering from a vague impression of what was probably said. Use this whenever the ' +
         'conversation touches something that might already be recorded: an ongoing arc, a past event, a person, a ' +
-        'decision made earlier. It runs a hybrid search over items, session summaries, rollups, and arc and realm ' +
-        'pages, and returns ranked hits with a snippet from each. Retrieve before asserting: check the record rather ' +
-        'than guess.',
+        'decision made earlier. Retrieve before asserting: check the record rather than guess. Results come back ' +
+        'in two parts. documents are ranked passages from pages, summaries and rollups, each with a snippet. ' +
+        'nodes are graph nodes whose name matches the query, including people and things that have no page of ' +
+        'their own; a node hit carries an id you can pass to graph_query, and a docId only when a page exists. A ' +
+        'node hit with hasPage: false means this person or thing is known and recorded, and there is nothing ' +
+        'written about them beyond their name and their links.',
       parameters: {
         type: 'object',
         properties: {
@@ -96,11 +129,21 @@ export function toolDefinitions(): ToolDefinition[] {
           },
           after: {
             type: 'string',
-            description: 'Only include results dated on or after this date (YYYY-MM-DD).',
+            description:
+              'Only include dated artifacts on or after this date, YYYY-MM-DD. Dated artifacts are session ' +
+              'summaries, daily rollups, weekly rollups, and journal entries; a weekly rollup matches if any day ' +
+              'of its week falls in range. Living documents that are rewritten over time (the constitution, and ' +
+              'realm, arc and person pages) have no single date and are never excluded by these filters. To ' +
+              'search only within a date range, combine this with kinds.',
           },
           before: {
             type: 'string',
-            description: 'Only include results dated on or before this date (YYYY-MM-DD).',
+            description:
+              'Only include dated artifacts on or before this date, YYYY-MM-DD. Dated artifacts are session ' +
+              'summaries, daily rollups, weekly rollups, and journal entries; a weekly rollup matches if any day ' +
+              'of its week falls in range. Living documents that are rewritten over time (the constitution, and ' +
+              'realm, arc and person pages) have no single date and are never excluded by these filters. To ' +
+              'search only within a date range, combine this with kinds.',
           },
           limit: {
             type: 'number',
@@ -206,22 +249,114 @@ export function toolDefinitions(): ToolDefinition[] {
     {
       name: 'list_arcs',
       description:
-        'List every arc currently tracked, with its id, name, and status. Cheap orientation: use this to see what ' +
-        'is currently open before deciding whether to search or read further.',
+        'List the arcs (ongoing storylines) tracked in memory, with each arc id, name, status, when it was last ' +
+        'touched, and the docId of its page when it has one. Pass that docId to read_document for the full ' +
+        'narrative. Status comes from the arc page itself and is absent when the arc has no page or its page ' +
+        'cannot be read. The system prompt preloads active arcs only, so this is the only way to reach a dormant ' +
+        'or closed arc. Cheap orientation: use it to see what is open before deciding whether to search or read ' +
+        'further. Results come back as a page: total is the true count, and hasMore says whether more remain.',
       parameters: {
         type: 'object',
-        properties: {},
+        properties: {
+          status: {
+            type: 'string',
+            enum: ['active', 'dormant', 'closed'],
+            description: 'Return only arcs with this status. Omit to get arcs of every status.',
+          },
+          offset: {
+            type: 'number',
+            description: 'How many rows to skip. Defaults to 0.',
+          },
+          limit: {
+            type: 'number',
+            description: 'How many rows to return. Defaults to 50, and is capped at 200.',
+          },
+        },
         additionalProperties: false,
       },
     },
     {
       name: 'list_realms',
       description:
-        'List every realm (life domain) currently tracked, with its id and name. Cheap orientation, like list_arcs, ' +
-        'for getting your bearings before a deeper lookup.',
+        'List the realms (life domains) tracked in memory, with each realm id, name, and the docId of its page ' +
+        'when it has one. Pass that docId to read_document for the full text. Cheap orientation, like list_arcs, ' +
+        'for getting your bearings before a deeper lookup. Results come back as a page: total is the true count, ' +
+        'and hasMore says whether more remain.',
       parameters: {
         type: 'object',
-        properties: {},
+        properties: {
+          offset: {
+            type: 'number',
+            description: 'How many rows to skip. Defaults to 0.',
+          },
+          limit: {
+            type: 'number',
+            description: 'How many rows to return. Defaults to 50, and is capped at 200.',
+          },
+        },
+        additionalProperties: false,
+      },
+    },
+    {
+      name: 'list_people',
+      description:
+        'List the people recorded in memory, with each person id, name, whether they have a page, the docId of ' +
+        'that page when they do, and when they were first recorded. The system prompt shows only the most recent ' +
+        'forty, so this is how you reach anyone older, and how you look someone up by name without guessing. A ' +
+        'person with no page is still fully recorded: they have an id you can pass to graph_query, and nothing ' +
+        'written about them beyond their name and their links. Results come back as a page: total is the true ' +
+        'count of matching people, and hasMore says whether more remain.',
+      parameters: {
+        type: 'object',
+        properties: {
+          nameContains: {
+            type: 'string',
+            description:
+              'Return only people whose name contains this text, case-insensitively. Omit to list everyone.',
+          },
+          hasPage: {
+            type: 'boolean',
+            description:
+              'Return only people who have a page (true) or only those who do not (false). Omit for both.',
+          },
+          offset: {
+            type: 'number',
+            description: 'How many rows to skip. Defaults to 0.',
+          },
+          limit: {
+            type: 'number',
+            description: 'How many rows to return. Defaults to 50, and is capped at 200.',
+          },
+        },
+        additionalProperties: false,
+      },
+    },
+    {
+      name: 'list_entities',
+      description:
+        'List the entities recorded in memory (films, books, companies, places, bands, works of fiction), with ' +
+        'each entity id, name, and when it was first recorded. The system prompt shows only the most recent ' +
+        'thirty, so this is how you reach anything older. Entities have no pages in this release, so there is ' +
+        'nothing to read beyond the name and what the graph links to it; pass the id to graph_query for that. ' +
+        'Results come back as a page: total is the true count of matching entities, and hasMore says whether ' +
+        'more remain.',
+      parameters: {
+        type: 'object',
+        properties: {
+          nameContains: {
+            type: 'string',
+            description:
+              'Return only entities whose name contains this text, case-insensitively. Omit to list everything.',
+          },
+          offset: {
+            type: 'number',
+            description: 'How many rows to skip. Defaults to 0.',
+          },
+          limit: {
+            type: 'number',
+            description: 'How many rows to return. Defaults to 50, and is capped at 200.',
+          },
+        },
         additionalProperties: false,
       },
     },
@@ -307,6 +442,10 @@ export async function dispatchTool(
         return await dispatchListArcs(engine, parsedArgs.value)
       case 'list_realms':
         return await dispatchListRealms(engine, parsedArgs.value)
+      case 'list_people':
+        return await dispatchListPeople(engine, parsedArgs.value)
+      case 'list_entities':
+        return await dispatchListEntities(engine, parsedArgs.value)
       case 'update_style':
         return await dispatchUpdateStyle(deps, parsedArgs.value)
       case 'update_profile':
@@ -333,8 +472,8 @@ async function dispatchSearchMemory(engine: MemoryEngine, value: unknown): Promi
       }
     : undefined
 
-  const hits = await engine.search(query, filters, limit)
-  return JSON.stringify(hits)
+  const results = await engine.search(query, filters, limit)
+  return JSON.stringify(results)
 }
 
 async function dispatchGraphQuery(engine: MemoryEngine, value: unknown): Promise<string> {
@@ -385,15 +524,54 @@ async function dispatchRemember(
 }
 
 async function dispatchListArcs(engine: MemoryEngine, value: unknown): Promise<string> {
-  const parsed = noArgs.safeParse(value)
+  const parsed = listArcsArgs.safeParse(value)
   if (!parsed.success) return errorJson(zodErrorMessage('list_arcs', parsed.error))
-  return JSON.stringify(engine.listArcs())
+
+  // Rebuilt key by key rather than spread: exactOptionalPropertyTypes
+  // distinguishes an absent key from a key present and undefined, and zod's
+  // .optional() types as `T | undefined`.
+  const options: ListArcsOptions = {}
+  if (parsed.data.status !== undefined) options.status = parsed.data.status
+  if (parsed.data.offset !== undefined) options.offset = parsed.data.offset
+  if (parsed.data.limit !== undefined) options.limit = parsed.data.limit
+
+  return JSON.stringify(await engine.listArcs(options))
 }
 
 async function dispatchListRealms(engine: MemoryEngine, value: unknown): Promise<string> {
-  const parsed = noArgs.safeParse(value)
+  const parsed = listRealmsArgs.safeParse(value)
   if (!parsed.success) return errorJson(zodErrorMessage('list_realms', parsed.error))
-  return JSON.stringify(engine.listRealms())
+
+  const options: ListRealmsOptions = {}
+  if (parsed.data.offset !== undefined) options.offset = parsed.data.offset
+  if (parsed.data.limit !== undefined) options.limit = parsed.data.limit
+
+  return JSON.stringify(engine.listRealms(options))
+}
+
+async function dispatchListPeople(engine: MemoryEngine, value: unknown): Promise<string> {
+  const parsed = listPeopleArgs.safeParse(value)
+  if (!parsed.success) return errorJson(zodErrorMessage('list_people', parsed.error))
+
+  const options: ListPeopleOptions = {}
+  if (parsed.data.nameContains !== undefined) options.nameContains = parsed.data.nameContains
+  if (parsed.data.hasPage !== undefined) options.hasPage = parsed.data.hasPage
+  if (parsed.data.offset !== undefined) options.offset = parsed.data.offset
+  if (parsed.data.limit !== undefined) options.limit = parsed.data.limit
+
+  return JSON.stringify(engine.listPeople(options))
+}
+
+async function dispatchListEntities(engine: MemoryEngine, value: unknown): Promise<string> {
+  const parsed = listEntitiesArgs.safeParse(value)
+  if (!parsed.success) return errorJson(zodErrorMessage('list_entities', parsed.error))
+
+  const options: ListEntitiesOptions = {}
+  if (parsed.data.nameContains !== undefined) options.nameContains = parsed.data.nameContains
+  if (parsed.data.offset !== undefined) options.offset = parsed.data.offset
+  if (parsed.data.limit !== undefined) options.limit = parsed.data.limit
+
+  return JSON.stringify(engine.listEntities(options))
 }
 
 async function dispatchUpdateStyle(deps: ToolDeps | undefined, value: unknown): Promise<string> {

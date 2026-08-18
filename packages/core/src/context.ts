@@ -23,6 +23,20 @@
 // the model read those as recent or old.
 
 import type { MemoryEngine, SessionContext } from '@openreverie/memory'
+import {
+  ARCS_SECTION_CAP,
+  CONSTITUTION_CAP,
+  capBody,
+  capRows,
+  ENTITIES_SECTION_CAP,
+  LATEST_DAILY_ROLLUP_CAP,
+  PEOPLE_SECTION_CAP,
+  REALM_FIRST_LINE_CAP,
+  REALMS_SECTION_CAP,
+  RECENT_INTENTIONS_SECTION_CAP,
+  RECENT_SUMMARY_CAP,
+  ROLLUPS_AVAILABLE_CAP,
+} from './budget.js'
 import type { ReverieConfig } from './config.js'
 import { buildPersona } from './personas.js'
 
@@ -47,6 +61,7 @@ export async function assembleSystemPrompt(
     entitiesSection(context),
     recentIntentionsSection(context),
     latestDailyRollupSection(context),
+    rollupsAvailableSection(context),
     recentSummariesSection(context),
   ].filter((section): section is string => section !== undefined)
 
@@ -85,16 +100,30 @@ function timeSection(context: SessionContext): string {
 function constitutionSection(context: SessionContext): string | undefined {
   const text = context.constitution.trim()
   if (text.length === 0) return undefined
-  return `## Constitution\n\n${text}`
+  // capBody cuts from the start and, when it cuts, appends a marker naming
+  // the constitution's docId. The docId is what lets the model fetch the
+  // full text it is missing; a marker without it would tell the model
+  // something exists and give it no way to reach it. This applies to the
+  // chat prompt only; reflection's input is deliberately never capped.
+  const capped = capBody(text, CONSTITUTION_CAP, context.constitutionDocId)
+  return `## Constitution\n\n${capped.text}`
 }
 
 function realmsSection(context: SessionContext): string | undefined {
   if (context.realms.length === 0) return undefined
   const lines = context.realms.map((realm) => {
     const firstLine = realm.firstLine.trim()
-    return firstLine.length > 0 ? `- ${realm.name}: ${firstLine}` : `- ${realm.name}`
+    const clipped =
+      firstLine.length > REALM_FIRST_LINE_CAP ? firstLine.slice(0, REALM_FIRST_LINE_CAP) : firstLine
+    return clipped.length > 0 ? `- ${realm.name}: ${clipped}` : `- ${realm.name}`
   })
-  return `## Realms\n\n${lines.join('\n')}`
+  const capped = capRows(lines, REALMS_SECTION_CAP)
+  if (capped.shown < lines.length) {
+    capped.rows.push(
+      `(showing ${capped.shown} of ${lines.length} realms. Call list_realms for the rest.)`,
+    )
+  }
+  return `## Realms\n\n${capped.rows.join('\n')}`
 }
 
 function arcsSection(context: SessionContext): string | undefined {
@@ -104,13 +133,58 @@ function arcsSection(context: SessionContext): string | undefined {
     if (arc.lastTouched) details.push(`last touched: ${arc.lastTouched}`)
     return `- ${arc.name} (${details.join(', ')})`
   })
-  return `## Active arcs\n\n${lines.join('\n')}`
+  const capped = capRows(lines, ARCS_SECTION_CAP)
+  const rows = capped.rows
+  if (context.arcsTruncated || capped.shown < lines.length) {
+    rows.push(
+      `(showing ${capped.shown} of ${context.arcsTotal} active arcs, most recently touched first. Call list_arcs for the rest, including dormant and closed ones.)`,
+    )
+  }
+  return `## Active arcs\n\n${rows.join('\n')}`
 }
 
 function latestDailyRollupSection(context: SessionContext): string | undefined {
   if (!context.latestDailyRollup) return undefined
   const body = context.latestDailyRollup.body.trim()
-  return `## Latest daily rollup\n\nDate: ${context.latestDailyRollup.date}\n\n${body}`
+  const capped = capBody(body, LATEST_DAILY_ROLLUP_CAP, context.latestDailyRollup.docId)
+  return `## Latest daily rollup\n\nDate: ${context.latestDailyRollup.date}\n\n${capped.text}`
+}
+
+function rollupsAvailableSection(context: SessionContext): string | undefined {
+  if (context.weeklyRollupsTotal === 0) return undefined
+  const lines: string[] = []
+  lines.push(
+    `Weekly rollups, most recent first: ${context.weeklyRollups
+      .map((r) => `${r.week} (${r.docId})`)
+      .join(', ')}`,
+  )
+  if (context.weeklyRollupsTotal > context.weeklyRollups.length) {
+    lines.push(
+      `${context.weeklyRollups.length} shown, ${context.weeklyRollupsTotal} exist` +
+        (context.earliestWeek !== undefined ? `, running back to ${context.earliestWeek}.` : '.'),
+    )
+  }
+  if (context.dailyRollups.total > 0) {
+    const range =
+      context.dailyRollups.earliest !== undefined && context.dailyRollups.latest !== undefined
+        ? `, from ${context.dailyRollups.earliest} to ${context.dailyRollups.latest}`
+        : ''
+    const dayWord = context.dailyRollups.total === 1 ? 'day' : 'days'
+    lines.push(
+      `Daily rollups: ${context.dailyRollups.total} ${dayWord} covered${range}. The newest is shown above in full.`,
+    )
+  }
+  // The escape hatch is appended after the cap, never inside it. It is not
+  // data competing for the budget: it is the sentence that makes the docIds
+  // above usable at all. Capping it alongside the rows means a full twelve
+  // week index drops the one line that says how to read any of them, which
+  // is the defect this release exists to remove.
+  const capped = capRows(lines, ROLLUPS_AVAILABLE_CAP)
+  const rows = [
+    ...capped.rows,
+    'Read any of these with read_document, or find one by period with search_memory using kinds and a date range.',
+  ]
+  return `## Rollups available\n\n${rows.join('\n')}`
 }
 
 function recentSummariesSection(context: SessionContext): string | undefined {
@@ -119,9 +193,10 @@ function recentSummariesSection(context: SessionContext): string | undefined {
   // session id and the prompt is the only place the model could get one.
   // Without it, the model can see that a session happened and can read its
   // summary, but has no way to ask for the verbatim transcript behind it.
-  const parts = context.recentSummaries.map(
-    (summary) => `${summary.date} (${summary.sessionId}): ${summary.body.trim()}`,
-  )
+  const parts = context.recentSummaries.map((summary) => {
+    const capped = capBody(summary.body.trim(), RECENT_SUMMARY_CAP, summary.docId)
+    return `${summary.date} (${summary.sessionId}): ${capped.text}`
+  })
   return `## Recent sessions\n\n${parts.join('\n\n')}`
 }
 
@@ -130,23 +205,31 @@ function peopleSection(context: SessionContext): string | undefined {
   const lines = context.people.map(
     (person) => `- ${person.name} (${person.id}, ${person.hasPage ? 'has a page' : 'no page yet'})`,
   )
-  if (context.peopleTruncated) {
-    lines.push(
-      '(list truncated: paged people are kept first, then the most recently created; older, unpaged people exist but are not shown here)',
+  const capped = capRows(lines, PEOPLE_SECTION_CAP)
+  const rows = capped.rows
+  if (context.peopleTruncated || capped.shown < lines.length) {
+    // The marker names the tool that closes the gap. A marker that says
+    // more exist without saying how to reach them tells the model something
+    // exists and gives it no way to fetch it, which is the defect this
+    // release exists to remove.
+    rows.push(
+      `(showing ${capped.shown} of ${context.peopleTotal} people, paged people first then most recently added. Call list_people to page through the rest, or search_memory by name.)`,
     )
   }
-  return `## People\n\n${lines.join('\n')}`
+  return `## People\n\n${rows.join('\n')}`
 }
 
 function entitiesSection(context: SessionContext): string | undefined {
   if (context.entities.length === 0) return undefined
   const lines = context.entities.map((entity) => `- ${entity.name}`)
-  if (context.entitiesTruncated) {
-    lines.push(
-      '(list truncated to the most recently created entries; older ones exist but are not shown here)',
+  const capped = capRows(lines, ENTITIES_SECTION_CAP)
+  const rows = capped.rows
+  if (context.entitiesTruncated || capped.shown < lines.length) {
+    rows.push(
+      `(showing ${capped.shown} of ${context.entitiesTotal} entities, most recently added first. Call list_entities to page through the rest, or search_memory by name.)`,
     )
   }
-  return `## Entities\n\n${lines.join('\n')}`
+  return `## Entities\n\n${rows.join('\n')}`
 }
 
 function recentIntentionsSection(context: SessionContext): string | undefined {
@@ -154,5 +237,13 @@ function recentIntentionsSection(context: SessionContext): string | undefined {
   const lines = context.recentIntentions.map(
     (intention) => `- ${intention.date}: ${intention.text}`,
   )
-  return `## Recent intentions\n\n${lines.join('\n')}`
+  const capped = capRows(lines, RECENT_INTENTIONS_SECTION_CAP)
+  const rows = capped.rows
+  if (capped.shown < lines.length) {
+    // Intentions have no listing tool and no fetch path of their own, so a
+    // marker here can only state the count. The five-row cap keeps this
+    // unreachable in practice; the character cap is a budget backstop.
+    rows.push(`(showing ${capped.shown} of ${lines.length} recent intentions.)`)
+  }
+  return `## Recent intentions\n\n${rows.join('\n')}`
 }
