@@ -45,6 +45,18 @@ knows what to verify rather than assume.
 | 19 final verification + README | DONE | `17dd15e` |
 | **retrieval merged into design** | DONE | merge `a0bd482`, worktree removed |
 
+### Watch item carried forward from modes Batch B
+
+`profileUpdatesSchema` is a strict object with no nullable field, so a reflection reply
+containing `"profileUpdates": {"timezone": null}` fails the WHOLE reflection parse and degrades
+the session to summary only. The prompt paragraph that used to instruct the model to null an
+unchanged timezone was removed in `e0277e7` so the prompt and the schema now agree, and the
+RESPONSE_SHAPE line advertises plain string types. This is the plan's design (Task 3 authored the
+schema strict and non-nullable, and its tests pin that), so it was not changed. But models emit
+`null` for "nothing to report" all the time. If reflection starts degrading to summary in real
+use, this is the first place to look. Fixing it would mean either accepting and dropping nulls in
+the schema, or adding an explicit "omit a key you have nothing for" line to the prompt.
+
 ### Modes plan (`2026-08-17-modes-profile-settings-plan.md`), 24 tasks
 
 Worktree `.claude/worktrees/modes`, branch `feat/phase-d-modes`. Design was merged in and
@@ -58,8 +70,8 @@ read each other's half-written build output.
 | Batch | Tasks | Shared files | Model | State | Commits |
 | --- | --- | --- | --- | --- | --- |
 | A | 1, 2, 3 | `memory/style.ts` (new), `memory/profile.ts`, `core/config.ts` | sonnet | DONE, 841 tests | `351092e` `d0e8015` `efa565b` |
-| B | 4, 5 | `memory/engine.ts`, `core/tools.ts`, `memory/reflection.ts` | sonnet | **ONGOING** | |
-| C | 6 | `core/modes.ts` (new catalogue) | sonnet | TODO | |
+| B | 4, 5 | `memory/engine.ts`, `core/tools.ts`, `memory/reflection.ts` | sonnet | DONE, 858 tests | `0db42b1` `e0277e7` |
+| C | 6 | `core/modes.ts` (new catalogue) | sonnet | **ONGOING** | |
 | D | 7, 7A, 8 | `core/personas.ts` **SAFETY** | sonnet impl, **you falsify** | TODO | |
 | E | 9 | `core/context.ts` profile block, 2000 char cap | sonnet | TODO | |
 | F | 10, 11 | `memory/transcripts.ts`, `memory/engine.ts` | sonnet | TODO | |
@@ -168,24 +180,21 @@ deleted. That is the failure mode this repo has been bitten by repeatedly.
 
 ## VERIFY THE ONGOING MODES BATCH BEFORE YOU CONTINUE
 
-Modes Batch B (Tasks 4, 5) was dispatched and the session may have ended before it was verified.
-In `.claude/worktrees/modes`:
+Modes Batch C (Task 6, the mode catalogue) was dispatched and the session may have ended before
+it was verified. In `.claude/worktrees/modes`:
 
 ```bash
-git log --oneline -4     # tip should be efa565b if nothing was committed
+git log --oneline -3     # tip should be e0277e7 if nothing was committed
 git status --short       # uncommitted agent work?
 pnpm lint && pnpm build && pnpm test
 ```
 
-Baseline before Batch B is **Test Files 52 / Tests 841** at `efa565b`. Batch B must raise that.
-Expected files: `packages/memory/src/engine.ts`, `engine.test.ts`, `packages/core/src/tools.ts`,
-`tools.test.ts`, `packages/memory/src/reflection.ts`, `reflection.test.ts`.
-Anything outside that list deserves a second look.
+Baseline before Batch C is **Test Files 52 / Tests 858** at `e0277e7`. Batch C must raise that.
+Expected files: `packages/core/src/modes.ts` (new), `modes.test.ts` (new),
+`packages/core/src/index.ts`. Nothing else.
 
-Task 4 widens the live `update_profile` tool to the full field set and adds engine plumbing.
-Task 5 makes reflection write the profile fields and STOP writing them into the constitution.
-Task 5 is worth your own eye: it changes what reflection writes where, and the constitution is
-the document whose accidental truncation Task 16 of the retrieval plan exists to prevent.
+Batch C is the catalogue that Batch D (Tasks 7, 7A, 8) overlays onto the persona. Batch D is the
+SAFETY batch: do its falsification yourself, never delegate it.
 
 Commit messages: the plan gives one per task at the end of each task's step list. Get them with
 `grep -n 'git commit -m' <plan>` and read the following lines; they are multi-line messages.
