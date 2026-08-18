@@ -7,6 +7,7 @@ import {
   parseStreamEvent,
   requireTerminal,
   type StreamEvent,
+  transcriptLineSchema,
 } from './api.js'
 
 const thinking = (seq: number): StreamEvent => ({ schemaVersion: '1', seq, type: 'thinking' })
@@ -173,5 +174,18 @@ describe('ApiClient request and NDJSON parsing', () => {
       nodes: [],
       edges: [],
     })
+  })
+})
+
+describe('transcriptLineSchema synthetic', () => {
+  it('accepts a synthetic line and a line without the key', () => {
+    const base = { lineSequence: 1, ts: '2026-08-17T10:00:00.000Z', role: 'user', content: 'hi' }
+    expect(transcriptLineSchema.safeParse(base).success).toBe(true)
+    expect(transcriptLineSchema.safeParse({ ...base, synthetic: true }).success).toBe(true)
+  })
+
+  it('still rejects synthetic: false, which the field never carries', () => {
+    const base = { lineSequence: 1, ts: '2026-08-17T10:00:00.000Z', role: 'user', content: 'hi' }
+    expect(transcriptLineSchema.safeParse({ ...base, synthetic: false }).success).toBe(false)
   })
 })

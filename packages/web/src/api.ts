@@ -58,6 +58,7 @@ export const transcriptLineSchema = z.strictObject({
   content: z.string(),
   toolCalls: z.array(toolCallSchema).optional(),
   toolCallId: z.string().optional(),
+  synthetic: z.literal(true).optional(),
 })
 
 export const proposalSchema = z.strictObject({

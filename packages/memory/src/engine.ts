@@ -548,6 +548,29 @@ export class MemoryEngine {
     return store.sessionId
   }
 
+  // Pushed down from AgentSession rather than read up out of it: core
+  // depends on memory, never the other way round, so the mode is told to
+  // the engine instead of the engine reaching for it.
+  //
+  // Written to disk, not held in a map. runMaintenance reflects stale,
+  // unreflected sessions through _doEndSession in a later process: someone
+  // journals for forty minutes, the process dies before /bye, and
+  // reflection runs at the next startup with no live session object
+  // anywhere. An in-memory-only mode would mean no journal entry is ever
+  // written for that session, which is data loss rather than an edge case.
+  async setSessionMode(sessionId: string, mode: string): Promise<void> {
+    const existing = (await SessionStore.readMeta(this.paths, sessionId)) ?? {}
+    await SessionStore.writeMeta(this.paths, sessionId, { ...existing, mode })
+  }
+
+  // The single place that knows how to answer "what mode was this session
+  // in." Same-process and later-process reflection go through this identical
+  // path. A session directory with no session.json, or one that fails to
+  // parse, means the mode is absent. Never a default.
+  async sessionMode(sessionId: string): Promise<string | undefined> {
+    return (await SessionStore.readMeta(this.paths, sessionId))?.mode
+  }
+
   async appendTranscript(sessionId: string, line: TranscriptLine): Promise<void> {
     const store = await SessionStore.open(this.paths, sessionId)
     await store.appendLine(line)
@@ -598,6 +621,14 @@ export class MemoryEngine {
     // Does NOT clear warnings; the public endSession or runMaintenance
     // is responsible for warning lifecycle.
     const now = new Date()
+    // Read from disk rather than from any in-memory session registry, so
+    // this works whether or not the process that started the session is the
+    // one ending it. The journal spec's gated write reads this value.
+    //
+    // Consumed by the journal spec's gated entry write. Read here, in the one
+    // place that knows how to answer the question, rather than in two.
+    const sessionModeAtEnd = await this.sessionMode(sessionId)
+    void sessionModeAtEnd
     const transcript = await SessionStore.readTranscript(this.paths, sessionId)
 
     if (!transcript.some((line) => line.role === 'user')) {

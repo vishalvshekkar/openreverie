@@ -470,6 +470,7 @@ const publicTranscriptLineSchema = z.strictObject({
   content: z.string(),
   toolCalls: z.array(toolCallSchema).optional(),
   toolCallId: z.string().optional(),
+  synthetic: z.literal(true).optional(),
 })
 const publicTranscriptLinesSchema = z.array(publicTranscriptLineSchema)
 const publicProposalSchema = z.strictObject({

@@ -4645,3 +4645,93 @@ describe('reflection receives the full constitution', () => {
     await rm(dir, { recursive: true, force: true })
   })
 })
+
+describe('session mode', () => {
+  // No shared helper for opening an engine against a temp folder exists in
+  // this file (every other block builds its own inline, see "profile
+  // writes" above), so this follows the same established pattern rather
+  // than introducing a second one. Tracks every root it creates so afterEach
+  // can clean them all up, since each test opens its own temp folder.
+  const roots: string[] = []
+
+  afterEach(async () => {
+    while (roots.length > 0) {
+      const root = roots.pop()
+      if (root) await rmWithRetry(root)
+    }
+  })
+
+  async function openTestEngine(): Promise<{
+    engine: MemoryEngine
+    root: string
+    deps: EngineDeps
+  }> {
+    const root = await mkdtemp(join(tmpdir(), 'openreverie-engine-session-mode-'))
+    roots.push(root)
+    const paths = memoryPaths(root)
+    await ensureMemoryTree(paths)
+    const deps = fakeDeps(
+      new FakeChatProvider([
+        { text: JSON.stringify(emptyReflectionOutput('A session.')), toolCalls: [] },
+      ]),
+    )
+    const engine = await MemoryEngine.open(root, deps, { maintenance: false })
+    return { engine, root, deps }
+  }
+
+  it('records a mode set at session start', async () => {
+    const { engine } = await openTestEngine()
+    const sessionId = await engine.startSession()
+    await engine.setSessionMode(sessionId, 'listen')
+    expect(await engine.sessionMode(sessionId)).toBe('listen')
+    await engine.close()
+  })
+
+  it('keeps the mode in force at the end, not the whole sequence', async () => {
+    const { engine } = await openTestEngine()
+    const sessionId = await engine.startSession()
+    await engine.setSessionMode(sessionId, 'general')
+    await engine.setSessionMode(sessionId, 'journal')
+    expect(await engine.sessionMode(sessionId)).toBe('journal')
+    await engine.close()
+  })
+
+  it('reports a session with no AgentSession behind it as having no mode', async () => {
+    const { engine } = await openTestEngine()
+    const sessionId = await engine.startSession()
+    expect(await engine.sessionMode(sessionId)).toBeUndefined()
+    await engine.close()
+  })
+
+  // The case section 9.4 exists to close. Holding the mode in an in-memory
+  // map instead of session.json fails here while the same-process cases
+  // above keep passing.
+  it('survives closing and reopening the engine between the write and the read', async () => {
+    const { engine, root, deps } = await openTestEngine()
+    const sessionId = await engine.startSession()
+    await engine.setSessionMode(sessionId, 'journal')
+    await engine.close()
+
+    const reopened = await MemoryEngine.open(root, deps, { maintenance: false })
+    expect(await reopened.sessionMode(sessionId)).toBe('journal')
+    await reopened.close()
+  })
+
+  it('has the mode available at end of session, from a fresh engine instance', async () => {
+    const { engine, root, deps } = await openTestEngine()
+    const sessionId = await engine.startSession()
+    await engine.setSessionMode(sessionId, 'journal')
+    await engine.appendTranscript(sessionId, {
+      ts: new Date().toISOString(),
+      role: 'user',
+      content: 'hello',
+    })
+    await engine.close()
+
+    const reopened = await MemoryEngine.open(root, deps, { maintenance: false })
+    expect(await reopened.sessionMode(sessionId)).toBe('journal')
+    await reopened.endSession(sessionId)
+    expect(await reopened.sessionMode(sessionId)).toBe('journal')
+    await reopened.close()
+  })
+})
