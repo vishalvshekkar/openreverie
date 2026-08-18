@@ -774,18 +774,17 @@ export class MemoryEngine {
     )
     this.liveItems.delete(sessionId)
 
-    // Reflection's timezone backstop. Validated by updateProfile itself,
-    // which rejects anything Intl does not recognize, and swallowed on
-    // failure: a bad zone name from the model must not undo a session that
-    // has already been written to disk.
-    const reportedTimezone = out.profileUpdates?.timezone
-    if (typeof reportedTimezone === 'string' && reportedTimezone.length > 0) {
+    // Reflection's profile backstop. A model that already used the live
+    // update_profile tool during the conversation has written these facts
+    // once already; writing the same confirmed values again here is a
+    // no-op in effect. Validated by updateProfile itself and swallowed on
+    // failure: a bad field from the model must not undo a session that has
+    // already been written to disk.
+    if (out.profileUpdates !== undefined && Object.keys(out.profileUpdates).length > 0) {
       try {
-        await this.updateProfile({ timezone: reportedTimezone })
+        await this.updateProfile(out.profileUpdates)
       } catch (err) {
-        this.warnings.push(
-          `Reflection reported a timezone this session that could not be saved: ${err instanceof Error ? err.message : String(err)}`,
-        )
+        this.warnings.push(`Could not apply reflection's profile updates: ${errorMessage(err)}`)
       }
     }
 
@@ -1590,6 +1589,7 @@ export class MemoryEngine {
       peopleTruncated: cappedPeople.truncated,
       entities: cappedEntities.nodes,
       entitiesTruncated: cappedEntities.truncated,
+      profile: this.profileCache.meta,
     }
   }
 

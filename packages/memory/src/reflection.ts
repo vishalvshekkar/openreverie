@@ -42,6 +42,7 @@ import {
   readGraph,
 } from './graph.js'
 import type { MemoryPaths } from './paths.js'
+import { type ProfileMeta, type ProfileUpdates, profileUpdatesSchema } from './profile.js'
 import { localDateFromStored, renderStoredStamp } from './time.js'
 import { SessionStore, type TranscriptLine } from './transcripts.js'
 
@@ -93,12 +94,14 @@ export interface ReflectionOutput {
   arcUpdates: { arcId: string; note: string }[]
   personUpdates: { personId: string; note: string }[]
   constitutionUpdate: string | null
-  // A structured personal fact worth writing into profile.md rather than
-  // into constitution prose. null, or the field's absence, means nothing to
-  // update. This is a backstop: a model that used the live update_profile
-  // tool during the conversation has already written it, and writing the
-  // same confirmed value twice is a no-op in effect.
-  profileUpdates?: { timezone: string | null }
+  // Structured personal facts worth writing into profile.md rather than
+  // into constitution prose: the current value of a name, pronouns,
+  // location, timezone, birthday, occupation, or birthday-greeting answer.
+  // Absent or an empty object means nothing to update. This is a backstop:
+  // a model that used the live update_profile tool during the conversation
+  // has already written the fact, and writing the same confirmed value
+  // twice is a no-op in effect.
+  profileUpdates?: ProfileUpdates
 }
 
 export interface ReflectionContext {
@@ -115,6 +118,10 @@ export interface ReflectionContext {
   peopleTruncated?: boolean
   entities: GraphNode[]
   entitiesTruncated?: boolean
+  // The current profile.md fields, so reflection can tell a fact not yet
+  // known from one already recorded and stop proposing writes that would
+  // change nothing.
+  profile: ProfileMeta
 }
 
 const reflectionItemKindSchema = z.enum(['observation', 'feeling', 'event', 'intention'])
@@ -167,8 +174,29 @@ export const reflectionOutputSchema: z.ZodType<ReflectionOutput> = z.object({
   arcUpdates: z.array(z.object({ arcId: z.string(), note: z.string() })),
   personUpdates: z.array(z.object({ personId: z.string(), note: z.string() })),
   constitutionUpdate: z.string().nullable(),
-  profileUpdates: z.object({ timezone: z.string().nullable() }).exactOptional(),
+  profileUpdates: profileUpdatesSchema.exactOptional(),
 })
+
+// Reflection sees what is already recorded so it can tell "not yet known"
+// from "already correct" and stop proposing a field that needs no change.
+function renderProfile(profile: ProfileMeta): string {
+  const fields = [
+    'preferredName',
+    'pronouns',
+    'location',
+    'timezone',
+    'birthday',
+    'occupation',
+    'birthdayGreetings',
+  ] as const
+  const lines: string[] = []
+  for (const field of fields) {
+    const value = profile[field]
+    if (value === undefined) continue
+    lines.push(`- ${field}: ${String(value)}`)
+  }
+  return lines.length === 0 ? '(nothing recorded yet)' : lines.join('\n')
+}
 
 // truncated is only ever true for entities (arcs and realms are never
 // capped): when the caller already cut the list down to ENTITIES_CAP, say
@@ -233,15 +261,21 @@ const RESPONSE_SHAPE = `{
   "arcUpdates": [{"arcId": string, "note": string}],
   "personUpdates": [{"personId": string, "note": string}],
   "constitutionUpdate": string | null,
-  "profileUpdates": {"timezone": string | null}
+  "profileUpdates": {"preferredName": string, "pronouns": string, "location": string, "timezone": string, "birthday": string, "occupation": string, "birthdayGreetings": boolean}
 }`
 
-function buildReflectionPrompt(context: ReflectionContext, transcript: TranscriptLine[]): string {
+export function buildReflectionPrompt(
+  context: ReflectionContext,
+  transcript: TranscriptLine[],
+): string {
   return [
     'You are the memory reflection pipeline for a personal companion agent. You are not the companion and you do not talk to the user. Read the session transcript below and produce structured JSON describing what happened, so it can be filed into durable memory.',
     '',
     'Constitution:',
     context.constitution,
+    '',
+    'Current profile:',
+    renderProfile(context.profile),
     '',
     'Known arcs:',
     renderListing(context.arcs),
@@ -258,9 +292,7 @@ function buildReflectionPrompt(context: ReflectionContext, transcript: Transcrip
     'Transcript:',
     renderTranscript(transcript),
     '',
-    'When updating the constitution: basic identity facts about the user (their name, pronouns, where they live, their occupation or work situation) always belong in the constitution when first learned or when they change. Do not wait for these facts to feel weighty; update the constitution to include them immediately.',
-    '',
-    'Timezone is the exception, and it does not go in the constitution: reverie has to read it back out in code to render local times, and prose is not reliably machine parseable. If this session established or corrected the person\'s timezone, put the IANA name (for example "Asia/Kolkata", "America/New_York") in profileUpdates.timezone. Otherwise set it to null.',
+    "Facts and meaning go to two different places. The current value of a plain fact about the user goes in profileUpdates: what they want to be called, their pronouns, where they live, their timezone, their birthday, and what they do. Write only what they actually said; never infer a fact from another one. What a fact means to them, and how it changed, goes in constitutionUpdate. 'location: Bangalore' is a profile field. 'Moved to Bangalore and the move landed harder than expected' is the constitution. A job change is the same shape: the new title is a profileUpdates.occupation write, what the change meant is a constitution write, and a later profile write must never erase the narrative about the old job.",
     '',
     "A node and a page are two different decisions. A node is a permanent, queryable line in the graph; it is nearly free, so create one generously, on first mention, for anyone or anything with a real part in this person's life. A page is a maintained document a separate model call rewrites every session that touches it; it is expensive, so it is only granted when earned. Each name under Known people above is marked with whether it already has a page. Entities never get a page in this release, so no name under Known entities carries that mark.",
     '',
