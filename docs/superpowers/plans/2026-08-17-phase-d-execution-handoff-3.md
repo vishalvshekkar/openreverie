@@ -72,8 +72,8 @@ read each other's half-written build output.
 | A | 1, 2, 3 | `memory/style.ts` (new), `memory/profile.ts`, `core/config.ts` | sonnet | DONE, 841 tests | `351092e` `d0e8015` `efa565b` |
 | B | 4, 5 | `memory/engine.ts`, `core/tools.ts`, `memory/reflection.ts` | sonnet | DONE, 858 tests | `0db42b1` `e0277e7` |
 | C | 6 | `core/modes.ts` (new catalogue) | sonnet | DONE, 867 tests | `9b091df` |
-| D | 7, 7A, 8 | `core/personas.ts` **SAFETY** | sonnet impl, **you falsify** | **ONGOING** | |
-| E | 9 | `core/context.ts` profile block, 2000 char cap | sonnet | TODO | |
+| D | 7, 7A, 8 | `core/personas.ts` **SAFETY** | sonnet impl, orchestrator falsified | DONE, 884 tests | `bc2530c` (combined, shared file) |
+| E | 9 | `core/context.ts` profile block, 2000 char cap | sonnet | **ONGOING** | |
 | F | 10, 11 | `memory/transcripts.ts`, `memory/engine.ts` | sonnet | TODO | |
 | G | 12 | `set_mode` replaces `update_style`, tools/agent/cli | sonnet | TODO | |
 | H | 13 | style leaves `config.toml`, migration plus 9 fixtures | sonnet | TODO | |
@@ -180,21 +180,35 @@ deleted. That is the failure mode this repo has been bitten by repeatedly.
 
 ## VERIFY THE ONGOING MODES BATCH BEFORE YOU CONTINUE
 
-Modes Batch C (Task 6, the mode catalogue) was dispatched and the session may have ended before
-it was verified. In `.claude/worktrees/modes`:
+Modes Batch E (Task 9, the `## Profile` block in the assembled prompt) was dispatched and the
+session may have ended before it was verified. In `.claude/worktrees/modes`:
 
 ```bash
-git log --oneline -3     # tip should be e0277e7 if nothing was committed
+git log --oneline -3     # tip should be bc2530c if nothing was committed
 git status --short       # uncommitted agent work?
 pnpm lint && pnpm build && pnpm test
 ```
 
-Baseline before Batch C is **Test Files 52 / Tests 858** at `e0277e7`. Batch C must raise that.
-Expected files: `packages/core/src/modes.ts` (new), `modes.test.ts` (new),
-`packages/core/src/index.ts`. Nothing else.
+Baseline before Batch E is **Test Files 53 / Tests 884** at `bc2530c`. Batch E must raise that.
+Expected files: `packages/core/src/context.ts`, `packages/core/src/context.test.ts`. Nothing else.
 
-Batch C is the catalogue that Batch D (Tasks 7, 7A, 8) overlays onto the persona. Batch D is the
-SAFETY batch: do its falsification yourself, never delegate it.
+### The safety batch is DONE and was falsified by the orchestrator, not a subagent
+
+Batch D (Tasks 7, 7A, 8) landed as `bc2530c`. Recorded here so nobody redoes it or assumes it
+was taken on trust:
+
+- All five crisis symbols were verified byte-identical to their pre-batch state by extracting
+  each template literal and comparing md5: `CRISIS_DETECTION`, `COMPANION_CRISIS_STANCE`,
+  `FIREWALL_CRISIS_STANCE`, `crisisSection`, `renderResources`.
+- Task 8 step 9 was performed by the orchestrator: moving `crisisSection(mode, resources)` above
+  `modeSection(activeMode)` in `buildPersona`'s section list fails the invariant with
+  `companion/listen position: expected false to be true`.
+- A second, independent falsification was run: keeping crisis last but letting an active mode
+  append text to it also fails. So the test discriminates on both halves, position and bytes,
+  not just on presence.
+- `buildPersona` now carries a comment saying why the ordering matters. Do not reorder those
+  sections. The mode paragraph goes BEFORE the crisis stance, never after: text after the crisis
+  stance reads to the model as amending it.
 
 Commit messages: the plan gives one per task at the end of each task's step list. Get them with
 `grep -n 'git commit -m' <plan>` and read the following lines; they are multi-line messages.
