@@ -728,3 +728,251 @@ describe('assembleSystemPrompt', () => {
     await engine.close()
   })
 })
+
+describe('assembleSystemPrompt budget', () => {
+  let dir: string
+  let paths: MemoryPaths
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'openreverie-context-budget-'))
+    paths = memoryPaths(dir)
+    await ensureMemoryTree(paths)
+  })
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  async function openEngine(): Promise<MemoryEngine> {
+    return MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])), { maintenance: false })
+  }
+
+  it('caps the constitution and hands back its docId for the full text', async () => {
+    const docId = newId('doc')
+    const sentinel = 'THE SENTINEL SENTENCE THAT IS NEVER SHOWN'
+    const body = `${'a'.repeat(6000)}\n\n${'b'.repeat(1000)}\n\n${sentinel}`
+    await writeDocumentAtomic({ path: paths.constitution, meta: { id: docId }, body })
+    await appendGraph(paths, [
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'arc_any',
+        type: 'arc',
+        label: 'Any Arc',
+      },
+    ])
+
+    const engine = await openEngine()
+    const prompt = await assembleSystemPrompt(engine, testConfig())
+
+    expect(prompt).toContain('(truncated: showing the first 6,000 of')
+    expect(prompt).toContain(`Call read_document with docId ${docId} for the full text.`)
+    expect(prompt).not.toContain(sentinel)
+
+    const full = await engine.readDocumentById(docId)
+    expect(full?.body).toContain(sentinel)
+
+    await engine.close()
+  })
+
+  it('leaves a short constitution uncapped and with no truncation marker', async () => {
+    await writeDocumentAtomic({
+      path: paths.constitution,
+      meta: { id: newId('doc') },
+      body: 'The user prefers direct, unflinching honesty.\n',
+    })
+    await appendGraph(paths, [
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'arc_any',
+        type: 'arc',
+        label: 'Any Arc',
+      },
+    ])
+
+    const engine = await openEngine()
+    const prompt = await assembleSystemPrompt(engine, testConfig())
+
+    expect(prompt).toContain('The user prefers direct, unflinching honesty.')
+    expect(prompt).not.toContain('(truncated:')
+
+    await engine.close()
+  })
+
+  it('clips each realm first line to 160 characters', async () => {
+    await writeDocumentAtomic({
+      path: join(paths.realmsDir, 'fitness.md'),
+      meta: { id: newId('doc'), name: 'Fitness' },
+      body: `${'x'.repeat(200)}\n`,
+    })
+    await appendGraph(paths, [
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'realm_fitness',
+        type: 'realm',
+        label: 'Fitness',
+        doc: join(paths.realmsDir, 'fitness.md'),
+      },
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'arc_any',
+        type: 'arc',
+        label: 'Any Arc',
+      },
+    ])
+
+    const engine = await openEngine()
+    const prompt = await assembleSystemPrompt(engine, testConfig())
+
+    expect(prompt).toContain('x'.repeat(160))
+    expect(prompt).not.toContain('x'.repeat(161))
+
+    await engine.close()
+  })
+
+  it('caps active arcs at 30 and names list_arcs for the rest', async () => {
+    const records: Parameters<typeof appendGraph>[1] = []
+    // Distinct, short (date-only) "last touched" values, one calendar day
+    // apart and strictly increasing with i. A full ISO-with-time stamp
+    // (as used elsewhere in this file) makes each of these 33 rows long
+    // enough that 30 of them exceed ARCS_SECTION_CAP (2000 characters),
+    // which would make the character-level list cap truncate below the
+    // row-level ARCS_CAP this test means to exercise. Date-only values
+    // keep the 30 rows this test expects to see comfortably under budget.
+    const baseDate = new Date('2026-09-02T00:00:00.000Z')
+    for (let i = 0; i < 33; i++) {
+      const arcPath = join(paths.arcsDir, `arc-${i}.md`)
+      const touched = new Date(baseDate.getTime() - (32 - i) * 24 * 60 * 60 * 1000)
+        .toISOString()
+        .slice(0, 10)
+      await writeDocumentAtomic({
+        path: arcPath,
+        meta: {
+          id: newId('doc'),
+          name: `Active Arc ${String(i).padStart(2, '0')}`,
+          status: 'active',
+          updated: touched,
+        },
+        body: `Arc ${i}.\n`,
+      })
+      records.push({
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: `arc_${i}`,
+        type: 'arc',
+        label: `Active Arc ${String(i).padStart(2, '0')}`,
+        doc: arcPath,
+      })
+    }
+    await appendGraph(paths, records)
+
+    const engine = await openEngine()
+    const prompt = await assembleSystemPrompt(engine, testConfig())
+
+    expect(prompt).toContain(
+      '(showing 30 of 33 active arcs, most recently touched first. Call list_arcs for the rest, including dormant and closed ones.)',
+    )
+    expect(prompt).toContain('Active Arc 32')
+    expect(prompt).not.toContain('Active Arc 00')
+
+    await engine.close()
+  })
+  it('shows no arcs marker when under the cap, and orders undated arcs last', async () => {
+    const datedPath = join(paths.arcsDir, 'touched.md')
+    await writeDocumentAtomic({
+      path: datedPath,
+      meta: { id: newId('doc'), name: 'Touched Arc', status: 'active', updated: '2026-08-10' },
+      body: 'Touched.\n',
+    })
+    await appendGraph(paths, [
+      {
+        ts: '2026-08-02T00:00:00.000Z',
+        op: 'assert',
+        node: 'arc_loose_two',
+        type: 'arc',
+        label: 'Loose Two',
+      },
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'arc_touched',
+        type: 'arc',
+        label: 'Touched Arc',
+        doc: datedPath,
+      },
+      {
+        ts: '2026-08-03T00:00:00.000Z',
+        op: 'assert',
+        node: 'arc_loose_one',
+        type: 'arc',
+        label: 'Loose One',
+      },
+    ])
+
+    const engine = await openEngine()
+    const prompt = await assembleSystemPrompt(engine, testConfig())
+
+    expect(prompt).toContain('## Active arcs')
+    expect(prompt).not.toContain('Call list_arcs for the rest')
+
+    const touched = prompt.indexOf('Touched Arc')
+    const looseOne = prompt.indexOf('Loose One')
+    const looseTwo = prompt.indexOf('Loose Two')
+    expect(touched).toBeGreaterThan(-1)
+    expect(touched).toBeLessThan(looseOne)
+    expect(looseOne).toBeLessThan(looseTwo)
+
+    await engine.close()
+  })
+
+  it('caps an over-long daily rollup and hands back its docId', async () => {
+    const docId = newId('doc')
+    const sentinel = 'THE ROLLUP SENTINEL'
+    await writeDocumentAtomic({
+      path: join(paths.rollupsDailyDir, '2026-08-10.md'),
+      meta: { id: docId, date: '2026-08-10' },
+      body: `${'c'.repeat(2500)}\n\n${sentinel}`,
+    })
+    await appendGraph(paths, [
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'arc_any',
+        type: 'arc',
+        label: 'Any Arc',
+      },
+    ])
+
+    const engine = await openEngine()
+    const prompt = await assembleSystemPrompt(engine, testConfig())
+
+    expect(prompt).toContain('(truncated: showing the first 2,500 of')
+    expect(prompt).toContain(`Call read_document with docId ${docId} for the full text.`)
+    expect(prompt).not.toContain(sentinel)
+
+    await engine.close()
+  })
+
+  it('caps each recent session summary independently', async () => {
+    const store = await SessionStore.start(paths, new Date(Date.now() - 24 * 60 * 60 * 1000))
+    const docId = newId('doc')
+    const sentinel = 'THE SUMMARY SENTINEL'
+    await writeDocumentAtomic({
+      path: join(store.dir, 'summary.md'),
+      meta: { id: docId },
+      body: `${'d'.repeat(2000)}\n\n${sentinel}`,
+    })
+
+    const engine = await openEngine()
+    const prompt = await assembleSystemPrompt(engine, testConfig())
+
+    expect(prompt).toContain('(truncated: showing the first 2,000 of')
+    expect(prompt).toContain(`Call read_document with docId ${docId} for the full text.`)
+    expect(prompt).not.toContain(sentinel)
+
+    await engine.close()
+  })
+})

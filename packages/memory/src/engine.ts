@@ -215,8 +215,18 @@ export interface EngineDeps {
 
 export interface SessionContext {
   constitution: string
+  // The constitution document's id, so the truncation marker capBody emits
+  // can hand the model a key read_document accepts. The prompt shows at most
+  // CONSTITUTION_CAP characters; the id is how it fetches the rest.
+  constitutionDocId: string
   realms: { id: string; name: string; firstLine: string }[]
   arcs: { id: string; name: string; status: string; lastTouched?: string }[]
+  // True when there are more active arcs than ARCS_CAP, so `arcs` above is
+  // the most recently touched subset rather than the complete active roster.
+  arcsTruncated: boolean
+  // The true number of active arcs, for the same reason peopleTotal and
+  // entitiesTotal exist: the marker states how many were not shown.
+  arcsTotal: number
   // Every person node, paged or not, up to PEOPLE_CAP, most recently
   // created first (paged people kept over unpaged ones when the cap cuts
   // the list short). This is what lets the model know a person exists in
@@ -249,8 +259,8 @@ export interface SessionContext {
   // model cannot tell an intention from yesterday apart from one from last
   // week.
   recentIntentions: { text: string; date: string }[]
-  latestDailyRollup?: { date: string; body: string }
-  recentSummaries: { sessionId: string; date: string; body: string }[]
+  latestDailyRollup?: { date: string; body: string; docId: string }
+  recentSummaries: { sessionId: string; date: string; body: string; docId: string }[]
   // The person's IANA timezone, and whether it is a fact they confirmed or
   // only the default read off the machine at folder creation. The model is
   // never told the current time through this context: the current time
@@ -302,6 +312,13 @@ const RECENT_INTENTIONS_CAP = 5
 // every turn after a couple of years of daily use.
 const PEOPLE_CAP = 40
 const ENTITIES_CAP = 30
+// Active arcs rendered in the prompt. Active-only filtering bounds arcs
+// against closed ones and nothing bounds them against each other, so a
+// user with many open storylines would otherwise grow this section without
+// bound. The reflection prompt does not share this cap (arcs are listed
+// there by id and label only, which stays short), so it lives here next to
+// the chat-prompt caps.
+const ARCS_CAP = 30
 const PERSON_STARTER_BODY = 'This page is new. It grows as we talk.\n'
 
 export class MemoryEngine {
@@ -723,6 +740,13 @@ export class MemoryEngine {
     const constitutionDoc = await readDocument(this.paths.constitution)
 
     const arcs: SessionContext['arcs'] = []
+    const arcRows: {
+      id: string
+      name: string
+      status: string
+      lastTouched?: string
+      ts: string
+    }[] = []
     for (const node of this.graphState.nodes.values()) {
       if (node.type !== 'arc') continue
       let status = 'active'
@@ -741,8 +765,25 @@ export class MemoryEngine {
       // assembled context; dormant and closed arcs never age out of
       // graphState on their own, so they must be filtered here instead.
       if (status !== 'active') continue
-      arcs.push({ id: node.id, name: node.label, status, ...(lastTouched ? { lastTouched } : {}) })
+      arcRows.push({
+        id: node.id,
+        name: node.label,
+        status,
+        ...(lastTouched ? { lastTouched } : {}),
+        ts: node.ts,
+      })
     }
+    arcRows.sort(compareArcs)
+    const arcsTotal = arcRows.length
+    for (const row of arcRows.slice(0, ARCS_CAP)) {
+      arcs.push({
+        id: row.id,
+        name: row.name,
+        status: row.status,
+        ...(row.lastTouched ? { lastTouched: row.lastTouched } : {}),
+      })
+    }
+    const arcsTruncated = arcsTotal > ARCS_CAP
 
     const realms: SessionContext['realms'] = []
     for (const node of this.graphState.nodes.values()) {
@@ -759,11 +800,11 @@ export class MemoryEngine {
       realms.push({ id: node.id, name: node.label, firstLine })
     }
 
-    let latestDailyRollup: { date: string; body: string } | undefined
+    let latestDailyRollup: { date: string; body: string; docId: string } | undefined
     for (const doc of await listDocuments(this.paths.rollupsDailyDir, this.onDocSkip)) {
       if (typeof doc.meta.date !== 'string') continue
       if (!latestDailyRollup || doc.meta.date > latestDailyRollup.date) {
-        latestDailyRollup = { date: doc.meta.date, body: doc.body }
+        latestDailyRollup = { date: doc.meta.date, body: doc.body, docId: doc.meta.id }
       }
     }
 
@@ -786,7 +827,12 @@ export class MemoryEngine {
     for (const session of recentCandidates) {
       const summaryPath = join(this.paths.sessionsDir, session.dirName, 'summary.md')
       const doc = await readDocument(summaryPath)
-      recentSummaries.push({ sessionId: session.sessionId, date: session.date, body: doc.body })
+      recentSummaries.push({
+        sessionId: session.sessionId,
+        date: session.date,
+        body: doc.body,
+        docId: doc.meta.id,
+      })
       // doc.meta.items is the same mergedItems array applyReflection wrote
       // into this summary's frontmatter (see reflection.ts). A hand-written
       // summary.md (several tests build one directly) has no items key at
@@ -845,8 +891,11 @@ export class MemoryEngine {
 
     return {
       constitution: constitutionDoc.body,
+      constitutionDocId: constitutionDoc.meta.id,
       realms,
       arcs,
+      arcsTruncated,
+      arcsTotal,
       people,
       peopleTruncated: cappedPeople.truncated,
       peopleTotal: personNodes.length,
@@ -1999,6 +2048,26 @@ function isoFromId(id: string, fallback: string): string {
 function byTsDescending(a: GraphNode, b: GraphNode): number {
   if (a.ts === b.ts) return 0
   return a.ts > b.ts ? -1 : 1
+}
+
+// Orders active arcs for the prompt: most recently touched first, and arcs
+// whose page could not be read (no lastTouched) sort last, ordered among
+// themselves by node ts descending. Without that rule the ARCS_CAP cut
+// would drop a nondeterministic arc, since the undated group's order would
+// otherwise depend on graph.jsonl's insertion order.
+function compareArcs(
+  a: { lastTouched?: string; ts: string; id: string },
+  b: { lastTouched?: string; ts: string; id: string },
+): number {
+  if (a.lastTouched !== undefined && b.lastTouched !== undefined) {
+    if (a.lastTouched !== b.lastTouched) return a.lastTouched > b.lastTouched ? -1 : 1
+  } else if (a.lastTouched !== undefined) {
+    return -1
+  } else if (b.lastTouched !== undefined) {
+    return 1
+  }
+  if (a.ts !== b.ts) return a.ts > b.ts ? -1 : 1
+  return a.id < b.id ? 1 : a.id > b.id ? -1 : 0
 }
 
 const LISTING_DEFAULT_LIMIT = 50
