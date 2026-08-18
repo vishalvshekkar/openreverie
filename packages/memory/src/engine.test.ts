@@ -4515,3 +4515,40 @@ describe('search node lane', () => {
     await rm(dir, { recursive: true, force: true })
   })
 })
+
+describe('reflection receives the full constitution', () => {
+  it('the reflection prompt carries the whole constitution body, sentinel included', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'openreverie-reflect-full-'))
+    const paths = memoryPaths(dir)
+    await ensureMemoryTree(paths)
+
+    const sentinel = 'THE SENTINEL SENTENCE THAT MUST SURVIVE REFLECTION'
+    const body = `${'p'.repeat(12000)}\n\n${sentinel}`
+    await writeDocumentAtomic({
+      path: paths.constitution,
+      meta: { id: newId('doc') },
+      body,
+    })
+
+    const chat = new FakeChatProvider([
+      { text: JSON.stringify(emptyReflectionOutput('A session.')), toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+    const sessionId = await engine.startSession()
+    await engine.appendTranscript(sessionId, {
+      ts: new Date().toISOString(),
+      role: 'user',
+      content: 'Hello there.',
+    })
+    await engine.endSession(sessionId)
+
+    const prompt = chat.requests[0]?.messages[0]?.content ?? ''
+    expect(prompt).toContain('p'.repeat(12000))
+    expect(prompt).toContain(sentinel)
+    expect(prompt).not.toContain('(truncated:')
+
+    await engine.close()
+    await rm(dir, { recursive: true, force: true })
+  })
+})

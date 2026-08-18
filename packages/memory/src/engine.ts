@@ -1450,6 +1450,13 @@ export class MemoryEngine {
   // --- private helpers ---
 
   private async buildReflectionContext(): Promise<ReflectionContext> {
+    // The constitution is passed through whole, never capped. Reflection
+    // emits its constitution update as a complete replacement body, so a
+    // model shown a truncated constitution and asked to produce the update
+    // would rewrite only what it saw and delete the tail it never saw from
+    // disk. capBody (in @openreverie/core) applies to assembleSystemPrompt
+    // only and must never be applied here. See the test "the reflection
+    // prompt carries the whole constitution body, sentinel included".
     const constitutionDoc = await readDocument(this.paths.constitution)
     const arcs = [...this.graphState.nodes.values()].filter((node) => node.type === 'arc')
     const realms = [...this.graphState.nodes.values()].filter((node) => node.type === 'realm')
