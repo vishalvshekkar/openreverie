@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { JOURNAL_MODE_ENGAGEMENT_CLAUSE, JOURNAL_MODE_ORIENTATION_CLAUSE } from './journaling.js'
 import { isModeName, MODE_NAMES, MODES, modeOverrides, modeParagraph } from './modes.js'
 
 // The override table from spec section 6.2, transcribed. This test is what
@@ -63,6 +64,15 @@ describe('mode catalogue', () => {
         expect((clause ?? '').trim().length, `${name}.${axis}`).toBeGreaterThan(20)
       }
     }
+  })
+
+  // The generic length-only check above already passed against journal's
+  // old placeholder clauses, so it cannot catch a regression where the
+  // catalogue entry stops pointing at journaling.ts's real content. This
+  // identity check is what actually falsifies that wiring.
+  it("journal's catalogue clauses are the real exports from journaling.ts, not placeholder text", () => {
+    expect(MODES.journal.clauses.orientation).toBe(JOURNAL_MODE_ORIENTATION_CLAUSE)
+    expect(MODES.journal.clauses.engagement).toBe(JOURNAL_MODE_ENGAGEMENT_CLAUSE)
   })
 
   it('matches the override table in spec section 6.2, mode by mode', () => {

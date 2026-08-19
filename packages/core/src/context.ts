@@ -55,6 +55,7 @@ export async function assembleSystemPrompt(
     config.safety.resources,
     engine.currentStyle(),
     activeMode,
+    context.journalingProtocol,
   )
 
   if (context.isFirstSession) {

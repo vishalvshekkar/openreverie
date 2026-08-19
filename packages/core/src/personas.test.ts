@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { type CrisisResource, defaultCrisisResources, type StyleConfig } from './config.js'
+import { EXPRESSIVE_WRITING_SAFETY_GATE } from './journaling.js'
 import { MODE_NAMES, MODES, modeOverrides, modeParagraph } from './modes.js'
 import { buildPersona } from './personas.js'
 
@@ -410,6 +411,27 @@ describe('mode overlay', () => {
     expect(buildPersona('companion', defaultCrisisResources, defaultStyle, 'general')).toEqual(
       buildPersona('companion', defaultCrisisResources, defaultStyle),
     )
+  })
+})
+
+describe('journal mode threading', () => {
+  // The generic mode-overlay loops above only check that the two static
+  // clauses land somewhere in the persona, which was also true of the old
+  // placeholder text they replaced. This checks the actual dynamic content
+  // modeSection substitutes for journal (the safety gate, and the session's
+  // own journaling protocol threaded through buildPersona's 5th argument)
+  // really reaches the rendered persona, not just the two clause strings
+  // that also happen to be duplicated inside it.
+  it('renders the expressive writing safety gate and the passed journaling protocol', () => {
+    const persona = buildPersona(
+      'companion',
+      defaultCrisisResources,
+      defaultStyle,
+      'journal',
+      'A configured protocol, verbatim.',
+    )
+    expect(persona).toContain(EXPRESSIVE_WRITING_SAFETY_GATE)
+    expect(persona).toContain('A configured protocol, verbatim.')
   })
 })
 

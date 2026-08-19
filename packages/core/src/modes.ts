@@ -14,6 +14,8 @@
 // ever will. A snarky companion stays snarky while it listens. Mode
 // changes what the conversation is doing, not who is talking.
 
+import { JOURNAL_MODE_ENGAGEMENT_CLAUSE, JOURNAL_MODE_ORIENTATION_CLAUSE } from './journaling.js'
+
 export type ModeName =
   | 'general'
   | 'listen'
@@ -123,18 +125,17 @@ export const MODES: Record<ModeName, Mode> = {
         'There is one specific thing. Stay on it until it settles. Do not change the subject, do not broaden, and do not add a second thread. Circling back over the same ground is the work here, not a failure of the conversation.',
     },
   },
-  // The journal mode's real protocol, its writing formats, and its safety
-  // gates belong to the journal spec. These two clauses are the minimum
-  // that keeps the suppressed axes instructed until that spec ships and
-  // replaces them.
+  // The journal mode's real paragraph is built dynamically per session
+  // from journaling.md and the chosen format (see journaling.ts and
+  // personas.ts's modeSection); it is not read from this static entry.
+  // These clauses exist anyway so the catalogue-shape tests that check
+  // "every suppressed axis has a non-empty clause" pass for journal too.
   journal: {
     id: 'journal',
     summary: 'Structured written reflection.',
     clauses: {
-      orientation:
-        'This is written reflection rather than conversation. Give them room to write, keep your own contributions short, and do not turn what they wrote into a summary or a lesson.',
-      engagement:
-        'They are the one writing. Prompt once when a prompt is wanted, then stay out of the way until they are done.',
+      orientation: JOURNAL_MODE_ORIENTATION_CLAUSE,
+      engagement: JOURNAL_MODE_ENGAGEMENT_CLAUSE,
     },
   },
 }

@@ -7,7 +7,9 @@
 // are built from the same shared parts so the two prompts stay in sync by
 // construction, and so tests can assert the shared prefix is identical.
 
+import { JOURNALING_PROTOCOL_ABSENT } from '@openreverie/memory'
 import type { CrisisResource, StyleConfig } from './config.js'
+import { buildJournalModeParagraph } from './journaling.js'
 import { MODES, type ModeName, modeOverrides, modeParagraph } from './modes.js'
 
 export type PersonaMode = 'companion' | 'firewall'
@@ -139,8 +141,14 @@ function styleSection(style: StyleConfig, activeMode: ModeName): string {
 
 const PRECEDENCE_SENTENCE = `When these instructions and your configured style disagree, this order decides, highest first: the safety mode's crisis stance below, the first-conversation guidance if this is the first conversation, the personal-register rule above, this mode, and then your configured style for every axis this mode does not cover.`
 
-function modeSection(activeMode: ModeName): string | undefined {
-  const paragraph = modeParagraph(activeMode)
+function modeSection(
+  activeMode: ModeName,
+  journalingProtocol: string | undefined,
+): string | undefined {
+  const paragraph =
+    activeMode === 'journal'
+      ? buildJournalModeParagraph(journalingProtocol ?? JOURNALING_PROTOCOL_ABSENT)
+      : modeParagraph(activeMode)
   if (paragraph === undefined) return undefined
   return `## Mode: ${activeMode}\n\n${MODES[activeMode].summary}\n\n${paragraph}\n\n${PRECEDENCE_SENTENCE}`
 }
@@ -150,6 +158,7 @@ export function buildPersona(
   resources: CrisisResource[],
   style: StyleConfig,
   activeMode: ModeName = 'general',
+  journalingProtocol?: string,
 ): string {
   // The crisis section stays last, always. The mode paragraph goes before
   // it, never after: an override paragraph appended after the crisis
@@ -163,7 +172,7 @@ export function buildPersona(
     CONVERSATIONAL_VOICE,
     STANCE_DOCTRINE,
     styleSection(style, activeMode),
-    modeSection(activeMode),
+    modeSection(activeMode, journalingProtocol),
     crisisSection(mode, resources),
   ].filter((section): section is string => section !== undefined)
   return sections.join('\n\n')

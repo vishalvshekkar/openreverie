@@ -551,6 +551,15 @@ describe('assembleSystemPrompt', () => {
       // this assertion is the one that would catch it sneaking in between.
       const between = prompt.slice(constitutionIndex + '## Constitution'.length, journalingIndex)
       expect(between).not.toMatch(/\n## /)
+      // "Their configured setup: ..." exists only inside buildPersona's mode
+      // paragraph (personas.ts), never inside journalingProtocolSection
+      // above. Nothing else in this file checks that assembleSystemPrompt
+      // actually threads context.journalingProtocol into the buildPersona
+      // call site: dropping that argument would silently fall back to the
+      // JOURNALING_PROTOCOL_ABSENT sentinel there while this section still
+      // rendered the real protocol, a self-contradicting prompt a green
+      // suite would otherwise miss.
+      expect(prompt).toContain('Their configured setup: Gratitude, three times a week.')
 
       await engine.close()
     })
