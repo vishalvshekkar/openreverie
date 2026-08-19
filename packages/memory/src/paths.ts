@@ -13,6 +13,8 @@ export interface MemoryPaths {
   constitution: string
   profile: string
   migrationsLog: string
+  journalDir: string
+  journaling: string
   realmsDir: string
   arcsDir: string
   peopleDir: string
@@ -30,6 +32,8 @@ export function memoryPaths(root: string): MemoryPaths {
     constitution: join(root, 'constitution.md'),
     profile: join(root, 'profile.md'),
     migrationsLog: join(root, 'migrations.jsonl'),
+    journalDir: join(root, 'journal'),
+    journaling: join(root, 'journaling.md'),
     realmsDir: join(root, 'realms'),
     arcsDir: join(root, 'arcs'),
     peopleDir: join(root, 'people'),
@@ -53,6 +57,7 @@ export async function ensureMemoryTree(paths: MemoryPaths): Promise<void> {
     paths.sessionsDir,
     paths.rollupsDailyDir,
     paths.rollupsWeeklyDir,
+    paths.journalDir,
   ]) {
     await mkdir(dir, { recursive: true })
   }
