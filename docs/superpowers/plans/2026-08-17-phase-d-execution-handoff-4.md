@@ -260,7 +260,7 @@ half-written build output. Mark a batch ONGOING *before* dispatching it.
 | J | 12 | Reflection's `journalingUpdate` field, the backstop path; `reflection.ts`, `engine.ts` | C | DONE, 1115, dispatched to `pi` CLI + DeepSeek V4 flash (trial 2), orchestrator-verified and independently falsified | `62f98a6` |
 | K | 13 | **SAFETY invariant test, six combinations, position plus bytes**; `core/personas.test.ts` only | H, C | DONE, 1117, orchestrator personally re-falsified both halves in isolation | `5993b07` |
 | L | 14 | Server exposes `journal`/`journaling` kinds; `server/app.ts` | B | DONE, 1118, dispatched to `pi` CLI + DeepSeek V4 flash (trial 3), orchestrator-verified and independently falsified | `2814ca9` |
-| M | 15, + deferred item 1 | Web client schema, `Library.tsx` `KIND_LABELS`; `web/api.ts`, `web/views/Library.tsx`. Also close deferred item 1 from the modes epoch (below): `getProfile`, `updateProfile`, `getSettings` have no tests in `api.test.ts`, and M is already touching that exact file | L | TODO | |
+| M | 15, + deferred item 1 | Web client schema, `Library.tsx` `KIND_LABELS`; `web/api.ts`, `web/views/Library.tsx`. Also close deferred item 1 from the modes epoch (below): `getProfile`, `updateProfile`, `getSettings` have no tests in `api.test.ts`, and M is already touching that exact file | L | ONGOING (dispatched to `pi` CLI + DeepSeek V4 flash, trial 4) | |
 | N | 16 | Real web journal tab, `excerpt`/`recordedAt` end to end; `engine.ts`, `server/app.ts`, `web/api.ts`, `web/views/Journal.tsx` (replaces placeholder), `journal.css` | B, L, M | TODO | |
 
 Notes on sequencing, from the plan survey:
