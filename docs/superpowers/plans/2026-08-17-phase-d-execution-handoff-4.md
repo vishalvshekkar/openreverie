@@ -163,8 +163,8 @@ half-written build output. Mark a batch ONGOING *before* dispatching it.
 | A | 1 | `memory/paths.ts`: `journalDir`, `journaling` fields | nothing | DONE, 1033 | `30e80d9` |
 | B | 2, + defect 7 | `DocKind` gains `journal`/`journaling`; `sqlite.ts`, `engine.ts`, `core/tools.ts`, plus `dateSpan.ts` and `core/docKinds.test.ts` (undeclared, see defect 7) | A | DONE, 1038 | `eb8a7ea` |
 | C | 3, 4, 7 | `memory/journal.ts`: entry filename/frontmatter, body assembly, `journaling.md` read/write helper | A, B | DONE, 1057 | `a11a213` |
-| D | 5 | `declare_journal_method` tool; `transcripts.ts`, `engine.ts`, `core/tools.ts` | C | ONGOING | |
-| E | 6 | Gated write in `_doEndSession`, the crash path; `engine.ts` **safety-adjacent** | C, D | TODO | |
+| D | 5 | `declare_journal_method` tool; `transcripts.ts`, `engine.ts`, `core/tools.ts` | C | DONE, 1063 | `d941c7b` |
+| E | 6 | Gated write in `_doEndSession`, the crash path; `engine.ts` **safety-adjacent** | C, D | ONGOING | |
 | F | 8 | `sessionContext` gains `mode` param, `journalingProtocol`; `engine.ts` | C | TODO | |
 | G | 9 | `journalingProtocolSection` in the assembled prompt; `core/context.ts` | F | TODO | |
 | H | 10 | `core/journaling.ts` content module (largest task, includes the expressive-writing safety gate); wires into `core/modes.ts`, `core/personas.ts` (`buildPersona` signature), `core/context.ts` (call site) **safety-relevant content** | C, G | TODO | |
