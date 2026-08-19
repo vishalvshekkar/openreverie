@@ -3756,6 +3756,38 @@ describe('MemoryEngine', () => {
       expect(doc?.entryDate).toBe('2026-08-16')
       await engine.close()
     })
+
+    it('a journal row carries a short excerpt of its body, truncated', async () => {
+      const longFirstLine = 'A'.repeat(200)
+      await writeDocumentAtomic({
+        path: join(paths.journalDir, '2026-08-16-doc_01JZZZ.md'),
+        meta: {
+          id: 'doc_01JZZZ',
+          kind: 'journal',
+          method: 'open',
+          mode: 'journal',
+          entryDate: '2026-08-16',
+          recordedAt: '2026-08-16T21:04:00.000Z',
+          session: 'session_01JAAA',
+        },
+        body: `${longFirstLine}\nSecond line, not part of the excerpt.\n`,
+      })
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const rows = await engine.listPublicDocuments()
+      const row = rows.find((r) => r.kind === 'journal')
+      expect(row?.excerpt?.length).toBeLessThanOrEqual(141)
+      expect(row?.excerpt).not.toContain('Second line')
+      await engine.close()
+    })
+
+    it('a non-journal row never carries an excerpt', async () => {
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const rows = await engine.listPublicDocuments()
+      expect(rows.every((row) => row.excerpt === undefined)).toBe(true)
+      await engine.close()
+    })
   })
 
   describe('session journal method', () => {

@@ -98,6 +98,8 @@ export interface PublicDocumentRow {
   readOnly: true
   method?: string
   entryDate?: string
+  excerpt?: string
+  recordedAt?: string
 }
 
 export interface PublicDocument extends PublicDocumentRow {
@@ -2262,11 +2264,30 @@ function publicDocumentRow(doc: Document, kind: DocKind): PublicDocumentRow {
     readOnly: true,
   }
   if (kind !== 'journal') return base
+  const excerpt = documentExcerpt(doc)
   return {
     ...base,
     ...(typeof doc.meta.method === 'string' ? { method: doc.meta.method } : {}),
     ...(typeof doc.meta.entryDate === 'string' ? { entryDate: doc.meta.entryDate } : {}),
+    ...(excerpt ? { excerpt } : {}),
+    ...(typeof doc.meta.recordedAt === 'string' ? { recordedAt: doc.meta.recordedAt } : {}),
   }
+}
+
+const EXCERPT_MAX_CHARS = 140
+
+// The first non-empty line of the body, trimmed and capped. Deliberately
+// simple: a journal entry's first line is usually the person's actual
+// opening sentence, and this is a list-row hint, not a summary.
+function documentExcerpt(doc: Document): string | undefined {
+  const firstLine = doc.body
+    .split('\n')
+    .find((line) => line.trim().length > 0)
+    ?.trim()
+  if (!firstLine) return undefined
+  return firstLine.length > EXCERPT_MAX_CHARS
+    ? `${firstLine.slice(0, EXCERPT_MAX_CHARS)}…`
+    : firstLine
 }
 
 function documentTitle(doc: Document): string {

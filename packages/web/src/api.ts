@@ -26,6 +26,8 @@ export const documentRowSchema = z.strictObject({
   readOnly: z.literal(true),
   method: z.string().optional(),
   entryDate: z.string().optional(),
+  excerpt: z.string().optional(),
+  recordedAt: z.string().optional(),
 })
 
 export const documentSchema = documentRowSchema.extend({ body: z.string() })

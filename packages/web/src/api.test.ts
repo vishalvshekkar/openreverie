@@ -222,6 +222,20 @@ describe('ApiClient request and NDJSON parsing', () => {
     expect(result.success).toBe(true)
   })
 
+  it('documentRowSchema accepts a journal row with an excerpt', () => {
+    const result = documentRowSchema.safeParse({
+      docId: 'doc_01JZZZ',
+      kind: 'journal',
+      title: 'doc_01JZZZ',
+      updatedAt: '2026-08-16T21:04:00.000Z',
+      readOnly: true,
+      method: 'gratitude',
+      entryDate: '2026-08-16',
+      excerpt: 'Grateful for the quiet morning.',
+    })
+    expect(result.success).toBe(true)
+  })
+
   it('documentRowSchema accepts a journaling row with neither field', () => {
     const result = documentRowSchema.safeParse({
       docId: 'doc_01JZZZ2',

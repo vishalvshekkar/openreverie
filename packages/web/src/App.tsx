@@ -159,7 +159,7 @@ export function App({ api }: { api: AppApi }) {
         )}
         {view === 'journal' && (
           <ViewBoundary>
-            <Journal />
+            <Journal api={api} />
           </ViewBoundary>
         )}
         {view === 'settings' && (

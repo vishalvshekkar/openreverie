@@ -512,6 +512,8 @@ const publicDocumentRowSchema = z.strictObject({
   readOnly: z.literal(true),
   method: z.string().optional(),
   entryDate: z.string().optional(),
+  excerpt: z.string().optional(),
+  recordedAt: z.string().optional(),
 })
 const publicDocumentRowsSchema = z.array(publicDocumentRowSchema)
 const publicDocumentSchema = publicDocumentRowSchema.extend({ body: z.string() })
