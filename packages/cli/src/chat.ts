@@ -6,8 +6,8 @@
 
 import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
-import type { ReverieConfig, StyleConfig, ToolDeps } from '@openreverie/core'
-import { AgentSession, saveConfig } from '@openreverie/core'
+import type { ReverieConfig } from '@openreverie/core'
+import { AgentSession } from '@openreverie/core'
 import type { EngineDeps, MemoryEngine } from '@openreverie/memory'
 import { listDocuments, memoryPaths, readDocument } from '@openreverie/memory'
 import type { ChatProvider, EmbeddingProvider } from '@openreverie/providers'
@@ -34,7 +34,7 @@ export interface ChatIo {
 // fallback instead of silence or a crash.
 const TOOL_NOTICES: Record<string, string> = {
   remember: 'remembering',
-  update_style: 'adjusting style',
+  set_mode: 'switching mode',
   search_memory: 'searching memory',
   read_document: 'reading memory',
   read_transcript: 'reading memory',
@@ -143,7 +143,6 @@ export async function runChat(deps: {
   config: ReverieConfig
   chat: ChatProvider
   io: ChatIo
-  toolDeps?: ToolDeps
   colorEnabled?: boolean
   setInterval?: (fn: () => void, ms: number) => unknown
   clearInterval?: (handle: unknown) => void
@@ -154,7 +153,6 @@ export async function runChat(deps: {
     config,
     chat,
     io,
-    toolDeps,
     colorEnabled = false,
     setInterval: setIntervalDep = (fn: () => void, ms: number) => setInterval(fn, ms),
     clearInterval: clearIntervalDep = (handle: unknown) =>
@@ -172,7 +170,7 @@ export async function runChat(deps: {
 
   io.write(`Memory folder: ${config.memoryDir}. Safety mode: ${config.safety.mode}.\n\n`)
 
-  const session = await AgentSession.start(engine, config, chat, toolDeps)
+  const session = await AgentSession.start(engine, config, chat)
 
   // 0 = no interrupt yet, 1 = one Ctrl-C seen (reminded about /bye), 2+ =
   // a second Ctrl-C seen (exit without reflecting). The handler itself
@@ -276,6 +274,9 @@ export async function runChat(deps: {
           statusLine.stop()
           io.write(`${dim(toolNotice(event.name), colorEnabled)}\n`)
           statusLine.start(toolStatusLabel(event.name))
+        } else if (event.type === 'mode') {
+          statusLine.stop()
+          io.write(`${dim(`[mode: ${event.mode}]`, colorEnabled)}\n`)
         } else if (event.type === 'done') {
           statusLine.stop()
           io.write('\n')
@@ -314,25 +315,6 @@ export async function runChat(deps: {
     if (interruptLevel >= 2) {
       return { interrupted: true }
     }
-  }
-}
-
-// Builds the persister the update_style tool needs. Core never knows
-// config file paths or how style is saved (that is the point of ToolDeps);
-// this is the CLI's one implementation of it. Patches `config.style` in
-// place, in the same ReverieConfig object the running session was started
-// with, then writes the whole config back to the exact path it was loaded
-// from, atomically (saveConfig writes to a temp file and renames over the
-// target).
-export function createStylePersister(
-  config: ReverieConfig,
-  configPath: string,
-): (patch: Partial<StyleConfig>) => Promise<StyleConfig> {
-  return async (patch: Partial<StyleConfig>) => {
-    const nextStyle: StyleConfig = { ...config.style, ...patch }
-    config.style = nextStyle
-    await saveConfig(config, configPath)
-    return nextStyle
   }
 }
 

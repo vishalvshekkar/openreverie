@@ -127,8 +127,8 @@ async function askStyleAxis<T extends string>(
 async function askStyle(io: SetupIo): Promise<StyleConfig> {
   io.write(
     '\nA few quick questions about how reverie talks with you. These are starting points, not ' +
-      'fixed forever: you can change any of them later just by telling reverie in conversation, ' +
-      'something like "be more direct with me" or "let me lead more."\n',
+      'fixed forever: you can change any of them later with /style in the terminal, or in the ' +
+      'settings pane in the browser.\n',
   )
 
   const engagement = await askStyleAxis<StyleConfig['engagement']>(

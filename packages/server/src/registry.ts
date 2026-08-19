@@ -305,7 +305,9 @@ export class LiveSessionRegistry {
         return
       }
       for await (const event of live.agent.send(message)) {
-        const recorded = this.record(live, streamEventFromAgent(event))
+        const input = streamEventFromAgent(event)
+        if (input === undefined) continue
+        const recorded = this.record(live, input)
         terminal ||= recorded.type === 'done' || recorded.type === 'error'
       }
       if (!terminal) {
@@ -336,7 +338,10 @@ export class LiveSessionRegistry {
 
   private async recordGreeting(live: LiveSession): Promise<void> {
     try {
-      for await (const event of live.agent.greet()) this.record(live, streamEventFromAgent(event))
+      for await (const event of live.agent.greet()) {
+        const input = streamEventFromAgent(event)
+        if (input !== undefined) this.record(live, input)
+      }
       await this.syncPublic(live)
     } catch {
       // AgentSession.greet intentionally suppresses provider failures. This catch only guards
@@ -476,7 +481,13 @@ const nodeIntervalScheduler: RegistryScheduler = {
   },
 }
 
-function streamEventFromAgent(event: AgentEvent): StreamEventInput {
+// AgentEvent gained a 'mode' member for the set_mode tool and the /mode
+// command (see @openreverie/core). StreamEventInput has no matching wire
+// variant yet: carrying a mode change to a connected web client is server
+// and web wiring that belongs to a later task, not this one. A mode
+// change is dropped from the stream here, deliberately, which is exactly
+// the behavior before that AgentEvent member existed.
+function streamEventFromAgent(event: AgentEvent): StreamEventInput | undefined {
   switch (event.type) {
     case 'thinking':
       return { type: 'thinking' }
@@ -484,6 +495,8 @@ function streamEventFromAgent(event: AgentEvent): StreamEventInput {
       return { type: 'text', text: event.text }
     case 'tool':
       return { type: 'tool', name: event.name }
+    case 'mode':
+      return undefined
     case 'done':
       return { type: 'done' }
   }

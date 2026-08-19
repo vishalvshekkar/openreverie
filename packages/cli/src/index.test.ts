@@ -41,12 +41,6 @@ function testDeps(overrides: Partial<CliMainDeps> = {}): {
       throw new Error('countMemoryDocuments should not be called')
     },
     runChat: async () => ({ interrupted: false }),
-    createStylePersister: () => async (patch) => ({
-      engagement: 'balanced',
-      tone: 'warm',
-      orientation: 'listening',
-      ...patch,
-    }),
     loadConfig: async () => {
       throw new Error('loadConfig should not be called')
     },

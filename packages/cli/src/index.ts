@@ -23,13 +23,7 @@ import type { ProviderSelection } from '@openreverie/providers'
 import { createChatProvider, createEmbeddingProvider } from '@openreverie/providers'
 import { launchServer } from '@openreverie/server'
 import type { ChatIo } from './chat.js'
-import {
-  countMemoryDocuments,
-  createStylePersister,
-  openCliContext,
-  printWarnings,
-  runChat,
-} from './chat.js'
+import { countMemoryDocuments, openCliContext, printWarnings, runChat } from './chat.js'
 import { buildRealDoctorDeps, type DoctorDeps, runDoctor } from './doctor.js'
 import { subcommandHelp, TOP_LEVEL_HELP } from './help.js'
 import { runMigrate } from './migrate.js'
@@ -127,7 +121,6 @@ export interface CliMainDeps {
   openEngine: typeof MemoryEngine.open
   countMemoryDocuments: typeof countMemoryDocuments
   runChat: typeof runChat
-  createStylePersister: typeof createStylePersister
   loadConfig: (path: string) => Promise<ReverieConfig>
   configPath: string
   write: (text: string) => void
@@ -298,9 +291,8 @@ export async function mainWith(args: string[], deps: CliMainDeps): Promise<void>
       deps.write('Reflection is up to date.\n')
     } else {
       const io = readlineChatIo()
-      const toolDeps = { updateStyle: deps.createStylePersister(config, configPath) }
       try {
-        const chatResult = await deps.runChat({ engine, config, chat, io, toolDeps, colorEnabled })
+        const chatResult = await deps.runChat({ engine, config, chat, io, colorEnabled })
         if (chatResult.interrupted) {
           process.exitCode = 4
         }
@@ -328,7 +320,6 @@ const defaultDeps: CliMainDeps = {
   openEngine: MemoryEngine.open,
   countMemoryDocuments,
   runChat,
-  createStylePersister,
   loadConfig,
   configPath: defaultConfigPath(),
   write: (text) => process.stdout.write(text),

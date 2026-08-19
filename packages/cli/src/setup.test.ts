@@ -239,14 +239,14 @@ describe('runSetup style questions', () => {
     expect(joined).toContain('Solutions.')
   })
 
-  it('mentions exactly once that style can be changed later by telling reverie in conversation', async () => {
+  it('mentions exactly once that style can be changed later with /style', async () => {
     const configPath = await tempConfigPath()
     const { io, output } = scriptedIo(['', '', '', '', '', '', '', '1', '', '', ''])
 
     await runSetup(io, configPath)
 
     const joined = output.join('')
-    const mentions = joined.match(/telling reverie in conversation/g) ?? []
+    const mentions = joined.match(/\/style/g) ?? []
     expect(mentions).toHaveLength(1)
   })
 })

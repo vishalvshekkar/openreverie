@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -10,7 +10,12 @@ import {
   memoryPaths,
   writeProfile,
 } from '@openreverie/memory'
-import { type ChatProvider, FakeChatProvider, FakeEmbeddingProvider } from '@openreverie/providers'
+import {
+  type ChatProvider,
+  FakeChatProvider,
+  FakeEmbeddingProvider,
+  type ToolCall,
+} from '@openreverie/providers'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { type AgentEvent, AgentSession } from './agent.js'
 import { defaultCrisisResources, type ReverieConfig } from './config.js'
@@ -75,6 +80,50 @@ async function collect(events: AsyncIterable<AgentEvent>): Promise<AgentEvent[]>
     out.push(event)
   }
   return out
+}
+
+// A round in a scripted script for makeAgentFixture: a small DSL over
+// FakeChatProvider's {text, toolCalls} shape, so a caller can spell out a
+// round as the events it produces rather than translate that by hand.
+type ScriptedEvent = { type: 'tool_call'; toolCall: ToolCall } | { type: 'text'; text: string }
+
+function toFakeChatResult(round: ScriptedEvent[]): { text: string; toolCalls: ToolCall[] } {
+  let text = ''
+  const toolCalls: ToolCall[] = []
+  for (const event of round) {
+    if (event.type === 'text') {
+      text += event.text
+    } else {
+      toolCalls.push(event.toolCall)
+    }
+  }
+  return { text, toolCalls }
+}
+
+// The fixture behind the session-mode tests below: an engine, config and
+// chat provider wired together the same way every other test in this file
+// wires them, plus `systems`, which records the system prompt of every
+// request the fake provider receives so a test can assert on what the
+// model actually saw rather than on a return value that can be right
+// while the prompt is stale.
+async function makeAgentFixture(rounds: ScriptedEvent[][] = []): Promise<{
+  engine: MemoryEngine
+  config: ReverieConfig
+  chat: FakeChatProvider
+  paths: MemoryPaths
+  systems: string[]
+}> {
+  const chat = new FakeChatProvider(rounds.map(toFakeChatResult))
+  const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+  const config = testConfig()
+  const paths = memoryPaths(dir)
+  const systems: string[] = []
+  const originalStream = chat.stream.bind(chat)
+  chat.stream = (req) => {
+    systems.push(req.system ?? '')
+    return originalStream(req)
+  }
+  return { engine, config, chat, paths, systems }
 }
 
 describe('AgentSession', () => {
@@ -357,111 +406,159 @@ describe('AgentSession', () => {
     await engine.close()
   })
 
-  it('rebuilds the system prompt when update_style succeeds, so the new style applies immediately to subsequent requests', async () => {
-    const chat = new FakeChatProvider([
-      {
-        text: '',
-        toolCalls: [
+  describe('session mode', () => {
+    it('starts in general and reports it', async () => {
+      const { engine, config, chat } = await makeAgentFixture()
+      const session = await AgentSession.start(engine, config, chat)
+      expect(session.mode).toBe('general')
+      await engine.close()
+    })
+
+    it('starts in a mode passed at start, and records it on disk right away', async () => {
+      const { engine, config, chat } = await makeAgentFixture()
+      const session = await AgentSession.start(engine, config, chat, { mode: 'journal' })
+      expect(session.mode).toBe('journal')
+      expect(await engine.sessionMode(session.sessionId)).toBe('journal')
+      await engine.close()
+    })
+
+    // Assert on the system prompt the fake provider received, not on a return
+    // value: a return value can be right while the prompt is stale.
+    it('carries the new mode paragraph on the next provider request after set_mode', async () => {
+      const { engine, config, chat, systems } = await makeAgentFixture([
+        [
           {
-            id: 'call_1',
-            name: 'update_style',
-            arguments: JSON.stringify({ tone: 'playful' }),
+            type: 'tool_call',
+            toolCall: { id: 't1', name: 'set_mode', arguments: '{"mode":"listen"}' },
           },
         ],
-      },
-      { text: 'Now speaking playfully.', toolCalls: [] },
-    ])
+        [{ type: 'text', text: 'ok' }],
+      ])
+      const session = await AgentSession.start(engine, config, chat)
+      const events = []
+      for await (const event of session.send('be quiet and just listen')) events.push(event)
 
-    const toolDeps = {
-      updateStyle: async (_patch: Record<string, unknown>) => {
-        return {
-          engagement: 'balanced' as const,
-          tone: 'playful' as const,
-          orientation: 'listening' as const,
-        }
-      },
-    }
+      expect(systems[0]).not.toContain('## Mode: listen')
+      expect(systems[1]).toContain('## Mode: listen')
+      expect(events).toContainEqual({ type: 'mode', mode: 'listen' })
+      expect(session.mode).toBe('listen')
 
-    const engine = await MemoryEngine.open(dir, {
-      chat,
-      embeddings: new FakeEmbeddingProvider(),
-      reflectionModel: 'fake-reflect',
-      embeddingModel: 'fake-embed',
+      await engine.close()
     })
-    const config = testConfig()
-    const session = await AgentSession.start(engine, config, chat, toolDeps)
 
-    const events = await collect(session.send('Change how you talk to me.'))
-
-    expect(events).toEqual([
-      { type: 'thinking' },
-      { type: 'tool', name: 'update_style' },
-      { type: 'thinking' },
-      { type: 'text', text: 'Now speaking playfully.' },
-      { type: 'done' },
-    ])
-
-    expect(chat.requests.length).toBe(2)
-
-    const firstSystemPrompt = chat.requests[0]?.system || ''
-    const secondSystemPrompt = chat.requests[1]?.system || ''
-
-    expect(firstSystemPrompt).not.toBe(secondSystemPrompt)
-    expect(firstSystemPrompt).toContain('Your configured tone is warm')
-    expect(secondSystemPrompt).toContain('Your configured tone is playful')
-
-    await engine.close()
-  })
-
-  it('does not rebuild the system prompt when update_style fails', async () => {
-    const chat = new FakeChatProvider([
-      {
-        text: '',
-        toolCalls: [
+    it('leaves the mode unchanged when set_mode names something unknown', async () => {
+      const { engine, config, chat } = await makeAgentFixture([
+        [
           {
-            id: 'call_1',
-            name: 'update_style',
-            arguments: JSON.stringify({ tone: 'playful' }),
+            type: 'tool_call',
+            toolCall: { id: 't1', name: 'set_mode', arguments: '{"mode":"moody"}' },
           },
         ],
-      },
-      { text: 'Still warm.', toolCalls: [] },
-    ])
+        [{ type: 'text', text: 'ok' }],
+      ])
+      const session = await AgentSession.start(engine, config, chat)
+      for await (const _event of session.send('switch modes')) {
+        // drain
+      }
+      expect(session.mode).toBe('general')
 
-    const toolDeps = {
-      updateStyle: async () => {
-        throw new Error('could not persist style')
-      },
-    }
-
-    const engine = await MemoryEngine.open(dir, {
-      chat,
-      embeddings: new FakeEmbeddingProvider(),
-      reflectionModel: 'fake-reflect',
-      embeddingModel: 'fake-embed',
+      await engine.close()
     })
-    const config = testConfig()
-    const session = await AgentSession.start(engine, config, chat, toolDeps)
 
-    const events = await collect(session.send('Try to change how you talk.'))
+    // The regression test for the bug this replaces: the server starts
+    // sessions with no injected dependencies at all.
+    it('works on a session created with no injected dependencies', async () => {
+      const { engine, config, chat } = await makeAgentFixture([
+        [
+          {
+            type: 'tool_call',
+            toolCall: { id: 't1', name: 'set_mode', arguments: '{"mode":"solve"}' },
+          },
+        ],
+        [{ type: 'text', text: 'ok' }],
+      ])
+      const session = await AgentSession.start(engine, config, chat)
+      for await (const _event of session.send('help me decide')) {
+        // drain
+      }
+      expect(session.mode).toBe('solve')
 
-    expect(events).toEqual([
-      { type: 'thinking' },
-      { type: 'tool', name: 'update_style' },
-      { type: 'thinking' },
-      { type: 'text', text: 'Still warm.' },
-      { type: 'done' },
-    ])
+      await engine.close()
+    })
 
-    expect(chat.requests.length).toBe(2)
+    it('appends one /mode line with no synthetic key when the CLI sets it', async () => {
+      const { engine, config, chat } = await makeAgentFixture()
+      const session = await AgentSession.start(engine, config, chat)
+      await session.setMode('listen', { source: 'cli' })
+      const lines = await engine.readTranscript(session.sessionId)
+      const modeLines = lines.filter((line) => line.content === '/mode listen')
+      expect(modeLines).toHaveLength(1)
+      expect(modeLines[0]?.role).toBe('user')
+      expect(modeLines[0]?.synthetic).toBeUndefined()
 
-    const firstSystemPrompt = chat.requests[0]?.system || ''
-    const secondSystemPrompt = chat.requests[1]?.system || ''
+      await engine.close()
+    })
 
-    expect(firstSystemPrompt).toBe(secondSystemPrompt)
-    expect(secondSystemPrompt).toContain('Your configured tone is warm')
+    it('marks the /mode line synthetic when the web sets it', async () => {
+      const { engine, config, chat } = await makeAgentFixture()
+      const session = await AgentSession.start(engine, config, chat)
+      await session.setMode('listen', { source: 'web' })
+      const lines = await engine.readTranscript(session.sessionId)
+      const modeLines = lines.filter((line) => line.content === '/mode listen')
+      expect(modeLines).toHaveLength(1)
+      expect(modeLines[0]?.synthetic).toBe(true)
 
-    await engine.close()
+      await engine.close()
+    })
+
+    it('appends no line at all when the model sets it, since the tool lines already record it', async () => {
+      const { engine, config, chat } = await makeAgentFixture()
+      const session = await AgentSession.start(engine, config, chat)
+      await session.setMode('listen', { source: 'tool' })
+      const lines = await engine.readTranscript(session.sessionId)
+      expect(lines.filter((line) => line.content === '/mode listen')).toHaveLength(0)
+
+      await engine.close()
+    })
+
+    it('records every mode change on disk for the engine to read at end of session', async () => {
+      const { engine, config, chat } = await makeAgentFixture()
+      const session = await AgentSession.start(engine, config, chat)
+      await session.setMode('listen', { source: 'cli' })
+      expect(await engine.sessionMode(session.sessionId)).toBe('listen')
+      await session.setMode('journal', { source: 'web' })
+      expect(await engine.sessionMode(session.sessionId)).toBe('journal')
+
+      await engine.close()
+    })
+
+    // Guard, not a falsification: this passes with the mode feature entirely
+    // absent. It guards against a future change that makes set_mode start
+    // writing the file.
+    it('Guard: profile.md is byte-identical before and after a mode change', async () => {
+      const { engine, config, chat, paths } = await makeAgentFixture()
+      const session = await AgentSession.start(engine, config, chat)
+      const before = await readFile(paths.profile, 'utf8')
+      await session.setMode('real', { source: 'cli' })
+      expect(await readFile(paths.profile, 'utf8')).toEqual(before)
+
+      await engine.close()
+    })
+
+    it('applies a profile change made outside a turn when refreshSystemPrompt is called', async () => {
+      const { engine, config, chat, systems } = await makeAgentFixture([
+        [{ type: 'text', text: 'a' }],
+      ])
+      const session = await AgentSession.start(engine, config, chat)
+      await engine.updateProfileSettings({ style: { tone: 'direct' } })
+      await session.refreshSystemPrompt()
+      for await (const _event of session.send('hello')) {
+        // drain
+      }
+      expect(systems[0]).toContain('Your configured tone is direct')
+
+      await engine.close()
+    })
   })
 
   it('greet() streams the greeting and appends it as a single assistant line, with no user line', async () => {
@@ -470,7 +567,7 @@ describe('AgentSession', () => {
     ])
     const engine = await MemoryEngine.open(dir, fakeDeps(chat))
     await engine.updateProfile({ timezone: 'Asia/Kolkata' })
-    const session = await AgentSession.start(engine, testConfig(), chat, undefined, {
+    const session = await AgentSession.start(engine, testConfig(), chat, {
       now: () => new Date('2026-08-16T20:00:00.000Z'),
     })
 
@@ -754,7 +851,7 @@ describe('AgentSession', () => {
   it('writes transcript timestamps from the injected clock rather than the real one', async () => {
     const chat = new FakeChatProvider([{ text: 'Noted.', toolCalls: [] }])
     const engine = await MemoryEngine.open(dir, fakeDeps(chat))
-    const session = await AgentSession.start(engine, testConfig(), chat, undefined, {
+    const session = await AgentSession.start(engine, testConfig(), chat, {
       now: () => new Date('2026-08-16T20:00:00.000Z'),
     })
 
@@ -773,7 +870,7 @@ describe('AgentSession', () => {
     const chat = new FakeChatProvider([{ text: 'Noted.', toolCalls: [] }])
     const engine = await MemoryEngine.open(dir, fakeDeps(chat))
     await engine.updateProfile({ timezone: 'Asia/Kolkata' })
-    const session = await AgentSession.start(engine, testConfig(), chat, undefined, {
+    const session = await AgentSession.start(engine, testConfig(), chat, {
       now: () => new Date('2026-08-16T20:00:00.000Z'),
     })
 
@@ -792,7 +889,7 @@ describe('AgentSession', () => {
     const chat = new FakeChatProvider([{ text: 'Sounds fun.', toolCalls: [] }])
     const engine = await MemoryEngine.open(dir, fakeDeps(chat))
     await engine.updateProfile({ timezone: 'Asia/Kolkata' })
-    const session = await AgentSession.start(engine, testConfig(), chat, undefined, {
+    const session = await AgentSession.start(engine, testConfig(), chat, {
       now: () => new Date('2026-08-16T20:00:00.000Z'),
     })
 
@@ -820,7 +917,7 @@ describe('AgentSession', () => {
     ])
     const engine = await MemoryEngine.open(dir, fakeDeps(chat))
     await engine.updateProfile({ timezone: 'Asia/Kolkata' })
-    const session = await AgentSession.start(engine, testConfig(), chat, undefined, {
+    const session = await AgentSession.start(engine, testConfig(), chat, {
       now: () => new Date('2026-08-16T20:00:00.000Z'),
     })
 
@@ -846,7 +943,7 @@ describe('AgentSession', () => {
     const engine = await MemoryEngine.open(dir, fakeDeps(chat))
     await engine.updateProfile({ timezone: 'Asia/Kolkata' })
     let clock = new Date('2026-08-16T20:00:00.000Z')
-    const session = await AgentSession.start(engine, testConfig(), chat, undefined, {
+    const session = await AgentSession.start(engine, testConfig(), chat, {
       now: () => clock,
     })
 
@@ -885,7 +982,7 @@ describe('AgentSession', () => {
     const engine = await MemoryEngine.open(dir, fakeDeps(chat))
     await engine.updateProfile({ timezone: 'Asia/Kolkata' })
     let clock = new Date('2026-08-16T10:49:00.000Z')
-    const session = await AgentSession.start(engine, testConfig(), chat, undefined, {
+    const session = await AgentSession.start(engine, testConfig(), chat, {
       now: () => clock,
     })
 
@@ -922,7 +1019,7 @@ describe('AgentSession', () => {
       { text: 'Sure.', toolCalls: [] },
     ])
     const engine = await MemoryEngine.open(dir, fakeDeps(chat))
-    const session = await AgentSession.start(engine, testConfig(), chat, undefined, {
+    const session = await AgentSession.start(engine, testConfig(), chat, {
       now: () => new Date('2026-08-16T20:00:00.000Z'),
     })
 

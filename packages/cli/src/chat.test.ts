@@ -1,7 +1,7 @@
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { loadConfig, type ReverieConfig, saveConfig } from '@openreverie/core'
+import type { ReverieConfig } from '@openreverie/core'
 import {
   appendGraph,
   type EngineDeps,
@@ -17,7 +17,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   type ChatIo,
   countMemoryDocuments,
-  createStylePersister,
   openCliContext,
   printWarnings,
   runChat,
@@ -1012,7 +1011,7 @@ describe('color helpers', () => {
 describe('toolNotice', () => {
   it('maps each known tool to its honest, specific notice', () => {
     expect(toolNotice('remember')).toBe('[remembering]')
-    expect(toolNotice('update_style')).toBe('[adjusting style]')
+    expect(toolNotice('set_mode')).toBe('[switching mode]')
     expect(toolNotice('search_memory')).toBe('[searching memory]')
     expect(toolNotice('read_document')).toBe('[reading memory]')
     expect(toolNotice('read_transcript')).toBe('[reading memory]')
@@ -1403,96 +1402,5 @@ describe('runChat status line', () => {
     expect(output[frameIndex + 2]?.toLowerCase()).toContain('finishing this reply')
 
     await engine.close()
-  })
-})
-
-describe('createStylePersister', () => {
-  it('patches only the given axes and persists the result atomically to the same path', async () => {
-    const dir = await mkdtemp(path.join(tmpdir(), 'openreverie-style-persist-'))
-    try {
-      const configPath = path.join(dir, 'config.toml')
-      const config = testConfig(dir)
-      await saveConfig(config, configPath)
-
-      const persist = createStylePersister(config, configPath)
-      const result = await persist({ tone: 'direct' })
-
-      expect(result).toEqual({ engagement: 'balanced', tone: 'direct', orientation: 'listening' })
-      // The in-memory config object the running session holds is updated too,
-      // not just the file on disk.
-      expect(config.style).toEqual(result)
-
-      const reloaded = await loadConfig(configPath)
-      expect(reloaded.style).toEqual(result)
-    } finally {
-      await rm(dir, { recursive: true, force: true })
-    }
-  })
-
-  it('applies a second patch on top of the first, leaving untouched axes alone', async () => {
-    const dir = await mkdtemp(path.join(tmpdir(), 'openreverie-style-persist-2-'))
-    try {
-      const configPath = path.join(dir, 'config.toml')
-      const config = testConfig(dir)
-      await saveConfig(config, configPath)
-
-      const persist = createStylePersister(config, configPath)
-      await persist({ engagement: 'leading' })
-      const result = await persist({ tone: 'snarky' })
-
-      expect(result).toEqual({ engagement: 'leading', tone: 'snarky', orientation: 'listening' })
-      const reloaded = await loadConfig(configPath)
-      expect(reloaded.style).toEqual(result)
-    } finally {
-      await rm(dir, { recursive: true, force: true })
-    }
-  })
-})
-
-describe('runChat update_style tool notice', () => {
-  it('renders [adjusting style] and persists the change through the wired toolDeps', async () => {
-    const dir = await mkdtemp(path.join(tmpdir(), 'openreverie-chat-style-'))
-    try {
-      const configPath = path.join(dir, 'config.toml')
-      const config = testConfig(dir)
-      await saveConfig(config, configPath)
-
-      const chat = new FakeChatProvider([
-        { text: 'Good to see you.', toolCalls: [] },
-        {
-          text: '',
-          toolCalls: [
-            {
-              id: 'call_1',
-              name: 'update_style',
-              arguments: JSON.stringify({ tone: 'direct' }),
-            },
-          ],
-        },
-        { text: 'Done, I will be more direct.', toolCalls: [] },
-        { text: emptyReflectionJson('Changed tone.'), toolCalls: [] },
-      ])
-      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
-      const { io, output } = scriptedIo(['talk to me more directly', '/bye'])
-
-      await runChat({
-        engine,
-        config,
-        chat,
-        io,
-        toolDeps: { updateStyle: createStylePersister(config, configPath) },
-      })
-
-      const joined = output.join('')
-      expect(joined).toContain('[adjusting style]')
-      expect(joined).toContain('Done, I will be more direct.')
-
-      const reloaded = await loadConfig(configPath)
-      expect(reloaded.style.tone).toBe('direct')
-
-      await engine.close()
-    } finally {
-      await rm(dir, { recursive: true, force: true })
-    }
   })
 })

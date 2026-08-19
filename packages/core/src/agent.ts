@@ -29,19 +29,27 @@ import { renderLiveStamp, renderLocalTime, utcOffsetMinutesFor } from '@openreve
 import type { ChatProvider, ToolCall } from '@openreverie/providers'
 import type { ReverieConfig } from './config.js'
 import { assembleSystemPrompt } from './context.js'
-import { dispatchTool, type ToolDeps, toolDefinitions } from './tools.js'
+import type { ModeName } from './modes.js'
+import { dispatchTool, toolDefinitions } from './tools.js'
 
 export type AgentEvent =
   | { type: 'text'; text: string }
   | { type: 'tool'; name: string }
   | { type: 'thinking' }
+  | { type: 'mode'; mode: ModeName }
   | { type: 'done' }
+
+export type ModeChangeSource = 'cli' | 'web' | 'tool'
 
 export interface AgentSessionOptions {
   // Injectable clock. Every transcript line and every rendered time in this
   // session comes from a call to this, so a test can pin it without
   // touching process-wide state.
   now?: () => Date
+  // The mode this session starts in. Defaults to 'general'. Session mode
+  // is session state, never persisted config, so this is the only way a
+  // caller sets a starting mode other than the default.
+  mode?: ModeName
 }
 
 const MAX_TOOL_ROUNDS = 8
@@ -158,9 +166,9 @@ export class AgentSession {
   // round is still being written.
   private sendChain: Promise<void> = Promise.resolve()
 
-  private readonly toolDeps: ToolDeps | undefined
   private readonly config: ReverieConfig
   private readonly now: () => Date
+  private activeMode: ModeName
 
   private constructor(
     engine: MemoryEngine,
@@ -168,39 +176,75 @@ export class AgentSession {
     model: string,
     system: string,
     sessionId: string,
-    toolDeps: ToolDeps | undefined,
     config: ReverieConfig,
     now: () => Date,
+    mode: ModeName,
   ) {
     this.engine = engine
     this.chat = chat
     this.model = model
     this.system = system
     this.sessionId = sessionId
-    this.toolDeps = toolDeps
     this.config = config
     this.now = now
+    this.activeMode = mode
+  }
+
+  get mode(): ModeName {
+    return this.activeMode
   }
 
   static async start(
     engine: MemoryEngine,
     config: ReverieConfig,
     chat: ChatProvider,
-    toolDeps?: ToolDeps,
     options: AgentSessionOptions = {},
   ): Promise<AgentSession> {
-    const system = await assembleSystemPrompt(engine, config)
+    const mode = options.mode ?? 'general'
+    const system = await assembleSystemPrompt(engine, config, mode)
     const sessionId = await engine.startSession()
+    // Recorded from the session's first moment, so a process that dies
+    // before /bye still leaves the mode where reflection can find it.
+    await engine.setSessionMode(sessionId, mode)
     return new AgentSession(
       engine,
       chat,
       config.models.chat,
       system,
       sessionId,
-      toolDeps,
       config,
       options.now ?? (() => new Date()),
+      mode,
     )
+  }
+
+  // The one place a session's mode changes, from all three callers. Each
+  // caller differs in exactly one way, which the transcript has to record:
+  // the CLI's /mode is a line the user literally typed, the web picker is a
+  // click with no keystroke behind it, and a set_mode tool call is already
+  // recorded by its own assistant tool-call line and tool result line.
+  async setMode(name: ModeName, options: { source: ModeChangeSource }): Promise<void> {
+    this.activeMode = name
+    if (options.source !== 'tool') {
+      const now = this.now()
+      await this.engine.appendTranscript(this.sessionId, {
+        ts: now.toISOString(),
+        utcOffsetMinutes: utcOffsetMinutesFor(now, this.engine.timezone()),
+        role: 'user',
+        content: `/mode ${name}`,
+        ...(options.source === 'web' ? { synthetic: true as const } : {}),
+      })
+    }
+    await this.engine.setSessionMode(this.sessionId, name)
+    await this.refreshSystemPrompt()
+  }
+
+  // A public entry point, because /style and the settings pane both change
+  // the profile from outside any turn. Without one, the only re-assembly in
+  // the codebase is buried inside runTurn, and a /style change would apply
+  // no earlier than the next session.
+  async refreshSystemPrompt(): Promise<void> {
+    this.system = await assembleSystemPrompt(this.engine, this.config, this.activeMode)
   }
 
   async *send(userText: string): AsyncIterable<AgentEvent> {
@@ -359,20 +403,16 @@ export class AgentSession {
         first = false
         yield { type: 'tool', name: toolCall.name }
 
-        const result = await dispatchTool(this.engine, this.sessionId, toolCall, this.toolDeps)
-
-        // If update_style succeeds, reassemble the system prompt so the new
-        // style applies immediately to subsequent requests.
-        if (toolCall.name === 'update_style' && !this.resultHasError(result)) {
-          const resultData = JSON.parse(result)
-          this.config.style = resultData.style
-          // The prompt reads style from the profile now, not from config, so
-          // the new style has to land there or the reassembly below rebuilds
-          // the identical prompt. update_style still writes config.toml
-          // through its persister until that path is retired.
-          await this.engine.updateProfileSettings({ style: resultData.style })
-          this.system = await assembleSystemPrompt(this.engine, this.config)
-        }
+        let switchedTo: ModeName | undefined
+        const result = await dispatchTool(this.engine, this.sessionId, toolCall, {
+          setMode: async (name) => {
+            // source 'tool' because the assistant tool-call line and the
+            // tool result line already record this change in the
+            // transcript.
+            await this.setMode(name, { source: 'tool' })
+            switchedTo = name
+          },
+        })
 
         // Same for update_profile: the Time section is built from the
         // profile, so a confirmed timezone has to be reassembled in for the
@@ -380,10 +420,13 @@ export class AgentSession {
         // during the first conversation. Messages already stamped keep the
         // stamp they were written with and are never re-rendered.
         if (toolCall.name === 'update_profile' && !this.resultHasError(result)) {
-          this.system = await assembleSystemPrompt(this.engine, this.config)
+          this.system = await assembleSystemPrompt(this.engine, this.config, this.activeMode)
         }
 
         await this.appendBoth({ role: 'tool', content: result, toolCallId: toolCall.id })
+        if (switchedTo !== undefined) {
+          yield { type: 'mode', mode: switchedTo }
+        }
       }
     }
 
