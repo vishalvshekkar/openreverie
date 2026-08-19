@@ -12,6 +12,7 @@ import type { EngineDeps, MemoryEngine } from '@openreverie/memory'
 import { listDocuments, memoryPaths, readDocument } from '@openreverie/memory'
 import type { ChatProvider, EmbeddingProvider } from '@openreverie/providers'
 import { cyan, dim, magenta } from './colors.js'
+import { type CommandContext, parseInput, runCommand } from './commands.js'
 import { createStatusLine, type StatusLine } from './status.js'
 
 export interface ChatIo {
@@ -218,6 +219,15 @@ export async function runChat(deps: {
     return { interrupted: true }
   }
 
+  const commandContext: CommandContext = {
+    io,
+    session,
+    engine,
+    memoryDir: config.memoryDir,
+    safetyMode: config.safety.mode,
+    printWarnings: () => printWarnings(io, engine, colorEnabled),
+  }
+
   for (;;) {
     let line: string
     try {
@@ -231,27 +241,15 @@ export async function runChat(deps: {
       return { interrupted: true }
     }
 
-    const trimmed = line.trim()
-    if (trimmed === '/bye') {
-      io.write('reflecting on this session...\n')
-      try {
-        await session.end()
-        printWarnings(io, engine, colorEnabled)
-        io.write('Saved and reflected. See you next time.\n')
-      } catch (err) {
-        // Any warning the engine accumulated before the throw (a page
-        // resolveNarratives had to skip, a git commit that failed) belongs
-        // on screen either way; losing it here would be the same silent
-        // drop this whole fix exists to close.
-        printWarnings(io, engine, colorEnabled)
-        io.write(
-          `\nI could not finish reflecting: ${errorMessage(err)}. Your conversation is saved; ` +
-            'it will be reflected the next time reverie starts.\n',
-        )
+    const parsed = parseInput(line)
+    if (parsed.kind === 'command') {
+      const outcome = await runCommand(parsed.name, parsed.arg, commandContext)
+      if (outcome === 'exit') {
+        return { interrupted: false }
       }
-      return { interrupted: false }
+      continue
     }
-    if (trimmed === '') {
+    if (parsed.text === '') {
       continue
     }
 
@@ -259,7 +257,7 @@ export async function runChat(deps: {
     let taggedThisTurn = false
     responding = true
     try {
-      for await (const event of session.send(line)) {
+      for await (const event of session.send(parsed.text)) {
         if (event.type === 'thinking') {
           statusLine.start('thinking')
         } else if (event.type === 'text') {

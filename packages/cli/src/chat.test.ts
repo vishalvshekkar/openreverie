@@ -763,6 +763,104 @@ describe('runChat', () => {
   })
 })
 
+describe('command loop', () => {
+  let dir: string
+
+  beforeEach(async () => {
+    dir = await mkdtemp(path.join(tmpdir(), 'openreverie-chat-loop-'))
+  })
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  // Only requests with a `tools` field are conversation turns (the
+  // greeting and each session.send()); the reflection call on /bye omits
+  // `tools` entirely, so this skips it rather than mistaking its giant
+  // reflection prompt (also sent as a 'user' message) for something typed
+  // at the you> prompt.
+  function lastUserMessage(chat: FakeChatProvider): string | undefined {
+    for (let i = chat.requests.length - 1; i >= 0; i--) {
+      const req = chat.requests[i]
+      if (req?.tools === undefined) continue
+      const messages = req.messages
+      for (let j = messages.length - 1; j >= 0; j--) {
+        if (messages[j]?.role === 'user') return messages[j]?.content
+      }
+    }
+    return undefined
+  }
+
+  it('never sends an unknown command to the model', async () => {
+    const chat = new FakeChatProvider([
+      { text: 'Good to see you.', toolCalls: [] },
+      { text: emptyReflectionJson('Nothing happened.'), toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const { io, output } = scriptedIo(['/moed listen', '/bye'])
+
+    await runChat({ engine, config, chat, io })
+
+    expect(lastUserMessage(chat)).toBeUndefined()
+    expect(output.join('')).toContain('Unknown command: /moed. Type /help to see what there is.')
+
+    await engine.close()
+  })
+
+  it('sends an ordinary line to the model unchanged', async () => {
+    const chat = new FakeChatProvider([
+      { text: 'Good to see you.', toolCalls: [] },
+      { text: 'Hi there.', toolCalls: [] },
+      { text: emptyReflectionJson('Said hello.'), toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const { io } = scriptedIo(['hello there', '/bye'])
+
+    await runChat({ engine, config, chat, io })
+
+    expect(lastUserMessage(chat)).toMatch(/hello there$/)
+
+    await engine.close()
+  })
+
+  it('sends a doubled slash through as a literal slash', async () => {
+    const chat = new FakeChatProvider([
+      { text: 'Good to see you.', toolCalls: [] },
+      { text: 'Noted.', toolCalls: [] },
+      { text: emptyReflectionJson('Talked about slashes.'), toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const { io } = scriptedIo(['//mode', '/bye'])
+
+    await runChat({ engine, config, chat, io })
+
+    expect(lastUserMessage(chat)).toMatch(/\/mode$/)
+
+    await engine.close()
+  })
+
+  it('reflects and exits on EOF, through the command table', async () => {
+    const chat = new FakeChatProvider([
+      { text: 'Good to see you.', toolCalls: [] },
+      { text: emptyReflectionJson('A short session.'), toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    // No answers scripted: the first question() throws, exactly as a
+    // closed readline stream does, which the loop treats like /bye.
+    const { io, output } = scriptedIo([])
+
+    await runChat({ engine, config, chat, io })
+
+    expect(output.join('')).toContain('reflecting on this session')
+
+    await engine.close()
+  })
+})
+
 describe('printWarnings', () => {
   it('prints each warning as a dim note line', () => {
     const output: string[] = []
