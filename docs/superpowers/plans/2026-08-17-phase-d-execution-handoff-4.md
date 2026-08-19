@@ -258,7 +258,7 @@ half-written build output. Mark a batch ONGOING *before* dispatching it.
 | H | 10 | `core/journaling.ts` content module (largest task, includes the expressive-writing safety gate); wires into `core/modes.ts`, `core/personas.ts` (`buildPersona` signature), `core/context.ts` (call site) **safety-relevant content** | C, G | DONE, 1103, orchestrator personally cross-checked all six formats' evidence text and the safety gate against the spec, and personally falsified the wiring fix | `5aec7a4` |
 | I | 11 | `update_journaling_protocol` tool, `refreshSystemPrompt` trigger; `engine.ts`, `core/tools.ts`, `core/agent.ts` | C | DONE, 1107, orchestrator personally falsified the reassembly trigger | `5f5e5b7` |
 | J | 12 | Reflection's `journalingUpdate` field, the backstop path; `reflection.ts`, `engine.ts` | C | DONE, 1115, dispatched to `pi` CLI + DeepSeek V4 flash (trial 2), orchestrator-verified and independently falsified | `62f98a6` |
-| K | 13 | **SAFETY invariant test, six combinations, position plus bytes**; `core/personas.test.ts` only | H, C | TODO, orchestrator falsifies personally | |
+| K | 13 | **SAFETY invariant test, six combinations, position plus bytes**; `core/personas.test.ts` only | H, C | DONE, 1117, orchestrator personally re-falsified both halves in isolation | `5993b07` |
 | L | 14 | Server exposes `journal`/`journaling` kinds; `server/app.ts` | B | TODO | |
 | M | 15, + deferred item 1 | Web client schema, `Library.tsx` `KIND_LABELS`; `web/api.ts`, `web/views/Library.tsx`. Also close deferred item 1 from the modes epoch (below): `getProfile`, `updateProfile`, `getSettings` have no tests in `api.test.ts`, and M is already touching that exact file | L | TODO | |
 | N | 16 | Real web journal tab, `excerpt`/`recordedAt` end to end; `engine.ts`, `server/app.ts`, `web/api.ts`, `web/views/Journal.tsx` (replaces placeholder), `journal.css` | B, L, M | TODO | |
@@ -322,6 +322,27 @@ Notes on sequencing, from the plan survey:
   positive `.toMatch(/not a recurring nag/i)` lock-in), falsified for real. Lesson for future
   batches: a subagent's own classification of "spec-transcribed vs. incidental" is not reliable
   enough to skip checking the spec directly when the two collide.
+- **K's own plan text (Task 13 Step 1) contained a tautological assertion, caught by the
+  implementer's own second review pass, then independently re-verified by the orchestrator.** The
+  plan's position check compared each arm's crisis-section slice against itself
+  (`journalWithFixture.endsWith(crisisSectionOf(journalWithFixture))`), which is true for any
+  string regardless of where the section actually sits: a suffix always ends with itself. Fixed to
+  compare all three arms against one fixed `baselineCrisis` comparator instead, plus an anchor
+  assertion (`baseline.endsWith('- Find A Helpline (international): findahelpline.com')`) pinning
+  that the baseline's own crisis section really is the output's tail, not just self-referential.
+  Both the byte-identity and position checks were confirmed independently falsifiable, by the
+  implementer and again by the orchestrator, each in isolation (commenting out the other check and
+  re-running the reordering falsification alone). Lesson: even the plan's own falsify-step code can
+  itself be anti-falsifiable; falsifying in isolation, one assertion at a time, is what catches that,
+  not just running the whole block and seeing it fail somewhere.
+- **A fourth instance of the flaky-under-load pattern surfaced during the orchestrator's own gate
+  run for Batch K**: 1 test failed on the first full-suite run after Batch K's changes landed
+  (`Tests 1 failed | 1116 passed (1117)`), passed cleanly on three immediate reruns
+  (`1117 passed (1117)` each time). The specific failing test was not captured before the output
+  cleared; not one of Batch K's own new tests (isolated `-t` runs of the new describe block were
+  clean throughout). This crosses the threshold already named twice in this document for raising a
+  suite-level pattern rather than continuing to log occurrences; raise it at the journal merge,
+  alongside the three prior instances (modes Batches L, P; journal Batch F).
 - **J went to `pi` CLI + DeepSeek V4 flash, a second trial, at the human's explicit request this
   session** (the first was modes' Batch O). Non-interactive invocation confirmed working:
   `pi --provider deepseek --model deepseek-v4-flash --print --no-session -p "<prompt>"` from the
