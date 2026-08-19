@@ -56,6 +56,13 @@ function colorsEnabled(): boolean {
   return process.stdout.isTTY === true && process.env.NO_COLOR === undefined
 }
 
+// Two different conditions, deliberately not collapsed into one. Colour is
+// off when stdout is not a TTY or NO_COLOR is set; the terminal is
+// interactive whenever stdout is a TTY, regardless of NO_COLOR.
+function isInteractive(): boolean {
+  return process.stdout.isTTY === true
+}
+
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
@@ -131,6 +138,7 @@ export interface CliMainDeps {
   configPath: string
   write: (text: string) => void
   colorEnabled: () => boolean
+  interactive: () => boolean
   readVersion: () => string
   runDoctor: (deps: DoctorDeps) => Promise<number>
   buildDoctorDeps: (configPath: string, write: (text: string) => void) => DoctorDeps
@@ -298,7 +306,14 @@ export async function mainWith(args: string[], deps: CliMainDeps): Promise<void>
     } else {
       const io = readlineChatIo()
       try {
-        const chatResult = await deps.runChat({ engine, config, chat, io, colorEnabled })
+        const chatResult = await deps.runChat({
+          engine,
+          config,
+          chat,
+          io,
+          colorEnabled,
+          interactive: deps.interactive(),
+        })
         if (chatResult.interrupted) {
           process.exitCode = 4
         }
@@ -331,6 +346,7 @@ const defaultDeps: CliMainDeps = {
   configPath: defaultConfigPath(),
   write: (text) => process.stdout.write(text),
   colorEnabled: colorsEnabled,
+  interactive: isInteractive,
   readVersion: readOwnVersion,
   runDoctor,
   buildDoctorDeps: buildRealDoctorDeps,

@@ -14,6 +14,7 @@ import type { ChatProvider, EmbeddingProvider } from '@openreverie/providers'
 import { cyan, dim, magenta } from './colors.js'
 import { type CommandContext, parseInput, runCommand } from './commands.js'
 import { createStatusLine, type StatusLine } from './status.js'
+import { formatStripTime, renderStatusStrip } from './strip.js'
 
 export interface ChatIo {
   question(prompt: string): Promise<string>
@@ -145,6 +146,7 @@ export async function runChat(deps: {
   chat: ChatProvider
   io: ChatIo
   colorEnabled?: boolean
+  interactive?: boolean
   setInterval?: (fn: () => void, ms: number) => unknown
   clearInterval?: (handle: unknown) => void
   now?: () => number
@@ -155,6 +157,7 @@ export async function runChat(deps: {
     chat,
     io,
     colorEnabled = false,
+    interactive = false,
     setInterval: setIntervalDep = (fn: () => void, ms: number) => setInterval(fn, ms),
     clearInterval: clearIntervalDep = (handle: unknown) =>
       clearInterval(handle as Parameters<typeof clearInterval>[0]),
@@ -168,6 +171,8 @@ export async function runChat(deps: {
     clearInterval: clearIntervalDep,
     now,
   })
+
+  const sessionStartedAt = now()
 
   io.write(`Memory folder: ${config.memoryDir}. Safety mode: ${config.safety.mode}.\n\n`)
 
@@ -228,7 +233,31 @@ export async function runChat(deps: {
     printWarnings: () => printWarnings(io, engine, colorEnabled),
   }
 
+  // Printed once, on its own dim line, immediately before each prompt. Not
+  // animated and never repainted, which is what gives a fresh value at
+  // every turn and right after a mode change without any cursor addressing
+  // and without fighting readline.
+  //
+  // Shown when the terminal is interactive; dimmed only when colour is on.
+  // Those are two different conditions: someone who sets NO_COLOR wants no
+  // colour, not less information.
+  function writeStatusStrip(): void {
+    if (!interactive) return
+    const meta = engine.profile().meta
+    const time = formatStripTime(meta.timezone, new Date(now()))
+    const place = meta.timezoneSource === 'user-confirmed' ? meta.location : undefined
+    const line = renderStatusStrip({
+      mode: session.mode,
+      tone: engine.currentStyle().tone,
+      ...(place === undefined ? {} : { location: place }),
+      ...(time === undefined ? {} : { localTime: time.localTime, zoneAbbrev: time.zoneAbbrev }),
+      elapsedMs: now() - sessionStartedAt,
+    })
+    io.write(`${dim(line, colorEnabled)}\n`)
+  }
+
   for (;;) {
+    writeStatusStrip()
     let line: string
     try {
       line = await io.question(cyan('you> ', colorEnabled))

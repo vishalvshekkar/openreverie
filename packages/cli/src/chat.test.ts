@@ -1501,3 +1501,85 @@ describe('runChat status line', () => {
     await engine.close()
   })
 })
+
+describe('status strip', () => {
+  let dir: string
+
+  beforeEach(async () => {
+    dir = await mkdtemp(path.join(tmpdir(), 'openreverie-chat-strip-'))
+  })
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  it('prints nothing when the terminal is not interactive', async () => {
+    const chat = new FakeChatProvider([])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const { io, output } = scriptedIo(['/bye'])
+
+    await runChat({ engine, config, chat, io, interactive: false })
+
+    expect(output.join('')).not.toContain(' · ')
+
+    await engine.close()
+  })
+
+  it('prints the strip with no escape sequences when colour is off but the terminal is interactive', async () => {
+    const chat = new FakeChatProvider([])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const { io, output } = scriptedIo(['/bye'])
+
+    await runChat({ engine, config, chat, io, interactive: true, colorEnabled: false })
+
+    const text = output.join('')
+    expect(text).toContain('general · warm')
+    expect(text).not.toContain(String.fromCharCode(27))
+
+    await engine.close()
+  })
+
+  it('shows the new mode on the next strip after a mode change', async () => {
+    const chat = new FakeChatProvider([])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const { io, output } = scriptedIo(['/mode listen', '/bye'])
+
+    await runChat({ engine, config, chat, io, interactive: true })
+
+    const strips = output
+      .join('')
+      .split('\n')
+      .filter((line) => line.includes(' · '))
+    // Assert the strips exist before indexing, so deleting the wiring fails
+    // here with a count instead of an undefined tripping up toContain.
+    expect(strips.length).toBeGreaterThanOrEqual(2)
+    expect(strips[0]).toContain('general · ')
+    expect(strips[1]).toContain('listen · ')
+
+    await engine.close()
+  })
+
+  // The spinner and the strip never write in the same frame.
+  it('writes no strip while a reply is streaming', async () => {
+    const chat = new FakeChatProvider([
+      { text: 'Good to see you.', toolCalls: [] },
+      { text: 'Hi there.', toolCalls: [] },
+      { text: emptyReflectionJson('Said hello.'), toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const { io, output } = scriptedIo(['hello', '/bye'])
+
+    await runChat({ engine, config, chat, io, interactive: true })
+
+    const flat = output.join('')
+    const stripIndex = flat.lastIndexOf(' · ')
+    const replyIndex = flat.indexOf('reverie> ')
+    expect(stripIndex).toBeGreaterThan(replyIndex)
+
+    await engine.close()
+  })
+})

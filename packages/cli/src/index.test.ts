@@ -52,6 +52,7 @@ function testDeps(overrides: Partial<CliMainDeps> = {}): {
       output += text
     },
     colorEnabled: () => false,
+    interactive: () => false,
     readVersion: () => '9.9.9-test',
     runDoctor: async () => {
       throw new Error('runDoctor should not be called')
