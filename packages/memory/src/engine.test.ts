@@ -3700,6 +3700,50 @@ describe('MemoryEngine', () => {
       await engine.close()
     })
   })
+
+  describe('session journal method', () => {
+    let dir: string
+
+    beforeEach(async () => {
+      dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-journalmethod-'))
+    })
+
+    afterEach(async () => {
+      await rm(dir, { recursive: true, force: true })
+    })
+
+    it('records and reads back the declared method for a session', async () => {
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const sessionId = await engine.startSession(new Date('2026-08-16T09:00:00.000Z'))
+      await engine.setSessionJournalMethod(sessionId, 'gratitude')
+      expect(await engine.sessionJournalMethod(sessionId)).toBe('gratitude')
+      await engine.close()
+    })
+
+    it('reports the method as absent for a session that never declared one', async () => {
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const sessionId = await engine.startSession(new Date('2026-08-16T09:00:00.000Z'))
+      expect(await engine.sessionJournalMethod(sessionId)).toBeUndefined()
+      await engine.close()
+    })
+
+    // The design note above setSessionJournalMethod promises a read-merge-write:
+    // declaring a method must not clobber a mode already written by
+    // setSessionMode. Nothing else in this plan asserts that property, so this
+    // is also the falsify target for that guarantee.
+    it('declaring a method leaves an already-set mode intact', async () => {
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const sessionId = await engine.startSession(new Date('2026-08-16T09:00:00.000Z'))
+      await engine.setSessionMode(sessionId, 'journal')
+      await engine.setSessionJournalMethod(sessionId, 'gratitude')
+      expect(await engine.sessionMode(sessionId)).toBe('journal')
+      expect(await engine.sessionJournalMethod(sessionId)).toBe('gratitude')
+      await engine.close()
+    })
+  })
 })
 
 describe('buildReflectionContext people and entities wiring', () => {

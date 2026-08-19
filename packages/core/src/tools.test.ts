@@ -61,11 +61,12 @@ function emptyReflectionOutput(summary: string) {
 }
 
 describe('toolDefinitions', () => {
-  it('lists exactly the eleven memory and style tools with non-empty descriptions and a JSON schema', () => {
+  it('lists exactly the twelve memory and style tools with non-empty descriptions and a JSON schema', () => {
     const defs = toolDefinitions()
     const names = defs.map((d) => d.name).sort()
     expect(names).toEqual(
       [
+        'declare_journal_method',
         'graph_query',
         'list_arcs',
         'list_entities',
@@ -452,6 +453,35 @@ describe('dispatchTool', () => {
     const definition = toolDefinitions().find((tool) => tool.name === 'remember')
     const properties = definition?.parameters.properties as Record<string, unknown>
     expect(properties.eventTime).toBeDefined()
+
+    await engine.close()
+  })
+
+  it('declare_journal_method records the method on the session', async () => {
+    const engine = await MemoryEngine.open(dir, fakeDeps())
+    const sessionId = await engine.startSession()
+
+    const result = await dispatchTool(
+      engine,
+      sessionId,
+      call('declare_journal_method', { method: 'gratitude' }),
+    )
+    expect(JSON.parse(result)).toEqual({ ok: true })
+    expect(await engine.sessionJournalMethod(sessionId)).toBe('gratitude')
+
+    await engine.close()
+  })
+
+  it('declare_journal_method rejects an unknown method', async () => {
+    const engine = await MemoryEngine.open(dir, fakeDeps())
+    const sessionId = await engine.startSession()
+
+    const result = await dispatchTool(
+      engine,
+      sessionId,
+      call('declare_journal_method', { method: 'astrology' }),
+    )
+    expect(JSON.parse(result).error).toBeDefined()
 
     await engine.close()
   })

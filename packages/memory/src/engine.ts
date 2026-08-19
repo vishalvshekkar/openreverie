@@ -36,6 +36,7 @@ import {
   readGraphRecords,
   type SequencedGraphRecord,
 } from './graph.js'
+import type { JournalMethod } from './journal.js'
 import { ensureMemoryTree, type MemoryPaths, memoryPaths } from './paths.js'
 import {
   loadProfile,
@@ -577,6 +578,23 @@ export class MemoryEngine {
   // parse, means the mode is absent. Never a default.
   async sessionMode(sessionId: string): Promise<string | undefined> {
     return (await SessionStore.readMeta(this.paths, sessionId))?.mode
+  }
+
+  // Declares which of the six journal methods this session is using, once
+  // the companion and the person have settled on one (spec section 7, step
+  // 3). Persisted next to the session's mode in the same session.json, on
+  // the same crash-safety reasoning that persistence exists for at all:
+  // a later process's runMaintenance pass must be able to read it back
+  // with no live AgentSession anywhere. Read-merge-write so this call
+  // never clobbers a mode already written by setSessionMode.
+  async setSessionJournalMethod(sessionId: string, method: JournalMethod): Promise<void> {
+    const existing = await SessionStore.readMeta(this.paths, sessionId)
+    await SessionStore.writeMeta(this.paths, sessionId, { ...existing, journalMethod: method })
+  }
+
+  async sessionJournalMethod(sessionId: string): Promise<JournalMethod | undefined> {
+    const meta = await SessionStore.readMeta(this.paths, sessionId)
+    return meta?.journalMethod as JournalMethod | undefined
   }
 
   async appendTranscript(sessionId: string, line: TranscriptLine): Promise<void> {
