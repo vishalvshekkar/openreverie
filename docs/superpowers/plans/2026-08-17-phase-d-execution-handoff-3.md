@@ -109,8 +109,8 @@ read each other's half-written build output.
 | F | 10, 11 | `memory/transcripts.ts`, `memory/engine.ts` | sonnet | DONE, 912 tests | `63bda62` (combined, shared test block) |
 | G | 12 | `set_mode` replaces `update_style`, tools/agent/cli | sonnet | DONE, 919 tests | `c80f7bb` |
 | H | 13 | style leaves `config.toml`, migration plus 9 fixtures | sonnet | DONE, 928 tests | `c5ba266` `49f3f3c` |
-| I | 14, 15 | `cli/commands.ts`, the `/mode` `/style` `/settings` `/whoami` table | sonnet | **NEXT, not started** | |
-| J | 16 | persistent status line, `cli/strip.ts` | sonnet | TODO | |
+| I | 14, 15 | `cli/commands.ts`, the `/mode` `/style` `/settings` `/whoami` table | sonnet | **ONGOING**, dispatched | |
+| J | 16 | persistent status line, `cli/strip.ts` | sonnet | NEXT | |
 | K | 17, 18 | `server/registry.ts`, `web/api.ts`, mode stream event and mode over HTTP | sonnet | TODO | |
 | L | 19 | profile/settings endpoints, **the API key that must never be reachable** | sonnet impl, **you verify the key test** | TODO | |
 | M | 20, 21 | `web/views/*` journal and settings destinations, mode picker | sonnet | TODO | |
