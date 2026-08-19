@@ -71,6 +71,10 @@ const declareJournalMethodArgs = z.strictObject({
   ]),
 })
 
+const updateJournalingProtocolArgs = z.strictObject({
+  body: z.string(),
+})
+
 const listArcsArgs = z.strictObject({
   status: z.enum(['active', 'dormant', 'closed']).optional(),
   offset: z.number().optional(),
@@ -267,6 +271,28 @@ export function toolDefinitions(): ToolDefinition[] {
           },
         },
         required: ['method'],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: 'update_journaling_protocol',
+      description:
+        "Rewrite journaling.md, the person's journaling setup: chosen method or methods and their cadence, " +
+        'prompt style, session length, and how active you should be during a session. Call this with the ' +
+        'complete new document body, full prose, a whole rewrite, never a diff or an append, and only after an ' +
+        'actual conversation about what changed (the first-time setup conversation, or a later request to ' +
+        'revise it). Available in every session, not only journal-mode ones, since the person can ask to change ' +
+        'their setup from an ordinary conversation too.',
+      parameters: {
+        type: 'object',
+        properties: {
+          body: {
+            type: 'string',
+            description:
+              'The complete new body of journaling.md, in prose, replacing whatever was there before.',
+          },
+        },
+        required: ['body'],
         additionalProperties: false,
       },
     },
@@ -476,6 +502,8 @@ export async function dispatchTool(
         return await dispatchRemember(engine, sessionId, parsedArgs.value)
       case 'declare_journal_method':
         return await dispatchDeclareJournalMethod(engine, sessionId, parsedArgs.value)
+      case 'update_journaling_protocol':
+        return await dispatchUpdateJournalingProtocol(engine, parsedArgs.value)
       case 'list_arcs':
         return await dispatchListArcs(engine, parsedArgs.value)
       case 'list_realms':
@@ -571,6 +599,17 @@ async function dispatchDeclareJournalMethod(
 
   await engine.setSessionJournalMethod(sessionId, parsed.data.method)
   return JSON.stringify({ ok: true })
+}
+
+async function dispatchUpdateJournalingProtocol(
+  engine: MemoryEngine,
+  value: unknown,
+): Promise<string> {
+  const parsed = updateJournalingProtocolArgs.safeParse(value)
+  if (!parsed.success) return errorJson(zodErrorMessage('update_journaling_protocol', parsed.error))
+
+  const doc = await engine.updateJournalingProtocol(parsed.data.body)
+  return JSON.stringify({ ok: true, updated: doc.meta.updated })
 }
 
 async function dispatchListArcs(engine: MemoryEngine, value: unknown): Promise<string> {

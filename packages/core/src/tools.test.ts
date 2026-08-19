@@ -61,7 +61,7 @@ function emptyReflectionOutput(summary: string) {
 }
 
 describe('toolDefinitions', () => {
-  it('lists exactly the twelve memory and style tools with non-empty descriptions and a JSON schema', () => {
+  it('lists exactly the thirteen memory and style tools with non-empty descriptions and a JSON schema', () => {
     const defs = toolDefinitions()
     const names = defs.map((d) => d.name).sort()
     expect(names).toEqual(
@@ -77,6 +77,7 @@ describe('toolDefinitions', () => {
         'remember',
         'search_memory',
         'set_mode',
+        'update_journaling_protocol',
         'update_profile',
       ].sort(),
     )
@@ -482,6 +483,22 @@ describe('dispatchTool', () => {
       call('declare_journal_method', { method: 'astrology' }),
     )
     expect(JSON.parse(result).error).toBeDefined()
+
+    await engine.close()
+  })
+
+  it('update_journaling_protocol rewrites the document and reports ok', async () => {
+    const engine = await MemoryEngine.open(dir, fakeDeps())
+    const sessionId = await engine.startSession()
+
+    const result = await dispatchTool(
+      engine,
+      sessionId,
+      call('update_journaling_protocol', { body: 'Gratitude, three times a week.' }),
+    )
+    expect(JSON.parse(result).ok).toBe(true)
+    const rows = await engine.listPublicDocuments()
+    expect(rows.find((row) => row.kind === 'journaling')).toBeDefined()
 
     await engine.close()
   })

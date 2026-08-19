@@ -41,6 +41,7 @@ import {
   type JournalMethod,
   readJournalingProtocol,
   writeJournalEntry,
+  writeJournalingProtocol,
 } from './journal.js'
 import { ensureMemoryTree, type MemoryPaths, memoryPaths } from './paths.js'
 import {
@@ -606,6 +607,18 @@ export class MemoryEngine {
   async sessionJournalMethod(sessionId: string): Promise<JournalMethod | undefined> {
     const meta = await SessionStore.readMeta(this.paths, sessionId)
     return meta?.journalMethod as JournalMethod | undefined
+  }
+
+  // The live-tool half of the journaling.md rewrite mechanism (spec
+  // section 4.5). Writes through the same shared helper reflection's
+  // journalingUpdate uses (Task 12), then reindexes so search stays
+  // current; reflection's own path reindexes separately, inside
+  // _doEndSession, on the same pattern the constitution update already
+  // uses.
+  async updateJournalingProtocol(body: string): Promise<Document> {
+    const doc = await writeJournalingProtocol(this.paths, body, new Date())
+    await this.reindexOrWarn(doc, 'journaling', 'live update_journaling_protocol call')
+    return doc
   }
 
   async appendTranscript(sessionId: string, line: TranscriptLine): Promise<void> {

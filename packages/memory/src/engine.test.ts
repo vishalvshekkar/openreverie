@@ -5052,3 +5052,35 @@ describe('journal entry write', () => {
     await engine.close()
   })
 })
+
+describe('updateJournalingProtocol', () => {
+  let dir: string
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-updatejournaling-'))
+  })
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  it('writes journaling.md on the first call and reindexes it', async () => {
+    const chat = new FakeChatProvider([])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const doc = await engine.updateJournalingProtocol('Gratitude, three times a week.')
+    expect(doc.body.trim()).toBe('Gratitude, three times a week.')
+    const rows = await engine.listPublicDocuments()
+    expect(rows.find((row) => row.kind === 'journaling')?.docId).toBe(doc.meta.id)
+    await engine.close()
+  })
+
+  it('preserves the id and replaces the body on a second call', async () => {
+    const chat = new FakeChatProvider([])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const first = await engine.updateJournalingProtocol('Gratitude, three times a week.')
+    const second = await engine.updateJournalingProtocol('Switched to the examen instead.')
+    expect(second.meta.id).toBe(first.meta.id)
+    expect(second.body).not.toContain('Gratitude')
+    await engine.close()
+  })
+})

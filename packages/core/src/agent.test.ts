@@ -2,6 +2,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  appendGraph,
   type EngineDeps,
   ensureMemoryTree,
   loadProfile,
@@ -1028,6 +1029,57 @@ describe('AgentSession', () => {
     const last = chat.requests.at(-1)?.system ?? ''
     expect(last).toContain("This person's timezone is Asia/Kolkata.")
     expect(last).not.toContain('This timezone is a system default')
+
+    await engine.close()
+  })
+
+  it('reassembles the system prompt after a successful update_journaling_protocol call', async () => {
+    // An arc so this is not treated as a first session, which would
+    // replace every optional section (journalingProtocolSection
+    // included) with the onboarding block; see context.test.ts's own
+    // journalingProtocolSection tests for the same setup. Appended
+    // before MemoryEngine.open, since the engine snapshots graph state
+    // at open.
+    await appendGraph(memoryPaths(dir), [
+      {
+        ts: '2026-08-01T00:00:00.000Z',
+        op: 'assert',
+        node: 'arc_any',
+        type: 'arc',
+        label: 'Any Arc',
+      },
+    ])
+
+    const chat = new FakeChatProvider([
+      {
+        text: '',
+        toolCalls: [
+          {
+            id: 'call_1',
+            name: 'update_journaling_protocol',
+            arguments: JSON.stringify({ body: 'Gratitude, three times a week.' }),
+          },
+        ],
+      },
+      { text: 'Got it, thanks.', toolCalls: [] },
+      { text: 'Sure.', toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    // journal mode, not the plan's plain start(): journalingProtocol is
+    // only read from disk when the session mode is 'journal' (see
+    // engine.ts's sessionContext), so the plan's own mode-less version of
+    // this test could never contain the new body regardless of whether
+    // the refreshSystemPrompt trigger below actually works.
+    const session = await AgentSession.start(engine, testConfig(), chat, {
+      mode: 'journal',
+      now: () => new Date('2026-08-16T20:00:00.000Z'),
+    })
+
+    await collect(session.send("Let's set up journaling."))
+    await collect(session.send('Anything else?'))
+
+    const last = chat.requests.at(-1)?.system ?? ''
+    expect(last).toContain('Gratitude, three times a week.')
 
     await engine.close()
   })
