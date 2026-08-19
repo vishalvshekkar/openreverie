@@ -77,6 +77,21 @@ knows what to verify rather than assume.
 | 19 final verification + README | DONE | `17dd15e` |
 | **retrieval merged into design** | DONE | merge `a0bd482`, worktree removed |
 
+### Watch item: one flaky test in `packages/server/src/registry.test.ts`
+
+`keeps only recent expired sessions in the tombstone cache` (`registry.test.ts:175`) failed once
+during a modes Task 16 run and passed on every rerun. Investigated: it is NOT a logic race. The
+test injects both the clock (`now: () => now`) and the scheduler (`FakeScheduler`), so its
+behaviour does not depend on wall time. What it does have is an explicit `15_000` ms timeout and
+a loop creating 65 sessions. On a loaded machine, with vitest workers running in parallel, that
+loop can exceed 15 seconds and the test times out.
+
+Confirmed passing 5 of 5 in isolation and in three full-suite runs. Nothing in Task 16 touches
+`packages/server`. Left alone because fixing it means editing an unrelated test outside the
+modes plan's scope, but recorded because a suite that fails once in a while erodes the gate that
+every batch here depends on. If it recurs, the fix is to raise that one timeout, not to reduce
+the session count, which is what the test is about.
+
 ### Watch item found in modes Task 14: the EOF loop depends on `bye` staying in the table
 
 `packages/cli/src/chat.ts` treats readline EOF as `line = '/bye'` and lets it flow through
@@ -130,9 +145,9 @@ read each other's half-written build output.
 | G | 12 | `set_mode` replaces `update_style`, tools/agent/cli | sonnet | DONE, 919 tests | `c80f7bb` |
 | H | 13 | style leaves `config.toml`, migration plus 9 fixtures | sonnet | DONE, 928 tests | `c5ba266` `49f3f3c` |
 | I | 14, 15 | `cli/commands.ts`, the `/mode` `/style` `/settings` `/whoami` table | sonnet | DONE, 962 tests | `ba311c9` `9272fd1` |
-| J | 16 | persistent status line, `cli/strip.ts` | sonnet | **ONGOING**, dispatched | |
-| K | 17, 18 | `server/registry.ts`, `web/api.ts`, mode stream event and mode over HTTP | sonnet | NEXT | |
-| L | 19 | profile/settings endpoints, **the API key that must never be reachable** | sonnet impl, **you verify the key test** | TODO | |
+| J | 16 | persistent status line, `cli/strip.ts` | sonnet | DONE, 974 tests | `1c644b2` |
+| K | 17, 18 | `server/registry.ts`, `web/api.ts`, mode stream event and mode over HTTP | sonnet | **ONGOING**, dispatched | |
+| L | 19 | profile/settings endpoints, **the API key that must never be reachable** | sonnet impl, **you verify the key test** | NEXT | |
 | M | 20, 21 | `web/views/*` journal and settings destinations, mode picker | sonnet | TODO | |
 | N | 22 | README | **you, personally** | TODO | |
 
