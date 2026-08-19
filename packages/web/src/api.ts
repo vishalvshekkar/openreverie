@@ -14,6 +14,8 @@ const documentKindSchema = z.enum([
   'rollup_daily',
   'rollup_weekly',
   'person',
+  'journal',
+  'journaling',
 ])
 
 export const documentRowSchema = z.strictObject({
@@ -22,6 +24,8 @@ export const documentRowSchema = z.strictObject({
   title: z.string(),
   updatedAt: z.string(),
   readOnly: z.literal(true),
+  method: z.string().optional(),
+  entryDate: z.string().optional(),
 })
 
 export const documentSchema = documentRowSchema.extend({ body: z.string() })

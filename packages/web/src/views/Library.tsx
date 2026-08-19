@@ -18,6 +18,8 @@ const KIND_LABELS: Record<DocumentKind, string> = {
   summary: 'Session summary',
   rollup_daily: 'Daily rollup',
   rollup_weekly: 'Weekly rollup',
+  journal: 'Journal entry',
+  journaling: 'Journaling protocol',
 }
 
 function isPlaceholderTitle(title: string, docId: string): boolean {
@@ -62,6 +64,8 @@ const GROUP_DEFS: { key: string; heading: string; kinds: DocumentKind[] }[] = [
   { key: 'people', heading: 'People', kinds: ['person'] },
   { key: 'rollups', heading: 'Rollups', kinds: ['rollup_daily', 'rollup_weekly'] },
   { key: 'summaries', heading: 'Summaries', kinds: ['summary'] },
+  { key: 'journal', heading: 'Journal entries', kinds: ['journal'] },
+  { key: 'journaling', heading: 'Journaling protocol', kinds: ['journaling'] },
 ]
 
 function groupDocuments(rows: DocumentRow[]): Group[] {

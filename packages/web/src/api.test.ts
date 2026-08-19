@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   ApiClient,
   ApiHttpError,
+  documentRowSchema,
   IncompleteStreamError,
   isTerminalEvent,
   parseStreamEvent,
@@ -145,6 +146,91 @@ describe('ApiClient request and NDJSON parsing', () => {
     const [url, init] = fetchMock.mock.calls[0] ?? []
     expect(url).toBe('/api/v1/sessions/session-1/mode')
     expect(JSON.parse(init.body as string)).toEqual({ mode: 'listen' })
+  })
+
+  it('gets the profile', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        data: {
+          preferredName: 'Vish',
+          pronouns: null,
+          location: null,
+          timezone: 'Asia/Kolkata',
+          birthday: null,
+          birthdayGreetings: null,
+          occupation: null,
+          style: { engagement: 'balanced', tone: 'warm', orientation: 'listening' },
+          prose: 'Some prose.',
+        },
+        meta: { nextCursor: null },
+      }),
+    )
+    const client = new ApiClient()
+    await expect(client.getProfile()).resolves.toMatchObject({ preferredName: 'Vish' })
+    const [url, init] = fetchMock.mock.calls[0] ?? []
+    expect(url).toBe('/api/v1/profile')
+    expect(init?.method).toBeUndefined()
+  })
+
+  it('updates the profile with a PATCH request', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        data: {
+          preferredName: 'Vish',
+          pronouns: null,
+          location: 'Bengaluru',
+          timezone: 'Asia/Kolkata',
+          birthday: null,
+          birthdayGreetings: null,
+          occupation: null,
+          style: { engagement: 'balanced', tone: 'warm', orientation: 'listening' },
+          prose: 'Some prose.',
+        },
+        meta: { nextCursor: null },
+      }),
+    )
+    const client = new ApiClient()
+    await expect(client.updateProfile({ location: 'Bengaluru' })).resolves.toMatchObject({
+      location: 'Bengaluru',
+    })
+    const [url, init] = fetchMock.mock.calls[0] ?? []
+    expect(url).toBe('/api/v1/profile')
+    expect(init?.method).toBe('PATCH')
+    expect(JSON.parse(init?.body as string)).toEqual({ location: 'Bengaluru' })
+  })
+
+  it('gets settings', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({ data: { safetyMode: 'companion' }, meta: { nextCursor: null } }),
+    )
+    const client = new ApiClient()
+    await expect(client.getSettings()).resolves.toEqual({ safetyMode: 'companion' })
+    const [url] = fetchMock.mock.calls[0] ?? []
+    expect(url).toBe('/api/v1/settings')
+  })
+
+  it('documentRowSchema accepts a journal row with method and entryDate', () => {
+    const result = documentRowSchema.safeParse({
+      docId: 'doc_01JZZZ',
+      kind: 'journal',
+      title: 'doc_01JZZZ',
+      updatedAt: '2026-08-16T21:04:00.000Z',
+      readOnly: true,
+      method: 'gratitude',
+      entryDate: '2026-08-16',
+    })
+    expect(result.success).toBe(true)
+  })
+
+  it('documentRowSchema accepts a journaling row with neither field', () => {
+    const result = documentRowSchema.safeParse({
+      docId: 'doc_01JZZZ2',
+      kind: 'journaling',
+      title: 'doc_01JZZZ2',
+      updatedAt: '2026-08-16T21:04:00.000Z',
+      readOnly: true,
+    })
+    expect(result.success).toBe(true)
   })
 
   it('parses the list envelope and returns data with its cursor', async () => {
