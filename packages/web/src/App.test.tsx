@@ -14,6 +14,8 @@ import type { AppApi } from './api.js'
 let conversationsMounts = 0
 let atlasMounts = 0
 let libraryMounts = 0
+let journalMounts = 0
+let settingsMounts = 0
 
 vi.mock('./views/Conversations.js', () => ({
   Conversations: () => {
@@ -44,6 +46,24 @@ vi.mock('./views/Library.js', () => ({
   },
 }))
 
+vi.mock('./views/Journal.js', () => ({
+  Journal: () => {
+    useEffect(() => {
+      journalMounts += 1
+    }, [])
+    return <div>journal view</div>
+  },
+}))
+
+vi.mock('./views/Settings.js', () => ({
+  Settings: () => {
+    useEffect(() => {
+      settingsMounts += 1
+    }, [])
+    return <div>settings view</div>
+  },
+}))
+
 const api = {} as AppApi
 let user: ReturnType<typeof userEvent.setup>
 
@@ -52,6 +72,8 @@ beforeEach(() => {
   conversationsMounts = 0
   atlasMounts = 0
   libraryMounts = 0
+  journalMounts = 0
+  settingsMounts = 0
   window.history.replaceState({}, '', '/')
 })
 
@@ -115,5 +137,43 @@ describe('App shell', () => {
     window.history.replaceState({}, '', '#/library')
     render(<App api={api} />)
     expect(screen.getByText('library view')).toBeVisible()
+  })
+})
+
+describe('journal and settings destinations', () => {
+  it('renders five destinations in the rail', () => {
+    render(<App api={api} />)
+    for (const label of ['Talk', 'Atlas', 'Record', 'Journal', 'Settings']) {
+      expect(screen.getByRole('button', { name: label })).toBeInTheDocument()
+    }
+  })
+
+  it('reads both new destinations out of the hash', () => {
+    expect(viewFromHash('#/journal')).toBe('journal')
+    expect(viewFromHash('#/settings')).toBe('settings')
+  })
+
+  it('keeps the conversation alive when switching to journal', async () => {
+    render(<App api={api} />)
+    await user.click(screen.getByRole('button', { name: 'Journal' }))
+    expect(screen.getByText('journal view')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Talk' }))
+    expect(conversationsMounts).toBe(1)
+  })
+
+  it('keeps the conversation alive when switching to settings', async () => {
+    render(<App api={api} />)
+    await user.click(screen.getByRole('button', { name: 'Settings' }))
+    expect(screen.getByText('settings view')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Talk' }))
+    expect(conversationsMounts).toBe(1)
+  })
+
+  it('mounts each new destination only while it is on screen', async () => {
+    render(<App api={api} />)
+    await user.click(screen.getByRole('button', { name: 'Journal' }))
+    await user.click(screen.getByRole('button', { name: 'Talk' }))
+    expect(journalMounts).toBe(1)
+    expect(settingsMounts).toBe(0)
   })
 })

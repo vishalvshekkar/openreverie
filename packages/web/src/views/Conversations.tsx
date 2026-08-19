@@ -13,6 +13,7 @@ import {
   type AppApi,
   IncompleteStreamError,
   isTerminalEvent,
+  type PublicProfile,
   type Session,
   type StreamEvent,
 } from '../api.js'
@@ -155,10 +156,31 @@ function renderMessage(message: ChatMessage) {
   )
 }
 
+/*
+ * Duplicated in the browser rather than imported: web talks to server over
+ * HTTP only and never imports a runtime engine package. This is a small,
+ * stable piece of copy, and the test that counts ten entries is what
+ * notices if the catalogue ever grows without this list following.
+ */
+const MODE_OPTIONS: readonly (readonly [string, string])[] = [
+  ['general', 'Open conversation, no agenda.'],
+  ['listen', 'You talk it through, it stays out of the way.'],
+  ['solve', 'A concrete problem, worked toward real options and a decision.'],
+  ['real', 'It pushes back and names what it sees.'],
+  ['deep', 'It asks the questions, trying to understand you.'],
+  ['brainstorm', 'Quantity over judgment, evaluation deferred.'],
+  ['boost', 'Your corner talked up, from things it actually knows about you.'],
+  ['decompress', 'Winding down. Light and low-stakes.'],
+  ['process', 'Working through one specific thing until it settles.'],
+  ['journal', 'Structured written reflection.'],
+]
+
 export function Conversations({ api }: { api: AppApi }): JSX.Element {
   const [state, dispatch] = useReducer(sessionReducer, initialChatState)
   const [sessions, setSessions] = useState<Session[]>([])
   const [draft, setDraft] = useState('')
+  const [profile, setProfile] = useState<PublicProfile | null>(null)
+  const [nowMs, setNowMs] = useState(() => Date.now())
   const lastSequenceRef = useRef(0)
   const threadRef = useRef<HTMLDivElement>(null)
   const stickToBottomRef = useRef(true)
@@ -201,6 +223,40 @@ export function Conversations({ api }: { api: AppApi }): JSX.Element {
     void refreshSessions()
     void startSession()
   }, [api, refreshSessions, startSession])
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        setProfile(await api.getProfile())
+      } catch {
+        // The strip degrades to nothing. A failed profile fetch must not
+        // block the thread.
+      }
+    })()
+  }, [api])
+
+  useEffect(() => {
+    const handle = setInterval(() => setNowMs(Date.now()), 30_000)
+    return () => clearInterval(handle)
+  }, [])
+
+  const changeMode = useCallback(
+    async (mode: string) => {
+      const sessionId = state.session?.sessionId
+      if (sessionId === undefined) return
+      try {
+        await api.setSessionMode(sessionId, mode)
+        dispatch({
+          type: 'stream',
+          event: { schemaVersion: '1', seq: state.lastSequence + 1, type: 'mode', mode },
+        })
+      } catch {
+        // The picker stays where it was. A mode the server did not accept
+        // must not be shown as if it took effect.
+      }
+    },
+    [api, state.session?.sessionId, state.lastSequence],
+  )
 
   // The effect scrolls the ref's current DOM node, but must re-run whenever
   // new content could have changed the thread's height, not just when the
@@ -418,6 +474,26 @@ export function Conversations({ api }: { api: AppApi }): JSX.Element {
 
         <div className="composer-area">
           <div className="composer-area-inner">
+            <div className="composer-status">
+              <label className="mode-picker" htmlFor="mode-picker">
+                <span className="mode-picker-label">Mode</span>
+                <select
+                  id="mode-picker"
+                  value={state.mode}
+                  disabled={!state.session || readOnly}
+                  onChange={(event) => void changeMode(event.target.value)}
+                >
+                  {MODE_OPTIONS.map(([value, summary]) => (
+                    <option key={value} value={value}>
+                      {value}: {summary}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <span className="status-strip" data-testid="status-strip">
+                {webStatusStrip(profile, state.session?.createdAt, nowMs)}
+              </span>
+            </div>
             {readOnly && (
               <p className="composer-note">
                 This conversation has ended. Start a new one to keep talking.
@@ -453,4 +529,44 @@ export function Conversations({ api }: { api: AppApi }): JSX.Element {
       </section>
     </div>
   )
+}
+
+/*
+ * The same four segments the terminal strip shows, from the same profile
+ * fields: tone, local place and time, elapsed. Mode is the picker itself,
+ * so it is not repeated here. A guessed timezone renders the time without
+ * the place name; a zone the browser rejects drops the segment entirely
+ * rather than substituting the host's, because a silent substitution is how
+ * a wrong local time becomes invisible.
+ */
+function webStatusStrip(
+  profile: PublicProfile | null,
+  createdAt: string | undefined,
+  nowMs: number,
+): string {
+  if (profile === null) return ''
+  const segments: string[] = [profile.style.tone]
+
+  if (profile.timezone !== null) {
+    try {
+      const time = new Intl.DateTimeFormat('en-US', {
+        timeZone: profile.timezone,
+        hour: 'numeric',
+        minute: '2-digit',
+        hour12: true,
+        timeZoneName: 'short',
+      }).format(new Date(nowMs))
+      const place = profile.location === null ? '' : `${profile.location} `
+      segments.push(`${place}${time}`)
+    } catch {
+      // A zone Intl rejects means no time segment at all.
+    }
+  }
+
+  if (createdAt !== undefined) {
+    const elapsed = Math.max(0, nowMs - new Date(createdAt).getTime())
+    segments.push(`${Math.floor(elapsed / 60_000)}m`)
+  }
+
+  return segments.join(' · ')
 }
