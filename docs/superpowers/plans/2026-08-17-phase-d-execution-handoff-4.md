@@ -164,8 +164,8 @@ half-written build output. Mark a batch ONGOING *before* dispatching it.
 | B | 2, + defect 7 | `DocKind` gains `journal`/`journaling`; `sqlite.ts`, `engine.ts`, `core/tools.ts`, plus `dateSpan.ts` and `core/docKinds.test.ts` (undeclared, see defect 7) | A | DONE, 1038 | `eb8a7ea` |
 | C | 3, 4, 7 | `memory/journal.ts`: entry filename/frontmatter, body assembly, `journaling.md` read/write helper | A, B | DONE, 1057 | `a11a213` |
 | D | 5 | `declare_journal_method` tool; `transcripts.ts`, `engine.ts`, `core/tools.ts` | C | DONE, 1063 | `d941c7b` |
-| E | 6 | Gated write in `_doEndSession`, the crash path; `engine.ts` **safety-adjacent** | C, D | ONGOING | |
-| F | 8 | `sessionContext` gains `mode` param, `journalingProtocol`; `engine.ts` | C | TODO | |
+| E | 6 | Gated write in `_doEndSession`, the crash path; `engine.ts` **safety-adjacent** | C, D | DONE, 1068, orchestrator personally re-falsified the mode gate | `dbf5621` |
+| F | 8 | `sessionContext` gains `mode` param, `journalingProtocol`; `engine.ts` | C | ONGOING | |
 | G | 9 | `journalingProtocolSection` in the assembled prompt; `core/context.ts` | F | TODO | |
 | H | 10 | `core/journaling.ts` content module (largest task, includes the expressive-writing safety gate); wires into `core/modes.ts`, `core/personas.ts` (`buildPersona` signature), `core/context.ts` (call site) **safety-relevant content** | C, G | TODO | |
 | I | 11 | `update_journaling_protocol` tool, `refreshSystemPrompt` trigger; `engine.ts`, `core/tools.ts`, `core/agent.ts` | C | TODO | |
@@ -239,9 +239,9 @@ yet cross-checked against the real tree, since nothing has been dispatched):
    15.** See the N row above.
 4. **Task 6 assumes `this.profile.meta.timezone` exists on `MemoryEngine` without a grep check**,
    unlike almost everywhere else in this plan, which otherwise grep-confirms cross-plan
-   assumptions explicitly. Batch E's brief should require a grep confirmation of the real shape
-   (likely `profile()` accessor plus `Profile.meta`, per the modes-era drift notes above) before
-   relying on it, and report if the real shape differs.
+   assumptions explicitly. **Resolved in Batch E**: the real accessor is `this.timezone()`
+   (`engine.ts:475`), which already resolves the stored value with a `systemTimeZone()` fallback
+   baked in. Used directly; `this.profile.meta.timezone` was never a valid path.
 5. **Task 3's stated dependency (Task 1 only) may understate a soft dependency on Task 2**, since
    it writes `kind: 'journal'` into frontmatter before `DocKind` formally includes that literal.
    Resolved by ordering (C runs after B), not by changing Task 3's own text.
@@ -265,6 +265,17 @@ yet cross-checked against the real tree, since nothing has been dispatched):
    dependency on Task 3's or Task 7's write helpers was needed to close this now. This is not a
    weakening of the P8 invariant: every other kind still requires a real positive cap present in
    `SECTION_CAPS`, and the exemption is only for these two, by name, with the reason recorded.
+8. **The crash-path journal write's `entryDate` uses `_doEndSession`'s local `now = new Date()`,
+   not the session's actual start time.** Found in Batch E, not fixed, not blocking: on the
+   ordinary path this is harmless (the session ends the same day it happens), but on the genuine
+   crash path (the process dies before `/bye`, a later process's `runMaintenance` reflects it
+   days later) the journal entry's `entryDate` becomes the day of recovery, not the day the person
+   actually journaled, which is exactly the event-time/record-time conflation `entryDate` versus
+   `recordedAt` exists to prevent everywhere else in this plan. The plan's own text is explicit
+   about using `now` here, so this was implemented plan-faithfully, not as a bug introduced by
+   this batch. Fixing it would mean sourcing `entryDate` from the session's recorded start time
+   instead (`SessionStore` already knows it), which is a real design change beyond Task 6's Files
+   block. Raise with the human before fixing; do not silently change it.
 
 ## What to do next, in order
 
