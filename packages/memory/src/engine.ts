@@ -36,7 +36,12 @@ import {
   readGraphRecords,
   type SequencedGraphRecord,
 } from './graph.js'
-import { assembleJournalBody, type JournalMethod, writeJournalEntry } from './journal.js'
+import {
+  assembleJournalBody,
+  type JournalMethod,
+  readJournalingProtocol,
+  writeJournalEntry,
+} from './journal.js'
 import { ensureMemoryTree, type MemoryPaths, memoryPaths } from './paths.js'
 import {
   loadProfile,
@@ -313,6 +318,12 @@ export interface SessionContext {
   // is always called after startSession, so without this carve-out no
   // session would ever look like a first one.
   isFirstSession: boolean
+  // Only ever set when the session's mode is journal; undefined for every
+  // other mode and for a call site that passes no mode at all. When set,
+  // it is either the trimmed body of journaling.md or the fixed
+  // JOURNALING_PROTOCOL_ABSENT sentinel, never assembled ad hoc, so its
+  // wording cannot drift between call sites.
+  journalingProtocol: string | undefined
 }
 
 export type GraphQuery =
@@ -896,7 +907,7 @@ export class MemoryEngine {
     }
   }
 
-  async sessionContext(now: Date = new Date()): Promise<SessionContext> {
+  async sessionContext(now: Date = new Date(), mode?: string): Promise<SessionContext> {
     const constitutionDoc = await readDocument(this.paths.constitution)
 
     const arcs: SessionContext['arcs'] = []
@@ -1080,6 +1091,9 @@ export class MemoryEngine {
     const hasReflectedSession = sessions.some((session) => session.reflected && !session.skipped)
     const isFirstSession = !hasAnyArc && !hasReflectedSession
 
+    const journalingProtocol =
+      mode === 'journal' ? await readJournalingProtocol(this.paths) : undefined
+
     return {
       constitution: constitutionDoc.body,
       constitutionDocId: constitutionDoc.meta.id,
@@ -1103,6 +1117,7 @@ export class MemoryEngine {
       timezone: this.timezone(),
       timezoneSource: this.timezoneSource(),
       isFirstSession,
+      journalingProtocol,
     }
   }
 

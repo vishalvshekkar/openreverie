@@ -3192,6 +3192,61 @@ describe('MemoryEngine', () => {
     })
   })
 
+  describe('sessionContext journalingProtocol', () => {
+    let dir: string
+    let paths: MemoryPaths
+
+    beforeEach(async () => {
+      dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-journalctx-'))
+      paths = memoryPaths(dir)
+    })
+
+    afterEach(async () => {
+      await rm(dir, { recursive: true, force: true })
+    })
+
+    it('leaves journalingProtocol undefined and never reads journaling.md when mode is not journal', async () => {
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      await engine.startSession()
+      const context = await engine.sessionContext(new Date(), 'general')
+      expect(context.journalingProtocol).toBeUndefined()
+      await engine.close()
+    })
+
+    it('leaves journalingProtocol undefined when sessionContext is called with no mode at all', async () => {
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      await engine.startSession()
+      const context = await engine.sessionContext()
+      expect(context.journalingProtocol).toBeUndefined()
+      await engine.close()
+    })
+
+    it('holds the ABSENT sentinel when mode is journal and journaling.md does not exist', async () => {
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      await engine.startSession()
+      const context = await engine.sessionContext(new Date(), 'journal')
+      expect(context.journalingProtocol).toContain('has never set up journal mode before')
+      await engine.close()
+    })
+
+    it('holds the trimmed journaling.md body when mode is journal and the file exists', async () => {
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      await writeDocumentAtomic({
+        path: paths.journaling,
+        meta: { id: 'doc_01JZZZ', kind: 'journaling', updated: '2026-08-16T21:04:00.000Z' },
+        body: 'Gratitude, three times a week.\n',
+      })
+      await engine.startSession()
+      const context = await engine.sessionContext(new Date(), 'journal')
+      expect(context.journalingProtocol).toBe('Gratitude, three times a week.')
+      await engine.close()
+    })
+  })
+
   describe('warnings', () => {
     let dir: string
     let paths: MemoryPaths
