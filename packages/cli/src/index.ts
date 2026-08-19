@@ -283,6 +283,8 @@ export async function mainWith(args: string[], deps: CliMainDeps): Promise<void>
     buildChat: deps.buildChat,
     buildEmbeddings: deps.buildEmbeddings,
     openEngine: (config, engineDeps) => deps.openEngine(config.memoryDir, engineDeps),
+    write: deps.write,
+    colorEnabled,
   })
 
   if (!context.ok) {

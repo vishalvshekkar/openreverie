@@ -13,6 +13,7 @@ import { listDocuments, memoryPaths, readDocument } from '@openreverie/memory'
 import type { ChatProvider, EmbeddingProvider } from '@openreverie/providers'
 import { cyan, dim, magenta } from './colors.js'
 import { type CommandContext, parseInput, runCommand } from './commands.js'
+import { createStartupSpinner } from './startup.js'
 import { createStatusLine, type StatusLine } from './status.js'
 import { formatStripTime, renderStatusStrip } from './strip.js'
 
@@ -353,6 +354,13 @@ export interface CliEngineDeps {
   buildChat: (config: ReverieConfig) => ChatProvider
   buildEmbeddings: (config: ReverieConfig) => EmbeddingProvider
   openEngine: (config: ReverieConfig, deps: EngineDeps) => Promise<MemoryEngine>
+  // Optional wiring for the decorative startup spinner. When write is
+  // absent (or colorEnabled is false) the spinner is a no-op, exactly like
+  // the status line: no escape sequence ever reaches a non-TTY stream.
+  write?: (text: string) => void
+  colorEnabled?: boolean
+  setInterval?: (fn: () => void, ms: number) => unknown
+  clearInterval?: (handle: unknown) => void
 }
 
 export type CliContextResult =
@@ -381,7 +389,23 @@ export async function openCliContext(deps: CliEngineDeps): Promise<CliContextRes
     return { ok: false, kind: 'provider', message: errorMessage(err) }
   }
 
+  // Decorative: a dim spinner cycles startup phrases while the engine's
+  // maintenance work runs. Purely cosmetic, not tied to any internal
+  // engine phase; it stops the moment openEngine settles either way.
+  const spinner =
+    deps.write !== undefined
+      ? createStartupSpinner({
+          write: deps.write,
+          colorEnabled: deps.colorEnabled === true,
+          setInterval: deps.setInterval ?? ((fn, ms) => setInterval(fn, ms)),
+          clearInterval:
+            deps.clearInterval ??
+            ((handle) => clearInterval(handle as Parameters<typeof clearInterval>[0])),
+        })
+      : undefined
+
   try {
+    if (spinner !== undefined) spinner.start()
     const engine = await deps.openEngine(config, {
       chat,
       embeddings,
@@ -391,6 +415,8 @@ export async function openCliContext(deps: CliEngineDeps): Promise<CliContextRes
     return { ok: true, engine, config, chat }
   } catch (err) {
     return { ok: false, kind: 'config', message: errorMessage(err) }
+  } finally {
+    spinner?.stop()
   }
 }
 

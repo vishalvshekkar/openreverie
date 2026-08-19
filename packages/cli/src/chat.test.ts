@@ -1013,6 +1013,96 @@ describe('openCliContext', () => {
       await rm(dir, { recursive: true, force: true })
     }
   })
+
+  it('shows a startup phrase while the engine is opening and clears the line when it resolves', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'openreverie-cli-context-spinner-'))
+    try {
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const output: string[] = []
+      const intervals: Array<() => void> = []
+      let releaseOpen!: () => void
+      const gate = new Promise<void>((resolve) => {
+        releaseOpen = resolve
+      })
+      const pending = openCliContext({
+        loadConfig: async () => testConfig(dir),
+        buildChat: () => chat,
+        buildEmbeddings: () => new FakeEmbeddingProvider(),
+        openEngine: async () => {
+          await gate
+          return engine
+        },
+        write: (text: string) => output.push(text),
+        colorEnabled: true,
+        setInterval: (fn: () => void, _ms: number) => {
+          intervals.push(fn)
+          return intervals.length
+        },
+        clearInterval: () => {},
+      })
+
+      // One microtask flush lets loadConfig settle and the spinner start
+      // while openEngine is still pending on the gate.
+      await Promise.resolve()
+      expect(output[0]).toContain('Getting my thoughts in order...')
+
+      intervals[0]?.()
+      expect(output[1]).toContain('Looking back...')
+
+      releaseOpen()
+      const result = await pending
+      expect(result.ok).toBe(true)
+      // The clear follows the last phrase; nothing stays stranded on the
+      // line for whatever the session prints next.
+      expect(output[output.length - 1]).toBe('\r\x1b[K')
+      if (result.ok) {
+        await result.engine.close()
+      } else {
+        await engine.close()
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('clears the startup spinner when the engine open fails, instead of leaving a stranded phrase', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'openreverie-cli-context-spinner-fail-'))
+    try {
+      const output: string[] = []
+      const intervals: Array<() => void> = []
+      let releaseFail!: (err: Error) => void
+      const gate = new Promise<MemoryEngine>((_resolve, reject) => {
+        releaseFail = reject
+      })
+      const pending = openCliContext({
+        loadConfig: async () => testConfig(dir),
+        buildChat: () => new FakeChatProvider([]),
+        buildEmbeddings: () => new FakeEmbeddingProvider(),
+        openEngine: async () => gate,
+        write: (text: string) => output.push(text),
+        colorEnabled: true,
+        setInterval: (fn: () => void, _ms: number) => {
+          intervals.push(fn)
+          return intervals.length
+        },
+        clearInterval: () => {},
+      })
+
+      await Promise.resolve()
+      expect(output[0]).toContain('Getting my thoughts in order...')
+
+      releaseFail(new Error('engine open failed: disk full'))
+      const result = await pending
+      expect(result.ok).toBe(false)
+      if (!result.ok) {
+        expect(result.message).toBe('engine open failed: disk full')
+      }
+      expect(output[output.length - 1]).toBe('\r\x1b[K')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('countMemoryDocuments', () => {
