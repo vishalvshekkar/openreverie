@@ -3,7 +3,8 @@ import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ReverieConfig } from '@openreverie/core'
-import type { MemoryEngine } from '@openreverie/memory'
+import type { MemoryEngine, Profile, ProfileSettingsPatch, StyleConfig } from '@openreverie/memory'
+import { DEFAULT_STYLE } from '@openreverie/memory'
 import type { ChatProvider, EmbeddingProvider } from '@openreverie/providers'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, type RecordEngine } from './app.js'
@@ -37,6 +38,24 @@ class FakeEngine implements RecordEngine {
   }
   async resolveProposal() {}
   async close() {}
+
+  profileState: Profile = { meta: { id: 'profile_fake' }, body: '' }
+
+  profile(): Profile {
+    return this.profileState
+  }
+
+  currentStyle(): StyleConfig {
+    return DEFAULT_STYLE
+  }
+
+  async updateProfileSettings(patch: ProfileSettingsPatch): Promise<Profile> {
+    this.profileState = {
+      meta: { ...this.profileState.meta },
+      body: patch.prose ?? this.profileState.body,
+    }
+    return this.profileState
+  }
 }
 
 function config(memoryDir: string): ReverieConfig {

@@ -4,15 +4,19 @@ import { readFile, realpath } from 'node:fs/promises'
 import type { IncomingMessage, RequestListener, ServerResponse } from 'node:http'
 import { extname, isAbsolute, relative, resolve, sep } from 'node:path'
 import type { ReverieConfig } from '@openreverie/core'
-import type {
-  Proposal,
-  PublicDocument,
-  PublicDocumentRow,
-  PublicGraphEdge,
-  PublicGraphNode,
-  PublicSession,
-  PublicTranscriptLine,
-  SequencedGraphRecord,
+import {
+  type Profile,
+  type ProfileSettingsPatch,
+  type Proposal,
+  type PublicDocument,
+  type PublicDocumentRow,
+  type PublicGraphEdge,
+  type PublicGraphNode,
+  type PublicSession,
+  type PublicTranscriptLine,
+  profileSettingsPatchSchema,
+  type SequencedGraphRecord,
+  type StyleConfig,
 } from '@openreverie/memory'
 import { z } from 'zod'
 import {
@@ -40,6 +44,9 @@ export interface RecordEngine {
   docIdForPath(path: string): string | undefined
   listPendingProposals(): Promise<Proposal[]>
   resolveProposal(id: string, resolution: 'accepted' | 'rejected'): Promise<void>
+  profile(): Profile
+  currentStyle(): StyleConfig
+  updateProfileSettings(patch: ProfileSettingsPatch): Promise<Profile>
 }
 
 export interface CreateAppDeps {
@@ -78,6 +85,7 @@ export function createApp(deps: CreateAppDeps): RequestListener {
       proposalResolutionLocks,
       deps.registry,
       deps.staticDir,
+      deps.config,
     ).catch((error: unknown) => {
       writeError(res, toApiError(error))
     })
@@ -93,6 +101,7 @@ async function handle(
   proposalResolutionLocks: Map<string, Promise<void>>,
   registry: LiveSessionRegistry | undefined,
   staticDir: string | undefined,
+  config: ReverieConfig | undefined,
 ): Promise<void> {
   const parsed = parseRequestUrl(req)
   const path = decodePath(parsed.pathname)
@@ -365,6 +374,48 @@ async function handle(
     return
   }
 
+  if (method === 'GET' && path.length === 3 && path[2] === 'profile') {
+    writePublicJson(
+      res,
+      200,
+      publicProfileSchema,
+      publicProfile(engine.profile(), engine.currentStyle()),
+      null,
+    )
+    return
+  }
+
+  if (method === 'PATCH' && path.length === 3 && path[2] === 'profile') {
+    const body = profileSettingsPatchSchema.safeParse(await readJson(req))
+    // An unrecognized key in a file the user may hand-edit is probably
+    // intentional; an unrecognized key arriving over HTTP is probably a
+    // mistake or an attempt. So the file schema passes them through and this
+    // one rejects the whole body rather than applying it in part.
+    if (!body.success) throw new ApiError(400, 'invalid_request', 'The request is invalid.')
+    const profile = await engine.updateProfileSettings(body.data)
+    writePublicJson(
+      res,
+      200,
+      publicProfileSchema,
+      publicProfile(profile, engine.currentStyle()),
+      null,
+    )
+    return
+  }
+
+  if (method === 'GET' && path.length === 3 && path[2] === 'settings') {
+    // Exactly one field. No memory folder path, no config file path, no
+    // model names, and above all nothing from the provider block. There is
+    // no PATCH: safety mode is not settable over HTTP, for the same reason
+    // it stays in config.toml.
+    const safetyMode = config?.safety.mode
+    if (safetyMode === undefined) {
+      throw new ApiError(404, 'not_found', 'The requested resource was not found.')
+    }
+    writePublicJson(res, 200, publicSettingsSchema, { safetyMode }, null)
+    return
+  }
+
   throw new ApiError(404, 'not_found', 'The requested resource was not found.')
 }
 
@@ -565,6 +616,49 @@ const proposalResolutionResponseSchema = z.strictObject({
   proposalId: z.string(),
   resolution: z.enum(['accepted', 'rejected']),
 })
+const publicProfileSchema = z.strictObject({
+  preferredName: z.string().nullable(),
+  pronouns: z.string().nullable(),
+  location: z.string().nullable(),
+  timezone: z.string().nullable(),
+  birthday: z.string().nullable(),
+  birthdayGreetings: z.boolean().nullable(),
+  occupation: z.string().nullable(),
+  style: z.strictObject({
+    engagement: z.string(),
+    tone: z.string(),
+    orientation: z.string(),
+  }),
+  prose: z.string(),
+})
+const publicSettingsSchema = z.strictObject({
+  safetyMode: z.enum(['companion', 'firewall']),
+})
+
+// Built from the whitelist, key by key, never by serializing the loaded
+// object. profile.md's own schema passes unknown keys through, so a
+// hand-added or forward-written key can exist in the file; this endpoint
+// does not echo it. timezoneSource is deliberately absent: it says how
+// confident the zone is, which is an implementation detail rather than a
+// setting.
+function publicProfile(profile: Profile, style: StyleConfig): z.infer<typeof publicProfileSchema> {
+  const meta = profile.meta
+  return {
+    preferredName: meta.preferredName ?? null,
+    pronouns: meta.pronouns ?? null,
+    location: meta.location ?? null,
+    timezone: meta.timezone ?? null,
+    birthday: meta.birthday ?? null,
+    birthdayGreetings: meta.birthdayGreetings ?? null,
+    occupation: meta.occupation ?? null,
+    style: {
+      engagement: style.engagement,
+      tone: style.tone,
+      orientation: style.orientation,
+    },
+    prose: profile.body,
+  }
+}
 const responseMetaSchema = z.strictObject({ nextCursor: z.string().nullable() })
 
 function responseSchema<T extends z.ZodType>(data: T) {

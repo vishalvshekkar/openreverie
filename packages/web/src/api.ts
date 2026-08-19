@@ -150,6 +150,29 @@ export const streamEventSchema = z.discriminatedUnion('type', [
   }),
 ])
 
+export const profileSchema = z.strictObject({
+  preferredName: z.string().nullable(),
+  pronouns: z.string().nullable(),
+  location: z.string().nullable(),
+  timezone: z.string().nullable(),
+  birthday: z.string().nullable(),
+  birthdayGreetings: z.boolean().nullable(),
+  occupation: z.string().nullable(),
+  style: z.strictObject({
+    engagement: z.string(),
+    tone: z.string(),
+    orientation: z.string(),
+  }),
+  prose: z.string(),
+})
+
+export const settingsSchema = z.strictObject({
+  safetyMode: z.enum(['companion', 'firewall']),
+})
+
+export type PublicProfile = z.infer<typeof profileSchema>
+export type PublicSettings = z.infer<typeof settingsSchema>
+
 export type StreamEvent = z.infer<typeof streamEventSchema>
 export type Session = z.infer<typeof sessionSchema>
 export type CreateSessionResponse = z.infer<typeof createSessionResponseSchema>
@@ -188,6 +211,9 @@ export interface AppApi {
   transcript(sessionId: string, cursor?: string): Promise<Page<TranscriptLine>>
   end(sessionId: string): Promise<Session>
   getGraphSnapshot(): Promise<GraphSnapshot>
+  getProfile(): Promise<PublicProfile>
+  updateProfile(patch: Record<string, unknown>): Promise<PublicProfile>
+  getSettings(): Promise<PublicSettings>
 }
 
 export class ApiHttpError extends Error {
@@ -412,6 +438,26 @@ export class ApiClient implements AppApi {
 
   getGraphSnapshot(): Promise<GraphSnapshot> {
     return this.request('/api/v1/graph/snapshot', {}, graphSnapshotSchema)
+  }
+
+  getProfile(): Promise<PublicProfile> {
+    return this.request('/api/v1/profile', {}, profileSchema)
+  }
+
+  updateProfile(patch: Record<string, unknown>): Promise<PublicProfile> {
+    return this.request(
+      '/api/v1/profile',
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      },
+      profileSchema,
+    )
+  }
+
+  getSettings(): Promise<PublicSettings> {
+    return this.request('/api/v1/settings', {}, settingsSchema)
   }
 
   private async ndjson(path: string, init: RequestInit): Promise<AsyncIterable<StreamEvent>> {
