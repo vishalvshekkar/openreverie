@@ -203,10 +203,27 @@ instead of queuing it.
   and abandoning the picker (navigate away, close the tab) leaves nothing to clean up. Also worth a
   look: the cards read well and the mid-conversation `<select>` switcher (Task 21) still works
   unchanged.
-- [ ] Whatever the journal epoch's own web and CLI surfaces turn out to be, most likely a real
-  Journal destination replacing the current placeholder. Add a specific item here as each such batch
-  lands, with the same level of detail as the two above: what to click, what to type, what to watch
-  for, not just "test the journal feature."
+- [ ] **The web journal tab, real content, replacing the placeholder** (`4a170a0`). Run `reverie web`
+  against a memory folder with at least one real journal entry (start a session in journal mode from
+  the CLI or web, write something, end the session so reflection runs), open the Journal nav
+  destination, and confirm: entries list newest-`entryDate`-first with the method in plain words
+  ("Gratitude", "Daily Examen", not the internal key), a formatted date, and a short excerpt;
+  clicking an entry shows its full body rendered as markdown, the method and date as a header line,
+  and a "Written <date>" secondary line only when `recordedAt` differs meaningfully from
+  `entryDate`; confirm there is no edit, delete, or compose control anywhere on the tab (it is
+  read-only by design); confirm switching to the Journal tab does not end a live Conversations
+  session (same check as the other nav destinations). Also worth a look: a memory folder with zero
+  journal entries yet shows "No journal entries yet." rather than an empty list that could read as
+  broken.
+- [ ] **The journal-mode conversational experience itself, CLI and web**: start a session in journal
+  mode, go through the first-time setup conversation (no `journaling.md` yet), confirm the agent
+  actually asks what you want out of journaling rather than launching straight into a method, then
+  pick a method (the examen is a good one to try, since it is the suggested default) and confirm the
+  prompt sequence runs conversationally rather than as a form. Separately, try expressive writing and
+  confirm the safety gate behavior described in the spec is visible in practice: it should not be
+  offered if the conversation reads as being in crisis territory, and the session should close with
+  the grounding prompt. This is the one part of the whole journal epoch no automated test can verify,
+  since it depends on the model's actual behavior at inference time, not on code paths.
 
 ### Modes plan, worktree `.claude/worktrees/modes`, branch `feat/phase-d-modes`
 
@@ -261,7 +278,7 @@ half-written build output. Mark a batch ONGOING *before* dispatching it.
 | K | 13 | **SAFETY invariant test, six combinations, position plus bytes**; `core/personas.test.ts` only | H, C | DONE, 1117, orchestrator personally re-falsified both halves in isolation | `5993b07` |
 | L | 14 | Server exposes `journal`/`journaling` kinds; `server/app.ts` | B | DONE, 1118, dispatched to `pi` CLI + DeepSeek V4 flash (trial 3), orchestrator-verified and independently falsified | `2814ca9` |
 | M | 15, + deferred item 1 | Web client schema, `Library.tsx` `KIND_LABELS`; `web/api.ts`, `web/views/Library.tsx`. Also close deferred item 1 from the modes epoch (below): `getProfile`, `updateProfile`, `getSettings` have no tests in `api.test.ts`, and M is already touching that exact file | L | DONE, 1125, dispatched to `pi` CLI + DeepSeek V4 flash (trial 4), orchestrator-verified and independently falsified. **Deferred item 1 (below) is now closed.** | `7bea8f7` |
-| N | 16 | Real web journal tab, `excerpt`/`recordedAt` end to end; `engine.ts`, `server/app.ts`, `web/api.ts`, `web/views/Journal.tsx` (replaces placeholder), `journal.css` | B, L, M | ONGOING (dispatched to `pi` CLI + DeepSeek V4 flash, trial 5, the last task in the plan) | |
+| N | 16 | Real web journal tab, `excerpt`/`recordedAt` end to end; `engine.ts`, `server/app.ts`, `web/api.ts`, `web/views/Journal.tsx` (replaces placeholder), `journal.css` | B, L, M | DONE, 1132, dispatched to `pi` CLI + DeepSeek V4 flash (trial 5), orchestrator-verified and independently falsified. **All 16 journal tasks complete.** | `4a170a0` |
 
 Notes on sequencing, from the plan survey:
 
@@ -322,6 +339,19 @@ Notes on sequencing, from the plan survey:
   positive `.toMatch(/not a recurring nag/i)` lock-in), falsified for real. Lesson for future
   batches: a subagent's own classification of "spec-transcribed vs. incidental" is not reliable
   enough to skip checking the spec directly when the two collide.
+- **N's plan Files block omitted `packages/web/src/App.tsx`.** The placeholder `Journal` component
+  took no props; the real one requires `api: AppApi`. `App.tsx`'s call site
+  (`{view === 'journal' && (...)}`) needed one line changed, `<Journal />` to `<Journal api={api}
+  />`, or `tsc -b` fails. `App.test.tsx` needed no change (it mocks `./views/Journal.js` with a
+  prop-agnostic stub). Two more plan defects found and fixed in N: the `excerpt` conditional-spread
+  literal fails `exactOptionalPropertyTypes` on a second call site (fixed by hoisting to a `const`
+  and narrowing the truthy branch, the same pattern used elsewhere in this file); and the plan's own
+  entry-view assertion (`getByText(/Gratitude/)` / a naive formatted-date match) matches multiple
+  elements at once, since the same method label and date text render in both the list row and the
+  reading pane. Fixed with an exact match on the reading pane's own concatenated text
+  (`'Gratitude · 14 August 2026'`, `/Written 14 August 2026/`), which the orchestrator's own
+  corrected brief for this batch had also gotten wrong on the first pass; the implementer caught it,
+  not the orchestrator.
 - **K's own plan text (Task 13 Step 1) contained a tautological assertion, caught by the
   implementer's own second review pass, then independently re-verified by the orchestrator.** The
   plan's position check compared each arm's crisis-section slice against itself
