@@ -60,19 +60,16 @@ decided afterward not to continue the trial. P (the web mode-card flow, commit `
 everything since went back to Claude subagents (`sonnet`/`haiku` via the `Agent` tool), batched by
 shared files for token efficiency. That is the standing approach going forward.
 
-**Your next action is to read the journal plan and split it into batches**, the same way modes was
-split into Batches A through M by shared files before any dispatch happened. The plan is long
-(4375 lines) and has not been read yet this session:
-`docs/superpowers/plans/2026-08-17-journal-mode-plan.md`. Read its task list and file-touch list
-per task first (skim, do not load the whole thing into one context if a subagent can survey it
-instead), group tasks that touch the same files into one batch each, and write that batching into
-this document's STATUS BOARD (a new "Journal plan, worktree `.claude/worktrees/journal`, branch
-`feat/phase-d-journal`" table, same shape as the modes one below) before dispatching anything.
-Mark a task ONGOING before dispatching it, same discipline as modes.
+The journal plan (`docs/superpowers/plans/2026-08-17-journal-mode-plan.md`, 4375 lines) has been
+read in full (via a subagent survey, not loaded whole into the orchestrator's context) and split
+into Batches A through N by shared files, the same way modes was split into Batches A through M.
+See the "Journal plan" table below for the batching and "Journal plan defects found" for what the
+survey turned up. **Nothing has been dispatched yet.** Mark a batch ONGOING before dispatching it,
+same discipline as modes.
 
 **Journal's Task 13 is a safety-invariant test (six combinations, position plus bytes). Falsify
 that one yourself, never a subagent.** It is the same shape as the modes Task 8 invariant (Batch D,
-falsified by the orchestrator, not redone). See "Safety handling" below.
+falsified by the orchestrator, not redone). It is Batch K below. See "Safety handling" below.
 
 ## STATUS BOARD
 
@@ -89,7 +86,7 @@ to be corrected in the last session.
 | 2 | **time** `2026-08-17-time-as-first-class-plan.md` | 23 | nothing | **DONE**, merged into design |
 | 3 | **retrieval** `2026-08-17-context-and-retrieval-plan.md` | 19 | time | **DONE**, merged into design as `a0bd482` |
 | 4 | **modes** `2026-08-17-modes-profile-settings-plan.md` | 24 | time | **DONE, merged into design as `e9c3350`.** Re-gated on design after merge: build 0, lint 0, 1029/1029. Worktree `.claude/worktrees/modes` removed. See Batches A to Q below |
-| 5 | **journal** `2026-08-17-journal-mode-plan.md` | 16 | time, modes | **STARTING.** Worktree `.claude/worktrees/journal` created from post-merge design (branch `feat/phase-d-journal`), `pnpm install` done, baseline confirmed at 1029/1029. No tasks batched or dispatched yet: the plan (4375 lines) has not been read and split into batches. That is the next action |
+| 5 | **journal** `2026-08-17-journal-mode-plan.md` | 16 | time, modes | **BATCHED, not yet dispatched.** Worktree `.claude/worktrees/journal` on `feat/phase-d-journal`, baseline reconfirmed at 1029/1029 (build 0, lint 0). Plan read and split into Batches A to N by shared files. See the Journal plan table below |
 
 Phase D is not finished until all five have shipped and merged into `feat/phase-d-design`, and
 design has merged to `main`. Merging design into `main` and cutting a release is the human's call:
@@ -155,54 +152,131 @@ next agent" section directly.
 
 Seventeen commits sit on `feat/phase-d-modes` ahead of `feat/phase-d-design`, before O, P, and Q.
 
+### Journal plan, worktree `.claude/worktrees/journal`, branch `feat/phase-d-journal`
+
+Batching is by shared files, same discipline as modes: SEQUENTIAL in the one worktree, never
+parallel, because two agents running `npx tsc -b` against the same `dist/` read each other's
+half-written build output. Mark a batch ONGOING *before* dispatching it.
+
+| Batch | Tasks | What | Depends on | State | Commits |
+| --- | --- | --- | --- | --- | --- |
+| A | 1 | `memory/paths.ts`: `journalDir`, `journaling` fields | nothing | TODO | |
+| B | 2 | `DocKind` gains `journal`/`journaling`; `sqlite.ts`, `engine.ts`, `core/tools.ts` | A | TODO | |
+| C | 3, 4, 7 | `memory/journal.ts`: entry filename/frontmatter, body assembly, `journaling.md` read/write helper | A, B | TODO | |
+| D | 5 | `declare_journal_method` tool; `transcripts.ts`, `engine.ts`, `core/tools.ts` | C | TODO | |
+| E | 6 | Gated write in `_doEndSession`, the crash path; `engine.ts` **safety-adjacent** | C, D | TODO | |
+| F | 8 | `sessionContext` gains `mode` param, `journalingProtocol`; `engine.ts` | C | TODO | |
+| G | 9 | `journalingProtocolSection` in the assembled prompt; `core/context.ts` | F | TODO | |
+| H | 10 | `core/journaling.ts` content module (largest task, includes the expressive-writing safety gate); wires into `core/modes.ts`, `core/personas.ts` (`buildPersona` signature), `core/context.ts` (call site) **safety-relevant content** | C, G | TODO | |
+| I | 11 | `update_journaling_protocol` tool, `refreshSystemPrompt` trigger; `engine.ts`, `core/tools.ts`, `core/agent.ts` | C | TODO | |
+| J | 12 | Reflection's `journalingUpdate` field, the backstop path; `reflection.ts`, `engine.ts` | C | TODO | |
+| K | 13 | **SAFETY invariant test, six combinations, position plus bytes**; `core/personas.test.ts` only | H, C | TODO, orchestrator falsifies personally | |
+| L | 14 | Server exposes `journal`/`journaling` kinds; `server/app.ts` | B | TODO | |
+| M | 15 | Web client schema, `Library.tsx` `KIND_LABELS`; `web/api.ts`, `web/views/Library.tsx` | L | TODO | |
+| N | 16 | Real web journal tab, `excerpt`/`recordedAt` end to end; `engine.ts`, `server/app.ts`, `web/api.ts`, `web/views/Journal.tsx` (replaces placeholder), `journal.css` | B, L, M | TODO | |
+
+Notes on sequencing, from the plan survey:
+
+- **C bundles three tasks (3, 4, 7) that all touch `journal.ts` and each depend only on Task 1.**
+  Task 3 also has an undeclared soft dependency on Task 2 (it writes `kind: 'journal'` into
+  frontmatter before `DocKind` formally includes it), which is why C runs after B, not before.
+- **G before H is a deliberate ordering, not a hard dependency.** Task 10 declares a dependency
+  only on Task 3, but its Step 7 (undeclared in the plan's own Files block for Task 10) edits
+  `core/context.ts`'s `assembleSystemPrompt` to widen the `buildPersona(...)` call site, which is
+  the same function Task 9 (Batch G) edits to add `journalingProtocolSection` to the `sections`
+  array. Running G first means H's brief can say plainly "the `sections` array already has the
+  journaling line, thread the new args through the `buildPersona` call without touching it,"
+  instead of leaving two batches to land conflicting edits to the same function in either order.
+- **H is where `buildPersona` gains the widened signature Batch K's safety test depends on.** K
+  cannot be dispatched before H lands and is verified.
+- **N's declared dependency in the plan is Task 2 only; the real dependency is B, L, and M.** Task
+  16 Steps 5 and 8 add `excerpt`/`recordedAt` to the response schemas Tasks 14 and 15 create
+  (`publicDocumentRowSchema`, `documentRowSchema`). Dispatching N before L and M land means those
+  schemas do not exist yet to extend.
+- Batch E (Task 6) is flagged safety-adjacent, not the safety invariant itself: it is the
+  crash-path gating logic Batch K's test protects. Its own plan steps require a two-direction
+  falsification (remove the `mode` gate, then separately the `method` gate) with the plan's own
+  warning that a gate checking only one of the two would pass every test written before that
+  second falsification. Require both directions' real failure output in the report; this one does
+  not need the orchestrator to re-run it personally, unlike K.
+
+### Journal plan defects found, do not re-derive
+
+From the same survey that produced the batching above, verified by reading the plan itself (not
+yet cross-checked against the real tree, since nothing has been dispatched):
+
+1. **Task 10's own Files block omits two files it actually edits.** It declares only
+   `journaling.ts`, `journaling.test.ts`, `modes.ts`, `modes.test.ts`, but Step 7 also edits
+   `core/personas.ts` (widens `buildPersona`) and `core/context.ts` (the `assembleSystemPrompt`
+   call site, which Task 9 also touches). Reflected in Batch H's scope and the G-before-H ordering
+   above.
+2. **The plan's global "File Structure" table (its lines 54 to 92) is incomplete and does not
+   match the per-task Files blocks.** `core/personas.ts` never appears there at all (only
+   `personas.test.ts` does); `core/modes.ts` and `modes.test.ts` are absent despite Task 10's own
+   Files block listing both. Treat per-task Files blocks as more authoritative, with the caveat in
+   defect 1.
+3. **Task 16's declared dependency (Task 2 only) understates its real dependency on Tasks 14 and
+   15.** See the N row above.
+4. **Task 6 assumes `this.profile.meta.timezone` exists on `MemoryEngine` without a grep check**,
+   unlike almost everywhere else in this plan, which otherwise grep-confirms cross-plan
+   assumptions explicitly. Batch E's brief should require a grep confirmation of the real shape
+   (likely `profile()` accessor plus `Profile.meta`, per the modes-era drift notes above) before
+   relying on it, and report if the real shape differs.
+5. **Task 3's stated dependency (Task 1 only) may understate a soft dependency on Task 2**, since
+   it writes `kind: 'journal'` into frontmatter before `DocKind` formally includes that literal.
+   Resolved by ordering (C runs after B), not by changing Task 3's own text.
+6. **Many code snippets in the plan are placeholders**, marked
+   `// ...whatever this function already does..., unchanged...`, expecting the implementer to grep
+   the real shape rather than copy-paste. This is by design (the plan predates the time and modes
+   plans landing) but raises the bar on batches touching the same file this way, notably G and H
+   on `context.ts`.
+
 ## What to do next, in order
 
-1. **Batch O, the CLI startup spinner.** One `sonnet` subagent, one dispatch. Brief points at
-   `docs/superpowers/specs/2026-08-19-mode-at-launch-design.md`'s "CLI startup wait" section and
-   "Implementation notes" section directly, exact `sed -n` range, do not re-transcribe it. State
-   the starting test count (1018), forbid committing, require the falsify-a-test discipline for
-   whatever test covers the spinner's phrase rotation. Verify yourself, commit yourself.
+Modes is fully done: Batches O, P, Q shipped, merged into design as `e9c3350`, re-gated
+(build 0, lint 0, 1029/1029). The worktree `.claude/worktrees/modes` is removed. The journal
+worktree exists and is batched (Batches A to N above). Nothing dispatched yet.
 
-2. **Batch P, the web mode-card new-chat flow.** One `sonnet` subagent, one dispatch, after O is
-   committed. Same brief pattern, pointed at the spec's "web defers session creation" section.
-   Tell it explicitly to confirm what the current new-chat entry point does before changing it,
-   per the spec's own implementation note, and to reuse the existing mode-catalogue enumeration
-   the Task 21 picker already uses rather than adding a second source of truth. Verify yourself,
-   commit yourself.
+1. **Dispatch Batches A through N, sequentially, one `sonnet` subagent per batch** (see "Dispatching
+   subagents: the workflow that works" below for the recipe: shared preamble, short brief pointing
+   at exact `sed -n` ranges, state the starting test count, forbid committing, require falsify-not-
+   backfill). Mark each batch ONGOING before dispatch, verify with the full worktree gate yourself
+   (`npx tsc -b && npx vitest run && npx biome check --write . && npx biome check .`), `git show
+   --stat` the would-be commit's contents before committing, read the hash back with
+   `git rev-parse --short HEAD`, then fill in the table.
 
-3. **Batch Q, Task 22, the README. Personally, not via a subagent.** The Status section must
-   reflect reality. What modes actually shipped: conversation modes with a ten-mode catalogue and
-   a persona overlay; the personal profile fields; `set_mode` replacing `update_style`; style out
-   of `config.toml` and into `profile.md` with a `reverie migrate` path; a CLI command table with
-   `/mode`, `/style`, `/settings`, `/whoami`, `/help` and `/bye`; a persistent CLI status strip; a
-   `mode` stream event; session mode over HTTP; profile and settings endpoints; two new web
-   destinations plus a mode picker; and, once O and P ship, the mode-at-launch behavior itself
-   (CLI always starts `general` with a startup spinner, web picks a mode via cards before a
-   session exists). Claim nothing beyond that. Note honestly that the journal destination is a
-   placeholder whose contents the journal epoch replaces.
+2. **Batch K (Task 13) is the safety invariant. Falsify it personally**, exactly like modes Task 8
+   (Batch D): a subagent may write the RED test and the GREEN implementation, but the orchestrator
+   personally re-runs the falsification (move the mode-paragraph insertion after `crisisSection`
+   in `buildPersona`, confirm the `endsWith` assertions fail while a `toContain` presence check
+   would still pass, then restore) and pastes the real output here, rather than trusting the
+   subagent's report of having done it.
 
-4. **Clear the deferred items below that you judge blocking.** At minimum, read all of them.
+3. **Add to the MANUAL TESTING QUEUE as journal's web/CLI surfaces land**, per that section's own
+   rule: specifics (what to click, what to type, what to watch for), not "test the journal
+   feature." Batch N (the real web journal tab) is the obvious candidate. Do not test any of it
+   piecemeal unless it looks too risky to leave unverified until the end-of-epoch pass; say so
+   plainly if that judgment call comes up.
 
-5. **Merge modes into design:**
+4. **After all 16 tasks are done and verified**, run the full worktree gate one more time, then
+   merge journal into design:
    ```bash
    cd /Users/vishal/work/personal/second-mind
-   git merge feat/phase-d-modes        # regular merge, NOT --ff-only
+   git merge feat/phase-d-journal      # regular merge, NOT --ff-only
    pnpm lint && pnpm build && pnpm test
-   git worktree remove .claude/worktrees/modes
+   git worktree remove .claude/worktrees/journal
    ```
    Run the full gate again on design after the merge, because a merge can break what neither
    branch broke alone.
 
-6. **Then journal.** Create the worktree from the modes-merged design, NOT before:
-   ```bash
-   git worktree add .claude/worktrees/journal -b feat/phase-d-journal feat/phase-d-design
-   cd .claude/worktrees/journal && pnpm install
-   ```
-   Run the journal plan's 16 tasks. Its **Task 13 is a safety-invariant test (six combinations,
-   position plus bytes). Falsify that one yourself**, never a subagent. It is the same shape as
-   the modes Task 8 invariant.
+5. **Run the full MANUAL TESTING QUEUE**, journal's own items plus the two already queued from
+   modes (the CLI startup spinner, the web mode-card picker), as one consolidated pass.
 
-7. Update the README honestly after journal ships too.
+6. **Update the README honestly**, reflecting what journal actually shipped on top of what modes
+   already documented.
+
+7. Phase D is not finished until design merges to `main`. That merge, and cutting a release, is
+   the human's call: raise it and wait.
 
 ## DO THIS FIRST: a design workshop on mode at launch — DONE
 
