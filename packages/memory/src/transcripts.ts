@@ -54,7 +54,9 @@ export interface TranscriptLine {
 // append-only, and mixing a value that is rewritten on every mode change
 // into that stream would mean either breaking append-only or accumulating
 // one line per change that every transcript reader then has to filter out.
-export const sessionMetaSchema = z.object({ mode: z.string().optional() }).passthrough()
+export const sessionMetaSchema = z
+  .object({ mode: z.string().optional(), journalMethod: z.string().optional() })
+  .passthrough()
 export type SessionMeta = z.infer<typeof sessionMetaSchema>
 
 export interface PublicTranscriptLine extends TranscriptLine {

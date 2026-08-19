@@ -13,8 +13,9 @@
 // which is proof that neither is correct. File mtime is worse still, since
 // it records when reflection last rewrote the page. So living documents get
 // null, are stored with null date columns, and are never excluded by a date
-// filter. That is a stated, tested property of exactly four kinds, not an
-// accident that swallows most of the corpus.
+// filter. That is a stated, tested property of exactly five kinds, not an
+// accident that swallows most of the corpus. journaling.md joins that group:
+// it is one continuously revised document, not an event with a date.
 
 import type { DocumentMeta } from './documents.js'
 import { isoMondayOf, isoSundayOf } from './rollups.js'
@@ -38,6 +39,13 @@ export function documentDateSpan(kind: DocKind, meta: DocumentMeta): DateSpan | 
       }
       return { start: date, end: date }
     }
+    case 'journal': {
+      const date = meta.entryDate
+      if (typeof date !== 'string' || !ISO_DATE_PATTERN.test(date)) {
+        return null
+      }
+      return { start: date, end: date }
+    }
     case 'rollup_weekly': {
       const week = meta.week
       if (typeof week !== 'string' || !ISO_WEEK_PATTERN.test(week)) {
@@ -49,6 +57,7 @@ export function documentDateSpan(kind: DocKind, meta: DocumentMeta): DateSpan | 
     case 'realm':
     case 'arc':
     case 'person':
+    case 'journaling':
       return null
   }
 }

@@ -2,7 +2,7 @@ import { render, screen, waitFor, within } from '@testing-library/react'
 import { userEvent } from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import type { AppApi, Document, DocumentRow } from '../api.js'
-import { Library } from './Library.js'
+import { displayTitle, Library } from './Library.js'
 import { Markdown, parseMarkdown, renderInline } from './markdown.js'
 
 function row(overrides: Partial<DocumentRow> & Pick<DocumentRow, 'docId' | 'kind'>): DocumentRow {
@@ -102,6 +102,26 @@ describe('Library', () => {
       await screen.findByRole('button', { name: 'Session summary, 14 August 2026' }),
     ).toBeVisible()
     expect(screen.queryByText('doc_01KZZC9RZM56575G4T7962C')).not.toBeInTheDocument()
+  })
+
+  it('displayTitle falls back to a readable label for a journal document with a placeholder title', () => {
+    const row = {
+      docId: 'doc_01JZZZ',
+      kind: 'journal' as const,
+      title: 'doc_01JZZZ',
+      updatedAt: '2026-08-16T21:04:00.000Z',
+    }
+    expect(displayTitle(row)).toContain('16 August 2026')
+  })
+
+  it('displayTitle falls back to a readable label for the journaling protocol document', () => {
+    const row = {
+      docId: 'doc_01JZZZ2',
+      kind: 'journaling' as const,
+      title: 'doc_01JZZZ2',
+      updatedAt: '2026-08-16T21:04:00.000Z',
+    }
+    expect(displayTitle(row)).toContain('16 August 2026')
   })
 
   it('groups documents under the expected human headings, in hierarchy order', async () => {

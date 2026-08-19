@@ -423,6 +423,15 @@ export class AgentSession {
           this.system = await assembleSystemPrompt(this.engine, this.config, this.activeMode)
         }
 
+        // Same reasoning as update_profile above: journaling.md feeds
+        // the journaling protocol section of the system prompt, so a
+        // live rewrite has to be reassembled in before the next model
+        // call sees it, rather than waiting for a session that has not
+        // started yet.
+        if (toolCall.name === 'update_journaling_protocol' && !this.resultHasError(result)) {
+          await this.refreshSystemPrompt()
+        }
+
         await this.appendBoth({ role: 'tool', content: result, toolCallId: toolCall.id })
         if (switchedTo !== undefined) {
           yield { type: 'mode', mode: switchedTo }

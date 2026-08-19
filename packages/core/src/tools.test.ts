@@ -57,15 +57,17 @@ function emptyReflectionOutput(summary: string) {
     arcUpdates: [],
     personUpdates: [],
     constitutionUpdate: null,
+    journalingUpdate: null,
   }
 }
 
 describe('toolDefinitions', () => {
-  it('lists exactly the eleven memory and style tools with non-empty descriptions and a JSON schema', () => {
+  it('lists exactly the thirteen memory and style tools with non-empty descriptions and a JSON schema', () => {
     const defs = toolDefinitions()
     const names = defs.map((d) => d.name).sort()
     expect(names).toEqual(
       [
+        'declare_journal_method',
         'graph_query',
         'list_arcs',
         'list_entities',
@@ -76,6 +78,7 @@ describe('toolDefinitions', () => {
         'remember',
         'search_memory',
         'set_mode',
+        'update_journaling_protocol',
         'update_profile',
       ].sort(),
     )
@@ -109,6 +112,13 @@ describe('toolDefinitions', () => {
     const kinds = (searchMemory.parameters as { properties: { kinds: { description: string } } })
       .properties.kinds
     expect(kinds.description).toContain('person')
+  })
+
+  it('search_memory documents journal and journaling as valid kinds', () => {
+    const definitions = toolDefinitions()
+    const searchMemory = definitions.find((tool) => tool.name === 'search_memory')
+    const description = JSON.stringify(searchMemory?.parameters)
+    expect(description).toContain('journal, journaling')
   })
 
   // The forget feature is parked: MemoryEngine.forget still exists as
@@ -445,6 +455,51 @@ describe('dispatchTool', () => {
     const definition = toolDefinitions().find((tool) => tool.name === 'remember')
     const properties = definition?.parameters.properties as Record<string, unknown>
     expect(properties.eventTime).toBeDefined()
+
+    await engine.close()
+  })
+
+  it('declare_journal_method records the method on the session', async () => {
+    const engine = await MemoryEngine.open(dir, fakeDeps())
+    const sessionId = await engine.startSession()
+
+    const result = await dispatchTool(
+      engine,
+      sessionId,
+      call('declare_journal_method', { method: 'gratitude' }),
+    )
+    expect(JSON.parse(result)).toEqual({ ok: true })
+    expect(await engine.sessionJournalMethod(sessionId)).toBe('gratitude')
+
+    await engine.close()
+  })
+
+  it('declare_journal_method rejects an unknown method', async () => {
+    const engine = await MemoryEngine.open(dir, fakeDeps())
+    const sessionId = await engine.startSession()
+
+    const result = await dispatchTool(
+      engine,
+      sessionId,
+      call('declare_journal_method', { method: 'astrology' }),
+    )
+    expect(JSON.parse(result).error).toBeDefined()
+
+    await engine.close()
+  })
+
+  it('update_journaling_protocol rewrites the document and reports ok', async () => {
+    const engine = await MemoryEngine.open(dir, fakeDeps())
+    const sessionId = await engine.startSession()
+
+    const result = await dispatchTool(
+      engine,
+      sessionId,
+      call('update_journaling_protocol', { body: 'Gratitude, three times a week.' }),
+    )
+    expect(JSON.parse(result).ok).toBe(true)
+    const rows = await engine.listPublicDocuments()
+    expect(rows.find((row) => row.kind === 'journaling')).toBeDefined()
 
     await engine.close()
   })

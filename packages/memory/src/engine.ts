@@ -36,6 +36,14 @@ import {
   readGraphRecords,
   type SequencedGraphRecord,
 } from './graph.js'
+import {
+  assembleJournalBody,
+  type JournalMethod,
+  readJournalingProtocol,
+  readJournalingProtocolIfPresent,
+  writeJournalEntry,
+  writeJournalingProtocol,
+} from './journal.js'
 import { ensureMemoryTree, type MemoryPaths, memoryPaths } from './paths.js'
 import {
   loadProfile,
@@ -88,6 +96,10 @@ export interface PublicDocumentRow {
   title: string
   updatedAt: string
   readOnly: true
+  method?: string
+  entryDate?: string
+  excerpt?: string
+  recordedAt?: string
 }
 
 export interface PublicDocument extends PublicDocumentRow {
@@ -310,6 +322,12 @@ export interface SessionContext {
   // is always called after startSession, so without this carve-out no
   // session would ever look like a first one.
   isFirstSession: boolean
+  // Only ever set when the session's mode is journal; undefined for every
+  // other mode and for a call site that passes no mode at all. When set,
+  // it is either the trimmed body of journaling.md or the fixed
+  // JOURNALING_PROTOCOL_ABSENT sentinel, never assembled ad hoc, so its
+  // wording cannot drift between call sites.
+  journalingProtocol: string | undefined
 }
 
 export type GraphQuery =
@@ -577,6 +595,35 @@ export class MemoryEngine {
     return (await SessionStore.readMeta(this.paths, sessionId))?.mode
   }
 
+  // Declares which of the six journal methods this session is using, once
+  // the companion and the person have settled on one (spec section 7, step
+  // 3). Persisted next to the session's mode in the same session.json, on
+  // the same crash-safety reasoning that persistence exists for at all:
+  // a later process's runMaintenance pass must be able to read it back
+  // with no live AgentSession anywhere. Read-merge-write so this call
+  // never clobbers a mode already written by setSessionMode.
+  async setSessionJournalMethod(sessionId: string, method: JournalMethod): Promise<void> {
+    const existing = await SessionStore.readMeta(this.paths, sessionId)
+    await SessionStore.writeMeta(this.paths, sessionId, { ...existing, journalMethod: method })
+  }
+
+  async sessionJournalMethod(sessionId: string): Promise<JournalMethod | undefined> {
+    const meta = await SessionStore.readMeta(this.paths, sessionId)
+    return meta?.journalMethod as JournalMethod | undefined
+  }
+
+  // The live-tool half of the journaling.md rewrite mechanism (spec
+  // section 4.5). Writes through the same shared helper reflection's
+  // journalingUpdate uses (Task 12), then reindexes so search stays
+  // current; reflection's own path reindexes separately, inside
+  // _doEndSession, on the same pattern the constitution update already
+  // uses.
+  async updateJournalingProtocol(body: string): Promise<Document> {
+    const doc = await writeJournalingProtocol(this.paths, body, new Date())
+    await this.reindexOrWarn(doc, 'journaling', 'live update_journaling_protocol call')
+    return doc
+  }
+
   async appendTranscript(sessionId: string, line: TranscriptLine): Promise<void> {
     const store = await SessionStore.open(this.paths, sessionId)
     await store.appendLine(line)
@@ -634,7 +681,6 @@ export class MemoryEngine {
     // Consumed by the journal spec's gated entry write. Read here, in the one
     // place that knows how to answer the question, rather than in two.
     const sessionModeAtEnd = await this.sessionMode(sessionId)
-    void sessionModeAtEnd
     const transcript = await SessionStore.readTranscript(this.paths, sessionId)
 
     if (!transcript.some((line) => line.role === 'user')) {
@@ -665,6 +711,7 @@ export class MemoryEngine {
           arcUpdates: [],
           personUpdates: [],
           constitutionUpdate: null,
+          journalingUpdate: null,
         }
       : raw
 
@@ -835,6 +882,13 @@ export class MemoryEngine {
         `session ${sessionId} constitution update`,
       )
     }
+    if (out.journalingUpdate !== null) {
+      await this.reindexOrWarn(
+        await readDocument(this.paths.journaling),
+        'journaling',
+        `session ${sessionId} journaling protocol update`,
+      )
+    }
     for (const [id] of narratives) {
       const node = this.graphState.nodes.get(id)
       if (node?.doc) {
@@ -846,13 +900,38 @@ export class MemoryEngine {
       }
     }
 
+    // Journal mode adds one more write after the rest of this pipeline
+    // completes, gated on the session's own recorded mode (read into
+    // sessionModeAtEnd above) and declared method (read fresh here), both
+    // sourced from session.json on disk rather than from any in-memory
+    // session registry: this is what makes the write survive the process
+    // that started the session dying before an orderly endSession (spec
+    // section 11). Absent mode, absent method, or a mode other than
+    // journal all degrade the same way: no journal document is written,
+    // and nothing else about this pipeline changes.
+    if (sessionModeAtEnd === 'journal') {
+      const method = await this.sessionJournalMethod(sessionId)
+      if (method) {
+        const entryDate = formatLocalDate(now, this.timezone())
+        const body = assembleJournalBody(transcript, method)
+        const entryDoc = await writeJournalEntry(this.paths, {
+          method,
+          entryDate,
+          recordedAt: now.toISOString(),
+          session: sessionId,
+          body,
+        })
+        await this.reindexOrWarn(entryDoc, 'journal', `session ${sessionId} journal entry`)
+      }
+    }
+
     const commitResult = await commitMemory(this.paths.root, `reflect: session ${sessionId}`)
     if (!commitResult.ok && commitResult.warning) {
       this.warnings.push(commitResult.warning)
     }
   }
 
-  async sessionContext(now: Date = new Date()): Promise<SessionContext> {
+  async sessionContext(now: Date = new Date(), mode?: string): Promise<SessionContext> {
     const constitutionDoc = await readDocument(this.paths.constitution)
 
     const arcs: SessionContext['arcs'] = []
@@ -1036,6 +1115,9 @@ export class MemoryEngine {
     const hasReflectedSession = sessions.some((session) => session.reflected && !session.skipped)
     const isFirstSession = !hasAnyArc && !hasReflectedSession
 
+    const journalingProtocol =
+      mode === 'journal' ? await readJournalingProtocol(this.paths) : undefined
+
     return {
       constitution: constitutionDoc.body,
       constitutionDocId: constitutionDoc.meta.id,
@@ -1059,6 +1141,7 @@ export class MemoryEngine {
       timezone: this.timezone(),
       timezoneSource: this.timezoneSource(),
       isFirstSession,
+      journalingProtocol,
     }
   }
 
@@ -1618,6 +1701,7 @@ export class MemoryEngine {
     // known-entities lists the chat prompt does, not an unbounded one.
     const cappedPeople = capPeople(allPeople)
     const cappedEntities = capEntities(allEntities)
+    const journalingProtocol = await readJournalingProtocolIfPresent(this.paths)
     return {
       constitution: constitutionDoc.body,
       arcs,
@@ -1627,6 +1711,7 @@ export class MemoryEngine {
       entities: cappedEntities.nodes,
       entitiesTruncated: cappedEntities.truncated,
       profile: this.profileCache.meta,
+      ...(journalingProtocol !== undefined ? { journalingProtocol } : {}),
     }
   }
 
@@ -1763,6 +1848,15 @@ export class MemoryEngine {
     }
     for (const doc of await listDocuments(this.paths.rollupsWeeklyDir, this.onDocSkip)) {
       result.push({ doc, kind: 'rollup_weekly' })
+    }
+    for (const doc of await listDocuments(this.paths.journalDir, this.onDocSkip)) {
+      result.push({ doc, kind: 'journal' })
+    }
+    try {
+      result.push({ doc: await readDocument(this.paths.journaling), kind: 'journaling' })
+    } catch {
+      // journaling.md does not exist yet: nobody has journaled in this
+      // memory folder. Not an error, just nothing to index.
     }
 
     let sessionEntries: string[] = []
@@ -2162,13 +2256,38 @@ function errorMessage(err: unknown): string {
 }
 
 function publicDocumentRow(doc: Document, kind: DocKind): PublicDocumentRow {
-  return {
+  const base: PublicDocumentRow = {
     docId: doc.meta.id,
     kind,
     title: documentTitle(doc),
     updatedAt: documentUpdatedAt(doc),
     readOnly: true,
   }
+  if (kind !== 'journal') return base
+  const excerpt = documentExcerpt(doc)
+  return {
+    ...base,
+    ...(typeof doc.meta.method === 'string' ? { method: doc.meta.method } : {}),
+    ...(typeof doc.meta.entryDate === 'string' ? { entryDate: doc.meta.entryDate } : {}),
+    ...(excerpt ? { excerpt } : {}),
+    ...(typeof doc.meta.recordedAt === 'string' ? { recordedAt: doc.meta.recordedAt } : {}),
+  }
+}
+
+const EXCERPT_MAX_CHARS = 140
+
+// The first non-empty line of the body, trimmed and capped. Deliberately
+// simple: a journal entry's first line is usually the person's actual
+// opening sentence, and this is a list-row hint, not a summary.
+function documentExcerpt(doc: Document): string | undefined {
+  const firstLine = doc.body
+    .split('\n')
+    .find((line) => line.trim().length > 0)
+    ?.trim()
+  if (!firstLine) return undefined
+  return firstLine.length > EXCERPT_MAX_CHARS
+    ? `${firstLine.slice(0, EXCERPT_MAX_CHARS)}…`
+    : firstLine
 }
 
 function documentTitle(doc: Document): string {
@@ -2178,7 +2297,7 @@ function documentTitle(doc: Document): string {
 }
 
 function documentUpdatedAt(doc: Document): string {
-  for (const key of ['updated', 'date', 'week']) {
+  for (const key of ['updated', 'date', 'week', 'recordedAt']) {
     const value = doc.meta[key]
     if (typeof value === 'string') return value
   }

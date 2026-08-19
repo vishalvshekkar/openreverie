@@ -41,6 +41,7 @@ import {
   type GraphState,
   readGraph,
 } from './graph.js'
+import { writeJournalingProtocol } from './journal.js'
 import type { MemoryPaths } from './paths.js'
 import { type ProfileMeta, type ProfileUpdates, profileUpdatesSchema } from './profile.js'
 import { localDateFromStored, renderStoredStamp } from './time.js'
@@ -94,6 +95,13 @@ export interface ReflectionOutput {
   arcUpdates: { arcId: string; note: string }[]
   personUpdates: { personId: string; note: string }[]
   constitutionUpdate: string | null
+  // The backstop half of the journaling.md rewrite mechanism (spec
+  // section 4.5): null when nothing about the person's journaling setup
+  // changed this session, otherwise the full new document body. The live
+  // update_journaling_protocol tool is the primary path; this exists for
+  // a session where the person clearly renegotiated their setup but the
+  // model never called that tool for it.
+  journalingUpdate: string | null
   // Structured personal facts worth writing into profile.md rather than
   // into constitution prose: the current value of a name, pronouns,
   // location, timezone, birthday, occupation, or birthday-greeting answer.
@@ -122,6 +130,12 @@ export interface ReflectionContext {
   // known from one already recorded and stop proposing writes that would
   // change nothing.
   profile: ProfileMeta
+  // undefined when journaling.md does not exist, so the prompt can tell
+  // "not yet set up" apart from "already correct"; never the
+  // JOURNALING_PROTOCOL_ABSENT sentinel here, since that sentinel is
+  // written for the chat model's own journal-mode session, not for
+  // reflection's very different prompt.
+  journalingProtocol?: string
 }
 
 const reflectionItemKindSchema = z.enum(['observation', 'feeling', 'event', 'intention'])
@@ -174,6 +188,7 @@ export const reflectionOutputSchema: z.ZodType<ReflectionOutput> = z.object({
   arcUpdates: z.array(z.object({ arcId: z.string(), note: z.string() })),
   personUpdates: z.array(z.object({ personId: z.string(), note: z.string() })),
   constitutionUpdate: z.string().nullable(),
+  journalingUpdate: z.string().nullable(),
   profileUpdates: profileUpdatesSchema.exactOptional(),
 })
 
@@ -261,6 +276,7 @@ const RESPONSE_SHAPE = `{
   "arcUpdates": [{"arcId": string, "note": string}],
   "personUpdates": [{"personId": string, "note": string}],
   "constitutionUpdate": string | null,
+  "journalingUpdate": string | null,
   "profileUpdates": {"preferredName": string, "pronouns": string, "location": string, "timezone": string, "birthday": string, "occupation": string, "birthdayGreetings": boolean}
 }`
 
@@ -288,6 +304,9 @@ export function buildReflectionPrompt(
     '',
     'Known entities:',
     renderListing(context.entities, context.entitiesTruncated),
+    '',
+    'Current journaling setup:',
+    context.journalingProtocol ?? '(not set up yet: this person has never journaled before)',
     '',
     'Transcript:',
     renderTranscript(transcript),
@@ -781,6 +800,10 @@ export async function applyReflection(
 
   if (constitutionWrite) {
     await writeDocumentAtomic(constitutionWrite)
+  }
+
+  if (out.journalingUpdate !== null) {
+    await writeJournalingProtocol(paths, out.journalingUpdate, now)
   }
 
   await materializeNew(mintedItems)

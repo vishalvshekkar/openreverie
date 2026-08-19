@@ -60,6 +60,21 @@ const rememberArgs = z.strictObject({
   eventTime: z.string().optional(),
 })
 
+const declareJournalMethodArgs = z.strictObject({
+  method: z.enum([
+    'expressive_writing',
+    'gratitude',
+    'examen',
+    'thought_record',
+    'morning_pages',
+    'open',
+  ]),
+})
+
+const updateJournalingProtocolArgs = z.strictObject({
+  body: z.string(),
+})
+
 const listArcsArgs = z.strictObject({
   status: z.enum(['active', 'dormant', 'closed']).optional(),
   offset: z.number().optional(),
@@ -111,7 +126,7 @@ export function toolDefinitions(): ToolDefinition[] {
             items: { type: 'string' },
             description:
               'Restrict results to these document kinds. Valid values: constitution, realm, arc, summary, ' +
-              'rollup_daily, rollup_weekly, person. Omit to search across all kinds.',
+              'rollup_daily, rollup_weekly, person, journal, journaling. Omit to search across all kinds.',
           },
           after: {
             type: 'string',
@@ -229,6 +244,55 @@ export function toolDefinitions(): ToolDefinition[] {
           },
         },
         required: ['text'],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: 'declare_journal_method',
+      description:
+        'Record which of the six journaling formats this journal-mode session is using, once you and the person ' +
+        'have actually settled on one in conversation (expressive writing, gratitude, the daily examen, a CBT ' +
+        'thought record, morning pages, or open format). Call this once per session, as soon as the method is ' +
+        'clear, not before. Only meaningful during a journal-mode session; harmless otherwise.',
+      parameters: {
+        type: 'object',
+        properties: {
+          method: {
+            type: 'string',
+            enum: [
+              'expressive_writing',
+              'gratitude',
+              'examen',
+              'thought_record',
+              'morning_pages',
+              'open',
+            ],
+            description: 'Which of the six journaling formats this session is using.',
+          },
+        },
+        required: ['method'],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: 'update_journaling_protocol',
+      description:
+        "Rewrite journaling.md, the person's journaling setup: chosen method or methods and their cadence, " +
+        'prompt style, session length, and how active you should be during a session. Call this with the ' +
+        'complete new document body, full prose, a whole rewrite, never a diff or an append, and only after an ' +
+        'actual conversation about what changed (the first-time setup conversation, or a later request to ' +
+        'revise it). Available in every session, not only journal-mode ones, since the person can ask to change ' +
+        'their setup from an ordinary conversation too.',
+      parameters: {
+        type: 'object',
+        properties: {
+          body: {
+            type: 'string',
+            description:
+              'The complete new body of journaling.md, in prose, replacing whatever was there before.',
+          },
+        },
+        required: ['body'],
         additionalProperties: false,
       },
     },
@@ -436,6 +500,10 @@ export async function dispatchTool(
         return await dispatchReadTranscript(engine, parsedArgs.value)
       case 'remember':
         return await dispatchRemember(engine, sessionId, parsedArgs.value)
+      case 'declare_journal_method':
+        return await dispatchDeclareJournalMethod(engine, sessionId, parsedArgs.value)
+      case 'update_journaling_protocol':
+        return await dispatchUpdateJournalingProtocol(engine, parsedArgs.value)
       case 'list_arcs':
         return await dispatchListArcs(engine, parsedArgs.value)
       case 'list_realms':
@@ -519,6 +587,29 @@ async function dispatchRemember(
 
   await engine.remember(sessionId, parsed.data.text, parsed.data.kind, parsed.data.eventTime)
   return JSON.stringify({ ok: true })
+}
+
+async function dispatchDeclareJournalMethod(
+  engine: MemoryEngine,
+  sessionId: string,
+  value: unknown,
+): Promise<string> {
+  const parsed = declareJournalMethodArgs.safeParse(value)
+  if (!parsed.success) return errorJson(zodErrorMessage('declare_journal_method', parsed.error))
+
+  await engine.setSessionJournalMethod(sessionId, parsed.data.method)
+  return JSON.stringify({ ok: true })
+}
+
+async function dispatchUpdateJournalingProtocol(
+  engine: MemoryEngine,
+  value: unknown,
+): Promise<string> {
+  const parsed = updateJournalingProtocolArgs.safeParse(value)
+  if (!parsed.success) return errorJson(zodErrorMessage('update_journaling_protocol', parsed.error))
+
+  const doc = await engine.updateJournalingProtocol(parsed.data.body)
+  return JSON.stringify({ ok: true, updated: doc.meta.updated })
 }
 
 async function dispatchListArcs(engine: MemoryEngine, value: unknown): Promise<string> {

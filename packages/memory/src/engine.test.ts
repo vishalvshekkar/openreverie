@@ -119,6 +119,7 @@ function emptyReflectionOutput(summary: string): ReflectionOutput {
     arcUpdates: [],
     personUpdates: [],
     constitutionUpdate: null,
+    journalingUpdate: null,
   }
 }
 
@@ -356,6 +357,7 @@ describe('MemoryEngine', () => {
         arcUpdates: [],
         personUpdates: [],
         constitutionUpdate: null,
+        journalingUpdate: null,
       }
       const chat = new FakeChatProvider([
         { text: JSON.stringify(scriptedReflection), toolCalls: [] },
@@ -3192,6 +3194,61 @@ describe('MemoryEngine', () => {
     })
   })
 
+  describe('sessionContext journalingProtocol', () => {
+    let dir: string
+    let paths: MemoryPaths
+
+    beforeEach(async () => {
+      dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-journalctx-'))
+      paths = memoryPaths(dir)
+    })
+
+    afterEach(async () => {
+      await rm(dir, { recursive: true, force: true })
+    })
+
+    it('leaves journalingProtocol undefined and never reads journaling.md when mode is not journal', async () => {
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      await engine.startSession()
+      const context = await engine.sessionContext(new Date(), 'general')
+      expect(context.journalingProtocol).toBeUndefined()
+      await engine.close()
+    })
+
+    it('leaves journalingProtocol undefined when sessionContext is called with no mode at all', async () => {
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      await engine.startSession()
+      const context = await engine.sessionContext()
+      expect(context.journalingProtocol).toBeUndefined()
+      await engine.close()
+    })
+
+    it('holds the ABSENT sentinel when mode is journal and journaling.md does not exist', async () => {
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      await engine.startSession()
+      const context = await engine.sessionContext(new Date(), 'journal')
+      expect(context.journalingProtocol).toContain('has never set up journal mode before')
+      await engine.close()
+    })
+
+    it('holds the trimmed journaling.md body when mode is journal and the file exists', async () => {
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      await writeDocumentAtomic({
+        path: paths.journaling,
+        meta: { id: 'doc_01JZZZ', kind: 'journaling', updated: '2026-08-16T21:04:00.000Z' },
+        body: 'Gratitude, three times a week.\n',
+      })
+      await engine.startSession()
+      const context = await engine.sessionContext(new Date(), 'journal')
+      expect(context.journalingProtocol).toBe('Gratitude, three times a week.')
+      await engine.close()
+    })
+  })
+
   describe('warnings', () => {
     let dir: string
     let paths: MemoryPaths
@@ -3615,6 +3672,164 @@ describe('MemoryEngine', () => {
       })
       expect(stdout.trim()).toBe('forget: an old contact named Pat')
 
+      await engine.close()
+    })
+  })
+
+  describe('journal document kind', () => {
+    let dir: string
+    let paths: MemoryPaths
+
+    beforeEach(async () => {
+      dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-journal-'))
+      paths = memoryPaths(dir)
+      await ensureMemoryTree(paths)
+    })
+
+    afterEach(async () => {
+      await rm(dir, { recursive: true, force: true })
+    })
+
+    it('walkAllDocuments (via listPublicDocuments) includes a hand-written journal entry', async () => {
+      await writeDocumentAtomic({
+        path: join(paths.journalDir, '2026-08-16-doc_01JZZZ.md'),
+        meta: {
+          id: 'doc_01JZZZ',
+          kind: 'journal',
+          method: 'gratitude',
+          mode: 'journal',
+          entryDate: '2026-08-16',
+          recordedAt: '2026-08-16T21:04:00.000Z',
+          session: 'session_01JAAA',
+        },
+        body: 'Grateful for a quiet morning.\n',
+      })
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const rows = await engine.listPublicDocuments()
+      const journalRow = rows.find((row) => row.kind === 'journal')
+      expect(journalRow?.docId).toBe('doc_01JZZZ')
+      expect(journalRow?.method).toBe('gratitude')
+      expect(journalRow?.entryDate).toBe('2026-08-16')
+      await engine.close()
+    })
+
+    it('walkAllDocuments includes journaling.md, once it exists, with kind journaling', async () => {
+      await writeDocumentAtomic({
+        path: paths.journaling,
+        meta: { id: 'doc_01JZZZ2', kind: 'journaling', updated: '2026-08-16T21:04:00.000Z' },
+        body: 'Gratitude, three times a week.\n',
+      })
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const rows = await engine.listPublicDocuments()
+      expect(rows.find((row) => row.kind === 'journaling')?.docId).toBe('doc_01JZZZ2')
+      await engine.close()
+    })
+
+    it('walkAllDocuments does not fail when journaling.md is absent', async () => {
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const rows = await engine.listPublicDocuments()
+      expect(rows.find((row) => row.kind === 'journaling')).toBeUndefined()
+      await engine.close()
+    })
+
+    it('a journal row without a name-worthy title reports method and entryDate as its own fields, not folded into title', async () => {
+      await writeDocumentAtomic({
+        path: join(paths.journalDir, '2026-08-16-doc_01JZZZ.md'),
+        meta: {
+          id: 'doc_01JZZZ',
+          kind: 'journal',
+          method: 'examen',
+          mode: 'journal',
+          entryDate: '2026-08-16',
+          recordedAt: '2026-08-16T21:04:00.000Z',
+          session: 'session_01JAAA',
+        },
+        body: 'Right now, tired but okay.\n',
+      })
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const doc = await engine.getPublicDocument('doc_01JZZZ')
+      expect(doc?.method).toBe('examen')
+      expect(doc?.entryDate).toBe('2026-08-16')
+      await engine.close()
+    })
+
+    it('a journal row carries a short excerpt of its body, truncated', async () => {
+      const longFirstLine = 'A'.repeat(200)
+      await writeDocumentAtomic({
+        path: join(paths.journalDir, '2026-08-16-doc_01JZZZ.md'),
+        meta: {
+          id: 'doc_01JZZZ',
+          kind: 'journal',
+          method: 'open',
+          mode: 'journal',
+          entryDate: '2026-08-16',
+          recordedAt: '2026-08-16T21:04:00.000Z',
+          session: 'session_01JAAA',
+        },
+        body: `${longFirstLine}\nSecond line, not part of the excerpt.\n`,
+      })
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const rows = await engine.listPublicDocuments()
+      const row = rows.find((r) => r.kind === 'journal')
+      expect(row?.excerpt?.length).toBeLessThanOrEqual(141)
+      expect(row?.excerpt).not.toContain('Second line')
+      await engine.close()
+    })
+
+    it('a non-journal row never carries an excerpt', async () => {
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const rows = await engine.listPublicDocuments()
+      expect(rows.every((row) => row.excerpt === undefined)).toBe(true)
+      await engine.close()
+    })
+  })
+
+  describe('session journal method', () => {
+    let dir: string
+
+    beforeEach(async () => {
+      dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-journalmethod-'))
+    })
+
+    afterEach(async () => {
+      await rm(dir, { recursive: true, force: true })
+    })
+
+    it('records and reads back the declared method for a session', async () => {
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const sessionId = await engine.startSession(new Date('2026-08-16T09:00:00.000Z'))
+      await engine.setSessionJournalMethod(sessionId, 'gratitude')
+      expect(await engine.sessionJournalMethod(sessionId)).toBe('gratitude')
+      await engine.close()
+    })
+
+    it('reports the method as absent for a session that never declared one', async () => {
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const sessionId = await engine.startSession(new Date('2026-08-16T09:00:00.000Z'))
+      expect(await engine.sessionJournalMethod(sessionId)).toBeUndefined()
+      await engine.close()
+    })
+
+    // The design note above setSessionJournalMethod promises a read-merge-write:
+    // declaring a method must not clobber a mode already written by
+    // setSessionMode. Nothing else in this plan asserts that property, so this
+    // is also the falsify target for that guarantee.
+    it('declaring a method leaves an already-set mode intact', async () => {
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const sessionId = await engine.startSession(new Date('2026-08-16T09:00:00.000Z'))
+      await engine.setSessionMode(sessionId, 'journal')
+      await engine.setSessionJournalMethod(sessionId, 'gratitude')
+      expect(await engine.sessionMode(sessionId)).toBe('journal')
+      expect(await engine.sessionJournalMethod(sessionId)).toBe('gratitude')
       await engine.close()
     })
   })
@@ -4733,5 +4948,194 @@ describe('session mode', () => {
     await reopened.endSession(sessionId)
     expect(await reopened.sessionMode(sessionId)).toBe('journal')
     await reopened.close()
+  })
+})
+
+describe('journal entry write', () => {
+  let dir: string
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-journalwrite-'))
+  })
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  it('writes no file under journal/ for a session whose mode was never journal', async () => {
+    const scriptedReflection = emptyReflectionOutput('An ordinary conversation.')
+    const chat = new FakeChatProvider([{ text: JSON.stringify(scriptedReflection), toolCalls: [] }])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const sessionId = await engine.startSession(new Date('2026-08-16T09:00:00.000Z'))
+    await engine.appendTranscript(sessionId, {
+      ts: '2026-08-16T09:00:00.000Z',
+      role: 'user',
+      content: 'Just talking, nothing structured.',
+    })
+    await engine.endSession(sessionId)
+    const rows = await engine.listPublicDocuments()
+    expect(rows.find((row) => row.kind === 'journal')).toBeUndefined()
+    await engine.close()
+  })
+
+  // Distinct from the test above: here a method IS declared, but the
+  // session's mode was never set to journal (e.g. journal mode was
+  // considered and a method picked in some other flow, then the session
+  // continued in a different mode). A gate that checks only `method` and
+  // never `mode` would still write a file here, since method alone is
+  // truthy; only a mode check catches it. Added because falsifying the
+  // `mode === 'journal'` check alone against the other three tests in this
+  // block produced no failure: none of them declare a method without also
+  // setting the mode to journal, so removing the mode gate in isolation
+  // passed all of them. This test exists to make that removal fail.
+  it('writes no file under journal/ when a method was declared but the session mode was never set to journal', async () => {
+    const scriptedReflection = emptyReflectionOutput(
+      'Considered journaling, stayed in general mode.',
+    )
+    const chat = new FakeChatProvider([{ text: JSON.stringify(scriptedReflection), toolCalls: [] }])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const sessionId = await engine.startSession(new Date('2026-08-16T09:00:00.000Z'))
+    await engine.setSessionJournalMethod(sessionId, 'gratitude')
+    await engine.appendTranscript(sessionId, {
+      ts: '2026-08-16T09:00:00.000Z',
+      role: 'user',
+      content: 'Never actually entered journal mode.',
+    })
+    await engine.endSession(sessionId)
+    const rows = await engine.listPublicDocuments()
+    expect(rows.find((row) => row.kind === 'journal')).toBeUndefined()
+    await engine.close()
+  })
+
+  it('writes exactly one file under journal/ for a session whose mode was journal, with the declared method', async () => {
+    const scriptedReflection = emptyReflectionOutput('A short gratitude session.')
+    const chat = new FakeChatProvider([{ text: JSON.stringify(scriptedReflection), toolCalls: [] }])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const sessionId = await engine.startSession(new Date('2026-08-16T09:00:00.000Z'))
+    await engine.setSessionMode(sessionId, 'journal')
+    await engine.setSessionJournalMethod(sessionId, 'gratitude')
+    await engine.appendTranscript(sessionId, {
+      ts: '2026-08-16T09:00:00.000Z',
+      role: 'user',
+      content: 'Grateful for the quiet morning.',
+    })
+    await engine.endSession(sessionId)
+    const rows = await engine.listPublicDocuments()
+    const journalRows = rows.filter((row) => row.kind === 'journal')
+    expect(journalRows).toHaveLength(1)
+    expect(journalRows[0]?.method).toBe('gratitude')
+    const doc = await engine.getPublicDocument(journalRows[0]?.docId ?? '')
+    expect(doc?.body).toContain('Grateful for the quiet morning.')
+    await engine.close()
+  })
+
+  it('writes nothing under journal/ when the mode was journal but no method was ever declared', async () => {
+    // Absent method is treated the same as absent mode: the write is
+    // additive and gated, not an error. A session cannot reach this
+    // state through the real product (declare_journal_method is called
+    // as soon as the method is clear), but a test transcript can, and
+    // the write must degrade to "no journal document captured," per
+    // spec section 11, rather than writing a frontmatter with no method.
+    const scriptedReflection = emptyReflectionOutput('Started journal mode, then abandoned it.')
+    const chat = new FakeChatProvider([{ text: JSON.stringify(scriptedReflection), toolCalls: [] }])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const sessionId = await engine.startSession(new Date('2026-08-16T09:00:00.000Z'))
+    await engine.setSessionMode(sessionId, 'journal')
+    await engine.appendTranscript(sessionId, {
+      ts: '2026-08-16T09:00:00.000Z',
+      role: 'user',
+      content: 'Actually, never mind.',
+    })
+    await engine.endSession(sessionId)
+    const rows = await engine.listPublicDocuments()
+    expect(rows.find((row) => row.kind === 'journal')).toBeUndefined()
+    await engine.close()
+  })
+
+  it('survives the engine being closed and reopened between declaring the method and endSession (the crash path)', async () => {
+    const scriptedReflection = emptyReflectionOutput('A short gratitude session, reflected late.')
+    const startedAt = new Date('2026-08-14T09:00:00.000Z')
+
+    const firstChat = new FakeChatProvider([])
+    let engine = await MemoryEngine.open(dir, fakeDeps(firstChat))
+    const sessionId = await engine.startSession(startedAt)
+    await engine.setSessionMode(sessionId, 'journal')
+    await engine.setSessionJournalMethod(sessionId, 'gratitude')
+    await engine.appendTranscript(sessionId, {
+      ts: startedAt.toISOString(),
+      role: 'user',
+      content: 'Grateful for a slow start today.',
+    })
+    // Simulate the process dying before /bye or an orderly endSession:
+    // close the engine with the session still unreflected.
+    await engine.close()
+
+    const secondChat = new FakeChatProvider([
+      { text: JSON.stringify(scriptedReflection), toolCalls: [] },
+    ])
+    // A fresh MemoryEngine instance, as a later process would construct.
+    // MemoryEngine.open runs runMaintenance by default, which reflects
+    // any unreflected session it finds, calling _doEndSession on it.
+    engine = await MemoryEngine.open(dir, fakeDeps(secondChat))
+    const rows = await engine.listPublicDocuments()
+    const journalRows = rows.filter((row) => row.kind === 'journal')
+    expect(journalRows).toHaveLength(1)
+    expect(journalRows[0]?.method).toBe('gratitude')
+    const doc = await engine.getPublicDocument(journalRows[0]?.docId ?? '')
+    expect(doc?.body).toContain('Grateful for a slow start today.')
+    await engine.close()
+  })
+})
+
+describe('updateJournalingProtocol', () => {
+  let dir: string
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-updatejournaling-'))
+  })
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  it('writes journaling.md on the first call and reindexes it', async () => {
+    const chat = new FakeChatProvider([])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const doc = await engine.updateJournalingProtocol('Gratitude, three times a week.')
+    expect(doc.body.trim()).toBe('Gratitude, three times a week.')
+    const rows = await engine.listPublicDocuments()
+    expect(rows.find((row) => row.kind === 'journaling')?.docId).toBe(doc.meta.id)
+    await engine.close()
+  })
+
+  it('preserves the id and replaces the body on a second call', async () => {
+    const chat = new FakeChatProvider([])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const first = await engine.updateJournalingProtocol('Gratitude, three times a week.')
+    const second = await engine.updateJournalingProtocol('Switched to the examen instead.')
+    expect(second.meta.id).toBe(first.meta.id)
+    expect(second.body).not.toContain('Gratitude')
+    await engine.close()
+  })
+
+  it('reflection writes and reindexes journaling.md when journalingUpdate is set', async () => {
+    const scriptedReflection = {
+      ...emptyReflectionOutput('Talked about wanting to journal more.'),
+      journalingUpdate: 'Gratitude, three times a week.',
+    }
+    const chat = new FakeChatProvider([{ text: JSON.stringify(scriptedReflection), toolCalls: [] }])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const sessionId = await engine.startSession(new Date('2026-08-16T09:00:00.000Z'))
+    await engine.appendTranscript(sessionId, {
+      ts: '2026-08-16T09:00:00.000Z',
+      role: 'user',
+      content: 'I want to start journaling regularly.',
+    })
+    await engine.endSession(sessionId)
+    const rows = await engine.listPublicDocuments()
+    expect(rows.find((row) => row.kind === 'journaling')).toBeDefined()
+    const hits = (await engine.search('Gratitude, three times a week')).documents
+    expect(hits.some((hit) => hit.kind === 'journaling')).toBe(true)
+    await engine.close()
   })
 })

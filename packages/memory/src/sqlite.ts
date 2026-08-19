@@ -23,6 +23,8 @@ export const DOC_KINDS = [
   'rollup_daily',
   'rollup_weekly',
   'person',
+  'journal',
+  'journaling',
 ] as const
 
 export type DocKind = (typeof DOC_KINDS)[number]

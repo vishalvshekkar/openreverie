@@ -620,6 +620,55 @@ describe('record browsing app', () => {
     })
   })
 
+  it('a journal document round-trips method and entryDate through GET /api/v1/documents and the single-document route', async () => {
+    engine.documents.push({
+      docId: 'doc_01JZZZ',
+      kind: 'journal',
+      title: 'doc_01JZZZ',
+      updatedAt: '2026-08-16T21:04:00.000Z',
+      readOnly: true,
+      method: 'gratitude',
+      entryDate: '2026-08-16',
+      body: 'Grateful for the quiet morning.\n',
+    })
+    const listResponse = (await getJson('/api/v1/documents')) as Response & {
+      json: { data: Array<{ docId: string; method?: string; entryDate?: string }> }
+    }
+    const listRow = listResponse.json.data.find((row) => row.docId === 'doc_01JZZZ')
+    expect(listRow?.method).toBe('gratitude')
+    expect(listRow?.entryDate).toBe('2026-08-16')
+
+    const oneResponse = (await getJson('/api/v1/documents/doc_01JZZZ')) as Response & {
+      json: { data: { method?: string; entryDate?: string } }
+    }
+    expect(oneResponse.json.data.method).toBe('gratitude')
+    expect(oneResponse.json.data.entryDate).toBe('2026-08-16')
+  })
+
+  it('a journal document round-trips its excerpt through GET /api/v1/documents and the single-document route', async () => {
+    engine.documents.push({
+      docId: 'doc_01JZZZ',
+      kind: 'journal',
+      title: 'doc_01JZZZ',
+      updatedAt: '2026-08-16T21:04:00.000Z',
+      readOnly: true,
+      method: 'gratitude',
+      entryDate: '2026-08-16',
+      excerpt: 'Grateful for the quiet morning.',
+      body: 'Grateful for the quiet morning.\n',
+    })
+    const listResponse = (await getJson('/api/v1/documents')) as Response & {
+      json: { data: Array<{ docId: string; excerpt?: string }> }
+    }
+    const listRow = listResponse.json.data.find((row) => row.docId === 'doc_01JZZZ')
+    expect(listRow?.excerpt).toBe('Grateful for the quiet morning.')
+
+    const oneResponse = (await getJson('/api/v1/documents/doc_01JZZZ')) as Response & {
+      json: { data: { excerpt?: string } }
+    }
+    expect(oneResponse.json.data.excerpt).toBe('Grateful for the quiet morning.')
+  })
+
   async function requestWithAuth(
     method: string,
     path: string,

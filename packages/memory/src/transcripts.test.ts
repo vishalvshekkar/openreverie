@@ -371,5 +371,19 @@ describe('SessionStore', () => {
       const after = await readFile(join(store.dir, 'transcript.jsonl'), 'utf8')
       expect(after).toEqual(before)
     })
+
+    it('session metadata round-trips journalMethod alongside mode', async () => {
+      const store = await SessionStore.start(paths, new Date('2026-08-16T09:00:00.000Z'))
+      await SessionStore.writeMeta(paths, store.sessionId, { mode: 'journal' })
+      const afterMode = await SessionStore.readMeta(paths, store.sessionId)
+      expect(afterMode?.mode).toBe('journal')
+      await SessionStore.writeMeta(paths, store.sessionId, {
+        ...afterMode,
+        journalMethod: 'gratitude',
+      })
+      const afterMethod = await SessionStore.readMeta(paths, store.sessionId)
+      expect(afterMethod?.mode).toBe('journal')
+      expect(afterMethod?.journalMethod).toBe('gratitude')
+    })
   })
 })
