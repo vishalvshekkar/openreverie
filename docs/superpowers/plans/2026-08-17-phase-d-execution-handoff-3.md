@@ -1,5 +1,9 @@
 # Phase D execution handoff, part 3
 
+> **SUPERSEDED for status by `2026-08-17-phase-d-execution-handoff-4.md`.**
+> Read part 4 first. This document is still the source for the standing subagent preamble
+> in its appendix, and for the pitfall list, both of which part 4 points back to.
+
 This document is the complete brief for an orchestrating agent resuming Phase D after the
 second orchestrator ran out of session budget. Read it fully, then read `AGENTS.md` fully,
 before doing anything. `AGENTS.md` is binding; this document is your resume state.
@@ -148,8 +152,8 @@ read each other's half-written build output.
 | J | 16 | persistent status line, `cli/strip.ts` | sonnet | DONE, 974 tests | `1c644b2` |
 | K | 17, 18 | `server/registry.ts`, `web/api.ts`, mode stream event and mode over HTTP | sonnet | DONE, 990 tests | `fa7499d` (combined, shared file) |
 | L | 19 | profile/settings endpoints, **the API key that must never be reachable** | sonnet impl, orchestrator falsified | DONE, 1002 tests | `22e719e` |
-| M | 20, 21 | `web/views/*` journal and settings destinations, mode picker | sonnet | **ONGOING**, dispatched | |
-| N | 22 | README | **you, personally** | NEXT | |
+| M | 20, 21 | `web/views/*` journal and settings destinations, mode picker | sonnet | DONE, 1018 tests | `5e40167` (combined, shared files) |
+| N | 22 | README | **you, personally** | **NEXT, not started** | |
 
 Batch D is the safety batch: Task 7 (stance doctrine), Task 7A (the one identity sentence the
 model may narrate), Task 8 (mode overlay plus the safety invariant). Do the falsification of
