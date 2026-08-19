@@ -161,8 +161,8 @@ half-written build output. Mark a batch ONGOING *before* dispatching it.
 | Batch | Tasks | What | Depends on | State | Commits |
 | --- | --- | --- | --- | --- | --- |
 | A | 1 | `memory/paths.ts`: `journalDir`, `journaling` fields | nothing | DONE, 1033 | `30e80d9` |
-| B | 2 | `DocKind` gains `journal`/`journaling`; `sqlite.ts`, `engine.ts`, `core/tools.ts` | A | ONGOING | |
-| C | 3, 4, 7 | `memory/journal.ts`: entry filename/frontmatter, body assembly, `journaling.md` read/write helper | A, B | TODO | |
+| B | 2, + defect 7 | `DocKind` gains `journal`/`journaling`; `sqlite.ts`, `engine.ts`, `core/tools.ts`, plus `dateSpan.ts` and `core/docKinds.test.ts` (undeclared, see defect 7) | A | DONE, 1038 | `eb8a7ea` |
+| C | 3, 4, 7 | `memory/journal.ts`: entry filename/frontmatter, body assembly, `journaling.md` read/write helper | A, B | ONGOING | |
 | D | 5 | `declare_journal_method` tool; `transcripts.ts`, `engine.ts`, `core/tools.ts` | C | TODO | |
 | E | 6 | Gated write in `_doEndSession`, the crash path; `engine.ts` **safety-adjacent** | C, D | TODO | |
 | F | 8 | `sessionContext` gains `mode` param, `journalingProtocol`; `engine.ts` | C | TODO | |
@@ -244,6 +244,21 @@ yet cross-checked against the real tree, since nothing has been dispatched):
    the real shape rather than copy-paste. This is by design (the plan predates the time and modes
    plans landing) but raises the bar on batches touching the same file this way, notably G and H
    on `context.ts`.
+7. **The plan predates `packages/core/src/docKinds.test.ts` (the "P8" DocKind wiring test), which
+   assumes every `DocKind` gets an injected, capped prompt section.** `journal` is the first
+   tool-only kind in this codebase's history (per the design spec, section 4.4: reachable only
+   through `search_memory`/`read_document`, never prompt-injected), and `journaling` is the first
+   kind whose injected section is deliberately uncapped (the spec's `journalingProtocolSection`
+   has no `capBody` call, unlike `constitutionSection`). Resolved in Batch B, not deferred: added
+   `journal`/`journaling` cases to `dateSpan.ts`'s exhaustive switch (`journal` point-in-time on
+   `meta.entryDate`, `journaling` living/null, its header comment corrected from "four kinds" to
+   "five"), extended `docKinds.test.ts`'s `PROMPT_SECTION_CAP` ledger with an explicit
+   `PROMPT_EXEMPT_KINDS` carve-out (both entries `0`, each with its own comment explaining why),
+   and hand-seeded a `journal` entry and a `journaling` doc in that file's integration test,
+   confirming `walkAllDocuments` classifies both purely by file location, not `meta.kind`, so no
+   dependency on Task 3's or Task 7's write helpers was needed to close this now. This is not a
+   weakening of the P8 invariant: every other kind still requires a real positive cap present in
+   `SECTION_CAPS`, and the exemption is only for these two, by name, with the reason recorded.
 
 ## What to do next, in order
 
