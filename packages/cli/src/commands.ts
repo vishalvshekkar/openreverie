@@ -4,8 +4,14 @@
 // is not the argv parser: that one reads process.argv before a session
 // exists and lives in index.ts. The two are separate and stay separate.
 
-import type { ModeName } from '@openreverie/core'
-import type { Profile, StyleConfig } from '@openreverie/memory'
+import { isModeName, MODE_NAMES, MODES, type ModeName, modeOverrides } from '@openreverie/core'
+import {
+  ENGAGEMENT_VALUES,
+  ORIENTATION_VALUES,
+  type Profile,
+  type StyleConfig,
+  TONE_VALUES,
+} from '@openreverie/memory'
 
 export type ParsedInput =
   | { kind: 'command'; name: string; arg: string | undefined }
@@ -106,6 +112,117 @@ function commandHelp(ctx: CommandContext): CommandOutcome {
   return 'continue'
 }
 
+async function commandMode(arg: string | undefined, ctx: CommandContext): Promise<CommandOutcome> {
+  if (arg === undefined) {
+    const lines = MODE_NAMES.map((name) => {
+      const marker = name === ctx.session.mode ? ' (current)' : ''
+      return `  ${name}${marker}: ${MODES[name].summary}`
+    })
+    ctx.io.write(`${lines.join('\n')}\nA mode lasts for this conversation only. It is not saved.\n`)
+    return 'continue'
+  }
+
+  const requested = arg.trim().toLowerCase()
+  if (!isModeName(requested)) {
+    ctx.io.write(`No mode called ${requested}. The modes are: ${MODE_NAMES.join(', ')}.\n`)
+    return 'continue'
+  }
+
+  await ctx.session.setMode(requested, { source: 'cli' })
+  const overridden = modeOverrides(requested)
+  const suffix =
+    overridden.length === 0
+      ? 'It leaves your style settings alone.'
+      : `For this conversation it takes over your ${overridden.join(' and ')} setting.`
+  ctx.io.write(`Mode is now ${requested}: ${MODES[requested].summary} ${suffix}\n`)
+  return 'continue'
+}
+
+const STYLE_AXES = {
+  engagement: ENGAGEMENT_VALUES,
+  tone: TONE_VALUES,
+  orientation: ORIENTATION_VALUES,
+} as const
+
+async function commandStyle(arg: string | undefined, ctx: CommandContext): Promise<CommandOutcome> {
+  const style = ctx.engine.currentStyle()
+  if (arg === undefined) {
+    ctx.io.write(
+      [
+        `  engagement: ${style.engagement}`,
+        `  tone: ${style.tone}`,
+        `  orientation: ${style.orientation}`,
+        'Change one with /style <axis> <value>. This is saved to profile.md and lasts.',
+        '',
+      ].join('\n'),
+    )
+    return 'continue'
+  }
+
+  const parts = arg.trim().split(/\s+/)
+  const axis = (parts[0] ?? '').toLowerCase()
+  const value = (parts[1] ?? '').toLowerCase()
+
+  if (axis !== 'engagement' && axis !== 'tone' && axis !== 'orientation') {
+    ctx.io.write(`No style axis called ${axis}. The axes are: engagement, tone, orientation.\n`)
+    return 'continue'
+  }
+
+  const allowed = STYLE_AXES[axis] as readonly string[]
+  if (!allowed.includes(value)) {
+    ctx.io.write(`No ${axis} called ${value}. The values are: ${allowed.join(', ')}.\n`)
+    return 'continue'
+  }
+
+  await ctx.engine.updateProfileSettings({ style: { [axis]: value } as Partial<StyleConfig> })
+  // Re-assemble now, so the change applies to the rest of this
+  // conversation rather than only to the next one.
+  await ctx.session.refreshSystemPrompt()
+  ctx.io.write(`Your ${axis} is now ${value}. Saved.\n`)
+  return 'continue'
+}
+
+function commandSettings(ctx: CommandContext): CommandOutcome {
+  ctx.io.write(
+    [
+      `Safety mode: ${ctx.safetyMode}. This one is changed by hand in the config file, deliberately.`,
+      `Memory folder: ${ctx.memoryDir}`,
+      'Style: /style. What reverie knows about you: /whoami.',
+      '',
+    ].join('\n'),
+  )
+  return 'continue'
+}
+
+function commandWhoami(ctx: CommandContext): CommandOutcome {
+  const profile = ctx.engine.profile()
+  const meta = profile.meta
+  const shown = (value: unknown): string =>
+    value === undefined
+      ? 'not known'
+      : typeof value === 'boolean'
+        ? value
+          ? 'yes'
+          : 'no'
+        : String(value)
+
+  const lines = [
+    `Preferred name: ${shown(meta.preferredName)}`,
+    `Pronouns: ${shown(meta.pronouns)}`,
+    `Location: ${shown(meta.location)}`,
+    `Timezone: ${shown(meta.timezone)}`,
+    `Birthday: ${shown(meta.birthday)}`,
+    `Occupation: ${shown(meta.occupation)}`,
+    `Birthday greetings: ${shown(meta.birthdayGreetings)}`,
+  ]
+
+  const body = profile.body.trim()
+  if (body.length > 0) lines.push('', body)
+  lines.push('', 'Nothing here is guessed. It is only what you have said or set.')
+  ctx.io.write(`${lines.join('\n')}\n`)
+  return 'continue'
+}
+
 export async function runCommand(
   name: string,
   arg: string | undefined,
@@ -116,6 +233,14 @@ export async function runCommand(
       return await commandBye(ctx)
     case 'help':
       return commandHelp(ctx)
+    case 'mode':
+      return await commandMode(arg, ctx)
+    case 'style':
+      return await commandStyle(arg, ctx)
+    case 'settings':
+      return commandSettings(ctx)
+    case 'whoami':
+      return commandWhoami(ctx)
     default:
       // A typo'd command does not reach the model. Sending it to a
       // companion that then improvises around it is worse than one plain
