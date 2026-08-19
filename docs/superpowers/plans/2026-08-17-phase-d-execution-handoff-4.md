@@ -257,7 +257,7 @@ half-written build output. Mark a batch ONGOING *before* dispatching it.
 | G | 9 | `journalingProtocolSection` in the assembled prompt; `core/context.ts` | F | DONE, 1076 | `bfa1637` |
 | H | 10 | `core/journaling.ts` content module (largest task, includes the expressive-writing safety gate); wires into `core/modes.ts`, `core/personas.ts` (`buildPersona` signature), `core/context.ts` (call site) **safety-relevant content** | C, G | DONE, 1103, orchestrator personally cross-checked all six formats' evidence text and the safety gate against the spec, and personally falsified the wiring fix | `5aec7a4` |
 | I | 11 | `update_journaling_protocol` tool, `refreshSystemPrompt` trigger; `engine.ts`, `core/tools.ts`, `core/agent.ts` | C | DONE, 1107, orchestrator personally falsified the reassembly trigger | `5f5e5b7` |
-| J | 12 | Reflection's `journalingUpdate` field, the backstop path; `reflection.ts`, `engine.ts` | C | TODO | |
+| J | 12 | Reflection's `journalingUpdate` field, the backstop path; `reflection.ts`, `engine.ts` | C | DONE, 1115, dispatched to `pi` CLI + DeepSeek V4 flash (trial 2), orchestrator-verified and independently falsified | `62f98a6` |
 | K | 13 | **SAFETY invariant test, six combinations, position plus bytes**; `core/personas.test.ts` only | H, C | TODO, orchestrator falsifies personally | |
 | L | 14 | Server exposes `journal`/`journaling` kinds; `server/app.ts` | B | TODO | |
 | M | 15, + deferred item 1 | Web client schema, `Library.tsx` `KIND_LABELS`; `web/api.ts`, `web/views/Library.tsx`. Also close deferred item 1 from the modes epoch (below): `getProfile`, `updateProfile`, `getSettings` have no tests in `api.test.ts`, and M is already touching that exact file | L | TODO | |
@@ -322,6 +322,17 @@ Notes on sequencing, from the plan survey:
   positive `.toMatch(/not a recurring nag/i)` lock-in), falsified for real. Lesson for future
   batches: a subagent's own classification of "spec-transcribed vs. incidental" is not reliable
   enough to skip checking the spec directly when the two collide.
+- **J went to `pi` CLI + DeepSeek V4 flash, a second trial, at the human's explicit request this
+  session** (the first was modes' Batch O). Non-interactive invocation confirmed working:
+  `pi --provider deepseek --model deepseek-v4-flash --print --no-session -p "<prompt>"` from the
+  worktree root, run in the background; it has read/bash/edit/write tool access with no interactive
+  permission prompts to work around. The report was thorough and caught real defects the plan itself
+  under-enumerated (the `journalingUpdate: null` ripple hit four more files than the plan's Step 4
+  named; `engine.search`'s real `{ documents, nodes }` return shape; an `exactOptionalPropertyTypes`
+  violation in the plan's own verbatim field spread). Orchestrator verified and independently
+  falsified the same as every sonnet-dispatched batch; no quality gap observed on this task. Kept
+  off the two safety-relevant batches (H, K) deliberately; a reasonable batch to route this way is
+  one with a complete, concrete plan and no crisis/safety-stance surface.
 - **I's plan text guessed the wrong precedent for the reassembly trigger.** It said to copy
   whatever pattern `set_mode` uses; `set_mode` actually goes through a separate callback mechanism
   (`dispatchTool`'s options object), not a post-hoc `toolCall.name === '...'` check. The real,
