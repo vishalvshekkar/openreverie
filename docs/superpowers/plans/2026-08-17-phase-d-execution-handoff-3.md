@@ -21,6 +21,38 @@ Second most important, learned again in this session: **`git show --stat` every 
 make.** A commit that lands implementation without its tests looks fine in `git log` and is a
 serious defect. See "The commit-splitting trap" below.
 
+## START HERE: nothing is in flight, the tree is green
+
+The previous orchestrator stopped at a clean boundary. **There is no ONGOING work to verify.**
+Modes Batches A through G (Tasks 0-12) are DONE, committed, and gated.
+
+Confirm the starting state, in `.claude/worktrees/modes`:
+
+```bash
+git log --oneline -1        # expect c80f7bb "Replace update_style with set_mode"
+git status --short          # expect empty
+pnpm lint && pnpm build && pnpm test
+```
+
+Expected: lint 0, build 0, test 0, **Test Files 53 passed (53) / Tests 919 passed (919)**.
+The main repo at `/Users/vishal/work/personal/second-mind` should show only ` M ROADMAP.md`,
+which is the human's own uncommitted note about BUSL licensing. Leave it alone.
+
+If any of that does not match, something moved after this document was written; work out what
+before continuing.
+
+**Your next action is modes Batch H, Task 13 (style leaves `config.toml`).** It is the largest
+single task left in the plan: a new `styleToProfile` migration, registry wiring, `config.ts` and
+`setup.ts` changes, and nine test fixtures listed in the task's own step 9. Read
+`sed -n '3615,4178p'` of the modes plan. Dispatch it to one sonnet subagent using the recipe in
+"Dispatching subagents" below; do not do it yourself.
+
+Two things Task 13 must get right, both verified this session:
+- The real `MigrationResult` shape is `{ id, applied, summary, details }`, NOT the plan's
+  `{ changed, messages }`. `reverie migrate` already ships and prints `summary` then `details`.
+- `migrations` in `packages/memory/src/migrations/index.ts` already holds `profileSeedMigration`
+  and `utcToLocalRollupsMigration`. `styleToProfile` joins them; it does not replace them.
+
 ## STATUS BOARD, the thing to read first
 
 Update this table as you go. Mark a task ONGOING *before* you dispatch it, so the next agent
@@ -75,8 +107,8 @@ read each other's half-written build output.
 | D | 7, 7A, 8 | `core/personas.ts` **SAFETY** | sonnet impl, orchestrator falsified | DONE, 884 tests | `bc2530c` (combined, shared file) |
 | E | 9 | `core/context.ts` profile block, 2000 char cap | sonnet | DONE, 897 tests | `8087dab` |
 | F | 10, 11 | `memory/transcripts.ts`, `memory/engine.ts` | sonnet | DONE, 912 tests | `63bda62` (combined, shared test block) |
-| G | 12 | `set_mode` replaces `update_style`, tools/agent/cli | sonnet | **ONGOING** | |
-| H | 13 | style leaves `config.toml`, migration plus 9 fixtures | sonnet | TODO | |
+| G | 12 | `set_mode` replaces `update_style`, tools/agent/cli | sonnet | DONE, 919 tests | `c80f7bb` |
+| H | 13 | style leaves `config.toml`, migration plus 9 fixtures | sonnet | **NEXT, not started** | |
 | I | 14, 15 | `cli/commands.ts`, the `/mode` `/style` `/settings` `/whoami` table | sonnet | TODO | |
 | J | 16 | persistent status line, `cli/strip.ts` | sonnet | TODO | |
 | K | 17, 18 | `server/registry.ts`, `web/api.ts`, mode stream event and mode over HTTP | sonnet | TODO | |
@@ -145,61 +177,6 @@ Merge a worktree back into design only after the whole plan is complete and you 
 run `pnpm lint`, `pnpm build` and `pnpm test` in it. Run the full gate again on design after the
 merge, because a merge can break what neither branch broke alone. Then
 `git worktree remove .claude/worktrees/<plan-name>`.
-
-## VERIFY THE ONGOING WORK BEFORE YOU CONTINUE
-
-Retrieval Tasks 17 and 18 were dispatched to one subagent and the session ended before the
-result could be verified. **Do not assume they landed, and do not assume they did not.**
-
-Run this first, in `/Users/vishal/work/personal/second-mind/.claude/worktrees/retrieval`:
-
-```bash
-git log --oneline -3          # is fa95c0e still HEAD? then nothing was committed
-git status --short            # uncommitted work from the agent?
-pnpm lint && pnpm build && pnpm test
-```
-
-Three possible worlds:
-
-1. **HEAD is `fa95c0e` and the tree is clean.** The agent produced nothing usable. Re-dispatch
-   Tasks 17 and 18 from scratch using the brief recipe below.
-2. **HEAD is `fa95c0e` and the tree is dirty.** The agent did work but nothing was committed
-   (correct: subagents are instructed never to commit). Verify it yourself: run the full gate,
-   check `git diff --stat` shows only the files Tasks 17/18 name, grep the diff for parked tests
-   (`\.skip\(|\.only\(|\.todo\(`), then falsify at least one new assertion per task yourself
-   before committing. Expected files: Task 17 touches `packages/memory/src/engine.ts`,
-   `packages/core/src/context.ts`, `packages/core/src/context.test.ts`. Task 18 touches
-   `packages/memory/src/sqlite.ts` and CREATES `packages/core/src/docKinds.test.ts`.
-   Commit messages are in the plan; see "exact commit messages" below.
-3. **HEAD is past `fa95c0e`.** Somebody committed. Verify with `git show --stat` on each new
-   commit that tests landed alongside implementation, then run the full gate.
-
-**Baseline test count at `fa95c0e` is: Test Files 49 passed (49) / Tests 806 passed (806).**
-Tasks 17 and 18 must RAISE that number. A flat or falling count means tests were parked or
-deleted. That is the failure mode this repo has been bitten by repeatedly.
-
-## VERIFY THE ONGOING MODES BATCH BEFORE YOU CONTINUE
-
-Modes Batch G (Task 12, `set_mode` replaces `update_style`) was dispatched and the session may
-have ended before it was verified. In `.claude/worktrees/modes`:
-
-```bash
-git log --oneline -3     # tip should be 63bda62 if nothing was committed
-git status --short       # uncommitted agent work?
-pnpm lint && pnpm build && pnpm test
-```
-
-Baseline before Batch G is **Test Files 53 / Tests 912** at `63bda62`. Batch G must raise that.
-Expected files: `packages/core/src/tools.ts`, `tools.test.ts`, `packages/core/src/agent.ts`,
-`agent.test.ts`, `packages/cli/src/chat.ts`, `chat.test.ts`, `packages/cli/src/index.ts`,
-`packages/cli/src/setup.ts`.
-
-**Task 12 retires `update_style`.** When it does, the write-through added to `agent.ts` in
-`8087dab` (`await this.engine.updateProfileSettings({ style: resultData.style })`) should
-disappear with it. If Task 12 leaves `update_style` in place, that line must stay or the prompt
-stops seeing style changes. Check which happened before accepting the batch.
-Note the tool count in `tools.test.ts` is currently ELEVEN; replacing `update_style` with
-`set_mode` keeps it at eleven, but confirm rather than assume.
 
 ### Two things Batch E settled that later batches depend on
 
@@ -301,47 +278,34 @@ Worktrees live inside the main repo at `.claude/worktrees/` (gitignored):
 licensing). It is unrelated to Phase D and no plan touches it. **Leave it alone.** It does not
 block any merge. Do not commit it, do not stash it, do not "tidy" it.
 
-## Exact commit messages for the remaining retrieval tasks
-
-From the plan, use verbatim:
-
-- Task 17: `Preload a compact weekly rollup index with docIds, never the bodies`
-- Task 18: `Add the table-driven DocKind wiring test and a runtime DOC_KINDS list`
-
 ## What to do next, in order
 
-1. Verify/finish retrieval Tasks 17 and 18 as described above.
-2. Retrieval Task 19: run `pnpm lint`, `pnpm build`, `pnpm test` yourself from a clean tree.
-   Then update the README Status section honestly for what the retrieval release actually
-   changed (see "README" below). Commit that.
-3. Merge retrieval into design:
+1. **Modes Batch H (Task 13)**, then batches I through N, in the order of the modes batch table.
+   Every commit message is at the end of its task's step list in the plan; find them with
+   `grep -n 'git commit -m' <plan>` and read the following lines, they are multi-line.
+2. **Batch L (Task 19)** exposes profile and settings over HTTP. It must never make the provider
+   API key reachable. Verify that test yourself; do not accept a subagent's word for it.
+3. **Batch N (Task 22)** is the README. Do it yourself. `AGENTS.md` treats an overstated Status
+   section as a serious defect, not a cosmetic one.
+4. When modes is complete and green, merge it into design:
    ```bash
    cd /Users/vishal/work/personal/second-mind
-   git merge feat/phase-d-retrieval        # a regular merge, NOT --ff-only
-   pnpm lint && pnpm build && pnpm test    # run the gate again on design after the merge
-   git worktree remove .claude/worktrees/retrieval
+   git merge feat/phase-d-modes        # regular merge, NOT --ff-only
+   pnpm lint && pnpm build && pnpm test
+   git worktree remove .claude/worktrees/modes
    ```
-   A regular merge is required because design carries two handoff-doc commits beyond the time merge
-   (`a466123` part 2, and the commit that added this file, part 3).
-4. **Before starting modes, merge design into `feat/phase-d-modes`.** This was decided this
-   session and is important, see "Merge order" below. Then re-run `pnpm install` in that
-   worktree (the merge can move `package.json`/the lockfile), then run the modes plan's Task 0
-   gate including its step 6 green baseline.
-5. Run the modes plan. Decompose into file-sharing batches, dispatch, verify, and do the safety
-   falsification yourself for Tasks 7, 7A and 8.
-6. After modes merges into design, create `.claude/worktrees/journal` branched from the
-   modes-merged design and run the journal plan. Its Task 13 safety-invariant falsification
-   (six combinations, position plus bytes) is yours, never a subagent's.
-7. Update the README honestly after each plan ships. The Status section must never overstate.
-8. When all five epochs have merged into `feat/phase-d-design` and the full gate is green there,
-   Phase D is complete. Merging `feat/phase-d-design` into `main` and cutting a release is the
-   human's call, not yours: raise it and wait. `main` is currently at `e72377b`
-   (the v0.5.0 merge), so design is a long way ahead of it and that merge deserves a human eye.
-
-Note the ordering constraint that makes this sequential rather than parallel: journal depends on
-modes, and modes depends on time (done). retrieval and modes could in principle have run in
-parallel, but retrieval is nearly finished and modes has not started, so just finish retrieval
-first and take its merged result into modes.
+5. **Then journal.** Create the worktree from the modes-merged design, NOT before:
+   ```bash
+   git worktree add .claude/worktrees/journal -b feat/phase-d-journal feat/phase-d-design
+   cd .claude/worktrees/journal && pnpm install
+   ```
+   Run the journal plan's 16 tasks. Its **Task 13 is a safety-invariant test (six combinations,
+   position plus bytes). Falsify that one yourself**, never a subagent. It is the same shape as
+   the modes Task 8 invariant, which is documented above with how to falsify it properly.
+6. Update the README honestly after each plan ships.
+7. When all five epochs have merged into `feat/phase-d-design` and the gate is green there,
+   Phase D is complete. Merging design into `main` and cutting a release is the human's call:
+   raise it and wait. `main` is at `e72377b` (v0.5.0) and is a long way behind.
 
 ## Merge order: why modes must take design first
 
@@ -555,3 +519,148 @@ Keep it current. Mark a task ONGOING in the status board *before* dispatching it
 its commit hash as soon as you have verified and committed it. If you run out of session, the
 next agent's first action is reading the status board and the "verify the ongoing work" section,
 so those two must always describe reality.
+
+---
+
+## Appendix: the standing subagent preamble, verbatim
+
+This lived in a session scratchpad that does not survive. Write it back out to a file, point
+every subagent brief at it with `cat <path>`, and change the worktree path when you move from
+the modes worktree to the journal one. It is the single biggest token saver in this workflow:
+written once, read by every subagent, never repeated in a brief.
+
+```markdown
+# Standing brief for every openreverie subagent (read fully, it is binding)
+
+## Working directory, absolute, non-negotiable
+
+    /Users/vishal/work/personal/second-mind/.claude/worktrees/modes
+
+`cd` there as your FIRST action. This is a git worktree on branch `feat/phase-d-modes`.
+It already has `node_modules`. Use ABSOLUTE paths for every file you read or edit, all rooted
+at the path above. If you edit anything under `/Users/vishal/work/personal/second-mind/packages/`
+(no `.claude/worktrees/modes` segment) you have corrupted the wrong branch: stop and report it.
+
+## What this project is
+
+openreverie: a self-hosted companion agent for personal reflection with a layered memory.
+Six TypeScript packages in a pnpm workspace. Node v22, pnpm 10.8.1.
+
+Package dependency direction is downward only:
+`cli` -> `core` -> `memory` -> `providers`, and `server` -> `core` -> `memory` -> `providers`.
+`cli` and `server` are sibling outer interfaces. Never import upward or sideways.
+Model access only through `@openreverie/providers` interfaces.
+
+The plan file that governs your task is, in that worktree:
+`docs/superpowers/plans/2026-08-17-modes-profile-settings-plan.md`
+It contains verbatim code for each task. Read only the line range your dispatch names.
+The plan is the source of truth for code you write, EXCEPT where your dispatch says otherwise.
+
+## Writing style, applies to all prose you produce (code comments, test names, docs, reports)
+
+- Never use em dashes. Use commas, periods, colons, or parentheses.
+- No AI tropes: "delve", "seamlessly", "robust", "leverage", "streamline", "empower", "unlock",
+  "supercharge", "not just X, it's Y", emoji in headings or lists, marketing tone.
+- Plain and concrete. Short sentences are fine. Honesty over polish.
+
+## Method: TDD, then falsify
+
+1. RED: write the test exactly as the plan gives it. Run it. Confirm it FAILS, and confirm the
+   failure message is the one the plan predicts (or, if it differs, note the difference).
+2. GREEN: implement exactly as the plan gives it. Run the test. Confirm it PASSES.
+3. FALSIFY (if the plan names a falsify step): delete or revert the specific line of the fix the
+   plan names, rerun, confirm the test FAILS, then restore. Paste the real failure output in your
+   report. Reading the code is not falsifying.
+
+## TypeScript settings that will bite you
+
+- `exactOptionalPropertyTypes` is ON. Never write `{ key: undefined }`.
+  Use `...(value !== undefined ? { key: value } : {})`.
+  For zod schema fields whose type must exclude `undefined`, zod 4 has `.exactOptional()`.
+- `noUncheckedIndexedAccess` is ON. Narrow every array index and every `.find()` result.
+- Cross-package imports resolve through `dist/` (each package's `main` is `dist/index.js`).
+  A source edit in `memory` does NOT reach a `cli` or `server` test until you rebuild.
+  So: `npx tsc -b` ALWAYS runs BEFORE `npx vitest run`.
+
+## Environment facts
+
+- Machine timezone is Asia/Calcutta (UTC+05:30). CI is UTC. `T20:00:00Z` is the NEXT local day here.
+  Date-sensitive tests must pin UTC using the existing `pinTimezoneUtc(paths)` helper pattern in
+  `packages/memory/src/engine.test.ts`. Pin it inside the date-sensitive `it` block, NOT in a shared
+  `beforeEach` (that breaks the "system default timezone" test in `context.test.ts`).
+- Single-file test command, from the worktree root: `npx vitest run <path>`
+  (`pnpm --filter openreverie test -- <path>` FAILS with "No projects were found". Do not use it.)
+- biome line width is 100. Plan snippets sometimes exceed it; let biome reformat.
+- biome's recommended preset flags unused variables. Remove dead symbols, do not suppress.
+
+## Your gate, in this exact order, from the worktree root
+
+    npx tsc -b
+    npx vitest run
+    npx biome check --write .
+    npx biome check .          # must report no remaining fixes
+
+Then STOP.
+
+## Do NOT commit
+
+The plan's last step for each task says to `git add` and `git commit`. IGNORE THAT.
+The orchestrator verifies and commits. Leave all changes uncommitted in the working tree.
+
+## Stop and report instead of improvising, if
+
+- A symbol the plan references does not exist and no earlier task creates it.
+- The plan's predicted failure or pass contradicts reality in a way you cannot resolve minimally.
+- A change would require an upward import across a package boundary.
+- Anything touches crisis handling, safety modes, companion/firewall behavior. Never weaken these.
+- The same step fails three times.
+
+## Your report back, keep it under 400 words
+
+- Per plan task: RED output summary, GREEN confirmation, falsify output (paste the real failure line).
+- Any deviation from the plan text and why.
+- The final four gate commands with their exit codes and the vitest totals line
+  (e.g. "Test Files 48 passed (48) / Tests 779 passed (779)").
+- The literal output of: `git -C /Users/vishal/work/personal/second-mind/.claude/worktrees/modes status --short`
+- The literal output of: `git -C /Users/vishal/work/personal/second-mind status --short`
+  (this MUST show only ` M ROADMAP.md`. Anything else means you edited the wrong tree.)
+# Modes plan reconciliation, verified against the real tree (do not re-derive)
+
+The modes plan was written against an anticipated shape of the time plan. These five
+reconciliations are mechanical and confirmed by grep. Apply them silently, do not stop on them.
+
+1. **`saveProfile` does not exist. Use `writeProfile`.**
+   `packages/memory/src/profile.ts:95` exports `writeProfile(paths, profile): Promise<void>`.
+   `loadProfile(paths): Promise<Profile>` at :68 is named as the plan expects.
+   The plan writes `saveProfile` in Tasks 4, 5, 15, 19 and elsewhere. Every one means `writeProfile`.
+
+2. **`MigrationResult` in the plan is wrong.** The real shape, `packages/memory/src/migrations/index.ts:28`:
+   `{ id: string; applied: boolean; summary: string; details: string[] }`
+   The plan (Task 0 doc and the `style-to-profile` migration) shows `{ changed: boolean; messages: string[] }`.
+   Use the real shape. `reverie migrate` already ships and prints `summary` then `details` one per line,
+   so `style-to-profile` must return those fields.
+   `MigrationContext` is `{ paths, configPath }`, as the plan expects. `migrations` is a registry array
+   already holding `profileSeedMigration` and `utcToLocalRollupsMigration`.
+
+3. **`currentProfile()` does not exist. The accessor is `profile()`.**
+   `packages/memory/src/engine.ts:291` `profile(): Profile`. The private cached field is
+   `profileCache` (:221), not `profile`. `updateProfile(patch)` exists at :314 and currently
+   accepts only `{ timezone?: string }`. `timezone()` and `timezoneSource()` also already exist.
+   The plan's own Task 0 step 4 says to use an existing accessor under its real name. Do that.
+
+4. **`Profile.body` is correct**, `profile.ts:33`. The plan offers `prose` as an alternative.
+   Do NOT substitute. It is `body`. Note `meta` is `ProfileMeta & { [key: string]: unknown }`.
+
+5. **The plan's command table is stale.** Use:
+   - single test file: `npx vitest run <path>`  (NOT `pnpm vitest run`, NOT `pnpm --filter`)
+   - auto-format: `npx biome check --write .` then `npx biome check .` (must report no fixes)
+   - `pnpm format` only runs the formatter, not the linter's safe fixes. Do not rely on it.
+
+## Safety boundary for the modes plan, absolute
+
+Tasks 7 (stance doctrine), 7A (identity-fact sentence) and 8 (mode overlay plus the safety
+invariant) live in `packages/core/src/personas.ts` and its tests. A mode adjusts STYLE WITHIN the
+safety stance. A mode NEVER adjusts the safety stance. Never remove, weaken, or bypass the
+companion and firewall modes. Never make crisis behavior "smarter". If a step seems to require it,
+STOP and report; the orchestrator handles those falsifications personally.
+```
