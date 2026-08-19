@@ -352,6 +352,69 @@
   font-size: var(--step--1);
 }
 
+/*
+ * The new-chat screen: shown in place of the thread and composer whenever
+ * there is no active session, so no session (and no POST) exists until one
+ * of these cards is clicked.
+ */
+.mode-picker-screen {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-6);
+  padding: var(--space-6);
+  overflow-y: auto;
+}
+
+.mode-picker-screen-heading {
+  margin: 0;
+  color: var(--ink-soft);
+  font-family: var(--font-ui);
+  font-size: var(--step-0);
+  font-weight: 400;
+}
+
+.mode-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+  gap: var(--space-3);
+  width: 100%;
+  max-width: calc(var(--reading-measure) + 5rem);
+}
+
+.mode-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-2);
+  background: var(--panel-raised);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  text-align: left;
+  cursor: pointer;
+}
+
+.mode-card:hover {
+  background: var(--said);
+}
+
+.mode-card-name {
+  font-size: var(--step-0);
+  font-weight: 600;
+  text-transform: capitalize;
+}
+
+.mode-card-summary {
+  color: var(--ink-soft);
+  font-size: var(--step--1);
+}
+
 .mode-picker {
   display: flex;
   align-items: center;

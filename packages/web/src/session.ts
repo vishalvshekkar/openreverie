@@ -24,6 +24,7 @@ export type ChatAction =
   | { type: 'new-session'; session: Session }
   | { type: 'turn-start'; text: string }
   | { type: 'load-session'; session: Session; lines: TranscriptLine[] }
+  | { type: 'clear-session' }
 
 export const initialChatState: ChatState = {
   session: null,
@@ -111,7 +112,13 @@ export function sessionReducer(state: ChatState, action: ChatAction): ChatState 
         error: null,
       }
     case 'new-session':
-      return { ...initialChatState, session: action.session }
+      return {
+        ...initialChatState,
+        session: action.session,
+        mode: action.session.mode ?? initialChatState.mode,
+      }
+    case 'clear-session':
+      return initialChatState
     case 'turn-start':
       return {
         ...state,

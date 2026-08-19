@@ -140,9 +140,14 @@ beforeEach(() => {
   api.getProfile.mockResolvedValue(defaultProfile)
 })
 
+// Most of this file exercises an already-live session, so renderReady clicks
+// the general mode card, the same first step a real visitor takes on the new
+// mode-card screen, and waits for the session it starts.
 async function renderReady() {
   render(<Conversations api={api as unknown as AppApi} />)
-  await waitFor(() => expect(api.createSession).toHaveBeenCalled())
+  const generalCard = await screen.findByRole('button', { name: /^general\b/i })
+  await userEvent.click(generalCard)
+  await waitFor(() => expect(api.createSession).toHaveBeenCalledWith('general'))
   return screen.getByLabelText('Message')
 }
 
@@ -352,6 +357,11 @@ describe('Conversations', () => {
       const newConversation = screen.getByRole('button', { name: 'New conversation' })
       await userEvent.click(newConversation)
 
+      // "New conversation" only returns to the mode-card screen now: the new
+      // session (and its greeting) does not start until a card is clicked.
+      const generalCard = await screen.findByRole('button', { name: /^general\b/i })
+      await userEvent.click(generalCard)
+
       expect(await screen.findByText('New greeting')).toBeVisible()
 
       // Release the old greeting and let its remaining events actually settle
@@ -416,5 +426,49 @@ describe('mode picker', () => {
   it('renders the status strip next to the composer', async () => {
     await renderReady()
     expect(await screen.findByTestId('status-strip')).toHaveTextContent('warm')
+  })
+})
+
+describe('the new-chat mode-card picker', () => {
+  it('creates no session until a card is clicked, then creates it with the clicked mode', async () => {
+    api.createSession.mockResolvedValueOnce({ ...liveSession, mode: 'solve' })
+
+    render(<Conversations api={api as unknown as AppApi} />)
+
+    const solveCard = await screen.findByRole('button', { name: /^solve\b/i })
+    expect(api.createSession).not.toHaveBeenCalled()
+
+    await userEvent.click(solveCard)
+
+    await waitFor(() => expect(api.createSession).toHaveBeenCalledWith('solve'))
+  })
+
+  it('shows all ten catalogue modes as cards, reusing the switcher copy', async () => {
+    render(<Conversations api={api as unknown as AppApi} />)
+
+    const heading = await screen.findByText('Choose how to start')
+    const screenEl = heading.closest('.mode-picker-screen') as HTMLElement
+    expect(within(screenEl).getAllByRole('button')).toHaveLength(10)
+    expect(
+      within(screenEl).getByText('A concrete problem, worked toward real options and a decision.'),
+    ).toBeVisible()
+  })
+
+  it('leaves nothing to clean up if the picker screen is abandoned without a click', async () => {
+    render(<Conversations api={api as unknown as AppApi} />)
+
+    await screen.findByRole('button', { name: /^general\b/i })
+    expect(api.createSession).not.toHaveBeenCalled()
+    expect(api.end).not.toHaveBeenCalled()
+  })
+
+  it('shows the clicked mode, not a stale "general", once the session starts', async () => {
+    api.createSession.mockResolvedValueOnce({ ...liveSession, mode: 'solve' })
+
+    render(<Conversations api={api as unknown as AppApi} />)
+    const solveCard = await screen.findByRole('button', { name: /^solve\b/i })
+    await userEvent.click(solveCard)
+
+    await waitFor(() => expect(screen.getByLabelText('Mode')).toHaveValue('solve'))
   })
 })
