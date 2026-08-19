@@ -11,7 +11,6 @@
 // anywhere.
 
 import { stat } from 'node:fs/promises'
-import type { ReverieConfig } from '@openreverie/core'
 import {
   listMigrations,
   type MigrationContext,
@@ -20,7 +19,10 @@ import {
 } from '@openreverie/memory'
 
 export interface MigrateDeps {
-  loadConfig: () => Promise<ReverieConfig>
+  // reverie migrate must run on exactly the installs loadConfig now refuses,
+  // so it reads the memory folder out of the raw TOML instead of validating
+  // the whole file first.
+  readMemoryDir: () => Promise<string>
   configPath: string
   write: (text: string) => void
 }
@@ -38,15 +40,15 @@ export async function runMigrate(args: string[], deps: MigrateDeps): Promise<num
   const dryRun = args.includes('--dry-run')
   const list = args.includes('--list')
 
-  let config: ReverieConfig
+  let memoryDir: string
   try {
-    config = await deps.loadConfig()
+    memoryDir = await deps.readMemoryDir()
   } catch (err) {
     deps.write(`${err instanceof Error ? err.message : String(err)}\n`)
     return 1
   }
 
-  const paths = memoryPaths(config.memoryDir)
+  const paths = memoryPaths(memoryDir)
   if (!(await pathIsDirectory(paths.root))) {
     deps.write(`No memory folder found at ${paths.root}. Run: reverie setup\n`)
     return 1

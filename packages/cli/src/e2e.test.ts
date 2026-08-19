@@ -86,7 +86,6 @@ function testConfig(): ReverieConfig {
     provider: { name: 'openai', apiKey: 'test' },
     models: { chat: 'm', reflection: 'm', embeddings: 'm' },
     safety: { mode: 'companion', resources: [] },
-    style: { engagement: 'balanced', tone: 'warm', orientation: 'listening' },
   }
 }
 

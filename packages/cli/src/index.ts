@@ -17,7 +17,12 @@ import { realpathSync } from 'node:fs'
 import { createInterface } from 'node:readline/promises'
 import { fileURLToPath } from 'node:url'
 import type { ReverieConfig } from '@openreverie/core'
-import { defaultConfigPath, loadConfig, resolveApiKey } from '@openreverie/core'
+import {
+  defaultConfigPath,
+  loadConfig,
+  readConfigMemoryDir,
+  resolveApiKey,
+} from '@openreverie/core'
 import { MemoryEngine } from '@openreverie/memory'
 import type { ProviderSelection } from '@openreverie/providers'
 import { createChatProvider, createEmbeddingProvider } from '@openreverie/providers'
@@ -122,6 +127,7 @@ export interface CliMainDeps {
   countMemoryDocuments: typeof countMemoryDocuments
   runChat: typeof runChat
   loadConfig: (path: string) => Promise<ReverieConfig>
+  readConfigMemoryDir: (path: string) => Promise<string>
   configPath: string
   write: (text: string) => void
   colorEnabled: () => boolean
@@ -247,8 +253,8 @@ export async function mainWith(args: string[], deps: CliMainDeps): Promise<void>
 
   if (subcommand === 'migrate') {
     const exitCode = await deps.runMigrate(args.slice(1), {
-      loadConfig: () => deps.loadConfig(configPath),
-      configPath: deps.configPath,
+      readMemoryDir: () => deps.readConfigMemoryDir(configPath),
+      configPath,
       write: deps.write,
     })
     process.exitCode = exitCode
@@ -321,6 +327,7 @@ const defaultDeps: CliMainDeps = {
   countMemoryDocuments,
   runChat,
   loadConfig,
+  readConfigMemoryDir,
   configPath: defaultConfigPath(),
   write: (text) => process.stdout.write(text),
   colorEnabled: colorsEnabled,

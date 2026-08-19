@@ -13,6 +13,7 @@ import {
   type StyleConfig,
   saveConfig,
 } from '@openreverie/core'
+import { ensureMemoryTree, loadProfile, memoryPaths, writeProfile } from '@openreverie/memory'
 
 export interface SetupIo {
   question(prompt: string): Promise<string>
@@ -232,11 +233,25 @@ export async function runSetup(io: SetupIo, configPath?: string): Promise<void> 
     provider,
     models: { chat: chatModel, reflection: reflectionModel, embeddings: embeddingsModel },
     safety: { mode, resources: defaultCrisisResources.map((resource) => ({ ...resource })) },
-    style,
   }
 
   const resolvedPath = configPath ?? defaultConfigPath()
   await saveConfig(config, resolvedPath)
+
+  // Order matters here, and getting it wrong loses data. Create the memory
+  // tree first, because that is what seeds profile.md with a system-default
+  // timezone when the file is absent; writing a profile before that step
+  // means the seeding finds a file and skips. Then load, merge, and write
+  // back, never write fresh, because a rerun on an existing folder would
+  // otherwise discard every other field the person has.
+  const paths = memoryPaths(memoryDir)
+  await ensureMemoryTree(paths)
+  const profile = await loadProfile(paths)
+  await writeProfile(paths, {
+    ...profile,
+    meta: { ...profile.meta, style: { ...(profile.meta.style ?? {}), ...style } },
+  })
+  io.write(`Wrote your style choices to ${paths.profile}.\n`)
 
   io.write(`\nWrote config to ${resolvedPath}.\nStart reverie with: reverie\n`)
 }

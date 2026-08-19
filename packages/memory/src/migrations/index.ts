@@ -18,6 +18,7 @@
 import { appendFile, readFile } from 'node:fs/promises'
 import type { MemoryPaths } from '../paths.js'
 import { profileSeedMigration } from './profileSeed.js'
+import { styleToProfile } from './styleToProfile.js'
 import { utcToLocalRollupsMigration } from './utcToLocalRollups.js'
 
 export interface MigrationContext {
@@ -62,7 +63,11 @@ export interface RunMigrationsOptions {
 // task; profile-seed and utc-to-local-rollups register themselves in the two
 // tasks that add them. Order matters once there is more than one: a later
 // migration may depend on a file an earlier one just wrote.
-export const migrations: Migration[] = [profileSeedMigration, utcToLocalRollupsMigration]
+export const migrations: Migration[] = [
+  profileSeedMigration,
+  utcToLocalRollupsMigration,
+  styleToProfile,
+]
 
 export async function readAppliedMigrationIds(paths: MemoryPaths): Promise<Set<string>> {
   let raw: string

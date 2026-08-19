@@ -44,6 +44,9 @@ function testDeps(overrides: Partial<CliMainDeps> = {}): {
     loadConfig: async () => {
       throw new Error('loadConfig should not be called')
     },
+    readConfigMemoryDir: async () => {
+      throw new Error('readConfigMemoryDir should not be called')
+    },
     configPath: '/fake/.reverie/config.toml',
     write: (text: string) => {
       output += text

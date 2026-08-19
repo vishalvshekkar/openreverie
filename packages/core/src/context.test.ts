@@ -27,7 +27,6 @@ function testConfig(overrides: Partial<ReverieConfig> = {}): ReverieConfig {
     provider: { name: 'openai', apiKeyEnv: 'OPENREVERIE_TEST_KEY' },
     models: { chat: 'gpt-5', reflection: 'gpt-5-mini', embeddings: 'text-embedding-3-small' },
     safety: { mode: 'companion', resources: defaultCrisisResources },
-    style: { engagement: 'balanced', tone: 'warm', orientation: 'listening' },
     ...overrides,
   }
 }
@@ -170,7 +169,7 @@ describe('assembleSystemPrompt', () => {
 
     const prompt = await assembleSystemPrompt(engine, config)
 
-    const persona = buildPersona(config.safety.mode, config.safety.resources, config.style)
+    const persona = buildPersona(config.safety.mode, config.safety.resources, engine.currentStyle())
     expect(prompt.startsWith(persona)).toBe(true)
 
     expect(prompt).toContain('## Constitution')
@@ -494,7 +493,7 @@ describe('assembleSystemPrompt', () => {
 
     const prompt = await assembleSystemPrompt(engine, config)
 
-    const persona = buildPersona('firewall', defaultCrisisResources, config.style)
+    const persona = buildPersona('firewall', defaultCrisisResources, engine.currentStyle())
     expect(prompt.startsWith(persona)).toBe(true)
 
     await engine.close()

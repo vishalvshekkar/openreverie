@@ -45,7 +45,6 @@ function config(memoryDir: string): ReverieConfig {
     provider: { name: 'openai', apiKeyEnv: 'OPENAI_API_KEY' },
     models: { chat: 'chat', reflection: 'reflection', embeddings: 'embeddings' },
     safety: { mode: 'companion', resources: [] },
-    style: { engagement: 'balanced', tone: 'warm', orientation: 'listening' },
   }
 }
 
