@@ -36,7 +36,7 @@ import {
   readGraphRecords,
   type SequencedGraphRecord,
 } from './graph.js'
-import type { JournalMethod } from './journal.js'
+import { assembleJournalBody, type JournalMethod, writeJournalEntry } from './journal.js'
 import { ensureMemoryTree, type MemoryPaths, memoryPaths } from './paths.js'
 import {
   loadProfile,
@@ -654,7 +654,6 @@ export class MemoryEngine {
     // Consumed by the journal spec's gated entry write. Read here, in the one
     // place that knows how to answer the question, rather than in two.
     const sessionModeAtEnd = await this.sessionMode(sessionId)
-    void sessionModeAtEnd
     const transcript = await SessionStore.readTranscript(this.paths, sessionId)
 
     if (!transcript.some((line) => line.role === 'user')) {
@@ -863,6 +862,31 @@ export class MemoryEngine {
           node.type === 'person' ? 'person' : 'arc',
           `session ${sessionId} narrative rewrite for ${id}`,
         )
+      }
+    }
+
+    // Journal mode adds one more write after the rest of this pipeline
+    // completes, gated on the session's own recorded mode (read into
+    // sessionModeAtEnd above) and declared method (read fresh here), both
+    // sourced from session.json on disk rather than from any in-memory
+    // session registry: this is what makes the write survive the process
+    // that started the session dying before an orderly endSession (spec
+    // section 11). Absent mode, absent method, or a mode other than
+    // journal all degrade the same way: no journal document is written,
+    // and nothing else about this pipeline changes.
+    if (sessionModeAtEnd === 'journal') {
+      const method = await this.sessionJournalMethod(sessionId)
+      if (method) {
+        const entryDate = formatLocalDate(now, this.timezone())
+        const body = assembleJournalBody(transcript, method)
+        const entryDoc = await writeJournalEntry(this.paths, {
+          method,
+          entryDate,
+          recordedAt: now.toISOString(),
+          session: sessionId,
+          body,
+        })
+        await this.reindexOrWarn(entryDoc, 'journal', `session ${sessionId} journal entry`)
       }
     }
 
