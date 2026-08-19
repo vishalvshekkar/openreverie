@@ -160,7 +160,7 @@ half-written build output. Mark a batch ONGOING *before* dispatching it.
 
 | Batch | Tasks | What | Depends on | State | Commits |
 | --- | --- | --- | --- | --- | --- |
-| A | 1 | `memory/paths.ts`: `journalDir`, `journaling` fields | nothing | TODO | |
+| A | 1 | `memory/paths.ts`: `journalDir`, `journaling` fields | nothing | ONGOING | |
 | B | 2 | `DocKind` gains `journal`/`journaling`; `sqlite.ts`, `engine.ts`, `core/tools.ts` | A | TODO | |
 | C | 3, 4, 7 | `memory/journal.ts`: entry filename/frontmatter, body assembly, `journaling.md` read/write helper | A, B | TODO | |
 | D | 5 | `declare_journal_method` tool; `transcripts.ts`, `engine.ts`, `core/tools.ts` | C | TODO | |
