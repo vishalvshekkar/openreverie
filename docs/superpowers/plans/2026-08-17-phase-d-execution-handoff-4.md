@@ -95,6 +95,34 @@ Phase D is not finished until all five have shipped and merged into `feat/phase-
 design has merged to `main`. Merging design into `main` and cutting a release is the human's call:
 raise it and wait. `main` is at `e72377b` (v0.5.0) and is a long way behind.
 
+## MANUAL TESTING QUEUE, deliberately deferred, visit together near the end
+
+An automated gate (`tsc`, `vitest`, `biome`) proves the code is correct, not that a feature works.
+AGENTS.md requires starting the dev server and actually using a UI change by hand before calling it
+done. This session deferred that, on the human's explicit instruction, rather than skip it or do it
+piecemeal: everything below gets one consolidated manual pass near the end of Phase D (after journal
+ships, before design merges to `main`), because seeing the pieces work together end to end is more
+useful than one browser tab per commit. Add to this list as work lands. The one exception is a
+change that seems too risky to leave unverified that long: say so plainly and do it immediately
+instead of queuing it.
+
+- [ ] **Modes Batch O, the CLI startup spinner** (`f51647b`). Run `node packages/cli/dist/index.js`
+  for real, against a memory folder with something in it so the open takes a moment, and watch the
+  spinner actually render: phrases cycling, the line clearing cleanly before the session opens.
+  Automated tests cover phrase rotation and the clear-on-error path with fake timers and a fake
+  `write`; nobody has watched it in a real terminal yet.
+- [ ] **Modes Batch P, the web mode-card new-chat flow** (`d6f0700`). Run `reverie web`, open it in
+  a real browser, and confirm: the new-chat screen shows all ten mode cards with no session created
+  yet (check the network tab: no `POST /api/v1/sessions` before a click), clicking a card starts a
+  session in that mode, "New conversation" returns to the picker instead of eagerly starting one,
+  and abandoning the picker (navigate away, close the tab) leaves nothing to clean up. Also worth a
+  look: the cards read well and the mid-conversation `<select>` switcher (Task 21) still works
+  unchanged.
+- [ ] Whatever the journal epoch's own web and CLI surfaces turn out to be, most likely a real
+  Journal destination replacing the current placeholder. Add a specific item here as each such batch
+  lands, with the same level of detail as the two above: what to click, what to type, what to watch
+  for, not just "test the journal feature."
+
 ### Modes plan, worktree `.claude/worktrees/modes`, branch `feat/phase-d-modes`
 
 Batching is by shared files. Run them SEQUENTIALLY in the one worktree: two agents running
