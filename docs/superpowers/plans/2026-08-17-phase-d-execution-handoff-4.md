@@ -256,7 +256,7 @@ half-written build output. Mark a batch ONGOING *before* dispatching it.
 | F | 8 | `sessionContext` gains `mode` param, `journalingProtocol`; `engine.ts` | C | DONE, 1072 | `3071398` |
 | G | 9 | `journalingProtocolSection` in the assembled prompt; `core/context.ts` | F | DONE, 1076 | `bfa1637` |
 | H | 10 | `core/journaling.ts` content module (largest task, includes the expressive-writing safety gate); wires into `core/modes.ts`, `core/personas.ts` (`buildPersona` signature), `core/context.ts` (call site) **safety-relevant content** | C, G | DONE, 1103, orchestrator personally cross-checked all six formats' evidence text and the safety gate against the spec, and personally falsified the wiring fix | `5aec7a4` |
-| I | 11 | `update_journaling_protocol` tool, `refreshSystemPrompt` trigger; `engine.ts`, `core/tools.ts`, `core/agent.ts` | C | TODO | |
+| I | 11 | `update_journaling_protocol` tool, `refreshSystemPrompt` trigger; `engine.ts`, `core/tools.ts`, `core/agent.ts` | C | DONE, 1107, orchestrator personally falsified the reassembly trigger | `5f5e5b7` |
 | J | 12 | Reflection's `journalingUpdate` field, the backstop path; `reflection.ts`, `engine.ts` | C | TODO | |
 | K | 13 | **SAFETY invariant test, six combinations, position plus bytes**; `core/personas.test.ts` only | H, C | TODO, orchestrator falsifies personally | |
 | L | 14 | Server exposes `journal`/`journaling` kinds; `server/app.ts` | B | TODO | |
@@ -322,6 +322,15 @@ Notes on sequencing, from the plan survey:
   positive `.toMatch(/not a recurring nag/i)` lock-in), falsified for real. Lesson for future
   batches: a subagent's own classification of "spec-transcribed vs. incidental" is not reliable
   enough to skip checking the spec directly when the two collide.
+- **I's plan text guessed the wrong precedent for the reassembly trigger.** It said to copy
+  whatever pattern `set_mode` uses; `set_mode` actually goes through a separate callback mechanism
+  (`dispatchTool`'s options object), not a post-hoc `toolCall.name === '...'` check. The real,
+  already-existing precedent is `update_profile`'s block at `agent.ts:417-424`; `update_journaling_protocol`'s
+  trigger was added as a sibling `if` right after it (`5f5e5b7`). The plan's own Step 7 test (mirroring
+  `update_profile`'s reassembly test, no explicit mode) could never pass regardless of correct wiring:
+  `context.journalingProtocol` is only populated when the session's mode is `'journal'`. Fixed by
+  starting the test's session in journal mode with a prior arc (not a first session, which would
+  have taken the onboarding branch instead). Orchestrator personally falsified the corrected trigger.
 - **Three test assertions were added beyond the plan's own text in H** (`personas.test.ts`'s
   `journal mode threading` describe block, `modes.test.ts`'s catalogue-identity check, one line in
   `context.test.ts`'s existing journaling-protocol-section test), because the plan's own generic
