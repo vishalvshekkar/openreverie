@@ -255,7 +255,7 @@ half-written build output. Mark a batch ONGOING *before* dispatching it.
 | E | 6 | Gated write in `_doEndSession`, the crash path; `engine.ts` **safety-adjacent** | C, D | DONE, 1068, orchestrator personally re-falsified the mode gate | `dbf5621` |
 | F | 8 | `sessionContext` gains `mode` param, `journalingProtocol`; `engine.ts` | C | DONE, 1072 | `3071398` |
 | G | 9 | `journalingProtocolSection` in the assembled prompt; `core/context.ts` | F | DONE, 1076 | `bfa1637` |
-| H | 10 | `core/journaling.ts` content module (largest task, includes the expressive-writing safety gate); wires into `core/modes.ts`, `core/personas.ts` (`buildPersona` signature), `core/context.ts` (call site) **safety-relevant content** | C, G | TODO, not yet dispatched | |
+| H | 10 | `core/journaling.ts` content module (largest task, includes the expressive-writing safety gate); wires into `core/modes.ts`, `core/personas.ts` (`buildPersona` signature), `core/context.ts` (call site) **safety-relevant content** | C, G | DONE, 1103, orchestrator personally cross-checked all six formats' evidence text and the safety gate against the spec, and personally falsified the wiring fix | `5aec7a4` |
 | I | 11 | `update_journaling_protocol` tool, `refreshSystemPrompt` trigger; `engine.ts`, `core/tools.ts`, `core/agent.ts` | C | TODO | |
 | J | 12 | Reflection's `journalingUpdate` field, the backstop path; `reflection.ts`, `engine.ts` | C | TODO | |
 | K | 13 | **SAFETY invariant test, six combinations, position plus bytes**; `core/personas.test.ts` only | H, C | TODO, orchestrator falsifies personally | |
@@ -288,13 +288,46 @@ Notes on sequencing, from the plan survey:
   second falsification. **Require two distinct pasted failure outputs in E's report**; if they are
   identical, or only one is given, re-run the missing direction yourself rather than accepting the
   report. This one does not need the orchestrator to re-run it personally, unlike K.
-- **H must hand K a real signature, not the plan's prediction.** Task 10 Step 7's code for the
-  `buildPersona` signature widen is placeholder-style (`...unchanged...`), so what actually ships
-  may not match the plan's text verbatim. When verifying H, record `buildPersona`'s real final
-  signature in this document (in H's Commits cell or a note under it) and write K's brief against
-  that real signature, not the plan's. Require H's brief to grep every `buildPersona(` call site
-  before editing, and to confirm the pre-existing 42 `personas.test.ts` tests still pass in H's own
-  gate run.
+- **H's real final signature, recorded as required (`5aec7a4`).** `buildPersona`'s widened
+  signature is:
+  ```ts
+  export function buildPersona(
+    mode: PersonaMode,
+    resources: CrisisResource[],
+    style: StyleConfig,
+    activeMode: ModeName = 'general',
+    journalingProtocol?: string,
+  ): string
+  ```
+  `personas.ts`'s internal `modeSection` also widened, to `modeSection(activeMode: ModeName,
+  journalingProtocol: string | undefined)`, and now special-cases `activeMode === 'journal'` to call
+  `buildJournalModeParagraph(journalingProtocol ?? JOURNALING_PROTOCOL_ABSENT)` instead of the static
+  `modeParagraph(activeMode)` every other mode still uses; the surrounding `## Mode: ...` header and
+  trailing `PRECEDENCE_SENTENCE` wrap stays uniform across every mode, journal included (an
+  orchestrator ruling, since the plan's own Step 7 snippet was ambiguous on this point). The call
+  site in `context.ts`'s `assembleSystemPrompt` (lines 53-59 as of `5aec7a4`) passes
+  `context.journalingProtocol` as the 5th argument; `modeSection(...)`'s position in `buildPersona`'s
+  `sections` array is unchanged (still directly before `crisisSection`), so the crisis-last invariant
+  holds by construction. Write K's brief against this real signature, not the plan's placeholder.
+  All 42 pre-existing `personas.test.ts` tests passed unchanged in H's gate run (54 unmodified
+  `buildPersona(` call sites, relying on the new 5th parameter's default).
+- **One plan defect found and fixed during H, worth knowing before K**: the plan's own Step 1 test
+  for `CADENCE_DISCLOSURE_INSTRUCTION` asserted `.not.toMatch(/recurring/i)`, which collides with the
+  plan's own Step 3 prose, "not a recurring nag." The implementer first fixed this by paraphrasing
+  the prose to "not a nag to repeat," misclassifying it as incidental plan connective tissue. The
+  orchestrator caught this on review by grepping the spec directly
+  (`docs/superpowers/specs/2026-08-16-journal-mode-design.md:433`, exact phrase "not a recurring
+  nag"), confirmed it is spec-transcribed like the evidence claims, and had the implementer revert
+  the prose and narrow the assertion instead (dropped `recurring` from the negative pattern, added a
+  positive `.toMatch(/not a recurring nag/i)` lock-in), falsified for real. Lesson for future
+  batches: a subagent's own classification of "spec-transcribed vs. incidental" is not reliable
+  enough to skip checking the spec directly when the two collide.
+- **Three test assertions were added beyond the plan's own text in H** (`personas.test.ts`'s
+  `journal mode threading` describe block, `modes.test.ts`'s catalogue-identity check, one line in
+  `context.test.ts`'s existing journaling-protocol-section test), because the plan's own generic
+  `MODE_NAMES` loops would not have caught a silent regression in the new dynamic wiring (they also
+  passed against journal's old static placeholder text). Each was personally falsified by the
+  implementer and independently spot-checked by the orchestrator before being kept.
 - **`packages/memory/src/index.ts` does not yet re-export anything from `journal.ts`** (found
   during C). Fine for C, D, E, F, J (all within `memory`, or reached through `MemoryEngine`
   methods rather than a direct import). The first batch that needs a `journal.ts` symbol
