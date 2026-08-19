@@ -165,8 +165,8 @@ half-written build output. Mark a batch ONGOING *before* dispatching it.
 | C | 3, 4, 7 | `memory/journal.ts`: entry filename/frontmatter, body assembly, `journaling.md` read/write helper | A, B | DONE, 1057 | `a11a213` |
 | D | 5 | `declare_journal_method` tool; `transcripts.ts`, `engine.ts`, `core/tools.ts` | C | DONE, 1063 | `d941c7b` |
 | E | 6 | Gated write in `_doEndSession`, the crash path; `engine.ts` **safety-adjacent** | C, D | DONE, 1068, orchestrator personally re-falsified the mode gate | `dbf5621` |
-| F | 8 | `sessionContext` gains `mode` param, `journalingProtocol`; `engine.ts` | C | ONGOING | |
-| G | 9 | `journalingProtocolSection` in the assembled prompt; `core/context.ts` | F | TODO | |
+| F | 8 | `sessionContext` gains `mode` param, `journalingProtocol`; `engine.ts` | C | DONE, 1072 | `3071398` |
+| G | 9 | `journalingProtocolSection` in the assembled prompt; `core/context.ts` | F | ONGOING | |
 | H | 10 | `core/journaling.ts` content module (largest task, includes the expressive-writing safety gate); wires into `core/modes.ts`, `core/personas.ts` (`buildPersona` signature), `core/context.ts` (call site) **safety-relevant content** | C, G | TODO | |
 | I | 11 | `update_journaling_protocol` tool, `refreshSystemPrompt` trigger; `engine.ts`, `core/tools.ts`, `core/agent.ts` | C | TODO | |
 | J | 12 | Reflection's `journalingUpdate` field, the backstop path; `reflection.ts`, `engine.ts` | C | TODO | |
@@ -393,6 +393,17 @@ orchestrator's own two full-suite reruns after). Same pattern as above: not touc
 changes, not a logic race, just resource contention under a loaded machine. Left alone for the same
 reason. If flakes under load keep surfacing in different files, that is worth raising with the human
 as a pattern rather than chasing file by file.
+
+**A third instance turned up during journal Batch F, orchestrator's own verification run**:
+`packages/web/src/views/conversations.test.tsx` (a "Session summary, 14 A..." button lookup)
+failed once under full-suite load, passed cleanly on immediate rerun (1072/1072). Same shape again:
+not touched by Batch F's changes (`engine.ts`/`engine.test.ts` only), not a logic race, resource
+contention. This is the third distinct file across three different epochs (modes Batches L, P;
+journal Batch F), which crosses the threshold this document already named for raising it with the
+human as a pattern rather than continuing to log one-off occurrences. Raise it at the next natural
+checkpoint (the journal merge, or sooner if it recurs again before then): a suite that flakes under
+its own load on three unrelated files, always passing in isolation, may be worth addressing at the
+suite/CI level (parallelism, worker count, timeout margins) rather than file by file.
 
 ### 4. `PublicSession.mode` survives onto tombstones
 
