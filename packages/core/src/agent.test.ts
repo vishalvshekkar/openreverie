@@ -71,6 +71,7 @@ function emptyReflectionOutput(summary: string) {
     arcUpdates: [],
     personUpdates: [],
     constitutionUpdate: null,
+    journalingUpdate: null,
   }
 }
 

@@ -76,6 +76,7 @@ export function dayOneReflection(): ReflectionOutput {
     arcUpdates: [],
     personUpdates: [],
     constitutionUpdate: null,
+    journalingUpdate: null,
   }
 }
 
@@ -110,6 +111,7 @@ export function dayTwoReflection(arcIds: ArcIds): ReflectionOutput {
     arcUpdates: [],
     personUpdates: [],
     constitutionUpdate: null,
+    journalingUpdate: null,
   }
 }
 
@@ -144,6 +146,7 @@ export function dayThreeReflection(arcIds: ArcIds): ReflectionOutput {
     arcUpdates: [],
     personUpdates: [],
     constitutionUpdate: null,
+    journalingUpdate: null,
   }
 }
 
@@ -171,5 +174,6 @@ export function presentDayReflection(): ReflectionOutput {
     arcUpdates: [],
     personUpdates: [],
     constitutionUpdate: null,
+    journalingUpdate: null,
   }
 }

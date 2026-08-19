@@ -40,6 +40,7 @@ import {
   assembleJournalBody,
   type JournalMethod,
   readJournalingProtocol,
+  readJournalingProtocolIfPresent,
   writeJournalEntry,
   writeJournalingProtocol,
 } from './journal.js'
@@ -708,6 +709,7 @@ export class MemoryEngine {
           arcUpdates: [],
           personUpdates: [],
           constitutionUpdate: null,
+          journalingUpdate: null,
         }
       : raw
 
@@ -876,6 +878,13 @@ export class MemoryEngine {
         await readDocument(this.paths.constitution),
         'constitution',
         `session ${sessionId} constitution update`,
+      )
+    }
+    if (out.journalingUpdate !== null) {
+      await this.reindexOrWarn(
+        await readDocument(this.paths.journaling),
+        'journaling',
+        `session ${sessionId} journaling protocol update`,
       )
     }
     for (const [id] of narratives) {
@@ -1690,6 +1699,7 @@ export class MemoryEngine {
     // known-entities lists the chat prompt does, not an unbounded one.
     const cappedPeople = capPeople(allPeople)
     const cappedEntities = capEntities(allEntities)
+    const journalingProtocol = await readJournalingProtocolIfPresent(this.paths)
     return {
       constitution: constitutionDoc.body,
       arcs,
@@ -1699,6 +1709,7 @@ export class MemoryEngine {
       entities: cappedEntities.nodes,
       entitiesTruncated: cappedEntities.truncated,
       profile: this.profileCache.meta,
+      ...(journalingProtocol !== undefined ? { journalingProtocol } : {}),
     }
   }
 

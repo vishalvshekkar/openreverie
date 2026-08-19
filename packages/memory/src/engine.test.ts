@@ -119,6 +119,7 @@ function emptyReflectionOutput(summary: string): ReflectionOutput {
     arcUpdates: [],
     personUpdates: [],
     constitutionUpdate: null,
+    journalingUpdate: null,
   }
 }
 
@@ -356,6 +357,7 @@ describe('MemoryEngine', () => {
         arcUpdates: [],
         personUpdates: [],
         constitutionUpdate: null,
+        journalingUpdate: null,
       }
       const chat = new FakeChatProvider([
         { text: JSON.stringify(scriptedReflection), toolCalls: [] },
@@ -5081,6 +5083,27 @@ describe('updateJournalingProtocol', () => {
     const second = await engine.updateJournalingProtocol('Switched to the examen instead.')
     expect(second.meta.id).toBe(first.meta.id)
     expect(second.body).not.toContain('Gratitude')
+    await engine.close()
+  })
+
+  it('reflection writes and reindexes journaling.md when journalingUpdate is set', async () => {
+    const scriptedReflection = {
+      ...emptyReflectionOutput('Talked about wanting to journal more.'),
+      journalingUpdate: 'Gratitude, three times a week.',
+    }
+    const chat = new FakeChatProvider([{ text: JSON.stringify(scriptedReflection), toolCalls: [] }])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const sessionId = await engine.startSession(new Date('2026-08-16T09:00:00.000Z'))
+    await engine.appendTranscript(sessionId, {
+      ts: '2026-08-16T09:00:00.000Z',
+      role: 'user',
+      content: 'I want to start journaling regularly.',
+    })
+    await engine.endSession(sessionId)
+    const rows = await engine.listPublicDocuments()
+    expect(rows.find((row) => row.kind === 'journaling')).toBeDefined()
+    const hits = (await engine.search('Gratitude, three times a week')).documents
+    expect(hits.some((hit) => hit.kind === 'journaling')).toBe(true)
     await engine.close()
   })
 })

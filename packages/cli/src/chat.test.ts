@@ -54,6 +54,7 @@ function emptyReflectionJson(summary: string): string {
     arcUpdates: [],
     personUpdates: [],
     constitutionUpdate: null,
+    journalingUpdate: null,
   })
 }
 
@@ -404,6 +405,7 @@ describe('runChat', () => {
           arcUpdates: [{ arcId: 'arc_health', note: 'Should be skipped, the page is gone.' }],
           personUpdates: [],
           constitutionUpdate: null,
+          journalingUpdate: null,
         }),
         toolCalls: [],
       },

@@ -45,6 +45,7 @@ function emptyReflectionOutput(summary: string): ReflectionOutput {
     arcUpdates: [],
     personUpdates: [],
     constitutionUpdate: null,
+    journalingUpdate: null,
   }
 }
 
@@ -104,6 +105,27 @@ describe('reflectionOutputSchema', () => {
     const { newEntities, pagePromotions, ...rest } = emptyReflectionOutput('A session.')
     const result = reflectionOutputSchema.safeParse(rest)
     expect(result.success).toBe(false)
+  })
+
+  it('accepts journalingUpdate as null', () => {
+    const out: ReflectionOutput = { ...emptyReflectionOutput('A session.'), journalingUpdate: null }
+    expect(reflectionOutputSchema.safeParse(out).success).toBe(true)
+  })
+
+  it('accepts journalingUpdate as a full replacement body', () => {
+    const out: ReflectionOutput = {
+      ...emptyReflectionOutput('A session.'),
+      journalingUpdate: 'Switched from gratitude to the examen.',
+    }
+    expect(reflectionOutputSchema.safeParse(out).success).toBe(true)
+  })
+
+  it('rejects a whole output missing journalingUpdate entirely', () => {
+    const { journalingUpdate, ...rest } = {
+      ...emptyReflectionOutput('A session.'),
+      journalingUpdate: null,
+    }
+    expect(reflectionOutputSchema.safeParse(rest).success).toBe(false)
   })
 })
 
@@ -407,6 +429,37 @@ describe('reflection', () => {
       expect(prompt).toContain('goes in profileUpdates')
       expect(prompt).toContain('"profileUpdates"')
     })
+
+    it('includes the current journaling setup, or its absence, in the prompt', async () => {
+      const out = emptyReflectionOutput('A session about switching journaling methods.')
+      const chat = new FakeChatProvider([{ text: JSON.stringify(out), toolCalls: [] }])
+      await reflectSession({ chat, model: 'fake-model' }, TRANSCRIPT, {
+        constitution: 'Empty constitution.',
+        arcs: [],
+        realms: [],
+        people: [],
+        entities: [],
+        journalingProtocol: 'Gratitude, three times a week.',
+        profile: { id: 'doc_test' },
+      })
+      const prompt = chat.requests[0]?.messages[0]?.content ?? ''
+      expect(prompt).toContain('Gratitude, three times a week.')
+    })
+
+    it('states journaling is not yet set up when journalingProtocol is absent', async () => {
+      const out = emptyReflectionOutput('A first session.')
+      const chat = new FakeChatProvider([{ text: JSON.stringify(out), toolCalls: [] }])
+      await reflectSession({ chat, model: 'fake-model' }, TRANSCRIPT, {
+        constitution: 'Empty constitution.',
+        arcs: [],
+        realms: [],
+        people: [],
+        entities: [],
+        profile: { id: 'doc_test' },
+      })
+      const prompt = chat.requests[0]?.messages[0]?.content ?? ''
+      expect(prompt).toContain('never journaled before')
+    })
   })
 
   describe('rewriteNarrative', () => {
@@ -700,6 +753,7 @@ describe('reflection', () => {
         arcUpdates: [],
         personUpdates: [],
         constitutionUpdate: null,
+        journalingUpdate: null,
       }
 
       const result = await applyReflection(
@@ -1018,6 +1072,50 @@ describe('reflection', () => {
       expect(mintedItems[0]?.ts).toBe('2026-08-16T10:49:00.000Z')
       expect(mintedItems[1]?.eventTime).toBeUndefined()
     })
+
+    it('writes journaling.md when journalingUpdate is set, preserving the id on a second write', async () => {
+      const first = {
+        ...emptyReflectionOutput('First session about journaling.'),
+        journalingUpdate: 'Gratitude, three times a week.',
+      }
+      await applyReflection(
+        paths,
+        first,
+        sessionId,
+        [],
+        new Date('2026-08-16T21:00:00.000Z'),
+        new Map(),
+        noopMaterialize,
+      )
+      const firstDoc = await readDocument(paths.journaling)
+      expect(firstDoc.body.trim()).toBe('Gratitude, three times a week.')
+
+      const secondSessionId = newId('session')
+      const secondSessionDir = join(paths.sessionsDir, `2026-08-17-${secondSessionId}`)
+      await mkdir(secondSessionDir, { recursive: true })
+      const second = {
+        ...emptyReflectionOutput('Second session, switched methods.'),
+        journalingUpdate: 'Switched to the examen.',
+      }
+      await applyReflection(
+        paths,
+        second,
+        secondSessionId,
+        [],
+        new Date('2026-08-17T10:00:00.000Z'),
+        new Map(),
+        noopMaterialize,
+      )
+      const secondDoc = await readDocument(paths.journaling)
+      expect(secondDoc.meta.id).toBe(firstDoc.meta.id)
+      expect(secondDoc.body.trim()).toBe('Switched to the examen.')
+    })
+
+    it('leaves journaling.md untouched when journalingUpdate is null', async () => {
+      const out = emptyReflectionOutput('An ordinary session, nothing about journaling.')
+      await applyReflection(paths, out, sessionId, [], new Date(), new Map(), noopMaterialize)
+      await expect(readDocument(paths.journaling)).rejects.toThrow()
+    })
   })
 
   describe('narrative continuity across sessions', () => {
@@ -1291,6 +1389,7 @@ describe('profileUpdates', () => {
           arcUpdates: [],
           personUpdates: [],
           constitutionUpdate: null,
+          journalingUpdate: null,
           profileUpdates: {
             preferredName: 'Vish',
             pronouns: 'they/them',
@@ -1321,6 +1420,7 @@ describe('profileUpdates', () => {
           arcUpdates: [],
           personUpdates: [],
           constitutionUpdate: null,
+          journalingUpdate: null,
           profileUpdates: { style: { tone: 'direct' } },
         }),
       ),
