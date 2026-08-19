@@ -673,6 +673,124 @@ describe('live session HTTP routes', () => {
     expect(replay.headers['content-type']).toContain('application/json')
   })
 
+  describe('session mode endpoints', () => {
+    it('starts a session in a requested mode', async () => {
+      const response = await liveRequest(
+        'POST',
+        '/api/v1/sessions',
+        { mode: 'journal' },
+        authenticated({ origin }),
+      )
+      expect(response.status).toBe(201)
+      const json = response.json as { data: { mode: string } }
+      expect(json.data.mode).toBe('journal')
+    })
+
+    it('starts in general when no mode is given', async () => {
+      const response = await liveRequest(
+        'POST',
+        '/api/v1/sessions',
+        undefined,
+        authenticated({ origin }),
+      )
+      const json = response.json as { data: { mode: string } }
+      expect(json.data.mode).toBe('general')
+    })
+
+    it('sets the mode on a live session', async () => {
+      const created = await liveRequest(
+        'POST',
+        '/api/v1/sessions',
+        undefined,
+        authenticated({ origin }),
+      )
+      const sessionId = (created.json as { data: { sessionId: string } }).data.sessionId
+      const response = await liveRequest(
+        'POST',
+        `/api/v1/sessions/${sessionId}/mode`,
+        { mode: 'listen' },
+        authenticated({ origin }),
+      )
+      expect(response.status).toBe(200)
+      expect((response.json as { data: unknown }).data).toEqual({ mode: 'listen' })
+    })
+
+    it('reports the current mode on a live session so a reload recovers it', async () => {
+      const created = await liveRequest(
+        'POST',
+        '/api/v1/sessions',
+        undefined,
+        authenticated({ origin }),
+      )
+      const sessionId = (created.json as { data: { sessionId: string } }).data.sessionId
+      await liveRequest(
+        'POST',
+        `/api/v1/sessions/${sessionId}/mode`,
+        { mode: 'listen' },
+        authenticated({ origin }),
+      )
+      const fetched = await liveRequest(
+        'GET',
+        `/api/v1/sessions/${sessionId}`,
+        undefined,
+        authenticated(),
+      )
+      expect((fetched.json as { data: { mode: string } }).data.mode).toBe('listen')
+    })
+
+    it('rejects an unknown mode with 400', async () => {
+      const created = await liveRequest(
+        'POST',
+        '/api/v1/sessions',
+        undefined,
+        authenticated({ origin }),
+      )
+      const sessionId = (created.json as { data: { sessionId: string } }).data.sessionId
+      const response = await liveRequest(
+        'POST',
+        `/api/v1/sessions/${sessionId}/mode`,
+        { mode: 'moody' },
+        authenticated({ origin }),
+      )
+      expect(response.status).toBe(400)
+    })
+
+    it('returns 404 for a session that is not live', async () => {
+      const response = await liveRequest(
+        'POST',
+        '/api/v1/sessions/session_nope/mode',
+        { mode: 'listen' },
+        authenticated({ origin }),
+      )
+      expect([404, 409]).toContain(response.status)
+    })
+
+    it('marks a mode set from the browser as synthetic in the transcript', async () => {
+      const created = await liveRequest(
+        'POST',
+        '/api/v1/sessions',
+        undefined,
+        authenticated({ origin }),
+      )
+      const sessionId = (created.json as { data: { sessionId: string } }).data.sessionId
+      await liveRequest(
+        'POST',
+        `/api/v1/sessions/${sessionId}/mode`,
+        { mode: 'listen' },
+        authenticated({ origin }),
+      )
+      const transcript = await liveRequest(
+        'GET',
+        `/api/v1/sessions/${sessionId}/transcript`,
+        undefined,
+        authenticated(),
+      )
+      const lines = (transcript.json as { data: { content: string; synthetic?: boolean }[] }).data
+      const modeLine = lines.find((line) => line.content === '/mode listen')
+      expect(modeLine?.synthetic).toBe(true)
+    })
+  })
+
   function authenticated(overrides: Record<string, string> = {}): Record<string, string> {
     return { host, cookie, ...overrides }
   }

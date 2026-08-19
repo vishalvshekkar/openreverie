@@ -1,6 +1,6 @@
 import { Buffer } from 'node:buffer'
 import { createHash } from 'node:crypto'
-import { type AgentEvent, AgentSession, type ReverieConfig } from '@openreverie/core'
+import { type AgentEvent, AgentSession, isModeName, type ReverieConfig } from '@openreverie/core'
 import type { MemoryEngine, PublicSession, PublicTranscriptLine } from '@openreverie/memory'
 import { type ChatProvider, ProviderUnavailableError } from '@openreverie/providers'
 import { ApiError } from './api.js'
@@ -21,6 +21,7 @@ export type StreamEvent =
   | { schemaVersion: '1'; seq: number; type: 'thinking' }
   | { schemaVersion: '1'; seq: number; type: 'text'; text: string }
   | { schemaVersion: '1'; seq: number; type: 'tool'; name: string }
+  | { schemaVersion: '1'; seq: number; type: 'mode'; mode: string }
   | { schemaVersion: '1'; seq: number; type: 'done' }
   | {
       schemaVersion: '1'
@@ -35,6 +36,7 @@ type StreamEventInput =
   | { type: 'thinking' }
   | { type: 'text'; text: string }
   | { type: 'tool'; name: string }
+  | { type: 'mode'; mode: string }
   | { type: 'done' }
   | {
       type: 'error'
@@ -142,11 +144,17 @@ export class LiveSessionRegistry {
     return this.closePromise
   }
 
-  async create(): Promise<CreateSessionResponse> {
+  async create(options: { mode?: string } = {}): Promise<CreateSessionResponse> {
     if (this.live.size >= this.maxLiveSessions) {
       throw new ApiError(429, 'session_capacity', 'Too many live sessions are open.')
     }
-    const agent = await AgentSession.start(this.engine, this.config, this.chat)
+    const requested = options.mode
+    if (requested !== undefined && !isModeName(requested)) {
+      throw new ApiError(400, 'invalid_request', 'The request is invalid.')
+    }
+    const agent = await AgentSession.start(this.engine, this.config, this.chat, {
+      ...(requested === undefined ? {} : { mode: requested }),
+    })
     const stored = (await this.engine.listStoredSessions()).find(
       (session) => session.sessionId === agent.sessionId,
     )
@@ -159,6 +167,7 @@ export class LiveSessionRegistry {
         updatedAt: stored?.updatedAt ?? createdAt,
         status: 'live',
         readOnly: false,
+        mode: agent.mode,
         transcript: stored?.transcript ?? emptyTranscript(),
       },
       turns: new Map(),
@@ -263,6 +272,19 @@ export class LiveSessionRegistry {
     const publicSession = { ...live.public, status: 'ended' as const, readOnly: true }
     this.addTombstone({ sessionId, public: publicSession })
     return { ...publicSession }
+  }
+
+  async setMode(sessionId: string, mode: string): Promise<{ mode: string }> {
+    if (!isModeName(mode)) {
+      throw new ApiError(400, 'invalid_request', 'The request is invalid.')
+    }
+    const live = await this.requireLive(sessionId)
+    // source 'web': a click, with no keystroke behind it, so the /mode line
+    // this writes is marked synthetic.
+    await live.agent.setMode(mode, { source: 'web' })
+    live.public = { ...live.public, mode }
+    live.lastActivity = this.now()
+    return { mode }
   }
 
   sweep(now = this.now()): void {
@@ -481,12 +503,6 @@ const nodeIntervalScheduler: RegistryScheduler = {
   },
 }
 
-// AgentEvent gained a 'mode' member for the set_mode tool and the /mode
-// command (see @openreverie/core). StreamEventInput has no matching wire
-// variant yet: carrying a mode change to a connected web client is server
-// and web wiring that belongs to a later task, not this one. A mode
-// change is dropped from the stream here, deliberately, which is exactly
-// the behavior before that AgentEvent member existed.
 function streamEventFromAgent(event: AgentEvent): StreamEventInput | undefined {
   switch (event.type) {
     case 'thinking':
@@ -496,7 +512,7 @@ function streamEventFromAgent(event: AgentEvent): StreamEventInput | undefined {
     case 'tool':
       return { type: 'tool', name: event.name }
     case 'mode':
-      return undefined
+      return { type: 'mode', mode: event.mode }
     case 'done':
       return { type: 'done' }
   }

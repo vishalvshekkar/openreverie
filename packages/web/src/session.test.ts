@@ -198,6 +198,36 @@ describe('sessionReducer', () => {
   })
 })
 
+describe('mode events', () => {
+  it('starts in general', () => {
+    expect(initialChatState.mode).toBe('general')
+  })
+
+  it('updates the mode from a stream event', () => {
+    const next = sessionReducer(initialChatState, {
+      type: 'stream',
+      event: { schemaVersion: '1', seq: 1, type: 'mode', mode: 'listen' },
+    })
+    expect(next.mode).toBe('listen')
+    expect(next.lastSequence).toBe(1)
+  })
+
+  it('ignores a mode event that is behind the sequence cursor', () => {
+    const state = { ...initialChatState, lastSequence: 5, mode: 'listen' }
+    const next = sessionReducer(state, {
+      type: 'stream',
+      event: { schemaVersion: '1', seq: 3, type: 'mode', mode: 'solve' },
+    })
+    expect(next.mode).toBe('listen')
+  })
+
+  it('resets to general on a new session', () => {
+    const state = { ...initialChatState, mode: 'journal' }
+    const next = sessionReducer(state, { type: 'new-session', session })
+    expect(next.mode).toBe('general')
+  })
+})
+
 describe('messagesFromTranscript', () => {
   it('maps role and content, marks messages not pending, and derives stable unique ids from lineSequence', () => {
     const messages = messagesFromTranscript([helloLine, userLine])

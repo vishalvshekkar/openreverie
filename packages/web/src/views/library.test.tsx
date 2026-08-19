@@ -74,6 +74,7 @@ function createApi(rows: DocumentRow[]): AppApi & { getDocument: ReturnType<type
   return {
     bootstrap: vi.fn(),
     createSession: vi.fn(),
+    setSessionMode: vi.fn(),
     listSessions: vi.fn(),
     listDocuments: vi.fn().mockResolvedValue({ data: rows, nextCursor: null }),
     getDocument: vi.fn(async (docId: string) => {

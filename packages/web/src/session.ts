@@ -14,6 +14,7 @@ export interface ChatState {
   sending: boolean
   thinking: boolean
   activeTool: string | null
+  mode: string
   error: string | null
 }
 
@@ -31,6 +32,7 @@ export const initialChatState: ChatState = {
   sending: false,
   thinking: false,
   activeTool: null,
+  mode: 'general',
   error: null,
 }
 
@@ -75,6 +77,8 @@ export function sessionReducer(state: ChatState, action: ChatAction): ChatState 
           }
         case 'tool':
           return { ...state, lastSequence, activeTool: event.name }
+        case 'mode':
+          return { ...state, lastSequence, mode: event.mode }
         case 'done':
           return {
             ...state,

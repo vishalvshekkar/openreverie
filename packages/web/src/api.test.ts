@@ -17,6 +17,12 @@ const text = (seq: number, value: string): StreamEvent => ({
   type: 'text',
   text: value,
 })
+const mode = (seq: number, value: string): StreamEvent => ({
+  schemaVersion: '1',
+  seq,
+  type: 'mode',
+  mode: value,
+})
 const done = (seq: number): StreamEvent => ({ schemaVersion: '1', seq, type: 'done' })
 const error = (seq: number): StreamEvent => ({
   schemaVersion: '1',
@@ -88,6 +94,59 @@ describe('ApiClient request and NDJSON parsing', () => {
     expect(JSON.parse(init.body as string)).toEqual({ token: 'launch-token' })
   })
 
+  it('creates a session with a requested mode', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        data: {
+          sessionId: 'session-1',
+          createdAt: '2026-08-17T10:00:00.000Z',
+          updatedAt: '2026-08-17T10:00:00.000Z',
+          status: 'live',
+          readOnly: false,
+          mode: 'journal',
+          transcript: { lineCount: 0, userCount: 0, assistantCount: 0, toolCount: 0 },
+        },
+        meta: { nextCursor: null },
+      }),
+    )
+    const client = new ApiClient()
+    await expect(client.createSession('journal')).resolves.toMatchObject({ mode: 'journal' })
+    const [url, init] = fetchMock.mock.calls[0] ?? []
+    expect(url).toBe('/api/v1/sessions')
+    expect(JSON.parse(init.body as string)).toEqual({ mode: 'journal' })
+  })
+
+  it('creates a session with an empty body when no mode is given', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        data: {
+          sessionId: 'session-1',
+          createdAt: '2026-08-17T10:00:00.000Z',
+          updatedAt: '2026-08-17T10:00:00.000Z',
+          status: 'live',
+          readOnly: false,
+          transcript: { lineCount: 0, userCount: 0, assistantCount: 0, toolCount: 0 },
+        },
+        meta: { nextCursor: null },
+      }),
+    )
+    const client = new ApiClient()
+    await client.createSession()
+    const [, init] = fetchMock.mock.calls[0] ?? []
+    expect(JSON.parse(init.body as string)).toEqual({})
+  })
+
+  it('sets the mode on a live session', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({ data: { mode: 'listen' }, meta: { nextCursor: null } }),
+    )
+    const client = new ApiClient()
+    await expect(client.setSessionMode('session-1', 'listen')).resolves.toEqual({ mode: 'listen' })
+    const [url, init] = fetchMock.mock.calls[0] ?? []
+    expect(url).toBe('/api/v1/sessions/session-1/mode')
+    expect(JSON.parse(init.body as string)).toEqual({ mode: 'listen' })
+  })
+
   it('parses the list envelope and returns data with its cursor', async () => {
     fetchMock.mockResolvedValue(jsonResponse({ data: [minaRow], meta: { nextCursor: 'cursor-1' } }))
     const client = new ApiClient()
@@ -137,6 +196,10 @@ describe('ApiClient request and NDJSON parsing', () => {
     const collected = await collect(events)
     expect(collected).toHaveLength(3)
     expect(collected[2]).toMatchObject({ type: 'done', seq: 3 })
+  })
+
+  it('parses a mode stream event', () => {
+    expect(parseStreamEvent(JSON.stringify(mode(1, 'listen')))).toEqual(mode(1, 'listen'))
   })
 
   it('rejects a stream event that does not match the schema', () => {

@@ -32,6 +32,7 @@ export const sessionSchema = z.strictObject({
   updatedAt: z.string(),
   status: z.enum(['live', 'ended', 'expired']),
   readOnly: z.boolean(),
+  mode: z.string().optional(),
   transcript: z.strictObject({
     lineCount: z.number().int().nonnegative(),
     userCount: z.number().int().nonnegative(),
@@ -131,6 +132,12 @@ export const streamEventSchema = z.discriminatedUnion('type', [
   z.strictObject({
     schemaVersion: z.literal('1'),
     seq: z.number().int().positive(),
+    type: z.literal('mode'),
+    mode: z.string(),
+  }),
+  z.strictObject({
+    schemaVersion: z.literal('1'),
+    seq: z.number().int().positive(),
     type: z.literal('done'),
   }),
   z.strictObject({
@@ -161,7 +168,8 @@ export interface Page<T> {
 
 export interface AppApi {
   bootstrap(token: string): Promise<{ authenticated: true }>
-  createSession(): Promise<CreateSessionResponse>
+  createSession(mode?: string): Promise<CreateSessionResponse>
+  setSessionMode(sessionId: string, mode: string): Promise<{ mode: string }>
   listSessions(cursor?: string): Promise<Page<Session>>
   listDocuments(cursor?: string): Promise<Page<DocumentRow>>
   getDocument(docId: string): Promise<Document>
@@ -308,8 +316,28 @@ export class ApiClient implements AppApi {
     )
   }
 
-  createSession(): Promise<CreateSessionResponse> {
-    return this.request('/api/v1/sessions', { method: 'POST' }, createSessionResponseSchema)
+  createSession(mode?: string): Promise<CreateSessionResponse> {
+    return this.request(
+      '/api/v1/sessions',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(mode === undefined ? {} : { mode }),
+      },
+      createSessionResponseSchema,
+    )
+  }
+
+  setSessionMode(sessionId: string, mode: string): Promise<{ mode: string }> {
+    return this.request(
+      `/api/v1/sessions/${encodeURIComponent(sessionId)}/mode`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode }),
+      },
+      z.strictObject({ mode: z.string() }),
+    )
   }
 
   listSessions(cursor?: string): Promise<Page<Session>> {

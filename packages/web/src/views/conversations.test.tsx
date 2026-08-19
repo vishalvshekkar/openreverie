@@ -66,6 +66,7 @@ function createApi() {
   return {
     bootstrap: vi.fn(),
     createSession: vi.fn(),
+    setSessionMode: vi.fn(),
     listSessions: vi.fn(),
     listDocuments: vi.fn(),
     getDocument: vi.fn(),

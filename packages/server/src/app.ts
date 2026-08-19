@@ -251,7 +251,12 @@ async function handle(
   }
 
   if (registry && method === 'POST' && path.length === 3 && path[2] === 'sessions') {
-    const session = await registry.create()
+    const raw = await readJsonOrEmpty(req)
+    const body = createSessionSchema.safeParse(raw)
+    if (!body.success) throw new ApiError(400, 'invalid_request', 'The request is invalid.')
+    const session = await registry.create(
+      body.data.mode === undefined ? {} : { mode: body.data.mode },
+    )
     writePublicJson(res, 201, createSessionResponseSchema, session, null)
     return
   }
@@ -298,6 +303,21 @@ async function handle(
     const sessionId = requiredId(path[3])
     const session = await registry.end(sessionId)
     writePublicJson(res, 200, publicSessionSchema, session, null)
+    return
+  }
+
+  if (
+    registry &&
+    method === 'POST' &&
+    path.length === 5 &&
+    path[2] === 'sessions' &&
+    path[4] === 'mode'
+  ) {
+    const sessionId = requiredId(path[3])
+    const body = sessionModeSchema.safeParse(await readJson(req))
+    if (!body.success) throw new ApiError(400, 'invalid_request', 'The request is invalid.')
+    const result = await registry.setMode(sessionId, body.data.mode)
+    writePublicJson(res, 200, sessionModeResponseSchema, result, null)
     return
   }
 
@@ -446,6 +466,7 @@ const publicSessionSchema = z.strictObject({
   updatedAt: z.string(),
   status: z.enum(['live', 'ended', 'expired']),
   readOnly: z.boolean(),
+  mode: z.string().optional(),
   transcript: z.strictObject({
     lineCount: z.number().int().nonnegative(),
     userCount: z.number().int().nonnegative(),
@@ -457,6 +478,9 @@ const createSessionResponseSchema = publicSessionSchema.extend({
   initialGreetingStreamUrl: z.string().optional(),
 })
 const publicSessionsSchema = z.array(publicSessionSchema)
+const createSessionSchema = z.strictObject({ mode: z.string().optional() })
+const sessionModeSchema = z.strictObject({ mode: z.string() })
+const sessionModeResponseSchema = z.strictObject({ mode: z.string() })
 const toolCallSchema = z.strictObject({
   id: z.string(),
   name: z.string(),
@@ -676,6 +700,17 @@ async function readJson(req: IncomingMessage, maxBytes = LIMITS.requestBytes): P
     return JSON.parse(Buffer.concat(chunks).toString('utf8'))
   } catch {
     throw new ApiError(400, 'invalid_json', 'The request body must be JSON.')
+  }
+}
+
+// POST /api/v1/sessions has always been callable with no body, and still
+// is. An empty body means an empty object, not a parse error.
+async function readJsonOrEmpty(req: IncomingMessage): Promise<unknown> {
+  try {
+    return await readJson(req)
+  } catch (error) {
+    if (error instanceof ApiError && error.code === 'invalid_json') return {}
+    throw error
   }
 }
 

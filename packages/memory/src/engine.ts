@@ -100,6 +100,12 @@ export interface PublicSession {
   updatedAt: string
   status: 'live' | 'ended' | 'expired'
   readOnly: boolean
+  // Set when a session is created or switched, so a browser reload recovers
+  // the mode the conversation is actually in. It is carried onto the ended and
+  // expired tombstones as well, because those are built by spreading the live
+  // view. A stored session's mode lives in its session.json and is not part of
+  // this read-only view.
+  mode?: string
   transcript: {
     lineCount: number
     userCount: number
