@@ -260,7 +260,7 @@ half-written build output. Mark a batch ONGOING *before* dispatching it.
 | J | 12 | Reflection's `journalingUpdate` field, the backstop path; `reflection.ts`, `engine.ts` | C | DONE, 1115, dispatched to `pi` CLI + DeepSeek V4 flash (trial 2), orchestrator-verified and independently falsified | `62f98a6` |
 | K | 13 | **SAFETY invariant test, six combinations, position plus bytes**; `core/personas.test.ts` only | H, C | DONE, 1117, orchestrator personally re-falsified both halves in isolation | `5993b07` |
 | L | 14 | Server exposes `journal`/`journaling` kinds; `server/app.ts` | B | DONE, 1118, dispatched to `pi` CLI + DeepSeek V4 flash (trial 3), orchestrator-verified and independently falsified | `2814ca9` |
-| M | 15, + deferred item 1 | Web client schema, `Library.tsx` `KIND_LABELS`; `web/api.ts`, `web/views/Library.tsx`. Also close deferred item 1 from the modes epoch (below): `getProfile`, `updateProfile`, `getSettings` have no tests in `api.test.ts`, and M is already touching that exact file | L | ONGOING (dispatched to `pi` CLI + DeepSeek V4 flash, trial 4) | |
+| M | 15, + deferred item 1 | Web client schema, `Library.tsx` `KIND_LABELS`; `web/api.ts`, `web/views/Library.tsx`. Also close deferred item 1 from the modes epoch (below): `getProfile`, `updateProfile`, `getSettings` have no tests in `api.test.ts`, and M is already touching that exact file | L | DONE, 1125, dispatched to `pi` CLI + DeepSeek V4 flash (trial 4), orchestrator-verified and independently falsified. **Deferred item 1 (below) is now closed.** | `7bea8f7` |
 | N | 16 | Real web journal tab, `excerpt`/`recordedAt` end to end; `engine.ts`, `server/app.ts`, `web/api.ts`, `web/views/Journal.tsx` (replaces placeholder), `journal.css` | B, L, M | TODO | |
 
 Notes on sequencing, from the plan survey:
@@ -505,7 +505,12 @@ spec. This is now Batches O and P of the modes epoch, above.
 Nothing here is blocking the merge in the previous orchestrator's judgement, but every one is a
 real finding and none should be lost. They are ordered by how much they matter.
 
-### 1. The web API client's three new methods have no tests
+### 1. The web API client's three new methods have no tests — CLOSED, journal Batch M, `7bea8f7`
+
+`getProfile`, `updateProfile`, and `getSettings` now have request/response tests in `api.test.ts`,
+matching the file's existing pattern. Orchestrator independently falsified one (changed `updateProfile`'s
+method from `PATCH` to `POST`, confirmed the new test catches it, restored). Left here, struck through
+in spirit, so the original finding stays legible.
 
 `getProfile`, `updateProfile` and `getSettings` were added to `packages/web/src/api.ts` in
 Task 19. `packages/web/src/api.test.ts` has **no tests for any of them**: confirm with
