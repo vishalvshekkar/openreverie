@@ -1,3 +1,4 @@
+import { JOURNALING_PROTOCOL_ABSENT } from '@openreverie/memory'
 import { describe, expect, it } from 'vitest'
 import { type CrisisResource, defaultCrisisResources, type StyleConfig } from './config.js'
 import { EXPRESSIVE_WRITING_SAFETY_GATE } from './journaling.js'
@@ -466,4 +467,70 @@ describe('safety invariant', () => {
     const cut = (text: string) => text.slice(0, text.indexOf(CRISIS_MARKER))
     expect(cut(companion)).toEqual(cut(firewall))
   })
+})
+
+describe('journal mode never weakens the crisis stance', () => {
+  // Position plus bytes, against a journal-mode arm with real, non-trivial
+  // content, across every combination of {companion, firewall} safety mode
+  // and {no mode, journal mode with a real journaling.md fixture, journal
+  // mode with journaling.md absent}. A presence-only assertion ("the crisis
+  // text appears somewhere") is anti-falsifiable here: it gets stronger, not
+  // weaker, if journal mode's own prompt construction is deleted entirely,
+  // because there is then nothing left that could plausibly displace the
+  // crisis text.
+  const journalingFixture =
+    'Gratitude, three times a week, prompted, roughly ten minutes, active nudging.'
+
+  function crisisSectionOf(persona: string): string {
+    return persona.slice(persona.indexOf(CRISIS_MARKER))
+  }
+
+  for (const safetyMode of ['companion', 'firewall'] as const) {
+    it(`${safetyMode}: crisis section is byte-identical and last, across no-mode, journal-with-fixture, and journal-absent`, () => {
+      const baseline = buildPersona(safetyMode, resources, defaultStyle)
+      const journalWithFixture = buildPersona(
+        safetyMode,
+        resources,
+        defaultStyle,
+        'journal',
+        journalingFixture,
+      )
+      const journalAbsent = buildPersona(
+        safetyMode,
+        resources,
+        defaultStyle,
+        'journal',
+        JOURNALING_PROTOCOL_ABSENT,
+      )
+
+      // The journal-mode arms must genuinely differ from the baseline
+      // outside the crisis section, or this test would pass just as
+      // easily with journal mode's own prompt construction deleted.
+      expect(journalWithFixture).toContain(journalingFixture)
+      expect(journalWithFixture).not.toBe(baseline)
+      expect(journalAbsent).toContain('has never set up journal mode before')
+      expect(journalAbsent).not.toBe(baseline)
+
+      const baselineCrisis = crisisSectionOf(baseline)
+      const fixtureCrisis = crisisSectionOf(journalWithFixture)
+      const absentCrisis = crisisSectionOf(journalAbsent)
+
+      expect(fixtureCrisis).toBe(baselineCrisis)
+      expect(absentCrisis).toBe(baselineCrisis)
+
+      // Anchor: baseline's own crisis section really is the tail of
+      // buildPersona's output, ending on the last rendered resource line,
+      // not merely a slice that trivially ends with itself.
+      expect(baseline.endsWith('- Find A Helpline (international): findahelpline.com')).toBe(true)
+
+      // Position, checked against the fixed baseline comparator (not each
+      // arm's own slice-to-end of itself, which would be tautologically
+      // true regardless of where the section actually sits): the crisis
+      // section is the last section of buildPersona's own output in all
+      // three arms, not merely present somewhere.
+      expect(baseline.endsWith(baselineCrisis)).toBe(true)
+      expect(journalWithFixture.endsWith(baselineCrisis)).toBe(true)
+      expect(journalAbsent.endsWith(baselineCrisis)).toBe(true)
+    })
+  }
 })
