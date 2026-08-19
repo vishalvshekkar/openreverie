@@ -166,8 +166,8 @@ half-written build output. Mark a batch ONGOING *before* dispatching it.
 | D | 5 | `declare_journal_method` tool; `transcripts.ts`, `engine.ts`, `core/tools.ts` | C | DONE, 1063 | `d941c7b` |
 | E | 6 | Gated write in `_doEndSession`, the crash path; `engine.ts` **safety-adjacent** | C, D | DONE, 1068, orchestrator personally re-falsified the mode gate | `dbf5621` |
 | F | 8 | `sessionContext` gains `mode` param, `journalingProtocol`; `engine.ts` | C | DONE, 1072 | `3071398` |
-| G | 9 | `journalingProtocolSection` in the assembled prompt; `core/context.ts` | F | ONGOING | |
-| H | 10 | `core/journaling.ts` content module (largest task, includes the expressive-writing safety gate); wires into `core/modes.ts`, `core/personas.ts` (`buildPersona` signature), `core/context.ts` (call site) **safety-relevant content** | C, G | TODO | |
+| G | 9 | `journalingProtocolSection` in the assembled prompt; `core/context.ts` | F | DONE, 1076 | `bfa1637` |
+| H | 10 | `core/journaling.ts` content module (largest task, includes the expressive-writing safety gate); wires into `core/modes.ts`, `core/personas.ts` (`buildPersona` signature), `core/context.ts` (call site) **safety-relevant content** | C, G | TODO, not yet dispatched | |
 | I | 11 | `update_journaling_protocol` tool, `refreshSystemPrompt` trigger; `engine.ts`, `core/tools.ts`, `core/agent.ts` | C | TODO | |
 | J | 12 | Reflection's `journalingUpdate` field, the backstop path; `reflection.ts`, `engine.ts` | C | TODO | |
 | K | 13 | **SAFETY invariant test, six combinations, position plus bytes**; `core/personas.test.ts` only | H, C | TODO, orchestrator falsifies personally | |
