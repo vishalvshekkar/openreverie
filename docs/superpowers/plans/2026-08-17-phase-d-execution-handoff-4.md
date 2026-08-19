@@ -23,53 +23,141 @@ Three rules, all of which cost real time in earlier sessions:
 3. **`cd` with an absolute path in every shell command that runs the gate.** See "the wrong-tree
    trap, orchestrator edition" below.
 
-## START HERE: modes is done and merged, journal is set up but not yet batched
+## START HERE: modes is done and merged; journal is batched, Batches A-G done (7 of 16 tasks), Batch H is next
 
-Modes (all 24 plan tasks plus Batches O, P, Q) is DONE and merged into `feat/phase-d-design` as
-`e9c3350`. **There is no ONGOING work to verify in modes.** The journal worktree exists but nothing
-in it has been touched yet.
+This section was rewritten by the orchestrator that ran Batches A through G, pausing deliberately
+(at the human's request, to hand off to a fresh session on a fresh context budget) before
+dispatching Batch H. Nothing is broken, nothing is mid-flight, both trees are clean. Read this
+whole section before doing anything else; it is denser than the rest of the document on purpose.
 
-Confirm the starting state:
+### What is actually true right now
 
-```bash
-cd /Users/vishal/work/personal/second-mind
-git log --oneline -1        # expect e9c3350 "Merge branch 'feat/phase-d-modes' into feat/phase-d-design", or later if this file itself was committed after
-git status --short          # expect ` M ROADMAP.md` and `?? docs/.../2026-08-19-mode-at-launch-design.md` only
-pnpm build && pnpm test && pnpm lint
-```
+- Modes (all 24 plan tasks plus Batches O, P, Q) is DONE and merged into `feat/phase-d-design` as
+  `e9c3350`. Nothing to verify there.
+- Journal Batches A through G (Tasks 1, 2, 3, 4, 7, 5, 6, 8, 9, in dispatch order) are DONE,
+  verified by the orchestrator personally (diff read, gate rerun, lint rerun) and committed, in
+  the worktree `.claude/worktrees/journal` on branch `feat/phase-d-journal`. **Nothing has been
+  merged into `feat/phase-d-design` yet**; journal only exists in its own worktree/branch so far.
+- Current worktree test count: **1076 passed (1076), Test Files 59 passed (59)**, build 0, lint 0.
+  Last commit in the worktree: `bfa1637` ("Add journalingProtocolSection to the assembled system
+  prompt"). Confirm with:
+  ```bash
+  cd /Users/vishal/work/personal/second-mind/.claude/worktrees/journal
+  git log --oneline -8        # top should be bfa1637
+  git status --short          # must be EMPTY, nothing uncommitted
+  npx tsc -b && npx vitest run   # expect 59 files / 1076 tests, all green
+  npx biome check .
+  ```
+- Main repo (`/Users/vishal/work/personal/second-mind`) status should be exactly:
+  ```
+   M ROADMAP.md
+  ?? docs/superpowers/specs/2026-08-19-mode-at-launch-design.md
+  ```
+  (the human's own uncommitted BUSL note, and a read-only spec file). Nothing else. If either tree
+  doesn't match, work out what moved before continuing; do not assume it's safe to proceed.
+- The "Journal plan" table further down (search for `### Journal plan, worktree`) has the full
+  Batch A-N breakdown with commit hashes for A-G. **Batch H is marked TODO, not yet dispatched. It
+  is the next action.**
 
-Expected: build 0, lint 0, **Test Files 58 passed (58) / Tests 1029 passed (1029)**. The
-` M ROADMAP.md` is the human's own uncommitted BUSL-1.1 note; leave it alone. The untracked spec
-file is read-only reference material; do not commit it. Never use `git commit -am` in the main
-repo; stage the exact path you mean.
+### Batches O and P (modes), for context if it comes up
 
-```bash
-git worktree list           # expect main repo plus .claude/worktrees/journal on feat/phase-d-journal
-cd .claude/worktrees/journal
-git log --oneline -1        # expect e9c3350, same as design: nothing journal-specific committed yet
-npx tsc -b && npx vitest run   # expect the same 58/1029 baseline
-```
+O (CLI startup spinner, `f51647b`) went to the `pi` CLI running DeepSeek V4 flash instead of a
+Claude subagent, at the human's explicit request, as a one-batch trial. It went well but the human
+decided not to continue the trial. P onward, including all of journal so far, used Claude subagents
+(`sonnet` via the `Agent` tool), batched by shared files. That is the standing approach.
 
-If any of that does not match, work out what moved before continuing.
+### Before dispatching Batch H, read these five things or you will redo work or break something
 
-Batches O and P were dispatched two different ways this session, worth knowing if it comes up
-again: O (the CLI startup spinner, commit `f51647b`) went to the `pi` CLI running DeepSeek V4 flash
-instead of a Claude subagent, at the human's explicit request, as a one-batch trial. It went well
-(independently verified and re-falsified by the orchestrator, no issues found), but the human
-decided afterward not to continue the trial. P (the web mode-card flow, commit `d6f0700`) and
-everything since went back to Claude subagents (`sonnet`/`haiku` via the `Agent` tool), batched by
-shared files for token efficiency. That is the standing approach going forward.
+1. **The standing subagent preamble is at**
+   `/Users/vishal/work/personal/second-mind/.claude/journal-preamble.md`. Deliberately placed
+   inside the repo's own gitignored `.claude/` directory (not a session-scoped scratchpad), so it
+   survives across sessions on this machine and is not tied to any session ID. Every batch A
+   through G dispatch opened by `cat`-ing this exact path; every future batch should too. It is
+   current as of Batch G (includes the `this.timezone()` reconciliation from Batch E and the
+   G-before-H `context.ts` coordination note). If it is ever missing, the fallback is this
+   document's "Dispatching subagents" section plus the reconciliation notes and safety boundary
+   sections further down, reassembled the same way.
 
-The journal plan (`docs/superpowers/plans/2026-08-17-journal-mode-plan.md`, 4375 lines) has been
-read in full (via a subagent survey, not loaded whole into the orchestrator's context) and split
-into Batches A through N by shared files, the same way modes was split into Batches A through M.
-See the "Journal plan" table below for the batching and "Journal plan defects found" for what the
-survey turned up. **Nothing has been dispatched yet.** Mark a batch ONGOING before dispatching it,
-same discipline as modes.
+2. **Batch H (Task 10) is the largest task in the plan and is safety-relevant**: it creates
+   `packages/core/src/journaling.ts`, containing the expressive-writing safety gate and per-method
+   safety notes transcribed verbatim from the design spec. Its own Files block in the plan is
+   incomplete: Step 7 also edits `packages/core/src/personas.ts` (widens `buildPersona`'s
+   signature) and `packages/core/src/context.ts` (the `buildPersona(...)` call site inside
+   `assembleSystemPrompt`, lines 53-58 as of `bfa1637`). **Batch G already added
+   `journalingProtocolSection(context)` to the `sections` array in that same function (lines
+   68-73-ish) and deliberately left the `buildPersona(...)` call site untouched for H.** Tell
+   Batch H's brief plainly: do not touch the `sections` array (G already wired it), only the
+   `buildPersona(...)` call site needs the new arguments threaded through.
 
-**Journal's Task 13 is a safety-invariant test (six combinations, position plus bytes). Falsify
-that one yourself, never a subagent.** It is the same shape as the modes Task 8 invariant (Batch D,
-falsified by the orchestrator, not redone). It is Batch K below. See "Safety handling" below.
+3. **`packages/memory/src/index.ts` does not re-export anything from `journal.ts`.** Every batch
+   so far avoided needing it (either stayed within `memory`, or reached journal.ts's exports
+   through a `MemoryEngine` method rather than a direct import). Batch H, living in `core`, may be
+   the first to need a direct cross-package import (e.g. `JOURNALING_PROTOCOL_ABSENT`). If so, add
+   the barrel export as part of Batch H and rebuild (`npx tsc -b`) before the import resolves.
+
+4. **Batch H must hand Batch K (the safety invariant test) a REAL signature, not the plan's
+   text.** The plan's Task 10 Step 7 code for widening `buildPersona` is placeholder-style
+   (`...unchanged...`), so what actually ships may differ from the plan's snippet. When you verify
+   H, record `buildPersona`'s real final signature in this document, in H's row of the Journal
+   plan table or a note under it, and write K's brief against that real signature. Also require
+   H's brief to grep every `buildPersona(` call site before editing, and to confirm the
+   pre-existing 42 `personas.test.ts` tests still pass in H's own gate run.
+
+5. **Batch K (Task 13) is the safety invariant: six combinations of {companion, firewall} safety
+   mode times {no mode, journal mode with a real `journaling.md` fixture, journal mode with the
+   protocol absent}, asserting the crisis section is byte-identical and positionally LAST across
+   every arm.** Falsify it yourself, personally, never trust a subagent's report of having done
+   it: move the mode-paragraph insertion after `crisisSection` in `buildPersona`, confirm the
+   `endsWith` assertions fail while a `toContain` presence check would still pass, then restore.
+   Before committing K, run `git diff --exit-code -- packages/core/src/personas.ts` (must report
+   no differences) and `git show --stat` on K's commit (must show only `personas.test.ts`). This
+   is the same shape as modes' Task 8 invariant (Batch D there, falsified by the orchestrator, not
+   redone). K cannot be dispatched until H has landed and been verified.
+
+### Other things worth knowing before you continue
+
+- **Two plan defects were found and fixed during Batch B**, not deferred: the plan predates
+  `packages/core/src/docKinds.test.ts` (the "P8" DocKind wiring invariant), which assumed every
+  `DocKind` gets an injected, capped prompt section. `journal` is tool-only (never prompt-
+  injected, only reachable through `search_memory`/`read_document`) and `journaling`'s injected
+  section is deliberately uncapped. Both are now recorded as an explicit `PROMPT_EXEMPT_KINDS`
+  carve-out in that test file, not silently worked around. See "Journal plan defects found",
+  defect 7, for the full reasoning if this comes up again in a later batch.
+- **Batch C found and fixed a vacuous falsification in the plan's own Task 4 step 7** (the
+  examen-label ordering test could not distinguish "correct order" from "first label silently
+  missing"). Fixed with a stronger exact-sequence assertion, confirmed to actually fail under the
+  plan's own falsification injection. Recorded in the Batch C commit message.
+- **Batch E found and fixed the same class of problem**, personally re-verified by the
+  orchestrator: falsifying the `mode === 'journal'` gate alone, in isolation, passed every test the
+  plan gave, because none of them declare a method without also setting mode. A fifth test was
+  added; the orchestrator independently re-ran that exact falsification and confirmed the new test
+  catches it. See defect notes and Batch E's commit message.
+- **Defect 8, not blocking, flagged for the human, not fixed**: the crash-path journal entry's
+  `entryDate` uses `_doEndSession`'s `now = new Date()` (the moment recovery runs), not the
+  session's actual start time. On the genuine crash path (process dies before `/bye`, a much later
+  `runMaintenance` recovers it) this conflates event time and record time, which `entryDate`
+  versus `recordedAt` exists everywhere else in this plan to keep apart. Plan-faithful, not a bug
+  introduced by any batch. Raise with the human before changing it; do not silently fix it.
+- **A third instance of a flaky-under-load test surfaced during Batch F**
+  (`packages/web/src/views/conversations.test.tsx`, passed cleanly on immediate rerun). This is
+  now three distinct files across three epochs (modes Batches L, P; journal Batch F), all the same
+  shape: never touched by the batch that surfaced it, always clean in isolation or on rerun, only
+  fails under full-suite load. This crosses the threshold this document already named for raising
+  it with the human as a suite-level pattern (parallelism, worker count, timeout margins) rather
+  than continuing to log one-off occurrences file by file. Raise it at the journal merge if it
+  hasn't come up again sooner.
+- **Deferred item 1 from the modes epoch (untested `getProfile`/`updateProfile`/`getSettings` in
+  `packages/web/src/api.test.ts`) is folded into Batch M's scope**, not forgotten: M already
+  touches that exact file for Task 15's own schema widening.
+- **`ROADMAP.md`'s uncommitted change in the main repo is the human's own BUSL-1.1 note.** Leave
+  it alone; it is not related to Phase D. Never `git commit -am` in the main repo; always stage
+  the exact path.
+- **Machine timezone is Asia/Calcutta (UTC+05:30).** CI is UTC. This has bitten date-sensitive
+  tests before; see "Environment facts" below for the pinning pattern.
+- The full Batch A-N table, the complete defects list (8 entries), the safety handling rules, and
+  the dispatch recipe are all further down in this same document and are current as of `bfa1637`.
+  This START HERE section is a summary for a fast cold start; the rest of the document is the
+  detail to fall back on.
 
 ## STATUS BOARD
 
