@@ -172,7 +172,7 @@ half-written build output. Mark a batch ONGOING *before* dispatching it.
 | J | 12 | Reflection's `journalingUpdate` field, the backstop path; `reflection.ts`, `engine.ts` | C | TODO | |
 | K | 13 | **SAFETY invariant test, six combinations, position plus bytes**; `core/personas.test.ts` only | H, C | TODO, orchestrator falsifies personally | |
 | L | 14 | Server exposes `journal`/`journaling` kinds; `server/app.ts` | B | TODO | |
-| M | 15 | Web client schema, `Library.tsx` `KIND_LABELS`; `web/api.ts`, `web/views/Library.tsx` | L | TODO | |
+| M | 15, + deferred item 1 | Web client schema, `Library.tsx` `KIND_LABELS`; `web/api.ts`, `web/views/Library.tsx`. Also close deferred item 1 from the modes epoch (below): `getProfile`, `updateProfile`, `getSettings` have no tests in `api.test.ts`, and M is already touching that exact file | L | TODO | |
 | N | 16 | Real web journal tab, `excerpt`/`recordedAt` end to end; `engine.ts`, `server/app.ts`, `web/api.ts`, `web/views/Journal.tsx` (replaces placeholder), `journal.css` | B, L, M | TODO | |
 
 Notes on sequencing, from the plan survey:
@@ -197,8 +197,22 @@ Notes on sequencing, from the plan survey:
   crash-path gating logic Batch K's test protects. Its own plan steps require a two-direction
   falsification (remove the `mode` gate, then separately the `method` gate) with the plan's own
   warning that a gate checking only one of the two would pass every test written before that
-  second falsification. Require both directions' real failure output in the report; this one does
-  not need the orchestrator to re-run it personally, unlike K.
+  second falsification. **Require two distinct pasted failure outputs in E's report**; if they are
+  identical, or only one is given, re-run the missing direction yourself rather than accepting the
+  report. This one does not need the orchestrator to re-run it personally, unlike K.
+- **H must hand K a real signature, not the plan's prediction.** Task 10 Step 7's code for the
+  `buildPersona` signature widen is placeholder-style (`...unchanged...`), so what actually ships
+  may not match the plan's text verbatim. When verifying H, record `buildPersona`'s real final
+  signature in this document (in H's Commits cell or a note under it) and write K's brief against
+  that real signature, not the plan's. Require H's brief to grep every `buildPersona(` call site
+  before editing, and to confirm the pre-existing 42 `personas.test.ts` tests still pass in H's own
+  gate run.
+- **K's commit must be exactly one file.** Before committing K, run
+  `git diff --exit-code -- packages/core/src/personas.ts` in the worktree; it must report no
+  differences (the falsification's temporary edit must be fully reverted). `git show --stat` on
+  K's commit must show only `personas.test.ts`. A leaked safety-ordering inversion is the worst
+  defect this repo can ship; verify this personally, do not trust the subagent's report of having
+  reverted it.
 
 ### Journal plan defects found, do not re-derive
 
