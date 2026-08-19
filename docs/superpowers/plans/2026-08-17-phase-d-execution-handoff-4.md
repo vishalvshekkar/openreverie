@@ -47,10 +47,24 @@ in the main repo; it sweeps that file up. Stage the exact path you mean.
 
 If any of that does not match, work out what moved before continuing.
 
-**Your next action is modes Batch N, Task 22, the README. Do it personally, not via a subagent.**
-`AGENTS.md` treats an overstated Status section as a serious defect, not a cosmetic one. Read
-`sed -n '6986,$p' docs/superpowers/plans/2026-08-17-modes-profile-settings-plan.md`. Then merge
-modes into design. Then start the journal epoch.
+**The mode-at-launch design workshop is DONE.** Its outcome is
+`docs/superpowers/specs/2026-08-19-mode-at-launch-design.md`. Read that spec, not this section, for
+the decision. It is folded into the modes epoch as two new batches, O and P, below.
+
+**Your next action is modes Batch O (the CLI startup spinner), then Batch P (the web mode-card new
+chat flow), then Batch Q, Task 22, the README, done personally, not via a subagent.** `AGENTS.md`
+treats an overstated Status section as a serious defect, not a cosmetic one; the README must
+describe the mode-at-launch behavior honestly once O and P ship, which is why it now comes last,
+not first. Read `sed -n '6986,$p' docs/superpowers/plans/2026-08-17-modes-profile-settings-plan.md`
+for the README task's original brief, then add the mode-at-launch behavior to what it asks you to
+document. Then merge modes into design. Then start the journal epoch.
+
+**Be efficient dispatching O and P.** Each is one subagent, `sonnet`, one dispatch, pointed at the
+spec file directly (it is short, has the exact copy and the exact decisions, do not make a
+subagent re-derive them). Run O then P sequentially in the one worktree, same rule as every other
+batch: shared `dist/` output means no parallel dispatches. Do not split O or P into more than one
+dispatch each; every file either one touches lands in the same PR-sized change, and re-reading the
+plan or spec per file wastes context for no benefit.
 
 ## STATUS BOARD
 
@@ -66,7 +80,7 @@ to be corrected in the last session.
 | 1 | **cli-polish** `2026-08-17-cli-polish-and-ci-fix-plan.md` | 10 | nothing | **DONE**, merged into design |
 | 2 | **time** `2026-08-17-time-as-first-class-plan.md` | 23 | nothing | **DONE**, merged into design |
 | 3 | **retrieval** `2026-08-17-context-and-retrieval-plan.md` | 19 | time | **DONE**, merged into design as `a0bd482` |
-| 4 | **modes** `2026-08-17-modes-profile-settings-plan.md` | 24 | time | **22 of 24 done.** Only Task 22 (README) left, then the merge |
+| 4 | **modes** `2026-08-17-modes-profile-settings-plan.md` | 24 | time | **22 of 24 plan tasks done**, plus two new spec-driven batches (O, P) folded in from the mode-at-launch workshop, plus Task 22 (README, now last). See Batches O to Q below |
 | 5 | **journal** `2026-08-17-journal-mode-plan.md` | 16 | time, modes | **NOT STARTED.** No worktree yet |
 
 Phase D is not finished until all five have shipped and merged into `feat/phase-d-design`, and
@@ -93,24 +107,47 @@ Batching is by shared files. Run them SEQUENTIALLY in the one worktree: two agen
 | K | 17, 18 | mode stream event, mode over HTTP | DONE, 990 | `fa7499d` |
 | L | 19 | profile/settings endpoints, the API key | DONE, 1002, orchestrator falsified | `22e719e` |
 | M | 20, 21 | web journal and settings destinations, mode picker | DONE, 1018 | `5e40167` |
-| N | 22 | README | **NEXT, not started** | |
+| O | spec | CLI startup spinner, `2026-08-19-mode-at-launch-design.md` | DONE, 1023, dispatched via `pi` CLI + DeepSeek V4 flash (trial), orchestrator-verified and independently falsified | `f51647b` |
+| P | spec | web mode-card new-chat flow, same spec | NOT STARTED, after O | |
+| Q | 22 | README | NOT STARTED, after P | |
 
-Seventeen commits sit on `feat/phase-d-modes` ahead of `feat/phase-d-design`.
+Batches O and P have no task numbers in the modes plan; they come from
+`docs/superpowers/specs/2026-08-19-mode-at-launch-design.md` instead, folded into this epoch
+because the human asked for the workshop's outcome to ship as part of modes, not as a separate
+epoch. Point subagent briefs at the spec's decision sections and its "Implementation notes for the
+next agent" section directly.
+
+Seventeen commits sit on `feat/phase-d-modes` ahead of `feat/phase-d-design`, before O, P, and Q.
 
 ## What to do next, in order
 
-1. **Batch N, Task 22, the README. Personally.** The Status section must reflect reality. What
-   modes actually shipped: conversation modes with a ten-mode catalogue and a persona overlay;
-   the personal profile fields; `set_mode` replacing `update_style`; style out of `config.toml`
-   and into `profile.md` with a `reverie migrate` path; a CLI command table with `/mode`,
-   `/style`, `/settings`, `/whoami`, `/help` and `/bye`; a persistent CLI status strip; a `mode`
-   stream event; session mode over HTTP; profile and settings endpoints; and two new web
-   destinations plus a mode picker. Claim nothing beyond that. Note honestly that the journal
-   destination is a placeholder whose contents the journal epoch replaces.
+1. **Batch O, the CLI startup spinner.** One `sonnet` subagent, one dispatch. Brief points at
+   `docs/superpowers/specs/2026-08-19-mode-at-launch-design.md`'s "CLI startup wait" section and
+   "Implementation notes" section directly, exact `sed -n` range, do not re-transcribe it. State
+   the starting test count (1018), forbid committing, require the falsify-a-test discipline for
+   whatever test covers the spinner's phrase rotation. Verify yourself, commit yourself.
 
-2. **Clear the deferred items below that you judge blocking.** At minimum, read all of them.
+2. **Batch P, the web mode-card new-chat flow.** One `sonnet` subagent, one dispatch, after O is
+   committed. Same brief pattern, pointed at the spec's "web defers session creation" section.
+   Tell it explicitly to confirm what the current new-chat entry point does before changing it,
+   per the spec's own implementation note, and to reuse the existing mode-catalogue enumeration
+   the Task 21 picker already uses rather than adding a second source of truth. Verify yourself,
+   commit yourself.
 
-3. **Merge modes into design:**
+3. **Batch Q, Task 22, the README. Personally, not via a subagent.** The Status section must
+   reflect reality. What modes actually shipped: conversation modes with a ten-mode catalogue and
+   a persona overlay; the personal profile fields; `set_mode` replacing `update_style`; style out
+   of `config.toml` and into `profile.md` with a `reverie migrate` path; a CLI command table with
+   `/mode`, `/style`, `/settings`, `/whoami`, `/help` and `/bye`; a persistent CLI status strip; a
+   `mode` stream event; session mode over HTTP; profile and settings endpoints; two new web
+   destinations plus a mode picker; and, once O and P ship, the mode-at-launch behavior itself
+   (CLI always starts `general` with a startup spinner, web picks a mode via cards before a
+   session exists). Claim nothing beyond that. Note honestly that the journal destination is a
+   placeholder whose contents the journal epoch replaces.
+
+4. **Clear the deferred items below that you judge blocking.** At minimum, read all of them.
+
+5. **Merge modes into design:**
    ```bash
    cd /Users/vishal/work/personal/second-mind
    git merge feat/phase-d-modes        # regular merge, NOT --ff-only
@@ -120,7 +157,7 @@ Seventeen commits sit on `feat/phase-d-modes` ahead of `feat/phase-d-design`.
    Run the full gate again on design after the merge, because a merge can break what neither
    branch broke alone.
 
-4. **Then journal.** Create the worktree from the modes-merged design, NOT before:
+6. **Then journal.** Create the worktree from the modes-merged design, NOT before:
    ```bash
    git worktree add .claude/worktrees/journal -b feat/phase-d-journal feat/phase-d-design
    cd .claude/worktrees/journal && pnpm install
@@ -129,69 +166,21 @@ Seventeen commits sit on `feat/phase-d-modes` ahead of `feat/phase-d-design`.
    position plus bytes). Falsify that one yourself**, never a subagent. It is the same shape as
    the modes Task 8 invariant.
 
-5. Update the README honestly after journal ships too.
+7. Update the README honestly after journal ships too.
 
-## DO THIS FIRST: a design workshop on mode at launch (the human asked for it)
+## DO THIS FIRST: a design workshop on mode at launch — DONE
 
-The human asked for a small design workshop on how mode selection works as an experience, in
-both the CLI and the web, BEFORE resuming implementation. Run it with them. Do not decide it
-alone and do not implement first. Their questions, in their words: when you launch reverie, does
-the last mode show up, or something different? Or do you enter and then choose a mode, in which
-case startup has already done a lot of work before the first message, so what mode was that work
-done in?
+The human asked for a small design workshop on how mode selection works as an experience, in both
+the CLI and the web, before resuming implementation. That workshop happened directly with the
+human (not decided by an agent alone) and its outcome is written up in full at
+`docs/superpowers/specs/2026-08-19-mode-at-launch-design.md`. Read that spec, not this section,
+for the decision and the reasoning. Do not re-run the workshop.
 
-This is a real gap, not a hypothetical. The plan shipped the mechanism for modes and never
-specified the launch policy.
-
-### What the code does today, verified, so you do not re-derive it
-
-- `AgentSession.start` (`packages/core/src/agent.ts:197`) takes `options.mode` and defaults it:
-  `const mode = options.mode ?? 'general'`.
-- **The CLI never passes a mode.** So every CLI session starts in `general`, always. `/mode`
-  switches it for the rest of that conversation only, and the CLI says so in its own copy.
-- **The web can pass one.** `POST /api/v1/sessions` accepts an optional mode (Task 18), and the
-  picker added in Task 21 calls `POST /api/v1/sessions/:id/mode` afterwards for a live switch.
-  So the two interfaces already disagree about whether mode is a launch-time choice.
-- The mode is persisted per session from its first moment:
-  `await engine.setSessionMode(sessionId, mode)` runs inside `start`, deliberately, so a process
-  that dies before `/bye` still leaves the mode where reflection can find it.
-- **Nothing anywhere reads a "last used mode".** Session mode is written per session and never
-  read back as a default for the next one.
-- Startup work happens in `MemoryEngine.open` before any session exists:
-  `runMaintenance()` (reflect stale sessions, build pending rollups), then
-  `drainLegacyProposals()`, then `refreshDocPaths()` (`engine.ts:410-441`). The system prompt is
-  assembled in `AgentSession.start`, AFTER all of that, via
-  `assembleSystemPrompt(engine, config, mode)`.
-
-That last point is the crux of the human's question, and the answer is reassuring: maintenance and
-reflection are mode-independent. They run on the engine before a session or a persona exists, so
-"which mode was that work done in" is currently "none, and correctly so". What IS mode-dependent
-is the assembled system prompt, which is built once at session start from the mode. A launch-time
-mode picker therefore does not need to re-run maintenance; it needs to sit between engine open and
-`AgentSession.start`, or trigger a prompt re-assembly the way `/mode` already does via
-`refreshSystemPrompt()`.
-
-### The design question to actually workshop
-
-Roughly three options, worth putting to the human as a choice rather than a recommendation
-smuggled in as a summary:
-
-1. **Always start in `general`** (today's CLI behaviour). Simplest, most predictable, and it
-   matches the doctrine that a mode is a property of one conversation rather than a setting. The
-   cost is that someone who always journals must say `/mode` every single time.
-2. **Remember the last mode** and start there, shown in the status strip. Convenient, but it
-   makes mode sticky, which quietly contradicts "this conversation only", and it needs a new
-   persisted field: nothing reads a last-mode today.
-3. **Ask at launch**, after maintenance, before the first prompt. Most explicit, and it fits the
-   fact that maintenance is already mode-independent. The cost is a gate in front of every
-   session, including the "I just want to talk" case that `general` exists for.
-
-There is also a real sub-question the human raised: what the person sees while startup work is
-happening at all, since reflecting stale sessions and building rollups can take a while before
-the first prompt appears.
-
-Whatever is decided, the CLI and the web must agree, and the outcome belongs in a spec under
-`docs/superpowers/specs/`, which is this repo's design source of truth, before any code changes.
+Summary only, so you know whether you need the full spec for a given task: CLI always starts
+`general`, no launch gate, no last-mode memory, with a new decorative status spinner during the
+startup wait. Web decouples engine start from session start and gates session creation behind a
+mode-card picker on the new-chat screen, a deliberate divergence from the CLI justified in the
+spec. This is now Batches O and P of the modes epoch, above.
 
 ## DEFERRED ITEMS AND OPEN ISSUES
 
