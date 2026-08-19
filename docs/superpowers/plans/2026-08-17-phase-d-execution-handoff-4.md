@@ -174,7 +174,7 @@ to be corrected in the last session.
 | 2 | **time** `2026-08-17-time-as-first-class-plan.md` | 23 | nothing | **DONE**, merged into design |
 | 3 | **retrieval** `2026-08-17-context-and-retrieval-plan.md` | 19 | time | **DONE**, merged into design as `a0bd482` |
 | 4 | **modes** `2026-08-17-modes-profile-settings-plan.md` | 24 | time | **DONE, merged into design as `e9c3350`.** Re-gated on design after merge: build 0, lint 0, 1029/1029. Worktree `.claude/worktrees/modes` removed. See Batches A to Q below |
-| 5 | **journal** `2026-08-17-journal-mode-plan.md` | 16 | time, modes | **BATCHED, not yet dispatched.** Worktree `.claude/worktrees/journal` on `feat/phase-d-journal`, baseline reconfirmed at 1029/1029 (build 0, lint 0). Plan read and split into Batches A to N by shared files. See the Journal plan table below |
+| 5 | **journal** `2026-08-17-journal-mode-plan.md` | 16 | time, modes | **DONE, merged into design as `a114595`.** Re-gated on design after merge: build 0, lint 0, 1132/1132. Worktree `.claude/worktrees/journal` removed. README updated (`e4e86a2`). See Batches A to N below |
 
 Phase D is not finished until all five have shipped and merged into `feat/phase-d-design`, and
 design has merged to `main`. Merging design into `main` and cutting a release is the human's call:
@@ -471,50 +471,25 @@ yet cross-checked against the real tree, since nothing has been dispatched):
 
 ## What to do next, in order
 
-Modes is fully done: Batches O, P, Q shipped, merged into design as `e9c3350`, re-gated
-(build 0, lint 0, 1029/1029). The worktree `.claude/worktrees/modes` is removed. The journal
-worktree exists and is batched (Batches A to N above). Nothing dispatched yet.
+**Both modes and journal are fully done and merged into `feat/phase-d-design`.** Modes: Batches O,
+P, Q shipped, merged as `e9c3350`. Journal: all 16 tasks (Batches A through N) shipped, merged as
+`a114595`, re-gated (build 0, lint 0, 1132/1132). Both worktrees are removed. README updated at
+`e4e86a2`. Journal Batches H through N used a mix of `sonnet` (H, I, K: the two safety-relevant
+batches plus one implementation batch) and `pi` CLI + DeepSeek V4 flash (J, L, M, N: five trials
+total, at the human's explicit request, all orchestrator-verified and independently falsified, no
+quality gap observed against sonnet). See "J went to `pi` CLI..." in the sequencing notes below for
+the real invocation and what each trial caught.
 
-1. **Dispatch Batches A through N, sequentially, one `sonnet` subagent per batch** (see "Dispatching
-   subagents: the workflow that works" below for the recipe: shared preamble, short brief pointing
-   at exact `sed -n` ranges, state the starting test count, forbid committing, require falsify-not-
-   backfill). Mark each batch ONGOING before dispatch, verify with the full worktree gate yourself
-   (`npx tsc -b && npx vitest run && npx biome check --write . && npx biome check .`), `git show
-   --stat` the would-be commit's contents before committing, read the hash back with
-   `git rev-parse --short HEAD`, then fill in the table.
+1. **The MANUAL TESTING QUEUE is deliberately NOT done.** At the human's explicit request this
+   session, the hands-on browser/CLI pass was handed to them as a checklist instead of being run by
+   the orchestrator. The queue itself, further up this document, is current and complete: the CLI
+   spinner and web mode-card picker (modes epoch), the real web journal tab, and the journal-mode
+   conversation itself (the one thing no automated test can cover). Do not run it unless a future
+   session is explicitly asked to.
 
-2. **Batch K (Task 13) is the safety invariant. Falsify it personally**, exactly like modes Task 8
-   (Batch D): a subagent may write the RED test and the GREEN implementation, but the orchestrator
-   personally re-runs the falsification (move the mode-paragraph insertion after `crisisSection`
-   in `buildPersona`, confirm the `endsWith` assertions fail while a `toContain` presence check
-   would still pass, then restore) and pastes the real output here, rather than trusting the
-   subagent's report of having done it.
-
-3. **Add to the MANUAL TESTING QUEUE as journal's web/CLI surfaces land**, per that section's own
-   rule: specifics (what to click, what to type, what to watch for), not "test the journal
-   feature." Batch N (the real web journal tab) is the obvious candidate. Do not test any of it
-   piecemeal unless it looks too risky to leave unverified until the end-of-epoch pass; say so
-   plainly if that judgment call comes up.
-
-4. **After all 16 tasks are done and verified**, run the full worktree gate one more time, then
-   merge journal into design:
-   ```bash
-   cd /Users/vishal/work/personal/second-mind
-   git merge feat/phase-d-journal      # regular merge, NOT --ff-only
-   pnpm lint && pnpm build && pnpm test
-   git worktree remove .claude/worktrees/journal
-   ```
-   Run the full gate again on design after the merge, because a merge can break what neither
-   branch broke alone.
-
-5. **Run the full MANUAL TESTING QUEUE**, journal's own items plus the two already queued from
-   modes (the CLI startup spinner, the web mode-card picker), as one consolidated pass.
-
-6. **Update the README honestly**, reflecting what journal actually shipped on top of what modes
-   already documented.
-
-7. Phase D is not finished until design merges to `main`. That merge, and cutting a release, is
-   the human's call: raise it and wait.
+2. Phase D is not finished until design merges to `main`. That merge, and cutting a release, is
+   the human's call: raise it and wait. Nothing else in this document's own record is blocking that
+   merge.
 
 ## DO THIS FIRST: a design workshop on mode at launch — DONE
 
