@@ -318,6 +318,30 @@ describe('mainWith doctor', () => {
   })
 })
 
+describe('mainWith migrate', () => {
+  it('migrate --config rewrites the named config file, not the default one', async () => {
+    let readConfigMemoryDirCalledWith: string | undefined
+    let runMigrateDepConfigPath: string | undefined
+    const { deps } = testDeps({
+      readConfigMemoryDir: async (path: string) => {
+        readConfigMemoryDirCalledWith = path
+        return '/fake/memory'
+      },
+      runMigrate: async (_args, migrateDeps) => {
+        runMigrateDepConfigPath = migrateDeps.configPath
+        await migrateDeps.readMemoryDir()
+        return 0
+      },
+    })
+
+    await mainWith(['migrate', '--config', '/custom.toml'], deps)
+
+    expect(readConfigMemoryDirCalledWith).toBe('/custom.toml')
+    expect(runMigrateDepConfigPath).toBe('/custom.toml')
+    process.exitCode = 0
+  })
+})
+
 describe('mainWith chat interrupt exit code', () => {
   it('sets exitCode 4 when runChat reports interrupted: true', async () => {
     const dir = '/fake/memory'
