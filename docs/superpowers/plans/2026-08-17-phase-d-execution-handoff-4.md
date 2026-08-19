@@ -23,48 +23,46 @@ Three rules, all of which cost real time in earlier sessions:
 3. **`cd` with an absolute path in every shell command that runs the gate.** See "the wrong-tree
    trap, orchestrator edition" below.
 
-## START HERE: nothing is in flight, the tree is green
+## START HERE: O and P are done, Q (the README) is next
 
-The previous orchestrator stopped at a clean boundary after finishing modes Batch M.
-**There is no ONGOING work to verify.** Modes Batches A through M (Tasks 0 to 21) are DONE,
-committed, and gated.
+Modes Batches A through P are DONE, committed, and gated. **There is no ONGOING work to verify.**
 
 Confirm the starting state:
 
 ```bash
 cd /Users/vishal/work/personal/second-mind/.claude/worktrees/modes
-git log --oneline -1        # expect 5e40167 "Add journal and settings destinations, and a mode picker"
+git log --oneline -1        # expect d6f0700 "Defer web session creation to a mode-card new-chat picker"
 git status --short          # expect empty
-pnpm lint && pnpm build && pnpm test
+npx tsc -b && npx vitest run && npx biome check --write . && npx biome check .
 ```
 
-Expected: lint 0, build 0, test 0, **Test Files 57 passed (57) / Tests 1018 passed (1018)**.
+Expected: tsc 0, biome 0 (no fixes both times), **Test Files 58 passed (58) / Tests 1029 passed
+(1029)**.
 
 The main repo at `/Users/vishal/work/personal/second-mind` is on `feat/phase-d-design` and should
-show only ` M ROADMAP.md`, which is the human's own uncommitted note about BUSL-1.1 licensing.
-**Leave it alone.** Do not commit it, do not stash it, do not tidy it. Never use `git commit -am`
-in the main repo; it sweeps that file up. Stage the exact path you mean.
+show ` M ROADMAP.md` (the human's own uncommitted BUSL-1.1 note, leave it alone),
+` M docs/superpowers/plans/2026-08-17-phase-d-execution-handoff-4.md` (this file, if not yet
+committed), and `?? docs/superpowers/specs/2026-08-19-mode-at-launch-design.md` (the design spec,
+untracked, read-only, do not add it to the worktree or commit it into the main repo). Never use
+`git commit -am` in the main repo; stage the exact path you mean.
 
 If any of that does not match, work out what moved before continuing.
 
-**The mode-at-launch design workshop is DONE.** Its outcome is
-`docs/superpowers/specs/2026-08-19-mode-at-launch-design.md`. Read that spec, not this section, for
-the decision. It is folded into the modes epoch as two new batches, O and P, below.
+Batches O and P were both done this session: O (the CLI startup spinner) was dispatched as a trial
+to the `pi` CLI running DeepSeek V4 flash instead of a Claude subagent, at the human's explicit
+request, to see how it performed; commit `f51647b`. It went well (independently verified and
+re-falsified by the orchestrator, no issues found), but the human decided afterward not to continue
+the trial: back to Claude subagents (`sonnet`/`haiku` via the `Agent` tool) for everything from P
+onward, batched by shared files for token efficiency. P (the web mode-card flow) was dispatched
+that way as a single `sonnet` subagent; commit `d6f0700`. If DeepSeek/`pi` comes up again, that
+context is why it was tried once and then set aside, not a quality problem with the tool.
 
-**Your next action is modes Batch O (the CLI startup spinner), then Batch P (the web mode-card new
-chat flow), then Batch Q, Task 22, the README, done personally, not via a subagent.** `AGENTS.md`
-treats an overstated Status section as a serious defect, not a cosmetic one; the README must
-describe the mode-at-launch behavior honestly once O and P ship, which is why it now comes last,
-not first. Read `sed -n '6986,$p' docs/superpowers/plans/2026-08-17-modes-profile-settings-plan.md`
-for the README task's original brief, then add the mode-at-launch behavior to what it asks you to
-document. Then merge modes into design. Then start the journal epoch.
-
-**Be efficient dispatching O and P.** Each is one subagent, `sonnet`, one dispatch, pointed at the
-spec file directly (it is short, has the exact copy and the exact decisions, do not make a
-subagent re-derive them). Run O then P sequentially in the one worktree, same rule as every other
-batch: shared `dist/` output means no parallel dispatches. Do not split O or P into more than one
-dispatch each; every file either one touches lands in the same PR-sized change, and re-reading the
-plan or spec per file wastes context for no benefit.
+**Your next action is Batch Q, Task 22, the README, done personally, not via a subagent.**
+`AGENTS.md` treats an overstated Status section as a serious defect, not a cosmetic one; the README
+must describe the mode-at-launch behavior honestly now that O and P have shipped. Read
+`sed -n '6986,$p' docs/superpowers/plans/2026-08-17-modes-profile-settings-plan.md` for the
+README task's original brief, then add the mode-at-launch behavior to what it asks you to document.
+Then merge modes into design. Then start the journal epoch.
 
 ## STATUS BOARD
 
@@ -108,8 +106,8 @@ Batching is by shared files. Run them SEQUENTIALLY in the one worktree: two agen
 | L | 19 | profile/settings endpoints, the API key | DONE, 1002, orchestrator falsified | `22e719e` |
 | M | 20, 21 | web journal and settings destinations, mode picker | DONE, 1018 | `5e40167` |
 | O | spec | CLI startup spinner, `2026-08-19-mode-at-launch-design.md` | DONE, 1023, dispatched via `pi` CLI + DeepSeek V4 flash (trial), orchestrator-verified and independently falsified | `f51647b` |
-| P | spec | web mode-card new-chat flow, same spec | NOT STARTED, after O | |
-| Q | 22 | README | NOT STARTED, after P | |
+| P | spec | web mode-card new-chat flow, same spec | DONE, 1029, orchestrator-verified and independently falsified | `d6f0700` |
+| Q | 22 | README | **NEXT, not started** | |
 
 Batches O and P have no task numbers in the modes plan; they come from
 `docs/superpowers/specs/2026-08-19-mode-at-launch-design.md` instead, folded into this epoch
@@ -230,6 +228,13 @@ creating 65 sessions, which can be exceeded when vitest workers compete for a lo
 
 Left alone because fixing it means editing a test outside the modes plan's scope. If it recurs,
 raise that one timeout. Do not reduce the session count: 65 is what the test is about.
+
+A second instance of the same shape turned up during Batch P: `packages/web/src/views/settings.test.tsx`
+failed once under full-suite load and passed on every rerun (5 of 5 in isolation, and on the
+orchestrator's own two full-suite reruns after). Same pattern as above: not touched by Batch P's
+changes, not a logic race, just resource contention under a loaded machine. Left alone for the same
+reason. If flakes under load keep surfacing in different files, that is worth raising with the human
+as a pattern rather than chasing file by file.
 
 ### 4. `PublicSession.mode` survives onto tombstones
 
