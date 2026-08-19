@@ -78,7 +78,7 @@ to be corrected in the last session.
 | 1 | **cli-polish** `2026-08-17-cli-polish-and-ci-fix-plan.md` | 10 | nothing | **DONE**, merged into design |
 | 2 | **time** `2026-08-17-time-as-first-class-plan.md` | 23 | nothing | **DONE**, merged into design |
 | 3 | **retrieval** `2026-08-17-context-and-retrieval-plan.md` | 19 | time | **DONE**, merged into design as `a0bd482` |
-| 4 | **modes** `2026-08-17-modes-profile-settings-plan.md` | 24 | time | **22 of 24 plan tasks done**, plus two new spec-driven batches (O, P) folded in from the mode-at-launch workshop, plus Task 22 (README, now last). See Batches O to Q below |
+| 4 | **modes** `2026-08-17-modes-profile-settings-plan.md` | 24 | time | **DONE, all 24 plan tasks plus Batches O and P from the mode-at-launch workshop.** Ready to merge into design. See Batches A to Q below |
 | 5 | **journal** `2026-08-17-journal-mode-plan.md` | 16 | time, modes | **NOT STARTED.** No worktree yet |
 
 Phase D is not finished until all five have shipped and merged into `feat/phase-d-design`, and
@@ -107,7 +107,7 @@ Batching is by shared files. Run them SEQUENTIALLY in the one worktree: two agen
 | M | 20, 21 | web journal and settings destinations, mode picker | DONE, 1018 | `5e40167` |
 | O | spec | CLI startup spinner, `2026-08-19-mode-at-launch-design.md` | DONE, 1023, dispatched via `pi` CLI + DeepSeek V4 flash (trial), orchestrator-verified and independently falsified | `f51647b` |
 | P | spec | web mode-card new-chat flow, same spec | DONE, 1029, orchestrator-verified and independently falsified | `d6f0700` |
-| Q | 22 | README | **NEXT, not started** | |
+| Q | 22 | README | DONE, orchestrator personally, 1029 unchanged, boost dogfood pass done by hand | `bd68c2f` |
 
 Batches O and P have no task numbers in the modes plan; they come from
 `docs/superpowers/specs/2026-08-19-mode-at-launch-design.md` instead, folded into this epoch
