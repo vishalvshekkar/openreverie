@@ -131,6 +131,68 @@ Seventeen commits sit on `feat/phase-d-modes` ahead of `feat/phase-d-design`.
 
 5. Update the README honestly after journal ships too.
 
+## DO THIS FIRST: a design workshop on mode at launch (the human asked for it)
+
+The human asked for a small design workshop on how mode selection works as an experience, in
+both the CLI and the web, BEFORE resuming implementation. Run it with them. Do not decide it
+alone and do not implement first. Their questions, in their words: when you launch reverie, does
+the last mode show up, or something different? Or do you enter and then choose a mode, in which
+case startup has already done a lot of work before the first message, so what mode was that work
+done in?
+
+This is a real gap, not a hypothetical. The plan shipped the mechanism for modes and never
+specified the launch policy.
+
+### What the code does today, verified, so you do not re-derive it
+
+- `AgentSession.start` (`packages/core/src/agent.ts:197`) takes `options.mode` and defaults it:
+  `const mode = options.mode ?? 'general'`.
+- **The CLI never passes a mode.** So every CLI session starts in `general`, always. `/mode`
+  switches it for the rest of that conversation only, and the CLI says so in its own copy.
+- **The web can pass one.** `POST /api/v1/sessions` accepts an optional mode (Task 18), and the
+  picker added in Task 21 calls `POST /api/v1/sessions/:id/mode` afterwards for a live switch.
+  So the two interfaces already disagree about whether mode is a launch-time choice.
+- The mode is persisted per session from its first moment:
+  `await engine.setSessionMode(sessionId, mode)` runs inside `start`, deliberately, so a process
+  that dies before `/bye` still leaves the mode where reflection can find it.
+- **Nothing anywhere reads a "last used mode".** Session mode is written per session and never
+  read back as a default for the next one.
+- Startup work happens in `MemoryEngine.open` before any session exists:
+  `runMaintenance()` (reflect stale sessions, build pending rollups), then
+  `drainLegacyProposals()`, then `refreshDocPaths()` (`engine.ts:410-441`). The system prompt is
+  assembled in `AgentSession.start`, AFTER all of that, via
+  `assembleSystemPrompt(engine, config, mode)`.
+
+That last point is the crux of the human's question, and the answer is reassuring: maintenance and
+reflection are mode-independent. They run on the engine before a session or a persona exists, so
+"which mode was that work done in" is currently "none, and correctly so". What IS mode-dependent
+is the assembled system prompt, which is built once at session start from the mode. A launch-time
+mode picker therefore does not need to re-run maintenance; it needs to sit between engine open and
+`AgentSession.start`, or trigger a prompt re-assembly the way `/mode` already does via
+`refreshSystemPrompt()`.
+
+### The design question to actually workshop
+
+Roughly three options, worth putting to the human as a choice rather than a recommendation
+smuggled in as a summary:
+
+1. **Always start in `general`** (today's CLI behaviour). Simplest, most predictable, and it
+   matches the doctrine that a mode is a property of one conversation rather than a setting. The
+   cost is that someone who always journals must say `/mode` every single time.
+2. **Remember the last mode** and start there, shown in the status strip. Convenient, but it
+   makes mode sticky, which quietly contradicts "this conversation only", and it needs a new
+   persisted field: nothing reads a last-mode today.
+3. **Ask at launch**, after maintenance, before the first prompt. Most explicit, and it fits the
+   fact that maintenance is already mode-independent. The cost is a gate in front of every
+   session, including the "I just want to talk" case that `general` exists for.
+
+There is also a real sub-question the human raised: what the person sees while startup work is
+happening at all, since reflecting stale sessions and building rollups can take a while before
+the first prompt appears.
+
+Whatever is decided, the CLI and the web must agree, and the outcome belongs in a spec under
+`docs/superpowers/specs/`, which is this repo's design source of truth, before any code changes.
+
 ## DEFERRED ITEMS AND OPEN ISSUES
 
 Nothing here is blocking the merge in the previous orchestrator's judgement, but every one is a
