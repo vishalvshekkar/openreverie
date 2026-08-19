@@ -23,46 +23,56 @@ Three rules, all of which cost real time in earlier sessions:
 3. **`cd` with an absolute path in every shell command that runs the gate.** See "the wrong-tree
    trap, orchestrator edition" below.
 
-## START HERE: O and P are done, Q (the README) is next
+## START HERE: modes is done and merged, journal is set up but not yet batched
 
-Modes Batches A through P are DONE, committed, and gated. **There is no ONGOING work to verify.**
+Modes (all 24 plan tasks plus Batches O, P, Q) is DONE and merged into `feat/phase-d-design` as
+`e9c3350`. **There is no ONGOING work to verify in modes.** The journal worktree exists but nothing
+in it has been touched yet.
 
 Confirm the starting state:
 
 ```bash
-cd /Users/vishal/work/personal/second-mind/.claude/worktrees/modes
-git log --oneline -1        # expect d6f0700 "Defer web session creation to a mode-card new-chat picker"
-git status --short          # expect empty
-npx tsc -b && npx vitest run && npx biome check --write . && npx biome check .
+cd /Users/vishal/work/personal/second-mind
+git log --oneline -1        # expect e9c3350 "Merge branch 'feat/phase-d-modes' into feat/phase-d-design", or later if this file itself was committed after
+git status --short          # expect ` M ROADMAP.md` and `?? docs/.../2026-08-19-mode-at-launch-design.md` only
+pnpm build && pnpm test && pnpm lint
 ```
 
-Expected: tsc 0, biome 0 (no fixes both times), **Test Files 58 passed (58) / Tests 1029 passed
-(1029)**.
+Expected: build 0, lint 0, **Test Files 58 passed (58) / Tests 1029 passed (1029)**. The
+` M ROADMAP.md` is the human's own uncommitted BUSL-1.1 note; leave it alone. The untracked spec
+file is read-only reference material; do not commit it. Never use `git commit -am` in the main
+repo; stage the exact path you mean.
 
-The main repo at `/Users/vishal/work/personal/second-mind` is on `feat/phase-d-design` and should
-show ` M ROADMAP.md` (the human's own uncommitted BUSL-1.1 note, leave it alone),
-` M docs/superpowers/plans/2026-08-17-phase-d-execution-handoff-4.md` (this file, if not yet
-committed), and `?? docs/superpowers/specs/2026-08-19-mode-at-launch-design.md` (the design spec,
-untracked, read-only, do not add it to the worktree or commit it into the main repo). Never use
-`git commit -am` in the main repo; stage the exact path you mean.
+```bash
+git worktree list           # expect main repo plus .claude/worktrees/journal on feat/phase-d-journal
+cd .claude/worktrees/journal
+git log --oneline -1        # expect e9c3350, same as design: nothing journal-specific committed yet
+npx tsc -b && npx vitest run   # expect the same 58/1029 baseline
+```
 
 If any of that does not match, work out what moved before continuing.
 
-Batches O and P were both done this session: O (the CLI startup spinner) was dispatched as a trial
-to the `pi` CLI running DeepSeek V4 flash instead of a Claude subagent, at the human's explicit
-request, to see how it performed; commit `f51647b`. It went well (independently verified and
-re-falsified by the orchestrator, no issues found), but the human decided afterward not to continue
-the trial: back to Claude subagents (`sonnet`/`haiku` via the `Agent` tool) for everything from P
-onward, batched by shared files for token efficiency. P (the web mode-card flow) was dispatched
-that way as a single `sonnet` subagent; commit `d6f0700`. If DeepSeek/`pi` comes up again, that
-context is why it was tried once and then set aside, not a quality problem with the tool.
+Batches O and P were dispatched two different ways this session, worth knowing if it comes up
+again: O (the CLI startup spinner, commit `f51647b`) went to the `pi` CLI running DeepSeek V4 flash
+instead of a Claude subagent, at the human's explicit request, as a one-batch trial. It went well
+(independently verified and re-falsified by the orchestrator, no issues found), but the human
+decided afterward not to continue the trial. P (the web mode-card flow, commit `d6f0700`) and
+everything since went back to Claude subagents (`sonnet`/`haiku` via the `Agent` tool), batched by
+shared files for token efficiency. That is the standing approach going forward.
 
-**Your next action is Batch Q, Task 22, the README, done personally, not via a subagent.**
-`AGENTS.md` treats an overstated Status section as a serious defect, not a cosmetic one; the README
-must describe the mode-at-launch behavior honestly now that O and P have shipped. Read
-`sed -n '6986,$p' docs/superpowers/plans/2026-08-17-modes-profile-settings-plan.md` for the
-README task's original brief, then add the mode-at-launch behavior to what it asks you to document.
-Then merge modes into design. Then start the journal epoch.
+**Your next action is to read the journal plan and split it into batches**, the same way modes was
+split into Batches A through M by shared files before any dispatch happened. The plan is long
+(4375 lines) and has not been read yet this session:
+`docs/superpowers/plans/2026-08-17-journal-mode-plan.md`. Read its task list and file-touch list
+per task first (skim, do not load the whole thing into one context if a subagent can survey it
+instead), group tasks that touch the same files into one batch each, and write that batching into
+this document's STATUS BOARD (a new "Journal plan, worktree `.claude/worktrees/journal`, branch
+`feat/phase-d-journal`" table, same shape as the modes one below) before dispatching anything.
+Mark a task ONGOING before dispatching it, same discipline as modes.
+
+**Journal's Task 13 is a safety-invariant test (six combinations, position plus bytes). Falsify
+that one yourself, never a subagent.** It is the same shape as the modes Task 8 invariant (Batch D,
+falsified by the orchestrator, not redone). See "Safety handling" below.
 
 ## STATUS BOARD
 
@@ -78,8 +88,8 @@ to be corrected in the last session.
 | 1 | **cli-polish** `2026-08-17-cli-polish-and-ci-fix-plan.md` | 10 | nothing | **DONE**, merged into design |
 | 2 | **time** `2026-08-17-time-as-first-class-plan.md` | 23 | nothing | **DONE**, merged into design |
 | 3 | **retrieval** `2026-08-17-context-and-retrieval-plan.md` | 19 | time | **DONE**, merged into design as `a0bd482` |
-| 4 | **modes** `2026-08-17-modes-profile-settings-plan.md` | 24 | time | **DONE, all 24 plan tasks plus Batches O and P from the mode-at-launch workshop.** Ready to merge into design. See Batches A to Q below |
-| 5 | **journal** `2026-08-17-journal-mode-plan.md` | 16 | time, modes | **NOT STARTED.** No worktree yet |
+| 4 | **modes** `2026-08-17-modes-profile-settings-plan.md` | 24 | time | **DONE, merged into design as `e9c3350`.** Re-gated on design after merge: build 0, lint 0, 1029/1029. Worktree `.claude/worktrees/modes` removed. See Batches A to Q below |
+| 5 | **journal** `2026-08-17-journal-mode-plan.md` | 16 | time, modes | **STARTING.** Worktree `.claude/worktrees/journal` created from post-merge design (branch `feat/phase-d-journal`), `pnpm install` done, baseline confirmed at 1029/1029. No tasks batched or dispatched yet: the plan (4375 lines) has not been read and split into batches. That is the next action |
 
 Phase D is not finished until all five have shipped and merged into `feat/phase-d-design`, and
 design has merged to `main`. Merging design into `main` and cutting a release is the human's call:
