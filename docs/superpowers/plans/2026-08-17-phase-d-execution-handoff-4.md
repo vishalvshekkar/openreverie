@@ -162,8 +162,8 @@ half-written build output. Mark a batch ONGOING *before* dispatching it.
 | --- | --- | --- | --- | --- | --- |
 | A | 1 | `memory/paths.ts`: `journalDir`, `journaling` fields | nothing | DONE, 1033 | `30e80d9` |
 | B | 2, + defect 7 | `DocKind` gains `journal`/`journaling`; `sqlite.ts`, `engine.ts`, `core/tools.ts`, plus `dateSpan.ts` and `core/docKinds.test.ts` (undeclared, see defect 7) | A | DONE, 1038 | `eb8a7ea` |
-| C | 3, 4, 7 | `memory/journal.ts`: entry filename/frontmatter, body assembly, `journaling.md` read/write helper | A, B | ONGOING | |
-| D | 5 | `declare_journal_method` tool; `transcripts.ts`, `engine.ts`, `core/tools.ts` | C | TODO | |
+| C | 3, 4, 7 | `memory/journal.ts`: entry filename/frontmatter, body assembly, `journaling.md` read/write helper | A, B | DONE, 1057 | `a11a213` |
+| D | 5 | `declare_journal_method` tool; `transcripts.ts`, `engine.ts`, `core/tools.ts` | C | ONGOING | |
 | E | 6 | Gated write in `_doEndSession`, the crash path; `engine.ts` **safety-adjacent** | C, D | TODO | |
 | F | 8 | `sessionContext` gains `mode` param, `journalingProtocol`; `engine.ts` | C | TODO | |
 | G | 9 | `journalingProtocolSection` in the assembled prompt; `core/context.ts` | F | TODO | |
@@ -207,6 +207,12 @@ Notes on sequencing, from the plan survey:
   that real signature, not the plan's. Require H's brief to grep every `buildPersona(` call site
   before editing, and to confirm the pre-existing 42 `personas.test.ts` tests still pass in H's own
   gate run.
+- **`packages/memory/src/index.ts` does not yet re-export anything from `journal.ts`** (found
+  during C). Fine for C, D, E, F, J (all within `memory`, or reached through `MemoryEngine`
+  methods rather than a direct import). The first batch that needs a `journal.ts` symbol
+  (`JOURNALING_PROTOCOL_ABSENT`, `JournalMethod`, etc.) directly from `core` (most likely H or K,
+  which live in `packages/core`) must add the barrel export first and rebuild (`npx tsc -b`)
+  before that cross-package import resolves.
 - **K's commit must be exactly one file.** Before committing K, run
   `git diff --exit-code -- packages/core/src/personas.ts` in the worktree; it must report no
   differences (the falsification's temporary edit must be fully reverted). `git show --stat` on
