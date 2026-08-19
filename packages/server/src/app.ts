@@ -501,6 +501,8 @@ const documentKindSchema = z.enum([
   'rollup_daily',
   'rollup_weekly',
   'person',
+  'journal',
+  'journaling',
 ])
 const publicDocumentRowSchema = z.strictObject({
   docId: z.string(),
@@ -508,6 +510,8 @@ const publicDocumentRowSchema = z.strictObject({
   title: z.string(),
   updatedAt: z.string(),
   readOnly: z.literal(true),
+  method: z.string().optional(),
+  entryDate: z.string().optional(),
 })
 const publicDocumentRowsSchema = z.array(publicDocumentRowSchema)
 const publicDocumentSchema = publicDocumentRowSchema.extend({ body: z.string() })
