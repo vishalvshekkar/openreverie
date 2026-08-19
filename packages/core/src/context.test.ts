@@ -499,6 +499,91 @@ describe('assembleSystemPrompt', () => {
     await engine.close()
   })
 
+  describe('journalingProtocolSection', () => {
+    it('is absent when the session is not in journal mode', async () => {
+      // An arc so this is not treated as a first session, which would
+      // replace every optional section with the onboarding block.
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'arc_any',
+          type: 'arc',
+          label: 'Any Arc',
+        },
+      ])
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const prompt = await assembleSystemPrompt(engine, testConfig())
+
+      expect(prompt).not.toContain('## Journaling protocol')
+
+      await engine.close()
+    })
+
+    it('renders the journaling protocol body when present, immediately after the constitution section', async () => {
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'arc_any',
+          type: 'arc',
+          label: 'Any Arc',
+        },
+      ])
+      await writeDocumentAtomic({
+        path: paths.journaling,
+        meta: { id: newId('doc'), kind: 'journaling', updated: '2026-08-01T00:00:00.000Z' },
+        body: 'Gratitude, three times a week.\n',
+      })
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const prompt = await assembleSystemPrompt(engine, testConfig(), 'journal')
+
+      expect(prompt).toContain('## Journaling protocol')
+      expect(prompt).toContain('Gratitude, three times a week.')
+      const constitutionIndex = prompt.indexOf('## Constitution')
+      const journalingIndex = prompt.indexOf('## Journaling protocol')
+      expect(journalingIndex).toBeGreaterThan(constitutionIndex)
+      // "Immediately after" means no other section's header sits between
+      // them, not merely that journaling comes somewhere later. This memory
+      // also has an active arc, so "## Active arcs" is in the prompt too;
+      // this assertion is the one that would catch it sneaking in between.
+      const between = prompt.slice(constitutionIndex + '## Constitution'.length, journalingIndex)
+      expect(between).not.toMatch(/\n## /)
+
+      await engine.close()
+    })
+
+    it('renders the absent sentinel plainly when journal mode is active but journaling.md does not exist', async () => {
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'arc_any',
+          type: 'arc',
+          label: 'Any Arc',
+        },
+      ])
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const prompt = await assembleSystemPrompt(engine, testConfig(), 'journal')
+
+      expect(prompt).toContain('has never set up journal mode before')
+
+      await engine.close()
+    })
+
+    it('is absent during the first conversation even if a mode was somehow passed', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const prompt = await assembleSystemPrompt(engine, testConfig(), 'journal')
+
+      expect(prompt).not.toContain('## Journaling protocol')
+
+      await engine.close()
+    })
+  })
+
   describe('first conversation', () => {
     it('renders a First conversation section instead of the usual optional sections on a completely fresh engine', async () => {
       const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))

@@ -48,7 +48,7 @@ export async function assembleSystemPrompt(
   config: ReverieConfig,
   activeMode: ModeName = 'general',
 ): Promise<string> {
-  const context = await engine.sessionContext()
+  const context = await engine.sessionContext(new Date(), activeMode)
   const profile = engine.profile()
   const persona = buildPersona(
     config.safety.mode,
@@ -68,6 +68,7 @@ export async function assembleSystemPrompt(
     timeSection(context),
     profileSection(profile),
     constitutionSection(context),
+    journalingProtocolSection(context),
     realmsSection(context),
     arcsSection(context),
     peopleSection(context),
@@ -120,6 +121,11 @@ function constitutionSection(context: SessionContext): string | undefined {
   // chat prompt only; reflection's input is deliberately never capped.
   const capped = capBody(text, CONSTITUTION_CAP, context.constitutionDocId)
   return `## Constitution\n\n${capped.text}`
+}
+
+function journalingProtocolSection(context: SessionContext): string | undefined {
+  if (context.journalingProtocol === undefined) return undefined
+  return `## Journaling protocol\n\n${context.journalingProtocol}`
 }
 
 function realmsSection(context: SessionContext): string | undefined {
