@@ -2,16 +2,20 @@ import { Component, type ReactNode, useEffect, useState } from 'react'
 import type { AppApi } from './api.js'
 import { AtlasView } from './atlas.js'
 import { Conversations } from './views/Conversations.js'
+import { Journal } from './views/Journal.js'
 import { Library } from './views/Library.js'
+import { Settings } from './views/Settings.js'
 
-export type ViewId = 'conversations' | 'atlas' | 'library'
+export type ViewId = 'conversations' | 'atlas' | 'library' | 'journal' | 'settings'
 
-const VIEW_IDS: ViewId[] = ['conversations', 'atlas', 'library']
+const VIEW_IDS: ViewId[] = ['conversations', 'atlas', 'library', 'journal', 'settings']
 
 const VIEW_LABELS: Record<ViewId, string> = {
   conversations: 'Talk',
   atlas: 'Atlas',
   library: 'Record',
+  journal: 'Journal',
+  settings: 'Settings',
 }
 
 function isViewId(value: string): value is ViewId {
@@ -42,11 +46,27 @@ function RailIcon({ view }: { view: ViewId }) {
       </svg>
     )
   }
+  if (view === 'library') {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path d="M5 5.5A1.5 1.5 0 0 1 6.5 4H11v16H6.5A1.5 1.5 0 0 1 5 18.5z" />
+        <path d="M11 4h6.5A1.5 1.5 0 0 1 19 5.5v13a1.5 1.5 0 0 1-1.5 1.5H11" />
+        <path d="M13.5 8.5h3M13.5 12h3" />
+      </svg>
+    )
+  }
+  if (view === 'journal') {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path d="M6 4h10.5A1.5 1.5 0 0 1 18 5.5v13a1.5 1.5 0 0 1-1.5 1.5H6z" />
+        <path d="M6 4v16M9 8.5h6M9 12h6M9 15.5h3" />
+      </svg>
+    )
+  }
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-      <path d="M5 5.5A1.5 1.5 0 0 1 6.5 4H11v16H6.5A1.5 1.5 0 0 1 5 18.5z" />
-      <path d="M11 4h6.5A1.5 1.5 0 0 1 19 5.5v13a1.5 1.5 0 0 1-1.5 1.5H11" />
-      <path d="M13.5 8.5h3M13.5 12h3" />
+      <circle cx="12" cy="12" r="3" />
+      <path d="M12 3.5v2M12 18.5v2M3.5 12h2M18.5 12h2M6 6l1.4 1.4M16.6 16.6 18 18M18 6l-1.4 1.4M7.4 16.6 6 18" />
     </svg>
   )
 }
@@ -135,6 +155,16 @@ export function App({ api }: { api: AppApi }) {
         {view === 'library' && (
           <ViewBoundary>
             <Library api={api} />
+          </ViewBoundary>
+        )}
+        {view === 'journal' && (
+          <ViewBoundary>
+            <Journal />
+          </ViewBoundary>
+        )}
+        {view === 'settings' && (
+          <ViewBoundary>
+            <Settings api={api} />
           </ViewBoundary>
         )}
       </div>

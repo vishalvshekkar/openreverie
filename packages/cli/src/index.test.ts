@@ -41,20 +41,18 @@ function testDeps(overrides: Partial<CliMainDeps> = {}): {
       throw new Error('countMemoryDocuments should not be called')
     },
     runChat: async () => ({ interrupted: false }),
-    createStylePersister: () => async (patch) => ({
-      engagement: 'balanced',
-      tone: 'warm',
-      orientation: 'listening',
-      ...patch,
-    }),
     loadConfig: async () => {
       throw new Error('loadConfig should not be called')
+    },
+    readConfigMemoryDir: async () => {
+      throw new Error('readConfigMemoryDir should not be called')
     },
     configPath: '/fake/.reverie/config.toml',
     write: (text: string) => {
       output += text
     },
     colorEnabled: () => false,
+    interactive: () => false,
     readVersion: () => '9.9.9-test',
     runDoctor: async () => {
       throw new Error('runDoctor should not be called')
@@ -317,6 +315,30 @@ describe('mainWith doctor', () => {
     await mainWith(['doctor'], deps)
 
     expect(contextOpened).toBe(false)
+    process.exitCode = 0
+  })
+})
+
+describe('mainWith migrate', () => {
+  it('migrate --config rewrites the named config file, not the default one', async () => {
+    let readConfigMemoryDirCalledWith: string | undefined
+    let runMigrateDepConfigPath: string | undefined
+    const { deps } = testDeps({
+      readConfigMemoryDir: async (path: string) => {
+        readConfigMemoryDirCalledWith = path
+        return '/fake/memory'
+      },
+      runMigrate: async (_args, migrateDeps) => {
+        runMigrateDepConfigPath = migrateDeps.configPath
+        await migrateDeps.readMemoryDir()
+        return 0
+      },
+    })
+
+    await mainWith(['migrate', '--config', '/custom.toml'], deps)
+
+    expect(readConfigMemoryDirCalledWith).toBe('/custom.toml')
+    expect(runMigrateDepConfigPath).toBe('/custom.toml')
     process.exitCode = 0
   })
 })

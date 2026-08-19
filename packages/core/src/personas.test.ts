@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import type { CrisisResource, StyleConfig } from './config.js'
+import { type CrisisResource, defaultCrisisResources, type StyleConfig } from './config.js'
+import { MODE_NAMES, MODES, modeOverrides, modeParagraph } from './modes.js'
 import { buildPersona } from './personas.js'
 
 const resources: CrisisResource[] = [
@@ -8,6 +9,17 @@ const resources: CrisisResource[] = [
 ]
 
 const defaultStyle: StyleConfig = { engagement: 'balanced', tone: 'warm', orientation: 'listening' }
+
+// The first sentence of CRISIS_DETECTION, which opens both crisis stances
+// and appears nowhere else in either persona.
+const CRISIS_MARKER = 'Deciding whether a conversation has moved into crisis territory'
+
+function toneParagraphText(tone: StyleConfig['tone']): string {
+  return buildPersona('companion', defaultCrisisResources, { ...defaultStyle, tone })
+    .split('\n\n')
+    .filter((paragraph) => paragraph.startsWith('Your configured tone is'))
+    .join('')
+}
 
 function sharedPrefix(a: string, b: string): string {
   let length = 0
@@ -284,5 +296,152 @@ describe('buildPersona', () => {
       const text = buildPersona('companion', resources, solutionsStyle).toLowerCase()
       expect(text).toContain('personal-register rule outranks the orientation setting')
     })
+  })
+})
+
+describe('stance doctrine', () => {
+  it('tells the model to use they/them until told otherwise', () => {
+    const persona = buildPersona('companion', defaultCrisisResources, defaultStyle)
+    expect(persona).toContain('they/them until')
+    expect(persona).toContain('Never assume gender, age, or pronouns')
+  })
+
+  it("extends the rule to third parties in the user's life", () => {
+    const persona = buildPersona('companion', defaultCrisisResources, defaultStyle)
+    expect(persona).toContain('not only to the user')
+  })
+
+  it("forbids a default shape for someone's life", () => {
+    const persona = buildPersona('companion', defaultCrisisResources, defaultStyle)
+    expect(persona).toContain('living situation')
+    expect(persona).toContain('life stage')
+  })
+
+  it('is in the shared prefix, identical in both safety modes', () => {
+    const companion = buildPersona('companion', defaultCrisisResources, defaultStyle)
+    const firewall = buildPersona('firewall', defaultCrisisResources, defaultStyle)
+    const marker = 'Never assume gender, age, or pronouns'
+    expect(companion.slice(0, companion.indexOf(marker) + marker.length)).toEqual(
+      firewall.slice(0, firewall.indexOf(marker) + marker.length),
+    )
+  })
+})
+
+describe('birthday greetings consent', () => {
+  it('names the one exception to the no-narration rule', () => {
+    const persona = buildPersona('companion', defaultCrisisResources, defaultStyle)
+    expect(persona).toContain('birthday')
+    expect(persona).toContain('one sentence')
+    expect(persona).toContain('never ask again')
+  })
+
+  it('still forbids narrating anything else that was remembered', () => {
+    const persona = buildPersona('companion', defaultCrisisResources, defaultStyle)
+    expect(persona).toContain('Never ask permission to remember something')
+  })
+
+  it('tells the model never to ask for a birthday', () => {
+    const persona = buildPersona('companion', defaultCrisisResources, defaultStyle)
+    expect(persona).toContain('Never ask someone for their birthday')
+  })
+
+  it('keeps the exception in the shared prefix, identical in both safety modes', () => {
+    const companion = buildPersona('companion', defaultCrisisResources, defaultStyle)
+    const firewall = buildPersona('firewall', defaultCrisisResources, defaultStyle)
+    const marker = 'Never ask someone for their birthday'
+    expect(companion.slice(0, companion.indexOf(marker) + marker.length)).toEqual(
+      firewall.slice(0, firewall.indexOf(marker) + marker.length),
+    )
+  })
+})
+
+describe('mode overlay', () => {
+  const ENGAGEMENT_MARKER = 'Your configured engagement is'
+  const TONE_MARKER = 'Your configured tone is'
+  const ORIENTATION_MARKER = 'Your configured orientation is'
+
+  it('suppresses exactly the axes each mode overrides, and keeps the rest verbatim', () => {
+    for (const name of MODE_NAMES) {
+      const persona = buildPersona('companion', defaultCrisisResources, defaultStyle, name)
+      const overridden = modeOverrides(name)
+      expect(persona.includes(ENGAGEMENT_MARKER), `${name} engagement`).toBe(
+        !overridden.includes('engagement'),
+      )
+      expect(persona.includes(ORIENTATION_MARKER), `${name} orientation`).toBe(
+        !overridden.includes('orientation'),
+      )
+      const paragraph = modeParagraph(name)
+      if (paragraph === undefined) continue
+      for (const clause of Object.values(MODES[name].clauses)) {
+        expect(persona.includes(clause), `${name} clause`).toBe(true)
+      }
+    }
+  })
+
+  it('never suppresses tone, for any mode and any tone value', () => {
+    const tones: StyleConfig['tone'][] = ['warm', 'playful', 'snarky', 'direct', 'formal']
+    for (const name of MODE_NAMES) {
+      for (const tone of tones) {
+        const persona = buildPersona(
+          'companion',
+          defaultCrisisResources,
+          { ...defaultStyle, tone },
+          name,
+        )
+        expect(persona.includes(TONE_MARKER), `${name}/${tone}`).toBe(true)
+        expect(persona.includes(toneParagraphText(tone)), `${name}/${tone}`).toBe(true)
+      }
+    }
+  })
+
+  it('states the precedence order once a mode is active', () => {
+    const persona = buildPersona('companion', defaultCrisisResources, defaultStyle, 'solve')
+    expect(persona).toContain('this order decides, highest first')
+  })
+
+  it('says nothing about precedence in general mode', () => {
+    const persona = buildPersona('companion', defaultCrisisResources, defaultStyle, 'general')
+    expect(persona).not.toContain('this order decides, highest first')
+  })
+
+  // Guard, not a falsification: this passes with the mode feature entirely
+  // absent. It guards against general quietly growing a paragraph of its own.
+  it('Guard: general is byte-identical to no mode at all', () => {
+    expect(buildPersona('companion', defaultCrisisResources, defaultStyle, 'general')).toEqual(
+      buildPersona('companion', defaultCrisisResources, defaultStyle),
+    )
+  })
+})
+
+describe('safety invariant', () => {
+  // Position plus bytes, not presence. A naive "the crisis text is still in
+  // there" assertion passes even when the mode paragraph is appended after
+  // the crisis stance, which reads to the model as amending it.
+  it('keeps the crisis section last and byte-identical, for all ten modes and both safety modes', () => {
+    for (const safety of ['companion', 'firewall'] as const) {
+      const baseline = buildPersona(safety, defaultCrisisResources, defaultStyle)
+      const baselineCrisis = baseline.slice(baseline.indexOf(CRISIS_MARKER))
+      expect(baselineCrisis.length).toBeGreaterThan(200)
+      for (const name of MODE_NAMES) {
+        const persona = buildPersona(safety, defaultCrisisResources, defaultStyle, name)
+        expect(persona.endsWith(baselineCrisis), `${safety}/${name} position`).toBe(true)
+        expect(persona.slice(-baselineCrisis.length), `${safety}/${name} bytes`).toEqual(
+          baselineCrisis,
+        )
+      }
+    }
+  })
+
+  it('names mode in the sentence that says style is not a permission slip', () => {
+    const persona = buildPersona('companion', defaultCrisisResources, defaultStyle, 'real')
+    expect(persona).toContain('Tone, engagement, orientation, and mode are configured')
+    expect(persona).toContain('mode yields entirely')
+  })
+
+  it('keeps the shared prefix identical across safety modes with a mode active', () => {
+    const companion = buildPersona('companion', defaultCrisisResources, defaultStyle, 'deep')
+    const firewall = buildPersona('firewall', defaultCrisisResources, defaultStyle, 'deep')
+    const cut = (text: string) => text.slice(0, text.indexOf(CRISIS_MARKER))
+    expect(cut(companion)).toEqual(cut(firewall))
   })
 })

@@ -22,7 +22,8 @@
 // absolute dates (2026-08-12); the newest message's own stamp is what lets
 // the model read those as recent or old.
 
-import type { MemoryEngine, SessionContext } from '@openreverie/memory'
+import type { MemoryEngine, Profile, SessionContext } from '@openreverie/memory'
+import { PROFILE_STARTER_BODY } from '@openreverie/memory'
 import {
   ARCS_SECTION_CAP,
   CONSTITUTION_CAP,
@@ -31,6 +32,7 @@ import {
   ENTITIES_SECTION_CAP,
   LATEST_DAILY_ROLLUP_CAP,
   PEOPLE_SECTION_CAP,
+  PROFILE_BODY_CAP,
   REALM_FIRST_LINE_CAP,
   REALMS_SECTION_CAP,
   RECENT_INTENTIONS_SECTION_CAP,
@@ -38,22 +40,33 @@ import {
   ROLLUPS_AVAILABLE_CAP,
 } from './budget.js'
 import type { ReverieConfig } from './config.js'
+import type { ModeName } from './modes.js'
 import { buildPersona } from './personas.js'
 
 export async function assembleSystemPrompt(
   engine: MemoryEngine,
   config: ReverieConfig,
+  activeMode: ModeName = 'general',
 ): Promise<string> {
   const context = await engine.sessionContext()
-  const persona = buildPersona(config.safety.mode, config.safety.resources, config.style)
+  const profile = engine.profile()
+  const persona = buildPersona(
+    config.safety.mode,
+    config.safety.resources,
+    engine.currentStyle(),
+    activeMode,
+  )
 
   if (context.isFirstSession) {
-    return [persona, timeSection(context), firstConversationSection()].join('\n\n')
+    return [persona, timeSection(context), profileSection(profile), firstConversationSection()]
+      .filter((section): section is string => section !== undefined)
+      .join('\n\n')
   }
 
   const sections = [
     persona,
     timeSection(context),
+    profileSection(profile),
     constitutionSection(context),
     realmsSection(context),
     arcsSection(context),
@@ -230,6 +243,51 @@ function entitiesSection(context: SessionContext): string | undefined {
     )
   }
   return `## Entities\n\n${rows.join('\n')}`
+}
+
+// Fixed order, one line per set field. An unset field renders nothing at
+// all: no line, no placeholder, never "unknown", because a prompt that
+// claims a field is unknown when it is only absent is indistinguishable
+// from one that failed to load. timezone is deliberately excluded: the
+// Time section above already carries it, and a second copy invites the two
+// to drift. The style axes render as their own paragraphs in personas.ts,
+// not as raw values here. birthdayGreetings renders only once birthday is
+// set, since the value is meaningless before that.
+//
+// The prose body is capped at PROFILE_BODY_CAP (budget.ts) at
+// prompt-assembly time; profile.md on disk is never truncated. Unlike the
+// constitution or a rollup, profile.md is not indexed (see the comment on
+// PROFILE_BODY_CAP in budget.ts), so there is no docId to hand back:
+// capBody's marker names a read_document call that would resolve to
+// nothing, which is worse than no marker at all. The cut is marked with a
+// plain suffix instead.
+export const PROFILE_TRUNCATION_MARKER = '… [truncated]'
+
+function profileSection(profile: Profile): string | undefined {
+  const meta = profile.meta
+  const lines: string[] = []
+  if (meta.preferredName !== undefined) lines.push(`Preferred name: ${meta.preferredName}`)
+  if (meta.pronouns !== undefined) lines.push(`Pronouns: ${meta.pronouns}`)
+  if (meta.location !== undefined) lines.push(`Location: ${meta.location}`)
+  if (meta.birthday !== undefined) lines.push(`Birthday: ${meta.birthday}`)
+  if (meta.occupation !== undefined) lines.push(`Occupation: ${meta.occupation}`)
+  if (meta.birthday !== undefined && meta.birthdayGreetings !== undefined) {
+    lines.push(`Birthday greetings: ${meta.birthdayGreetings ? 'yes' : 'no'}`)
+  }
+
+  // profile.md ships with fixed maintenance boilerplate (PROFILE_STARTER_BODY),
+  // not testimony about the person, so a body that is still exactly that
+  // starter text is treated as unset rather than rendered to the model.
+  const rawProse = profile.body.trim()
+  const prose = rawProse === PROFILE_STARTER_BODY.trim() ? '' : rawProse
+  const capped =
+    prose.length > PROFILE_BODY_CAP
+      ? `${prose.slice(0, PROFILE_BODY_CAP)}${PROFILE_TRUNCATION_MARKER}`
+      : prose
+
+  if (lines.length === 0 && capped.length === 0) return undefined
+  const parts = [lines.join('\n'), capped].filter((part) => part.length > 0)
+  return `## Profile\n\n${parts.join('\n\n')}`
 }
 
 function recentIntentionsSection(context: SessionContext): string | undefined {

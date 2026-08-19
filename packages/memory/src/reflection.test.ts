@@ -9,6 +9,7 @@ import { ensureMemoryTree, type MemoryPaths, memoryPaths } from './paths.js'
 import { pendingProposals } from './proposals.js'
 import {
   applyReflection,
+  buildReflectionPrompt,
   type ReflectionItem,
   type ReflectionOutput,
   reflectionOutputSchema,
@@ -164,6 +165,7 @@ describe('reflection', () => {
         realms: [],
         people: [],
         entities: [],
+        profile: { id: 'doc_test' },
       })
 
       expect(result).toEqual(out)
@@ -184,6 +186,7 @@ describe('reflection', () => {
           { id: 'person_sam', type: 'person', label: 'Sam', ts: '2026-08-01T00:00:00.000Z' },
         ],
         entities: [],
+        profile: { id: 'doc_test' },
       })
 
       const prompt = chat.requests[0]?.messages[0]?.content ?? ''
@@ -198,8 +201,8 @@ describe('reflection', () => {
         '[2026-08-13T09:01:00.000Z (UTC; local time unknown)] assistant: That sounds like a good start to the day.',
       )
       expect(prompt).toContain('"constitutionUpdate": string | null')
-      expect(prompt).toContain('identity facts')
-      expect(prompt).toContain('first learned or when they change')
+      expect(prompt).toContain('Facts and meaning go to two different places.')
+      expect(prompt).toContain('goes in profileUpdates')
     })
 
     it('lists known people by id, label, and page status, known entities by id and label only, and states what makes someone worth a person page', async () => {
@@ -228,6 +231,7 @@ describe('reflection', () => {
             ts: '2026-08-01T00:00:00.000Z',
           },
         ],
+        profile: { id: 'doc_test' },
       })
 
       const prompt = chat.requests[0]?.messages[0]?.content ?? ''
@@ -261,6 +265,7 @@ describe('reflection', () => {
         realms: [],
         people: [],
         entities: [],
+        profile: { id: 'doc_test' },
       })
 
       expect(result).toEqual(out)
@@ -288,6 +293,7 @@ describe('reflection', () => {
         realms: [],
         people: [],
         entities: [],
+        profile: { id: 'doc_test' },
       })
 
       expect(result).toEqual(goodOut)
@@ -309,6 +315,7 @@ describe('reflection', () => {
         realms: [],
         people: [],
         entities: [],
+        profile: { id: 'doc_test' },
       })
 
       expect(result).toEqual(out)
@@ -329,6 +336,7 @@ describe('reflection', () => {
         realms: [],
         people: [],
         entities: [],
+        profile: { id: 'doc_test' },
       })
 
       expect(result).toEqual({ summary: 'also not json', degraded: true })
@@ -347,6 +355,7 @@ describe('reflection', () => {
         realms: [],
         people: [],
         entities: [],
+        profile: { id: 'doc_test' },
       })
 
       expect(result).toEqual({
@@ -355,18 +364,27 @@ describe('reflection', () => {
       })
     })
 
-    it('accepts profileUpdates and never instructs timezone into constitution prose', async () => {
+    it('accepts profileUpdates across the full allowlist, and routes facts to the profile rather than the constitution', async () => {
       const withUpdate = {
         ...emptyReflectionOutput('They mentioned moving to Berlin.'),
-        profileUpdates: { timezone: 'Europe/Berlin' },
+        profileUpdates: { timezone: 'Europe/Berlin', location: 'Berlin' },
       }
       expect(reflectionOutputSchema.safeParse(withUpdate).success).toBe(true)
 
+      // An empty object is valid: nothing to update this session.
+      const withNothing = {
+        ...emptyReflectionOutput('Nothing to update.'),
+        profileUpdates: {},
+      }
+      expect(reflectionOutputSchema.safeParse(withNothing).success).toBe(true)
+
+      // profileUpdates no longer accepts null for any field; the model
+      // omits a key entirely rather than nulling it.
       const withNull = {
         ...emptyReflectionOutput('Nothing to update.'),
         profileUpdates: { timezone: null },
       }
-      expect(reflectionOutputSchema.safeParse(withNull).success).toBe(true)
+      expect(reflectionOutputSchema.safeParse(withNull).success).toBe(false)
 
       // Absent entirely is also valid, which is what every existing fixture
       // in this file relies on.
@@ -381,10 +399,12 @@ describe('reflection', () => {
         realms: [],
         people: [],
         entities: [],
+        profile: { id: 'doc_test' },
       })
 
       const prompt = chat.requests[0]?.messages[0]?.content ?? ''
-      expect(prompt).not.toContain('their timezone')
+      expect(prompt).toContain('their timezone')
+      expect(prompt).toContain('goes in profileUpdates')
       expect(prompt).toContain('"profileUpdates"')
     })
   })
@@ -807,6 +827,7 @@ describe('reflection', () => {
         realms: [],
         people: [],
         entities: [],
+        profile: { id: 'doc_test' },
       })
       expect('degraded' in degraded && degraded.degraded).toBe(true)
 
@@ -1248,5 +1269,155 @@ describe('reflection', () => {
       const workDoc = await readDocument(workDocPath)
       expect(workDoc.body).toBe('Rewritten work body.\n')
     })
+  })
+})
+
+// No parseReflection export exists; reflectionOutputSchema.safeParse is the
+// same boundary the existing 'reflectionOutputSchema' describe block above
+// already exercises, so these tests use it directly instead of inventing a
+// new export.
+describe('profileUpdates', () => {
+  it('parses every allowlisted field out of a model response', () => {
+    const parsed = reflectionOutputSchema.safeParse(
+      JSON.parse(
+        JSON.stringify({
+          summary: 'A short session.',
+          items: [],
+          attributions: [],
+          newArcs: [],
+          newPersons: [],
+          newEntities: [],
+          pagePromotions: [],
+          arcUpdates: [],
+          personUpdates: [],
+          constitutionUpdate: null,
+          profileUpdates: {
+            preferredName: 'Vish',
+            pronouns: 'they/them',
+            location: 'Bengaluru',
+            timezone: 'Asia/Kolkata',
+            birthday: '04-02',
+            occupation: 'nurse',
+            birthdayGreetings: true,
+          },
+        }),
+      ),
+    )
+    expect(parsed.success).toBe(true)
+    expect(parsed.success && parsed.data.profileUpdates?.occupation).toBe('nurse')
+  })
+
+  it('rejects a style key in profileUpdates', () => {
+    const parsed = reflectionOutputSchema.safeParse(
+      JSON.parse(
+        JSON.stringify({
+          summary: 'A short session.',
+          items: [],
+          attributions: [],
+          newArcs: [],
+          newPersons: [],
+          newEntities: [],
+          pagePromotions: [],
+          arcUpdates: [],
+          personUpdates: [],
+          constitutionUpdate: null,
+          profileUpdates: { style: { tone: 'direct' } },
+        }),
+      ),
+    )
+    expect(parsed.success).toBe(false)
+  })
+})
+
+describe('reflection prompt', () => {
+  function buildReflectionPromptForTest(profile: Record<string, unknown> = {}): string {
+    return buildReflectionPrompt(
+      {
+        constitution: '',
+        arcs: [],
+        realms: [],
+        people: [],
+        entities: [],
+        peopleTruncated: false,
+        entitiesTruncated: false,
+        profile: { id: 'doc_1', ...profile },
+      },
+      [],
+    )
+  }
+
+  it('names the profile fields rather than routing them to the constitution', () => {
+    const prompt = buildReflectionPromptForTest()
+    expect(prompt).toContain('profileUpdates')
+    expect(prompt).not.toContain('their timezone) always belong in the constitution')
+    expect(prompt).toContain('Moved to Bangalore')
+  })
+
+  it('shows the current profile so the model can tell unset from already recorded', () => {
+    const prompt = buildReflectionPromptForTest({ preferredName: 'Vish', occupation: 'nurse' })
+    expect(prompt).toContain('Current profile:')
+    expect(prompt).toContain('preferredName: Vish')
+    expect(prompt).toContain('occupation: nurse')
+  })
+})
+
+describe('reflection fixtures, profile versus constitution', () => {
+  const FIXTURE_CONTEXT = {
+    constitution: 'Empty constitution.',
+    arcs: [],
+    realms: [],
+    people: [],
+    entities: [],
+    profile: { id: 'doc_test' },
+  }
+
+  it('puts a stated name and city in profileUpdates', async () => {
+    const chat = new FakeChatProvider([
+      {
+        text: JSON.stringify({
+          ...emptyReflectionOutput('They introduced themselves.'),
+          profileUpdates: { preferredName: 'Vish', location: 'Bengaluru' },
+        }),
+        toolCalls: [],
+      },
+    ])
+    const output = await reflectSession({ chat, model: 'test' }, TRANSCRIPT, FIXTURE_CONTEXT)
+    expect('degraded' in output).toBe(false)
+    expect(!('degraded' in output) ? Object.keys(output.profileUpdates ?? {}).sort() : []).toEqual([
+      'location',
+      'preferredName',
+    ])
+  })
+
+  it('never emits style, across the fixture set', async () => {
+    const chat = new FakeChatProvider([
+      {
+        text: JSON.stringify({
+          ...emptyReflectionOutput('A session.'),
+          profileUpdates: { location: 'Bengaluru' },
+        }),
+        toolCalls: [],
+      },
+    ])
+    const output = await reflectSession({ chat, model: 'test' }, TRANSCRIPT, FIXTURE_CONTEXT)
+    expect(!('degraded' in output) && 'style' in (output.profileUpdates ?? {})).toBe(false)
+  })
+
+  it('keeps the meaning of a move in the constitution and the place in the profile', async () => {
+    const chat = new FakeChatProvider([
+      {
+        text: JSON.stringify({
+          ...emptyReflectionOutput('They talked about the move.'),
+          constitutionUpdate: 'Moving unsettled them more than expected.',
+          profileUpdates: { location: 'Bengaluru' },
+        }),
+        toolCalls: [],
+      },
+    ])
+    const output = await reflectSession({ chat, model: 'test' }, TRANSCRIPT, FIXTURE_CONTEXT)
+    expect(!('degraded' in output) && output.constitutionUpdate).not.toBeNull()
+    const location = !('degraded' in output) ? output.profileUpdates?.location : undefined
+    expect(location).toBe('Bengaluru')
+    expect(location?.split(' ').length).toBeLessThan(4)
   })
 })

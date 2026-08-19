@@ -32,6 +32,7 @@ export const sessionSchema = z.strictObject({
   updatedAt: z.string(),
   status: z.enum(['live', 'ended', 'expired']),
   readOnly: z.boolean(),
+  mode: z.string().optional(),
   transcript: z.strictObject({
     lineCount: z.number().int().nonnegative(),
     userCount: z.number().int().nonnegative(),
@@ -58,6 +59,7 @@ export const transcriptLineSchema = z.strictObject({
   content: z.string(),
   toolCalls: z.array(toolCallSchema).optional(),
   toolCallId: z.string().optional(),
+  synthetic: z.literal(true).optional(),
 })
 
 export const proposalSchema = z.strictObject({
@@ -130,6 +132,12 @@ export const streamEventSchema = z.discriminatedUnion('type', [
   z.strictObject({
     schemaVersion: z.literal('1'),
     seq: z.number().int().positive(),
+    type: z.literal('mode'),
+    mode: z.string(),
+  }),
+  z.strictObject({
+    schemaVersion: z.literal('1'),
+    seq: z.number().int().positive(),
     type: z.literal('done'),
   }),
   z.strictObject({
@@ -141,6 +149,29 @@ export const streamEventSchema = z.discriminatedUnion('type', [
     message: z.string(),
   }),
 ])
+
+export const profileSchema = z.strictObject({
+  preferredName: z.string().nullable(),
+  pronouns: z.string().nullable(),
+  location: z.string().nullable(),
+  timezone: z.string().nullable(),
+  birthday: z.string().nullable(),
+  birthdayGreetings: z.boolean().nullable(),
+  occupation: z.string().nullable(),
+  style: z.strictObject({
+    engagement: z.string(),
+    tone: z.string(),
+    orientation: z.string(),
+  }),
+  prose: z.string(),
+})
+
+export const settingsSchema = z.strictObject({
+  safetyMode: z.enum(['companion', 'firewall']),
+})
+
+export type PublicProfile = z.infer<typeof profileSchema>
+export type PublicSettings = z.infer<typeof settingsSchema>
 
 export type StreamEvent = z.infer<typeof streamEventSchema>
 export type Session = z.infer<typeof sessionSchema>
@@ -160,7 +191,8 @@ export interface Page<T> {
 
 export interface AppApi {
   bootstrap(token: string): Promise<{ authenticated: true }>
-  createSession(): Promise<CreateSessionResponse>
+  createSession(mode?: string): Promise<CreateSessionResponse>
+  setSessionMode(sessionId: string, mode: string): Promise<{ mode: string }>
   listSessions(cursor?: string): Promise<Page<Session>>
   listDocuments(cursor?: string): Promise<Page<DocumentRow>>
   getDocument(docId: string): Promise<Document>
@@ -179,6 +211,9 @@ export interface AppApi {
   transcript(sessionId: string, cursor?: string): Promise<Page<TranscriptLine>>
   end(sessionId: string): Promise<Session>
   getGraphSnapshot(): Promise<GraphSnapshot>
+  getProfile(): Promise<PublicProfile>
+  updateProfile(patch: Record<string, unknown>): Promise<PublicProfile>
+  getSettings(): Promise<PublicSettings>
 }
 
 export class ApiHttpError extends Error {
@@ -307,8 +342,28 @@ export class ApiClient implements AppApi {
     )
   }
 
-  createSession(): Promise<CreateSessionResponse> {
-    return this.request('/api/v1/sessions', { method: 'POST' }, createSessionResponseSchema)
+  createSession(mode?: string): Promise<CreateSessionResponse> {
+    return this.request(
+      '/api/v1/sessions',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(mode === undefined ? {} : { mode }),
+      },
+      createSessionResponseSchema,
+    )
+  }
+
+  setSessionMode(sessionId: string, mode: string): Promise<{ mode: string }> {
+    return this.request(
+      `/api/v1/sessions/${encodeURIComponent(sessionId)}/mode`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode }),
+      },
+      z.strictObject({ mode: z.string() }),
+    )
   }
 
   listSessions(cursor?: string): Promise<Page<Session>> {
@@ -383,6 +438,26 @@ export class ApiClient implements AppApi {
 
   getGraphSnapshot(): Promise<GraphSnapshot> {
     return this.request('/api/v1/graph/snapshot', {}, graphSnapshotSchema)
+  }
+
+  getProfile(): Promise<PublicProfile> {
+    return this.request('/api/v1/profile', {}, profileSchema)
+  }
+
+  updateProfile(patch: Record<string, unknown>): Promise<PublicProfile> {
+    return this.request(
+      '/api/v1/profile',
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      },
+      profileSchema,
+    )
+  }
+
+  getSettings(): Promise<PublicSettings> {
+    return this.request('/api/v1/settings', {}, settingsSchema)
   }
 
   private async ndjson(path: string, init: RequestInit): Promise<AsyncIterable<StreamEvent>> {

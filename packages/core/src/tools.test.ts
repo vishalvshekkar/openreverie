@@ -12,8 +12,8 @@ import {
 } from '@openreverie/memory'
 import { FakeChatProvider, FakeEmbeddingProvider, type ToolCall } from '@openreverie/providers'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import type { StyleConfig } from './config.js'
-import { dispatchTool, type ToolDeps, toolDefinitions } from './tools.js'
+import { MODE_NAMES } from './modes.js'
+import { dispatchTool, toolDefinitions } from './tools.js'
 
 let dir: string
 
@@ -75,8 +75,8 @@ describe('toolDefinitions', () => {
         'read_transcript',
         'remember',
         'search_memory',
+        'set_mode',
         'update_profile',
-        'update_style',
       ].sort(),
     )
     for (const def of defs) {
@@ -528,125 +528,118 @@ describe('dispatchTool', () => {
       arguments: JSON.stringify({ timezone: 'Nowhere/Fake' }),
     })
 
-    expect(JSON.parse(result).error).toContain('Nowhere/Fake')
+    expect(JSON.parse(result).error).toContain('not a recognized IANA timezone')
     expect(engine.timezone()).toBe(before)
 
     await engine.close()
   })
 
-  describe('update_style', () => {
-    const initialStyle: StyleConfig = {
-      engagement: 'balanced',
-      tone: 'warm',
-      orientation: 'listening',
-    }
+  describe('update_profile allowlist', () => {
+    it('accepts every allowlisted field', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const sessionId = await engine.startSession()
+      const result = await dispatchTool(
+        engine,
+        sessionId,
+        call('update_profile', {
+          preferredName: 'Vish',
+          pronouns: 'they/them',
+          location: 'Bengaluru',
+          timezone: 'Asia/Kolkata',
+          birthday: '04-02',
+          occupation: 'nurse',
+          birthdayGreetings: false,
+        }),
+      )
+      expect(JSON.parse(result).error).toBeUndefined()
+      expect(engine.profile().meta.preferredName).toBe('Vish')
 
-    function fakeStyleDeps(initial: StyleConfig): {
-      deps: ToolDeps
-      calls: Partial<StyleConfig>[]
-    } {
-      let current = { ...initial }
-      const calls: Partial<StyleConfig>[] = []
-      const deps: ToolDeps = {
-        updateStyle: async (patch) => {
-          calls.push(patch)
-          current = { ...current, ...patch }
-          return { ...current }
+      await engine.close()
+    })
+
+    it('refuses a style write, because style is never model-writable', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const sessionId = await engine.startSession()
+      const result = await dispatchTool(
+        engine,
+        sessionId,
+        call('update_profile', { style: { tone: 'direct' } }),
+      )
+      expect(JSON.parse(result).error).toMatch(/update_profile/)
+      expect(engine.profile().meta.style).toBeUndefined()
+
+      await engine.close()
+    })
+  })
+
+  describe('set_mode', () => {
+    it('is offered as a tool and update_style is not', () => {
+      const names = toolDefinitions().map((definition) => definition.name)
+      expect(names).toContain('set_mode')
+      expect(names).not.toContain('update_style')
+    })
+
+    it('lists all ten modes in its enum', () => {
+      const definition = toolDefinitions().find((entry) => entry.name === 'set_mode')
+      const properties = definition?.parameters.properties as
+        | { mode?: { enum?: string[] } }
+        | undefined
+      expect(properties?.mode?.enum).toEqual([...MODE_NAMES])
+    })
+
+    it('tells the model to point at /style for a lasting change', () => {
+      const definition = toolDefinitions().find((entry) => entry.name === 'set_mode')
+      expect(definition?.description).toContain('/style')
+      expect(definition?.description).toContain('settings pane')
+      expect(definition?.description).toContain('this conversation only')
+    })
+
+    it('calls the hook with a valid mode', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps())
+      const sessionId = await engine.startSession()
+      const calls: string[] = []
+
+      const result = await dispatchTool(engine, sessionId, call('set_mode', { mode: 'listen' }), {
+        setMode: async (mode) => {
+          calls.push(mode)
         },
-      }
-      return { deps, calls }
-    }
-
-    it('applies a full patch and reports that it applies now and persists', async () => {
-      const engine = await MemoryEngine.open(dir, fakeDeps())
-      const sessionId = await engine.startSession()
-      const { deps } = fakeStyleDeps(initialStyle)
-
-      const result = await dispatchTool(
-        engine,
-        sessionId,
-        call('update_style', { engagement: 'leading', tone: 'playful', orientation: 'solutions' }),
-        deps,
-      )
-      const parsed = JSON.parse(result)
-
-      expect(parsed.ok).toBe(true)
-      expect(parsed.style).toEqual({
-        engagement: 'leading',
-        tone: 'playful',
-        orientation: 'solutions',
       })
-      expect(String(parsed.message).toLowerCase()).toMatch(/from this moment/)
-      expect(String(parsed.message).toLowerCase()).toMatch(/persist/)
+
+      expect(calls).toEqual(['listen'])
+      expect(JSON.parse(result)).toEqual({ ok: true, mode: 'listen' })
 
       await engine.close()
     })
 
-    it('applies a partial patch, passing only the provided fields to the persister', async () => {
+    it('returns the error shape and calls nothing for an unknown mode', async () => {
       const engine = await MemoryEngine.open(dir, fakeDeps())
       const sessionId = await engine.startSession()
-      const { deps, calls } = fakeStyleDeps(initialStyle)
+      const calls: string[] = []
 
-      const result = await dispatchTool(
-        engine,
-        sessionId,
-        call('update_style', { engagement: 'following' }),
-        deps,
-      )
-      const parsed = JSON.parse(result)
-
-      expect(parsed.ok).toBe(true)
-      expect(calls).toEqual([{ engagement: 'following' }])
-      expect(parsed.style).toEqual({
-        engagement: 'following',
-        tone: 'warm',
-        orientation: 'listening',
+      const result = await dispatchTool(engine, sessionId, call('set_mode', { mode: 'moody' }), {
+        setMode: async (mode) => {
+          calls.push(mode)
+        },
       })
 
-      await engine.close()
-    })
-
-    it('returns a JSON error, not a throw, when no fields are given', async () => {
-      const engine = await MemoryEngine.open(dir, fakeDeps())
-      const sessionId = await engine.startSession()
-      const { deps, calls } = fakeStyleDeps(initialStyle)
-
-      const result = await dispatchTool(engine, sessionId, call('update_style', {}), deps)
-
-      expect(JSON.parse(result).error).toMatch(/update_style/)
+      expect(JSON.parse(result).error).toMatch(/set_mode/)
       expect(calls).toEqual([])
 
       await engine.close()
     })
 
-    it('returns a JSON error, not a throw, when the persister rejects', async () => {
+    it('reports the unknown-tool error for a stale update_style call', async () => {
       const engine = await MemoryEngine.open(dir, fakeDeps())
       const sessionId = await engine.startSession()
-      const deps: ToolDeps = {
-        updateStyle: async () => {
-          throw new Error('could not write config file')
-        },
-      }
 
       const result = await dispatchTool(
         engine,
         sessionId,
         call('update_style', { tone: 'direct' }),
-        deps,
+        {},
       )
 
-      expect(JSON.parse(result).error).toMatch(/could not write config file/)
-
-      await engine.close()
-    })
-
-    it('returns a JSON error, not a throw, when no persister is wired up for this session', async () => {
-      const engine = await MemoryEngine.open(dir, fakeDeps())
-      const sessionId = await engine.startSession()
-
-      const result = await dispatchTool(engine, sessionId, call('update_style', { tone: 'direct' }))
-
-      expect(typeof JSON.parse(result).error).toBe('string')
+      expect(JSON.parse(result).error).toBe('unknown tool: update_style')
 
       await engine.close()
     })

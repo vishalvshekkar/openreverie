@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -16,8 +16,9 @@ import {
 } from '@openreverie/memory'
 import { FakeChatProvider, FakeEmbeddingProvider } from '@openreverie/providers'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { PROFILE_BODY_CAP } from './budget.js'
 import { defaultCrisisResources, type ReverieConfig } from './config.js'
-import { assembleSystemPrompt } from './context.js'
+import { assembleSystemPrompt, PROFILE_TRUNCATION_MARKER } from './context.js'
 import { buildPersona } from './personas.js'
 
 function testConfig(overrides: Partial<ReverieConfig> = {}): ReverieConfig {
@@ -26,7 +27,6 @@ function testConfig(overrides: Partial<ReverieConfig> = {}): ReverieConfig {
     provider: { name: 'openai', apiKeyEnv: 'OPENREVERIE_TEST_KEY' },
     models: { chat: 'gpt-5', reflection: 'gpt-5-mini', embeddings: 'text-embedding-3-small' },
     safety: { mode: 'companion', resources: defaultCrisisResources },
-    style: { engagement: 'balanced', tone: 'warm', orientation: 'listening' },
     ...overrides,
   }
 }
@@ -169,7 +169,7 @@ describe('assembleSystemPrompt', () => {
 
     const prompt = await assembleSystemPrompt(engine, config)
 
-    const persona = buildPersona(config.safety.mode, config.safety.resources, config.style)
+    const persona = buildPersona(config.safety.mode, config.safety.resources, engine.currentStyle())
     expect(prompt.startsWith(persona)).toBe(true)
 
     expect(prompt).toContain('## Constitution')
@@ -493,7 +493,7 @@ describe('assembleSystemPrompt', () => {
 
     const prompt = await assembleSystemPrompt(engine, config)
 
-    const persona = buildPersona('firewall', defaultCrisisResources, config.style)
+    const persona = buildPersona('firewall', defaultCrisisResources, engine.currentStyle())
     expect(prompt.startsWith(persona)).toBe(true)
 
     await engine.close()
@@ -596,6 +596,21 @@ describe('assembleSystemPrompt', () => {
 
       const lower = prompt.toLowerCase()
       expect(lower).toContain('outranks the engagement setting')
+
+      await engine.close()
+    })
+
+    it('leaves the onboarding questions conversational and mentions no profile field', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const prompt = await assembleSystemPrompt(engine, testConfig())
+
+      expect(prompt).toContain('their name and how they would like to be addressed')
+      expect(prompt).toContain('where they live and their timezone')
+      expect(prompt).not.toContain('profile.md')
+      expect(prompt).not.toContain('update_profile')
+
+      const firstConversation = prompt.slice(prompt.indexOf('## First conversation'))
+      expect(firstConversation).not.toContain('birthday')
 
       await engine.close()
     })
@@ -726,6 +741,196 @@ describe('assembleSystemPrompt', () => {
     expect(prompt).not.toContain('Call list_people')
 
     await engine.close()
+  })
+
+  describe('profile section', () => {
+    it('renders a set preferred name into the prompt', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      await engine.updateProfile({ preferredName: 'Vish' })
+      const prompt = await assembleSystemPrompt(engine, testConfig())
+
+      expect(prompt).toContain('## Profile')
+      expect(prompt).toContain('Preferred name: Vish')
+
+      await engine.close()
+    })
+
+    // Asserted together with the set case on purpose: the unset case passes
+    // by coincidence if the render call is deleted, so only the pair proves
+    // the section behaves.
+    it('says nothing at all about an unset field, not even unknown', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      await engine.updateProfile({ preferredName: 'Vish' })
+      const prompt = await assembleSystemPrompt(engine, testConfig())
+
+      expect(prompt).not.toContain('Pronouns')
+      expect(prompt).not.toContain('unknown')
+
+      await engine.close()
+    })
+
+    it('renders the fields in the fixed spec order', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      await engine.updateProfile({
+        preferredName: 'Vish',
+        pronouns: 'they/them',
+        location: 'Bengaluru',
+        birthday: '04-02',
+        occupation: 'nurse',
+        birthdayGreetings: true,
+      })
+      const prompt = await assembleSystemPrompt(engine, testConfig())
+
+      const order = [
+        'Preferred name:',
+        'Pronouns:',
+        'Location:',
+        'Birthday:',
+        'Occupation:',
+        'Birthday greetings:',
+      ].map((label) => prompt.indexOf(label))
+      expect(order.every((index) => index >= 0)).toBe(true)
+      expect([...order].sort((a, b) => a - b)).toEqual(order)
+
+      await engine.close()
+    })
+
+    it('leaves timezone out, because the Time section already carries it', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      await engine.updateProfile({ timezone: 'Asia/Kolkata', preferredName: 'Vish' })
+      const prompt = await assembleSystemPrompt(engine, testConfig())
+
+      expect(prompt).not.toContain('Timezone: Asia/Kolkata')
+
+      await engine.close()
+    })
+
+    it('hides birthday greetings until a birthday is recorded', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      await engine.updateProfile({ birthdayGreetings: true })
+      const withoutBirthday = await assembleSystemPrompt(engine, testConfig())
+      expect(withoutBirthday).not.toContain('Birthday greetings:')
+
+      await engine.updateProfile({ birthday: '04-02' })
+      const withBirthday = await assembleSystemPrompt(engine, testConfig())
+      expect(withBirthday).toContain('Birthday greetings: yes')
+
+      await engine.close()
+    })
+
+    it('omits the whole heading when nothing is set and the prose is only the starter boilerplate', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const prompt = await assembleSystemPrompt(engine, testConfig())
+
+      expect(prompt).not.toContain('## Profile')
+
+      await engine.close()
+    })
+
+    it('renders the prose body after the fields', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      await engine.updateProfile({ preferredName: 'Vish' })
+      await engine.updateProfileSettings({
+        prose: 'Prefers to be called Vish by everyone except his mother.',
+      })
+      const prompt = await assembleSystemPrompt(engine, testConfig())
+
+      expect(prompt.indexOf('except his mother')).toBeGreaterThan(
+        prompt.indexOf('Preferred name: Vish'),
+      )
+
+      await engine.close()
+    })
+
+    it('truncates a prose body over the cap and marks it, without touching the file', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const long = 'x'.repeat(PROFILE_BODY_CAP + 500)
+      await engine.updateProfileSettings({ prose: long })
+      const onDisk = await readFile(paths.profile, 'utf8')
+      const prompt = await assembleSystemPrompt(engine, testConfig())
+
+      expect(prompt).toContain(PROFILE_TRUNCATION_MARKER)
+      expect(prompt).not.toContain('x'.repeat(PROFILE_BODY_CAP + 1))
+      expect(prompt).toContain('x'.repeat(PROFILE_BODY_CAP))
+      expect(onDisk).toContain('x'.repeat(PROFILE_BODY_CAP + 500))
+
+      await engine.close()
+    })
+
+    it('leaves a prose body at exactly the cap unmarked', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      await engine.updateProfileSettings({ prose: 'y'.repeat(PROFILE_BODY_CAP) })
+      const prompt = await assembleSystemPrompt(engine, testConfig())
+
+      expect(prompt).not.toContain(PROFILE_TRUNCATION_MARKER)
+
+      await engine.close()
+    })
+
+    it('renders the profile during the first conversation too', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      await engine.updateProfile({ pronouns: 'they/them' })
+      const prompt = await assembleSystemPrompt(engine, testConfig())
+
+      expect(prompt).toContain('## First conversation')
+      expect(prompt).toContain('Pronouns: they/them')
+
+      await engine.close()
+    })
+
+    // isFirstSession is true for a totally fresh engine, so a test built
+    // that way exercises only the first-session sections array. Without a
+    // case in the ordinary, non-first-session branch too, deleting
+    // profileSection from that array would pass the whole suite by
+    // omission rather than by the section actually working there.
+    it('renders during a non-first session too', async () => {
+      const arcPath = join(paths.arcsDir, 'marathon.md')
+      await writeDocumentAtomic({
+        path: arcPath,
+        meta: { id: newId('doc'), name: 'Marathon Training', status: 'active' },
+        body: 'Training for the fall marathon.\n',
+      })
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'arc_marathon',
+          type: 'arc',
+          label: 'Marathon Training',
+          doc: arcPath,
+        },
+      ])
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      await engine.updateProfile({ preferredName: 'Vish' })
+      const prompt = await assembleSystemPrompt(engine, testConfig())
+
+      expect(prompt).not.toContain('## First conversation')
+      expect(prompt).toContain('## Profile')
+      expect(prompt).toContain('Preferred name: Vish')
+
+      await engine.close()
+    })
+  })
+
+  describe('mode in the assembled prompt', () => {
+    it('carries the mode paragraph when a mode is passed', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const prompt = await assembleSystemPrompt(engine, testConfig(), 'listen')
+
+      expect(prompt).toContain('## Mode: listen')
+
+      await engine.close()
+    })
+
+    it('carries no mode section by default', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const prompt = await assembleSystemPrompt(engine, testConfig())
+
+      expect(prompt).not.toContain('## Mode:')
+
+      await engine.close()
+    })
   })
 })
 

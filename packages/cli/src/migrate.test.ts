@@ -2,7 +2,6 @@ import { createHash } from 'node:crypto'
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { ReverieConfig } from '@openreverie/core'
 import {
   ensureMemoryTree,
   memoryPaths,
@@ -14,23 +13,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mainWith } from './index.js'
 import { type MigrateDeps, runMigrate } from './migrate.js'
 
-function testConfig(memoryDir: string): ReverieConfig {
-  return {
-    memoryDir,
-    provider: { name: 'openai', apiKeyEnv: 'OPENAI_API_KEY' },
-    models: { chat: 'fake-chat', reflection: 'fake-reflect', embeddings: 'fake-embed' },
-    safety: { mode: 'companion', resources: [] },
-    style: { engagement: 'balanced', tone: 'warm', orientation: 'listening' },
-  }
-}
-
+// configPath defaults to a file inside the memory folder's parent, never a
+// shared path like /tmp/config.toml: styleToProfile now writes to
+// ctx.configPath when it finds a [style] table there, and a fake config
+// path must not be able to collide with anything real on the machine
+// running the suite.
 function fakeDeps(
   memoryDir: string,
   output: string[],
-  configPath = '/tmp/config.toml',
+  configPath = join(memoryDir, '..', 'config.toml'),
 ): MigrateDeps {
   return {
-    loadConfig: async () => testConfig(memoryDir),
+    readMemoryDir: async () => memoryDir,
     configPath,
     write: (text: string) => output.push(text),
   }
@@ -115,13 +109,13 @@ describe('runMigrate', () => {
     expect(output.join('')).toContain('No memory folder found')
   })
 
-  it('prints the config error and exits non-zero when loadConfig throws', async () => {
+  it('prints the config error and exits non-zero when readMemoryDir throws', async () => {
     const output: string[] = []
     const deps: MigrateDeps = {
-      loadConfig: async () => {
+      readMemoryDir: async () => {
         throw new Error('No config found. Run: reverie setup')
       },
-      configPath: '/tmp/config.toml',
+      configPath: join(dir, 'config.toml'),
       write: (text: string) => output.push(text),
     }
     const exitCode = await runMigrate([], deps)

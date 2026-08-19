@@ -1,4 +1,4 @@
-import { appendFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { appendFile, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -294,5 +294,82 @@ describe('SessionStore', () => {
     const first = await SessionStore.readFirstLine(paths, withOffset.sessionId)
     expect(first?.content).toBe('Late one.')
     expect(await SessionStore.readFirstLine(paths, empty.sessionId)).toBeUndefined()
+  })
+
+  describe('synthetic lines', () => {
+    it('round-trips a synthetic line through the store', async () => {
+      const store = await SessionStore.start(paths, new Date('2026-08-17T10:00:00.000Z'))
+      await store.appendLine({
+        ts: '2026-08-17T10:00:01.000Z',
+        role: 'user',
+        content: '/mode listen',
+        synthetic: true,
+      })
+      const lines = await SessionStore.readTranscript(paths, store.sessionId)
+      expect(lines).toHaveLength(1)
+      expect(lines[0]?.synthetic).toBe(true)
+    })
+
+    it('leaves the key absent on a line the person actually typed', async () => {
+      const store = await SessionStore.start(paths, new Date('2026-08-17T10:00:00.000Z'))
+      await store.appendLine({
+        ts: '2026-08-17T10:00:01.000Z',
+        role: 'user',
+        content: '/mode listen',
+      })
+      const raw = await readFile(join(store.dir, 'transcript.jsonl'), 'utf8')
+      expect(raw).not.toContain('synthetic')
+      const lines = await SessionStore.readTranscript(paths, store.sessionId)
+      expect(lines[0]?.synthetic).toBeUndefined()
+    })
+
+    it('still reads a line written before the field existed', async () => {
+      const store = await SessionStore.start(paths, new Date('2026-08-17T10:00:00.000Z'))
+      await appendFile(
+        join(store.dir, 'transcript.jsonl'),
+        `${JSON.stringify({ ts: '2026-08-17T09:00:00.000Z', role: 'user', content: 'hello' })}\n`,
+        'utf8',
+      )
+      const lines = await SessionStore.readTranscript(paths, store.sessionId)
+      expect(lines[0]?.content).toBe('hello')
+      expect(lines[0]?.synthetic).toBeUndefined()
+    })
+  })
+
+  describe('session metadata', () => {
+    it('writes and reads back a session mode', async () => {
+      const store = await SessionStore.start(paths, new Date('2026-08-17T10:00:00.000Z'))
+      await SessionStore.writeMeta(paths, store.sessionId, { mode: 'journal' })
+      expect(await SessionStore.readMeta(paths, store.sessionId)).toEqual({ mode: 'journal' })
+    })
+
+    it('writes it atomically, leaving no temp file in the session directory', async () => {
+      const store = await SessionStore.start(paths, new Date('2026-08-17T10:00:00.000Z'))
+      await SessionStore.writeMeta(paths, store.sessionId, { mode: 'listen' })
+      const entries = await readdir(store.dir)
+      expect(entries.filter((name) => name.includes('.tmp-'))).toEqual([])
+      expect(entries).toContain('session.json')
+    })
+
+    it('reports undefined for a session directory with no session.json', async () => {
+      const store = await SessionStore.start(paths, new Date('2026-08-17T10:00:00.000Z'))
+      expect(await SessionStore.readMeta(paths, store.sessionId)).toBeUndefined()
+    })
+
+    it('reports undefined for a session.json that does not parse', async () => {
+      const store = await SessionStore.start(paths, new Date('2026-08-17T10:00:00.000Z'))
+      await writeFile(join(store.dir, 'session.json'), '{ not json', 'utf8')
+      expect(await SessionStore.readMeta(paths, store.sessionId)).toBeUndefined()
+    })
+
+    it('does not touch the transcript', async () => {
+      const store = await SessionStore.start(paths, new Date('2026-08-17T10:00:00.000Z'))
+      await store.appendLine({ ts: '2026-08-17T10:00:01.000Z', role: 'user', content: 'hello' })
+      const before = await readFile(join(store.dir, 'transcript.jsonl'), 'utf8')
+      await SessionStore.writeMeta(paths, store.sessionId, { mode: 'listen' })
+      await SessionStore.writeMeta(paths, store.sessionId, { mode: 'journal' })
+      const after = await readFile(join(store.dir, 'transcript.jsonl'), 'utf8')
+      expect(after).toEqual(before)
+    })
   })
 })

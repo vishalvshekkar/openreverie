@@ -13,6 +13,7 @@ import {
   type AppApi,
   IncompleteStreamError,
   isTerminalEvent,
+  type PublicProfile,
   type Session,
   type StreamEvent,
 } from '../api.js'
@@ -155,10 +156,35 @@ function renderMessage(message: ChatMessage) {
   )
 }
 
+/*
+ * Duplicated in the browser rather than imported: web talks to server over
+ * HTTP only and never imports a runtime engine package. This is a small,
+ * stable piece of copy, and the test that counts ten entries is what
+ * notices if the catalogue ever grows without this list following.
+ *
+ * Exported because it backs two pickers built from the same ten entries: the
+ * mid-conversation mode switcher below, and the new-chat mode-card screen.
+ * One source of truth, not a second list to keep in sync by hand.
+ */
+export const MODE_OPTIONS: readonly (readonly [string, string])[] = [
+  ['general', 'Open conversation, no agenda.'],
+  ['listen', 'You talk it through, it stays out of the way.'],
+  ['solve', 'A concrete problem, worked toward real options and a decision.'],
+  ['real', 'It pushes back and names what it sees.'],
+  ['deep', 'It asks the questions, trying to understand you.'],
+  ['brainstorm', 'Quantity over judgment, evaluation deferred.'],
+  ['boost', 'Your corner talked up, from things it actually knows about you.'],
+  ['decompress', 'Winding down. Light and low-stakes.'],
+  ['process', 'Working through one specific thing until it settles.'],
+  ['journal', 'Structured written reflection.'],
+]
+
 export function Conversations({ api }: { api: AppApi }): JSX.Element {
   const [state, dispatch] = useReducer(sessionReducer, initialChatState)
   const [sessions, setSessions] = useState<Session[]>([])
   const [draft, setDraft] = useState('')
+  const [profile, setProfile] = useState<PublicProfile | null>(null)
+  const [nowMs, setNowMs] = useState(() => Date.now())
   const lastSequenceRef = useRef(0)
   const threadRef = useRef<HTMLDivElement>(null)
   const stickToBottomRef = useRef(true)
@@ -178,19 +204,25 @@ export function Conversations({ api }: { api: AppApi }): JSX.Element {
     }
   }, [api])
 
-  const startSession = useCallback(async () => {
-    try {
-      const session = await api.createSession()
-      lastSequenceRef.current = 0
-      activeSessionIdRef.current = session.sessionId
-      dispatch({ type: 'new-session', session })
-      if (session.initialGreetingStreamUrl) {
-        void streamGreeting(session.sessionId, api, dispatch, lastSequenceRef, activeSessionIdRef)
+  // Called only from a mode-card click (or the falsification below), never on
+  // mount: no session, and no POST /api/v1/sessions, until a card is chosen.
+  const startSession = useCallback(
+    async (mode: string) => {
+      try {
+        const session = await api.createSession(mode)
+        lastSequenceRef.current = 0
+        activeSessionIdRef.current = session.sessionId
+        dispatch({ type: 'new-session', session })
+        if (session.initialGreetingStreamUrl) {
+          void streamGreeting(session.sessionId, api, dispatch, lastSequenceRef, activeSessionIdRef)
+        }
+      } catch {
+        // A session may fail to start while past records stay browsable. The
+        // person is left on the mode-card screen to try again.
       }
-    } catch {
-      // A session may fail to start while past records stay browsable.
-    }
-  }, [api])
+    },
+    [api],
+  )
 
   useEffect(() => {
     const token = new URLSearchParams(window.location.search).get('token')
@@ -199,8 +231,41 @@ export function Conversations({ api }: { api: AppApi }): JSX.Element {
       window.history.replaceState({}, '', window.location.pathname)
     }
     void refreshSessions()
-    void startSession()
-  }, [api, refreshSessions, startSession])
+  }, [api, refreshSessions])
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        setProfile(await api.getProfile())
+      } catch {
+        // The strip degrades to nothing. A failed profile fetch must not
+        // block the thread.
+      }
+    })()
+  }, [api])
+
+  useEffect(() => {
+    const handle = setInterval(() => setNowMs(Date.now()), 30_000)
+    return () => clearInterval(handle)
+  }, [])
+
+  const changeMode = useCallback(
+    async (mode: string) => {
+      const sessionId = state.session?.sessionId
+      if (sessionId === undefined) return
+      try {
+        await api.setSessionMode(sessionId, mode)
+        dispatch({
+          type: 'stream',
+          event: { schemaVersion: '1', seq: state.lastSequence + 1, type: 'mode', mode },
+        })
+      } catch {
+        // The picker stays where it was. A mode the server did not accept
+        // must not be shown as if it took effect.
+      }
+    },
+    [api, state.session?.sessionId, state.lastSequence],
+  )
 
   // The effect scrolls the ref's current DOM node, but must re-run whenever
   // new content could have changed the thread's height, not just when the
@@ -293,6 +358,9 @@ export function Conversations({ api }: { api: AppApi }): JSX.Element {
     stickToBottomRef.current = distanceFromBottom < SCROLL_STICK_THRESHOLD
   }
 
+  // Ends the prior session (best effort) and returns to the mode-card
+  // screen, the same picker shown on first load. It does not start a new
+  // session itself: that only happens once a card is clicked.
   async function newChat() {
     const current = state.session
     if (current && !current.readOnly) {
@@ -303,7 +371,8 @@ export function Conversations({ api }: { api: AppApi }): JSX.Element {
       }
     }
     stickToBottomRef.current = true
-    await startSession()
+    activeSessionIdRef.current = null
+    dispatch({ type: 'clear-session' })
     void refreshSessions()
   }
 
@@ -378,79 +447,158 @@ export function Conversations({ api }: { api: AppApi }): JSX.Element {
       </nav>
 
       <section className="thread-column" aria-label="Conversation">
-        {state.session && (
-          <div className="thread-header">
-            <span className="thread-session-id" title={state.session.sessionId}>
-              {state.session.sessionId}
-            </span>
-          </div>
-        )}
-        <div className="thread" ref={threadRef} onScroll={handleThreadScroll}>
-          <div className="thread-inner">
-            {state.messages.map(renderMessage)}
-            {state.messages.length === 0 &&
-              !state.thinking &&
-              !state.activeTool &&
-              !state.error && (
-                <p className="thread-empty">
-                  {readOnly
-                    ? 'This conversation ended before anything was said.'
-                    : 'Nothing here yet. Say what is on your mind.'}
-                </p>
-              )}
-            {state.thinking && (
-              <p className="turn-status" aria-live="polite">
-                Thinking
-              </p>
-            )}
-            {state.activeTool && (
-              <p className="turn-status" aria-live="polite">
-                Using {state.activeTool}
-              </p>
-            )}
-            {state.error && (
-              <p className="thread-notice" role="alert">
-                {state.error}
-              </p>
-            )}
-          </div>
-        </div>
+        {state.session ? (
+          <>
+            <div className="thread-header">
+              <span className="thread-session-id" title={state.session.sessionId}>
+                {state.session.sessionId}
+              </span>
+            </div>
+            <div className="thread" ref={threadRef} onScroll={handleThreadScroll}>
+              <div className="thread-inner">
+                {state.messages.map(renderMessage)}
+                {state.messages.length === 0 &&
+                  !state.thinking &&
+                  !state.activeTool &&
+                  !state.error && (
+                    <p className="thread-empty">
+                      {readOnly
+                        ? 'This conversation ended before anything was said.'
+                        : 'Nothing here yet. Say what is on your mind.'}
+                    </p>
+                  )}
+                {state.thinking && (
+                  <p className="turn-status" aria-live="polite">
+                    Thinking
+                  </p>
+                )}
+                {state.activeTool && (
+                  <p className="turn-status" aria-live="polite">
+                    Using {state.activeTool}
+                  </p>
+                )}
+                {state.error && (
+                  <p className="thread-notice" role="alert">
+                    {state.error}
+                  </p>
+                )}
+              </div>
+            </div>
 
-        <div className="composer-area">
-          <div className="composer-area-inner">
-            {readOnly && (
-              <p className="composer-note">
-                This conversation has ended. Start a new one to keep talking.
-              </p>
-            )}
-            <form className="composer" onSubmit={handleSubmit}>
-              <textarea
-                ref={textareaRef}
-                className="composer-input"
-                aria-label="Message"
-                value={draft}
-                onChange={handleDraftChange}
-                onKeyDown={handleComposerKeyDown}
-                disabled={composerDisabled}
-                rows={1}
-              />
-              <div className="composer-controls">
+            <div className="composer-area">
+              <div className="composer-area-inner">
+                <div className="composer-status">
+                  <label className="mode-picker" htmlFor="mode-picker">
+                    <span className="mode-picker-label">Mode</span>
+                    <select
+                      id="mode-picker"
+                      value={state.mode}
+                      disabled={!state.session || readOnly}
+                      onChange={(event) => void changeMode(event.target.value)}
+                    >
+                      {MODE_OPTIONS.map(([value, summary]) => (
+                        <option key={value} value={value}>
+                          {value}: {summary}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <span className="status-strip" data-testid="status-strip">
+                    {webStatusStrip(profile, state.session?.createdAt, nowMs)}
+                  </span>
+                </div>
+                {readOnly && (
+                  <p className="composer-note">
+                    This conversation has ended. Start a new one to keep talking.
+                  </p>
+                )}
+                <form className="composer" onSubmit={handleSubmit}>
+                  <textarea
+                    ref={textareaRef}
+                    className="composer-input"
+                    aria-label="Message"
+                    value={draft}
+                    onChange={handleDraftChange}
+                    onKeyDown={handleComposerKeyDown}
+                    disabled={composerDisabled}
+                    rows={1}
+                  />
+                  <div className="composer-controls">
+                    <button
+                      type="button"
+                      className="end-conversation"
+                      onClick={() => void endChat()}
+                      disabled={!state.session || readOnly}
+                    >
+                      End conversation
+                    </button>
+                    <button type="submit" className="send-button" disabled={sendDisabled}>
+                      Send
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          </>
+        ) : (
+          <div className="mode-picker-screen">
+            <h2 className="mode-picker-screen-heading">Choose how to start</h2>
+            <div className="mode-cards">
+              {MODE_OPTIONS.map(([value, summary]) => (
                 <button
                   type="button"
-                  className="end-conversation"
-                  onClick={() => void endChat()}
-                  disabled={!state.session || readOnly}
+                  key={value}
+                  className="mode-card"
+                  onClick={() => void startSession(value)}
                 >
-                  End conversation
+                  <span className="mode-card-name">{value}</span>
+                  <span className="mode-card-summary">{summary}</span>
                 </button>
-                <button type="submit" className="send-button" disabled={sendDisabled}>
-                  Send
-                </button>
-              </div>
-            </form>
+              ))}
+            </div>
           </div>
-        </div>
+        )}
       </section>
     </div>
   )
+}
+
+/*
+ * The same four segments the terminal strip shows, from the same profile
+ * fields: tone, local place and time, elapsed. Mode is the picker itself,
+ * so it is not repeated here. A guessed timezone renders the time without
+ * the place name; a zone the browser rejects drops the segment entirely
+ * rather than substituting the host's, because a silent substitution is how
+ * a wrong local time becomes invisible.
+ */
+function webStatusStrip(
+  profile: PublicProfile | null,
+  createdAt: string | undefined,
+  nowMs: number,
+): string {
+  if (profile === null) return ''
+  const segments: string[] = [profile.style.tone]
+
+  if (profile.timezone !== null) {
+    try {
+      const time = new Intl.DateTimeFormat('en-US', {
+        timeZone: profile.timezone,
+        hour: 'numeric',
+        minute: '2-digit',
+        hour12: true,
+        timeZoneName: 'short',
+      }).format(new Date(nowMs))
+      const place = profile.location === null ? '' : `${profile.location} `
+      segments.push(`${place}${time}`)
+    } catch {
+      // A zone Intl rejects means no time segment at all.
+    }
+  }
+
+  if (createdAt !== undefined) {
+    const elapsed = Math.max(0, nowMs - new Date(createdAt).getTime())
+    segments.push(`${Math.floor(elapsed / 60_000)}m`)
+  }
+
+  return segments.join(' · ')
 }

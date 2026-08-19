@@ -1,7 +1,7 @@
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { loadConfig, type ReverieConfig, saveConfig } from '@openreverie/core'
+import type { ReverieConfig } from '@openreverie/core'
 import {
   appendGraph,
   type EngineDeps,
@@ -17,7 +17,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   type ChatIo,
   countMemoryDocuments,
-  createStylePersister,
   openCliContext,
   printWarnings,
   runChat,
@@ -31,7 +30,6 @@ function testConfig(memoryDir: string): ReverieConfig {
     provider: { name: 'openai', apiKeyEnv: 'OPENAI_API_KEY' },
     models: { chat: 'fake-chat', reflection: 'fake-reflect', embeddings: 'fake-embed' },
     safety: { mode: 'companion', resources: [] },
-    style: { engagement: 'balanced', tone: 'warm', orientation: 'listening' },
   }
 }
 
@@ -765,6 +763,104 @@ describe('runChat', () => {
   })
 })
 
+describe('command loop', () => {
+  let dir: string
+
+  beforeEach(async () => {
+    dir = await mkdtemp(path.join(tmpdir(), 'openreverie-chat-loop-'))
+  })
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  // Only requests with a `tools` field are conversation turns (the
+  // greeting and each session.send()); the reflection call on /bye omits
+  // `tools` entirely, so this skips it rather than mistaking its giant
+  // reflection prompt (also sent as a 'user' message) for something typed
+  // at the you> prompt.
+  function lastUserMessage(chat: FakeChatProvider): string | undefined {
+    for (let i = chat.requests.length - 1; i >= 0; i--) {
+      const req = chat.requests[i]
+      if (req?.tools === undefined) continue
+      const messages = req.messages
+      for (let j = messages.length - 1; j >= 0; j--) {
+        if (messages[j]?.role === 'user') return messages[j]?.content
+      }
+    }
+    return undefined
+  }
+
+  it('never sends an unknown command to the model', async () => {
+    const chat = new FakeChatProvider([
+      { text: 'Good to see you.', toolCalls: [] },
+      { text: emptyReflectionJson('Nothing happened.'), toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const { io, output } = scriptedIo(['/moed listen', '/bye'])
+
+    await runChat({ engine, config, chat, io })
+
+    expect(lastUserMessage(chat)).toBeUndefined()
+    expect(output.join('')).toContain('Unknown command: /moed. Type /help to see what there is.')
+
+    await engine.close()
+  })
+
+  it('sends an ordinary line to the model unchanged', async () => {
+    const chat = new FakeChatProvider([
+      { text: 'Good to see you.', toolCalls: [] },
+      { text: 'Hi there.', toolCalls: [] },
+      { text: emptyReflectionJson('Said hello.'), toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const { io } = scriptedIo(['hello there', '/bye'])
+
+    await runChat({ engine, config, chat, io })
+
+    expect(lastUserMessage(chat)).toMatch(/hello there$/)
+
+    await engine.close()
+  })
+
+  it('sends a doubled slash through as a literal slash', async () => {
+    const chat = new FakeChatProvider([
+      { text: 'Good to see you.', toolCalls: [] },
+      { text: 'Noted.', toolCalls: [] },
+      { text: emptyReflectionJson('Talked about slashes.'), toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const { io } = scriptedIo(['//mode', '/bye'])
+
+    await runChat({ engine, config, chat, io })
+
+    expect(lastUserMessage(chat)).toMatch(/\/mode$/)
+
+    await engine.close()
+  })
+
+  it('reflects and exits on EOF, through the command table', async () => {
+    const chat = new FakeChatProvider([
+      { text: 'Good to see you.', toolCalls: [] },
+      { text: emptyReflectionJson('A short session.'), toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    // No answers scripted: the first question() throws, exactly as a
+    // closed readline stream does, which the loop treats like /bye.
+    const { io, output } = scriptedIo([])
+
+    await runChat({ engine, config, chat, io })
+
+    expect(output.join('')).toContain('reflecting on this session')
+
+    await engine.close()
+  })
+})
+
 describe('printWarnings', () => {
   it('prints each warning as a dim note line', () => {
     const output: string[] = []
@@ -917,6 +1013,96 @@ describe('openCliContext', () => {
       await rm(dir, { recursive: true, force: true })
     }
   })
+
+  it('shows a startup phrase while the engine is opening and clears the line when it resolves', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'openreverie-cli-context-spinner-'))
+    try {
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const output: string[] = []
+      const intervals: Array<() => void> = []
+      let releaseOpen!: () => void
+      const gate = new Promise<void>((resolve) => {
+        releaseOpen = resolve
+      })
+      const pending = openCliContext({
+        loadConfig: async () => testConfig(dir),
+        buildChat: () => chat,
+        buildEmbeddings: () => new FakeEmbeddingProvider(),
+        openEngine: async () => {
+          await gate
+          return engine
+        },
+        write: (text: string) => output.push(text),
+        colorEnabled: true,
+        setInterval: (fn: () => void, _ms: number) => {
+          intervals.push(fn)
+          return intervals.length
+        },
+        clearInterval: () => {},
+      })
+
+      // One microtask flush lets loadConfig settle and the spinner start
+      // while openEngine is still pending on the gate.
+      await Promise.resolve()
+      expect(output[0]).toContain('Getting my thoughts in order...')
+
+      intervals[0]?.()
+      expect(output[1]).toContain('Looking back...')
+
+      releaseOpen()
+      const result = await pending
+      expect(result.ok).toBe(true)
+      // The clear follows the last phrase; nothing stays stranded on the
+      // line for whatever the session prints next.
+      expect(output[output.length - 1]).toBe('\r\x1b[K')
+      if (result.ok) {
+        await result.engine.close()
+      } else {
+        await engine.close()
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('clears the startup spinner when the engine open fails, instead of leaving a stranded phrase', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'openreverie-cli-context-spinner-fail-'))
+    try {
+      const output: string[] = []
+      const intervals: Array<() => void> = []
+      let releaseFail!: (err: Error) => void
+      const gate = new Promise<MemoryEngine>((_resolve, reject) => {
+        releaseFail = reject
+      })
+      const pending = openCliContext({
+        loadConfig: async () => testConfig(dir),
+        buildChat: () => new FakeChatProvider([]),
+        buildEmbeddings: () => new FakeEmbeddingProvider(),
+        openEngine: async () => gate,
+        write: (text: string) => output.push(text),
+        colorEnabled: true,
+        setInterval: (fn: () => void, _ms: number) => {
+          intervals.push(fn)
+          return intervals.length
+        },
+        clearInterval: () => {},
+      })
+
+      await Promise.resolve()
+      expect(output[0]).toContain('Getting my thoughts in order...')
+
+      releaseFail(new Error('engine open failed: disk full'))
+      const result = await pending
+      expect(result.ok).toBe(false)
+      if (!result.ok) {
+        expect(result.message).toBe('engine open failed: disk full')
+      }
+      expect(output[output.length - 1]).toBe('\r\x1b[K')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('countMemoryDocuments', () => {
@@ -1012,7 +1198,7 @@ describe('color helpers', () => {
 describe('toolNotice', () => {
   it('maps each known tool to its honest, specific notice', () => {
     expect(toolNotice('remember')).toBe('[remembering]')
-    expect(toolNotice('update_style')).toBe('[adjusting style]')
+    expect(toolNotice('set_mode')).toBe('[switching mode]')
     expect(toolNotice('search_memory')).toBe('[searching memory]')
     expect(toolNotice('read_document')).toBe('[reading memory]')
     expect(toolNotice('read_transcript')).toBe('[reading memory]')
@@ -1406,93 +1592,84 @@ describe('runChat status line', () => {
   })
 })
 
-describe('createStylePersister', () => {
-  it('patches only the given axes and persists the result atomically to the same path', async () => {
-    const dir = await mkdtemp(path.join(tmpdir(), 'openreverie-style-persist-'))
-    try {
-      const configPath = path.join(dir, 'config.toml')
-      const config = testConfig(dir)
-      await saveConfig(config, configPath)
+describe('status strip', () => {
+  let dir: string
 
-      const persist = createStylePersister(config, configPath)
-      const result = await persist({ tone: 'direct' })
-
-      expect(result).toEqual({ engagement: 'balanced', tone: 'direct', orientation: 'listening' })
-      // The in-memory config object the running session holds is updated too,
-      // not just the file on disk.
-      expect(config.style).toEqual(result)
-
-      const reloaded = await loadConfig(configPath)
-      expect(reloaded.style).toEqual(result)
-    } finally {
-      await rm(dir, { recursive: true, force: true })
-    }
+  beforeEach(async () => {
+    dir = await mkdtemp(path.join(tmpdir(), 'openreverie-chat-strip-'))
   })
 
-  it('applies a second patch on top of the first, leaving untouched axes alone', async () => {
-    const dir = await mkdtemp(path.join(tmpdir(), 'openreverie-style-persist-2-'))
-    try {
-      const configPath = path.join(dir, 'config.toml')
-      const config = testConfig(dir)
-      await saveConfig(config, configPath)
-
-      const persist = createStylePersister(config, configPath)
-      await persist({ engagement: 'leading' })
-      const result = await persist({ tone: 'snarky' })
-
-      expect(result).toEqual({ engagement: 'leading', tone: 'snarky', orientation: 'listening' })
-      const reloaded = await loadConfig(configPath)
-      expect(reloaded.style).toEqual(result)
-    } finally {
-      await rm(dir, { recursive: true, force: true })
-    }
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true })
   })
-})
 
-describe('runChat update_style tool notice', () => {
-  it('renders [adjusting style] and persists the change through the wired toolDeps', async () => {
-    const dir = await mkdtemp(path.join(tmpdir(), 'openreverie-chat-style-'))
-    try {
-      const configPath = path.join(dir, 'config.toml')
-      const config = testConfig(dir)
-      await saveConfig(config, configPath)
+  it('prints nothing when the terminal is not interactive', async () => {
+    const chat = new FakeChatProvider([])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const { io, output } = scriptedIo(['/bye'])
 
-      const chat = new FakeChatProvider([
-        { text: 'Good to see you.', toolCalls: [] },
-        {
-          text: '',
-          toolCalls: [
-            {
-              id: 'call_1',
-              name: 'update_style',
-              arguments: JSON.stringify({ tone: 'direct' }),
-            },
-          ],
-        },
-        { text: 'Done, I will be more direct.', toolCalls: [] },
-        { text: emptyReflectionJson('Changed tone.'), toolCalls: [] },
-      ])
-      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
-      const { io, output } = scriptedIo(['talk to me more directly', '/bye'])
+    await runChat({ engine, config, chat, io, interactive: false })
 
-      await runChat({
-        engine,
-        config,
-        chat,
-        io,
-        toolDeps: { updateStyle: createStylePersister(config, configPath) },
-      })
+    expect(output.join('')).not.toContain(' · ')
 
-      const joined = output.join('')
-      expect(joined).toContain('[adjusting style]')
-      expect(joined).toContain('Done, I will be more direct.')
+    await engine.close()
+  })
 
-      const reloaded = await loadConfig(configPath)
-      expect(reloaded.style.tone).toBe('direct')
+  it('prints the strip with no escape sequences when colour is off but the terminal is interactive', async () => {
+    const chat = new FakeChatProvider([])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const { io, output } = scriptedIo(['/bye'])
 
-      await engine.close()
-    } finally {
-      await rm(dir, { recursive: true, force: true })
-    }
+    await runChat({ engine, config, chat, io, interactive: true, colorEnabled: false })
+
+    const text = output.join('')
+    expect(text).toContain('general · warm')
+    expect(text).not.toContain(String.fromCharCode(27))
+
+    await engine.close()
+  })
+
+  it('shows the new mode on the next strip after a mode change', async () => {
+    const chat = new FakeChatProvider([])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const { io, output } = scriptedIo(['/mode listen', '/bye'])
+
+    await runChat({ engine, config, chat, io, interactive: true })
+
+    const strips = output
+      .join('')
+      .split('\n')
+      .filter((line) => line.includes(' · '))
+    // Assert the strips exist before indexing, so deleting the wiring fails
+    // here with a count instead of an undefined tripping up toContain.
+    expect(strips.length).toBeGreaterThanOrEqual(2)
+    expect(strips[0]).toContain('general · ')
+    expect(strips[1]).toContain('listen · ')
+
+    await engine.close()
+  })
+
+  // The spinner and the strip never write in the same frame.
+  it('writes no strip while a reply is streaming', async () => {
+    const chat = new FakeChatProvider([
+      { text: 'Good to see you.', toolCalls: [] },
+      { text: 'Hi there.', toolCalls: [] },
+      { text: emptyReflectionJson('Said hello.'), toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const { io, output } = scriptedIo(['hello', '/bye'])
+
+    await runChat({ engine, config, chat, io, interactive: true })
+
+    const flat = output.join('')
+    const stripIndex = flat.lastIndexOf(' · ')
+    const replyIndex = flat.indexOf('reverie> ')
+    expect(stripIndex).toBeGreaterThan(replyIndex)
+
+    await engine.close()
   })
 })

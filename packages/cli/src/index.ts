@@ -17,19 +17,18 @@ import { realpathSync } from 'node:fs'
 import { createInterface } from 'node:readline/promises'
 import { fileURLToPath } from 'node:url'
 import type { ReverieConfig } from '@openreverie/core'
-import { defaultConfigPath, loadConfig, resolveApiKey } from '@openreverie/core'
+import {
+  defaultConfigPath,
+  loadConfig,
+  readConfigMemoryDir,
+  resolveApiKey,
+} from '@openreverie/core'
 import { MemoryEngine } from '@openreverie/memory'
 import type { ProviderSelection } from '@openreverie/providers'
 import { createChatProvider, createEmbeddingProvider } from '@openreverie/providers'
 import { launchServer } from '@openreverie/server'
 import type { ChatIo } from './chat.js'
-import {
-  countMemoryDocuments,
-  createStylePersister,
-  openCliContext,
-  printWarnings,
-  runChat,
-} from './chat.js'
+import { countMemoryDocuments, openCliContext, printWarnings, runChat } from './chat.js'
 import { buildRealDoctorDeps, type DoctorDeps, runDoctor } from './doctor.js'
 import { subcommandHelp, TOP_LEVEL_HELP } from './help.js'
 import { runMigrate } from './migrate.js'
@@ -55,6 +54,13 @@ const KNOWN_SUBCOMMANDS = new Set([
 // rather than sniffing process state itself.
 function colorsEnabled(): boolean {
   return process.stdout.isTTY === true && process.env.NO_COLOR === undefined
+}
+
+// Two different conditions, deliberately not collapsed into one. Colour is
+// off when stdout is not a TTY or NO_COLOR is set; the terminal is
+// interactive whenever stdout is a TTY, regardless of NO_COLOR.
+function isInteractive(): boolean {
+  return process.stdout.isTTY === true
 }
 
 function errorMessage(err: unknown): string {
@@ -127,11 +133,12 @@ export interface CliMainDeps {
   openEngine: typeof MemoryEngine.open
   countMemoryDocuments: typeof countMemoryDocuments
   runChat: typeof runChat
-  createStylePersister: typeof createStylePersister
   loadConfig: (path: string) => Promise<ReverieConfig>
+  readConfigMemoryDir: (path: string) => Promise<string>
   configPath: string
   write: (text: string) => void
   colorEnabled: () => boolean
+  interactive: () => boolean
   readVersion: () => string
   runDoctor: (deps: DoctorDeps) => Promise<number>
   buildDoctorDeps: (configPath: string, write: (text: string) => void) => DoctorDeps
@@ -254,8 +261,8 @@ export async function mainWith(args: string[], deps: CliMainDeps): Promise<void>
 
   if (subcommand === 'migrate') {
     const exitCode = await deps.runMigrate(args.slice(1), {
-      loadConfig: () => deps.loadConfig(configPath),
-      configPath: deps.configPath,
+      readMemoryDir: () => deps.readConfigMemoryDir(configPath),
+      configPath,
       write: deps.write,
     })
     process.exitCode = exitCode
@@ -276,6 +283,8 @@ export async function mainWith(args: string[], deps: CliMainDeps): Promise<void>
     buildChat: deps.buildChat,
     buildEmbeddings: deps.buildEmbeddings,
     openEngine: (config, engineDeps) => deps.openEngine(config.memoryDir, engineDeps),
+    write: deps.write,
+    colorEnabled,
   })
 
   if (!context.ok) {
@@ -298,9 +307,15 @@ export async function mainWith(args: string[], deps: CliMainDeps): Promise<void>
       deps.write('Reflection is up to date.\n')
     } else {
       const io = readlineChatIo()
-      const toolDeps = { updateStyle: deps.createStylePersister(config, configPath) }
       try {
-        const chatResult = await deps.runChat({ engine, config, chat, io, toolDeps, colorEnabled })
+        const chatResult = await deps.runChat({
+          engine,
+          config,
+          chat,
+          io,
+          colorEnabled,
+          interactive: deps.interactive(),
+        })
         if (chatResult.interrupted) {
           process.exitCode = 4
         }
@@ -328,11 +343,12 @@ const defaultDeps: CliMainDeps = {
   openEngine: MemoryEngine.open,
   countMemoryDocuments,
   runChat,
-  createStylePersister,
   loadConfig,
+  readConfigMemoryDir,
   configPath: defaultConfigPath(),
   write: (text) => process.stdout.write(text),
   colorEnabled: colorsEnabled,
+  interactive: isInteractive,
   readVersion: readOwnVersion,
   runDoctor,
   buildDoctorDeps: buildRealDoctorDeps,

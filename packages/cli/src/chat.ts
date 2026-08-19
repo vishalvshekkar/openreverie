@@ -6,13 +6,16 @@
 
 import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
-import type { ReverieConfig, StyleConfig, ToolDeps } from '@openreverie/core'
-import { AgentSession, saveConfig } from '@openreverie/core'
+import type { ReverieConfig } from '@openreverie/core'
+import { AgentSession } from '@openreverie/core'
 import type { EngineDeps, MemoryEngine } from '@openreverie/memory'
 import { listDocuments, memoryPaths, readDocument } from '@openreverie/memory'
 import type { ChatProvider, EmbeddingProvider } from '@openreverie/providers'
 import { cyan, dim, magenta } from './colors.js'
+import { type CommandContext, parseInput, runCommand } from './commands.js'
+import { createStartupSpinner } from './startup.js'
 import { createStatusLine, type StatusLine } from './status.js'
+import { formatStripTime, renderStatusStrip } from './strip.js'
 
 export interface ChatIo {
   question(prompt: string): Promise<string>
@@ -34,7 +37,7 @@ export interface ChatIo {
 // fallback instead of silence or a crash.
 const TOOL_NOTICES: Record<string, string> = {
   remember: 'remembering',
-  update_style: 'adjusting style',
+  set_mode: 'switching mode',
   search_memory: 'searching memory',
   read_document: 'reading memory',
   read_transcript: 'reading memory',
@@ -143,8 +146,8 @@ export async function runChat(deps: {
   config: ReverieConfig
   chat: ChatProvider
   io: ChatIo
-  toolDeps?: ToolDeps
   colorEnabled?: boolean
+  interactive?: boolean
   setInterval?: (fn: () => void, ms: number) => unknown
   clearInterval?: (handle: unknown) => void
   now?: () => number
@@ -154,8 +157,8 @@ export async function runChat(deps: {
     config,
     chat,
     io,
-    toolDeps,
     colorEnabled = false,
+    interactive = false,
     setInterval: setIntervalDep = (fn: () => void, ms: number) => setInterval(fn, ms),
     clearInterval: clearIntervalDep = (handle: unknown) =>
       clearInterval(handle as Parameters<typeof clearInterval>[0]),
@@ -170,9 +173,11 @@ export async function runChat(deps: {
     now,
   })
 
+  const sessionStartedAt = now()
+
   io.write(`Memory folder: ${config.memoryDir}. Safety mode: ${config.safety.mode}.\n\n`)
 
-  const session = await AgentSession.start(engine, config, chat, toolDeps)
+  const session = await AgentSession.start(engine, config, chat)
 
   // 0 = no interrupt yet, 1 = one Ctrl-C seen (reminded about /bye), 2+ =
   // a second Ctrl-C seen (exit without reflecting). The handler itself
@@ -220,7 +225,40 @@ export async function runChat(deps: {
     return { interrupted: true }
   }
 
+  const commandContext: CommandContext = {
+    io,
+    session,
+    engine,
+    memoryDir: config.memoryDir,
+    safetyMode: config.safety.mode,
+    printWarnings: () => printWarnings(io, engine, colorEnabled),
+  }
+
+  // Printed once, on its own dim line, immediately before each prompt. Not
+  // animated and never repainted, which is what gives a fresh value at
+  // every turn and right after a mode change without any cursor addressing
+  // and without fighting readline.
+  //
+  // Shown when the terminal is interactive; dimmed only when colour is on.
+  // Those are two different conditions: someone who sets NO_COLOR wants no
+  // colour, not less information.
+  function writeStatusStrip(): void {
+    if (!interactive) return
+    const meta = engine.profile().meta
+    const time = formatStripTime(meta.timezone, new Date(now()))
+    const place = meta.timezoneSource === 'user-confirmed' ? meta.location : undefined
+    const line = renderStatusStrip({
+      mode: session.mode,
+      tone: engine.currentStyle().tone,
+      ...(place === undefined ? {} : { location: place }),
+      ...(time === undefined ? {} : { localTime: time.localTime, zoneAbbrev: time.zoneAbbrev }),
+      elapsedMs: now() - sessionStartedAt,
+    })
+    io.write(`${dim(line, colorEnabled)}\n`)
+  }
+
   for (;;) {
+    writeStatusStrip()
     let line: string
     try {
       line = await io.question(cyan('you> ', colorEnabled))
@@ -233,27 +271,15 @@ export async function runChat(deps: {
       return { interrupted: true }
     }
 
-    const trimmed = line.trim()
-    if (trimmed === '/bye') {
-      io.write('reflecting on this session...\n')
-      try {
-        await session.end()
-        printWarnings(io, engine, colorEnabled)
-        io.write('Saved and reflected. See you next time.\n')
-      } catch (err) {
-        // Any warning the engine accumulated before the throw (a page
-        // resolveNarratives had to skip, a git commit that failed) belongs
-        // on screen either way; losing it here would be the same silent
-        // drop this whole fix exists to close.
-        printWarnings(io, engine, colorEnabled)
-        io.write(
-          `\nI could not finish reflecting: ${errorMessage(err)}. Your conversation is saved; ` +
-            'it will be reflected the next time reverie starts.\n',
-        )
+    const parsed = parseInput(line)
+    if (parsed.kind === 'command') {
+      const outcome = await runCommand(parsed.name, parsed.arg, commandContext)
+      if (outcome === 'exit') {
+        return { interrupted: false }
       }
-      return { interrupted: false }
+      continue
     }
-    if (trimmed === '') {
+    if (parsed.text === '') {
       continue
     }
 
@@ -261,7 +287,7 @@ export async function runChat(deps: {
     let taggedThisTurn = false
     responding = true
     try {
-      for await (const event of session.send(line)) {
+      for await (const event of session.send(parsed.text)) {
         if (event.type === 'thinking') {
           statusLine.start('thinking')
         } else if (event.type === 'text') {
@@ -276,6 +302,9 @@ export async function runChat(deps: {
           statusLine.stop()
           io.write(`${dim(toolNotice(event.name), colorEnabled)}\n`)
           statusLine.start(toolStatusLabel(event.name))
+        } else if (event.type === 'mode') {
+          statusLine.stop()
+          io.write(`${dim(`[mode: ${event.mode}]`, colorEnabled)}\n`)
         } else if (event.type === 'done') {
           statusLine.stop()
           io.write('\n')
@@ -317,25 +346,6 @@ export async function runChat(deps: {
   }
 }
 
-// Builds the persister the update_style tool needs. Core never knows
-// config file paths or how style is saved (that is the point of ToolDeps);
-// this is the CLI's one implementation of it. Patches `config.style` in
-// place, in the same ReverieConfig object the running session was started
-// with, then writes the whole config back to the exact path it was loaded
-// from, atomically (saveConfig writes to a temp file and renames over the
-// target).
-export function createStylePersister(
-  config: ReverieConfig,
-  configPath: string,
-): (patch: Partial<StyleConfig>) => Promise<StyleConfig> {
-  return async (patch: Partial<StyleConfig>) => {
-    const nextStyle: StyleConfig = { ...config.style, ...patch }
-    config.style = nextStyle
-    await saveConfig(config, configPath)
-    return nextStyle
-  }
-}
-
 // --- CLI command wiring, kept here (not index.ts) so it is testable with
 // injected fakes instead of the real filesystem and network. ---
 
@@ -344,6 +354,13 @@ export interface CliEngineDeps {
   buildChat: (config: ReverieConfig) => ChatProvider
   buildEmbeddings: (config: ReverieConfig) => EmbeddingProvider
   openEngine: (config: ReverieConfig, deps: EngineDeps) => Promise<MemoryEngine>
+  // Optional wiring for the decorative startup spinner. When write is
+  // absent (or colorEnabled is false) the spinner is a no-op, exactly like
+  // the status line: no escape sequence ever reaches a non-TTY stream.
+  write?: (text: string) => void
+  colorEnabled?: boolean
+  setInterval?: (fn: () => void, ms: number) => unknown
+  clearInterval?: (handle: unknown) => void
 }
 
 export type CliContextResult =
@@ -372,7 +389,23 @@ export async function openCliContext(deps: CliEngineDeps): Promise<CliContextRes
     return { ok: false, kind: 'provider', message: errorMessage(err) }
   }
 
+  // Decorative: a dim spinner cycles startup phrases while the engine's
+  // maintenance work runs. Purely cosmetic, not tied to any internal
+  // engine phase; it stops the moment openEngine settles either way.
+  const spinner =
+    deps.write !== undefined
+      ? createStartupSpinner({
+          write: deps.write,
+          colorEnabled: deps.colorEnabled === true,
+          setInterval: deps.setInterval ?? ((fn, ms) => setInterval(fn, ms)),
+          clearInterval:
+            deps.clearInterval ??
+            ((handle) => clearInterval(handle as Parameters<typeof clearInterval>[0])),
+        })
+      : undefined
+
   try {
+    if (spinner !== undefined) spinner.start()
     const engine = await deps.openEngine(config, {
       chat,
       embeddings,
@@ -382,6 +415,8 @@ export async function openCliContext(deps: CliEngineDeps): Promise<CliContextRes
     return { ok: true, engine, config, chat }
   } catch (err) {
     return { ok: false, kind: 'config', message: errorMessage(err) }
+  } finally {
+    spinner?.stop()
   }
 }
 

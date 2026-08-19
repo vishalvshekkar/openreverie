@@ -1,7 +1,7 @@
 import { act, render, screen, waitFor, within } from '@testing-library/react'
 import { userEvent } from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { AppApi, Session, StreamEvent, TranscriptLine } from '../api.js'
+import type { AppApi, PublicProfile, Session, StreamEvent, TranscriptLine } from '../api.js'
 import { Conversations } from './Conversations.js'
 
 const liveSessionId = 'session_01M052PA5A1MXY8JFHXTVVXAE'
@@ -62,10 +62,55 @@ const errorEvent = (seq: number, message: string): StreamEvent => ({
   message,
 })
 
+const defaultProfile: PublicProfile = {
+  preferredName: null,
+  pronouns: null,
+  location: null,
+  timezone: null,
+  birthday: null,
+  birthdayGreetings: null,
+  occupation: null,
+  style: { engagement: 'balanced', tone: 'warm', orientation: 'listening' },
+  prose: '',
+}
+
+// A stream that stays open until the test pushes into it, the same "gate"
+// idiom the greeting tests below use, but reusable and named for the mode
+// picker tests: no refetch happens when a mode event arrives mid-stream, so
+// the test needs a stream it controls rather than one that settles on its own.
+function makeControllableStream(): {
+  stream: AsyncIterable<StreamEvent>
+  push: (event: StreamEvent) => void
+} {
+  const pending: StreamEvent[] = []
+  let notify: (() => void) | undefined
+  async function* generator(): AsyncGenerator<StreamEvent> {
+    for (;;) {
+      const next = pending.shift()
+      if (next !== undefined) {
+        yield next
+        continue
+      }
+      await new Promise<void>((resolve) => {
+        notify = resolve
+      })
+    }
+  }
+  return {
+    stream: generator(),
+    push(event: StreamEvent) {
+      pending.push(event)
+      notify?.()
+      notify = undefined
+    },
+  }
+}
+
 function createApi() {
   return {
     bootstrap: vi.fn(),
     createSession: vi.fn(),
+    setSessionMode: vi.fn(),
     listSessions: vi.fn(),
     listDocuments: vi.fn(),
     getDocument: vi.fn(),
@@ -76,6 +121,9 @@ function createApi() {
     transcript: vi.fn(),
     end: vi.fn(),
     getGraphSnapshot: vi.fn(),
+    getProfile: vi.fn(),
+    updateProfile: vi.fn(),
+    getSettings: vi.fn(),
   }
 }
 
@@ -89,11 +137,17 @@ beforeEach(() => {
   api.listSessions.mockResolvedValue({ data: [liveSession, endedSession], nextCursor: null })
   api.transcript.mockResolvedValue({ data: endedTranscript, nextCursor: null })
   api.end.mockResolvedValue({ ...liveSession, status: 'ended', readOnly: true })
+  api.getProfile.mockResolvedValue(defaultProfile)
 })
 
+// Most of this file exercises an already-live session, so renderReady clicks
+// the general mode card, the same first step a real visitor takes on the new
+// mode-card screen, and waits for the session it starts.
 async function renderReady() {
   render(<Conversations api={api as unknown as AppApi} />)
-  await waitFor(() => expect(api.createSession).toHaveBeenCalled())
+  const generalCard = await screen.findByRole('button', { name: /^general\b/i })
+  await userEvent.click(generalCard)
+  await waitFor(() => expect(api.createSession).toHaveBeenCalledWith('general'))
   return screen.getByLabelText('Message')
 }
 
@@ -303,6 +357,11 @@ describe('Conversations', () => {
       const newConversation = screen.getByRole('button', { name: 'New conversation' })
       await userEvent.click(newConversation)
 
+      // "New conversation" only returns to the mode-card screen now: the new
+      // session (and its greeting) does not start until a card is clicked.
+      const generalCard = await screen.findByRole('button', { name: /^general\b/i })
+      await userEvent.click(generalCard)
+
       expect(await screen.findByText('New greeting')).toBeVisible()
 
       // Release the old greeting and let its remaining events actually settle
@@ -318,5 +377,98 @@ describe('Conversations', () => {
       expect(screen.queryByText('Old greeting second line')).toBeNull()
       expect(screen.getByText('New greeting')).toBeVisible()
     })
+  })
+})
+
+describe('mode picker', () => {
+  it('lists ten modes and starts on general', async () => {
+    await renderReady()
+    const picker = screen.getByLabelText('Mode')
+    expect(picker).toHaveValue('general')
+    expect(picker.querySelectorAll('option')).toHaveLength(10)
+  })
+
+  it('calls the session mode endpoint when the picker changes', async () => {
+    api.setSessionMode.mockResolvedValueOnce({ mode: 'listen' })
+    await renderReady()
+    const picker = screen.getByLabelText('Mode')
+    await userEvent.selectOptions(picker, 'listen')
+    await waitFor(() => expect(api.setSessionMode).toHaveBeenCalledWith(liveSessionId, 'listen'))
+    expect(picker).toHaveValue('listen')
+  })
+
+  it('follows the model without a refetch when a mode event arrives', async () => {
+    const controllable = makeControllableStream()
+    api.createSession.mockResolvedValueOnce({
+      ...liveSession,
+      initialGreetingStreamUrl: `/api/v1/sessions/${liveSessionId}/events`,
+    })
+    api.events.mockResolvedValueOnce(controllable.stream)
+
+    await renderReady()
+    const picker = screen.getByLabelText('Mode')
+    expect(picker).toHaveValue('general')
+
+    controllable.push({ schemaVersion: '1', seq: 1, type: 'mode', mode: 'solve' })
+    await waitFor(() => expect(screen.getByLabelText('Mode')).toHaveValue('solve'))
+    expect(api.setSessionMode).not.toHaveBeenCalled()
+  })
+
+  it('leaves the picker where it was when the endpoint fails', async () => {
+    api.setSessionMode.mockRejectedValueOnce(new Error('offline'))
+    await renderReady()
+    const picker = screen.getByLabelText('Mode')
+    await userEvent.selectOptions(picker, 'listen')
+    await waitFor(() => expect(api.setSessionMode).toHaveBeenCalled())
+    expect(screen.getByLabelText('Mode')).toHaveValue('general')
+  })
+
+  it('renders the status strip next to the composer', async () => {
+    await renderReady()
+    expect(await screen.findByTestId('status-strip')).toHaveTextContent('warm')
+  })
+})
+
+describe('the new-chat mode-card picker', () => {
+  it('creates no session until a card is clicked, then creates it with the clicked mode', async () => {
+    api.createSession.mockResolvedValueOnce({ ...liveSession, mode: 'solve' })
+
+    render(<Conversations api={api as unknown as AppApi} />)
+
+    const solveCard = await screen.findByRole('button', { name: /^solve\b/i })
+    expect(api.createSession).not.toHaveBeenCalled()
+
+    await userEvent.click(solveCard)
+
+    await waitFor(() => expect(api.createSession).toHaveBeenCalledWith('solve'))
+  })
+
+  it('shows all ten catalogue modes as cards, reusing the switcher copy', async () => {
+    render(<Conversations api={api as unknown as AppApi} />)
+
+    const heading = await screen.findByText('Choose how to start')
+    const screenEl = heading.closest('.mode-picker-screen') as HTMLElement
+    expect(within(screenEl).getAllByRole('button')).toHaveLength(10)
+    expect(
+      within(screenEl).getByText('A concrete problem, worked toward real options and a decision.'),
+    ).toBeVisible()
+  })
+
+  it('leaves nothing to clean up if the picker screen is abandoned without a click', async () => {
+    render(<Conversations api={api as unknown as AppApi} />)
+
+    await screen.findByRole('button', { name: /^general\b/i })
+    expect(api.createSession).not.toHaveBeenCalled()
+    expect(api.end).not.toHaveBeenCalled()
+  })
+
+  it('shows the clicked mode, not a stale "general", once the session starts', async () => {
+    api.createSession.mockResolvedValueOnce({ ...liveSession, mode: 'solve' })
+
+    render(<Conversations api={api as unknown as AppApi} />)
+    const solveCard = await screen.findByRole('button', { name: /^solve\b/i })
+    await userEvent.click(solveCard)
+
+    await waitFor(() => expect(screen.getByLabelText('Mode')).toHaveValue('solve'))
   })
 })

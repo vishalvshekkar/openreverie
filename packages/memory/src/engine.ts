@@ -37,7 +37,17 @@ import {
   type SequencedGraphRecord,
 } from './graph.js'
 import { ensureMemoryTree, type MemoryPaths, memoryPaths } from './paths.js'
-import { loadProfile, type Profile, writeProfile } from './profile.js'
+import {
+  loadProfile,
+  MODEL_WRITE_FIELDS,
+  type Profile,
+  type ProfileMeta,
+  type ProfileSettingsPatch,
+  type ProfileUpdates,
+  profileSettingsPatchSchema,
+  updateProfileArgsSchema,
+  writeProfile,
+} from './profile.js'
 import {
   type Proposal,
   type ProposalResolution,
@@ -62,7 +72,8 @@ import {
   pendingWeeklyRollups,
 } from './rollups.js'
 import { type DocKind, MemoryIndex, type SearchHit } from './sqlite.js'
-import { addDaysLocal, formatLocalDate, isValidIanaTimeZone, systemTimeZone } from './time.js'
+import { resolveStyle, type StyleConfig } from './style.js'
+import { addDaysLocal, formatLocalDate, systemTimeZone } from './time.js'
 import { type PublicTranscriptLine, SessionStore, type TranscriptLine } from './transcripts.js'
 
 export type { SequencedGraphRecord } from './graph.js'
@@ -89,6 +100,12 @@ export interface PublicSession {
   updatedAt: string
   status: 'live' | 'ended' | 'expired'
   readOnly: boolean
+  // Set when a session is created or switched, so a browser reload recovers
+  // the mode the conversation is actually in. It is carried onto the ended and
+  // expired tombstones as well, because those are built by spreading the live
+  // view. A stored session's mode lives in its session.json and is not part of
+  // this read-only view.
+  mode?: string
   transcript: {
     lineCount: number
     userCount: number
@@ -463,21 +480,69 @@ export class MemoryEngine {
       : 'system-default'
   }
 
-  // Writes a confirmed personal fact into profile.md and refreshes the
-  // cached copy. Called by the live update_profile tool and by reflection's
-  // profileUpdates backstop; both are the person telling us, so the source
-  // is always 'user-confirmed'.
-  async updateProfile(patch: { timezone?: string }): Promise<Profile> {
-    const current = this.profileCache
-    const meta: Profile['meta'] = { ...current.meta }
-    if (patch.timezone !== undefined) {
-      if (!isValidIanaTimeZone(patch.timezone)) {
-        throw new Error(`"${patch.timezone}" is not a recognized IANA timezone name.`)
+  // The three style axes, with the balanced/warm/listening defaults applied
+  // at read time rather than baked into the file schema, so an unset axis in
+  // profile.md is never mistaken for a chosen one.
+  currentStyle(): StyleConfig {
+    return resolveStyle(this.profileCache.meta.style)
+  }
+
+  // The MODEL-WRITE path: the live update_profile tool and reflection's
+  // profileUpdates both land here. The seven-key allowlist is enforced by
+  // the schema, so there is no representable call that writes style.
+  // Setting a timezone here is a confirmation, so timezoneSource follows.
+  async updateProfile(updates: ProfileUpdates): Promise<Profile> {
+    const parsed = updateProfileArgsSchema.safeParse(updates)
+    if (!parsed.success) {
+      throw new Error(
+        `Invalid profile update: ${parsed.error.issues
+          .map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`)
+          .join('; ')}`,
+      )
+    }
+    const meta: ProfileMeta = { ...this.profileCache.meta }
+    for (const [key, value] of Object.entries(parsed.data)) {
+      if (value !== undefined) meta[key] = value
+    }
+    if (parsed.data.timezone !== undefined) meta.timezoneSource = 'user-confirmed'
+    const next: Profile = { meta, body: this.profileCache.body }
+    await writeProfile(this.paths, next)
+    this.profileCache = next
+    return next
+  }
+
+  // The human path: /style, reverie setup, and the settings pane. It
+  // accepts style and prose, which no model surface may ever write, and it
+  // treats null as "clear this field" so a blank settings box means unknown
+  // rather than an empty string.
+  async updateProfileSettings(patch: ProfileSettingsPatch): Promise<Profile> {
+    const parsed = profileSettingsPatchSchema.safeParse(patch)
+    if (!parsed.success) {
+      throw new Error(
+        `Invalid profile settings: ${parsed.error.issues
+          .map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`)
+          .join('; ')}`,
+      )
+    }
+    const meta: ProfileMeta = { ...this.profileCache.meta }
+    const mutableMeta: Record<string, unknown> = meta
+    for (const key of MODEL_WRITE_FIELDS) {
+      const value = parsed.data[key]
+      if (value === undefined) continue
+      if (value === null) {
+        delete mutableMeta[key]
+      } else {
+        mutableMeta[key] = value
       }
-      meta.timezone = patch.timezone
+    }
+    if (parsed.data.style !== undefined) {
+      meta.style = { ...(meta.style ?? {}), ...parsed.data.style }
+    }
+    if (parsed.data.timezone !== undefined && parsed.data.timezone !== null) {
       meta.timezoneSource = 'user-confirmed'
     }
-    const next: Profile = { meta, body: current.body }
+    const body = parsed.data.prose !== undefined ? parsed.data.prose : this.profileCache.body
+    const next: Profile = { meta, body }
     await writeProfile(this.paths, next)
     this.profileCache = next
     return next
@@ -487,6 +552,29 @@ export class MemoryEngine {
     const store = await SessionStore.start(this.paths, now, this.timezone())
     this.liveItems.set(store.sessionId, [])
     return store.sessionId
+  }
+
+  // Pushed down from AgentSession rather than read up out of it: core
+  // depends on memory, never the other way round, so the mode is told to
+  // the engine instead of the engine reaching for it.
+  //
+  // Written to disk, not held in a map. runMaintenance reflects stale,
+  // unreflected sessions through _doEndSession in a later process: someone
+  // journals for forty minutes, the process dies before /bye, and
+  // reflection runs at the next startup with no live session object
+  // anywhere. An in-memory-only mode would mean no journal entry is ever
+  // written for that session, which is data loss rather than an edge case.
+  async setSessionMode(sessionId: string, mode: string): Promise<void> {
+    const existing = (await SessionStore.readMeta(this.paths, sessionId)) ?? {}
+    await SessionStore.writeMeta(this.paths, sessionId, { ...existing, mode })
+  }
+
+  // The single place that knows how to answer "what mode was this session
+  // in." Same-process and later-process reflection go through this identical
+  // path. A session directory with no session.json, or one that fails to
+  // parse, means the mode is absent. Never a default.
+  async sessionMode(sessionId: string): Promise<string | undefined> {
+    return (await SessionStore.readMeta(this.paths, sessionId))?.mode
   }
 
   async appendTranscript(sessionId: string, line: TranscriptLine): Promise<void> {
@@ -539,6 +627,14 @@ export class MemoryEngine {
     // Does NOT clear warnings; the public endSession or runMaintenance
     // is responsible for warning lifecycle.
     const now = new Date()
+    // Read from disk rather than from any in-memory session registry, so
+    // this works whether or not the process that started the session is the
+    // one ending it. The journal spec's gated write reads this value.
+    //
+    // Consumed by the journal spec's gated entry write. Read here, in the one
+    // place that knows how to answer the question, rather than in two.
+    const sessionModeAtEnd = await this.sessionMode(sessionId)
+    void sessionModeAtEnd
     const transcript = await SessionStore.readTranscript(this.paths, sessionId)
 
     if (!transcript.some((line) => line.role === 'user')) {
@@ -715,18 +811,17 @@ export class MemoryEngine {
     )
     this.liveItems.delete(sessionId)
 
-    // Reflection's timezone backstop. Validated by updateProfile itself,
-    // which rejects anything Intl does not recognize, and swallowed on
-    // failure: a bad zone name from the model must not undo a session that
-    // has already been written to disk.
-    const reportedTimezone = out.profileUpdates?.timezone
-    if (typeof reportedTimezone === 'string' && reportedTimezone.length > 0) {
+    // Reflection's profile backstop. A model that already used the live
+    // update_profile tool during the conversation has written these facts
+    // once already; writing the same confirmed values again here is a
+    // no-op in effect. Validated by updateProfile itself and swallowed on
+    // failure: a bad field from the model must not undo a session that has
+    // already been written to disk.
+    if (out.profileUpdates !== undefined && Object.keys(out.profileUpdates).length > 0) {
       try {
-        await this.updateProfile({ timezone: reportedTimezone })
+        await this.updateProfile(out.profileUpdates)
       } catch (err) {
-        this.warnings.push(
-          `Reflection reported a timezone this session that could not be saved: ${err instanceof Error ? err.message : String(err)}`,
-        )
+        this.warnings.push(`Could not apply reflection's profile updates: ${errorMessage(err)}`)
       }
     }
 
@@ -1531,6 +1626,7 @@ export class MemoryEngine {
       peopleTruncated: cappedPeople.truncated,
       entities: cappedEntities.nodes,
       entitiesTruncated: cappedEntities.truncated,
+      profile: this.profileCache.meta,
     }
   }
 

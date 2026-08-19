@@ -18,7 +18,6 @@ function testConfig(memoryDir: string): ReverieConfig {
     provider: { name: 'openai', apiKeyEnv: 'OPENAI_API_KEY' },
     models: { chat: 'fake-chat', reflection: 'fake-reflect', embeddings: 'fake-embed' },
     safety: { mode: 'companion', resources: [] },
-    style: { engagement: 'balanced', tone: 'warm', orientation: 'listening' },
   }
 }
 

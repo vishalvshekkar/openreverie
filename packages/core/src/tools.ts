@@ -19,18 +19,18 @@ import type {
   ListRealmsOptions,
   MemoryEngine,
 } from '@openreverie/memory'
+import { updateProfileArgsSchema } from '@openreverie/memory'
 import type { ToolCall, ToolDefinition } from '@openreverie/providers'
 import { z } from 'zod'
-import type { StyleConfig } from './config.js'
+import { isModeName, MODE_NAMES, MODES, type ModeName } from './modes.js'
 
-// Core must not know config file paths or how style preferences are
-// persisted: that is a CLI concern. ToolDeps is how a caller injects the
-// one operation dispatchTool needs to fulfil update_style, without core
-// ever importing from the config file layer. Optional because most tests
-// and most tool calls never touch it; when update_style is called without
-// one wired up, dispatch reports that plainly instead of throwing.
-export interface ToolDeps {
-  updateStyle?: (patch: Partial<StyleConfig>) => Promise<StyleConfig>
+// Mode is session state, so it needs no persister and no injected
+// configuration: AgentSession owns it, supplies this hook from runTurn,
+// and therefore works identically in the CLI and the server by
+// construction. This replaces the old ToolDeps, whose only member was a
+// style persister that only the CLI ever wired up.
+export interface ToolHooks {
+  setMode?: (mode: ModeName) => Promise<void>
 }
 
 const searchMemoryArgs = z.strictObject({
@@ -84,21 +84,7 @@ const listEntitiesArgs = z.strictObject({
   limit: z.number().optional(),
 })
 
-const updateStyleArgs = z
-  .strictObject({
-    engagement: z.enum(['leading', 'balanced', 'following']).optional(),
-    tone: z.enum(['warm', 'playful', 'snarky', 'direct', 'formal']).optional(),
-    orientation: z.enum(['listening', 'balanced', 'solutions']).optional(),
-  })
-  .refine(
-    (value) =>
-      value.engagement !== undefined || value.tone !== undefined || value.orientation !== undefined,
-    { message: 'at least one of engagement, tone, or orientation is required' },
-  )
-
-const updateProfileArgs = z.strictObject({
-  timezone: z.string(),
-})
+const setModeArgs = z.strictObject({ mode: z.string() })
 
 export function toolDefinitions(): ToolDefinition[] {
   return [
@@ -361,54 +347,66 @@ export function toolDefinitions(): ToolDefinition[] {
       },
     },
     {
-      name: 'update_style',
+      name: 'set_mode',
       description:
-        'Change how you converse with this person going forward: engagement (leading, balanced, following), tone ' +
-        '(warm, playful, snarky, direct, formal), or orientation (listening, balanced, solutions). Use this only ' +
-        'when the person has actually asked to change how you talk with them, not on your own judgment. At least ' +
-        'one field is required; omit the axes that should stay as they are. The change applies immediately, from ' +
-        'that point in the conversation onward, and is saved so it persists into future sessions.',
+        'Change what this conversation is doing, when the person asks for something this conversation needs. ' +
+        'The modes are: ' +
+        MODE_NAMES.map((name) => `${name} (${MODES[name].summary})`).join('; ') +
+        '. The change lasts for this conversation only and is not saved. If instead they are asking for a ' +
+        'lasting change to how you talk with them in general, do not call this: point them at /style in the ' +
+        'terminal or the settings pane in the browser, and say plainly that you do not change that setting ' +
+        'yourself.',
       parameters: {
         type: 'object',
         properties: {
-          engagement: {
+          mode: {
             type: 'string',
-            enum: ['leading', 'balanced', 'following'],
-            description: 'How much you initiate versus wait to be led.',
-          },
-          tone: {
-            type: 'string',
-            enum: ['warm', 'playful', 'snarky', 'direct', 'formal'],
-            description: 'The register you speak in.',
-          },
-          orientation: {
-            type: 'string',
-            enum: ['listening', 'balanced', 'solutions'],
-            description:
-              'Whether you mostly listen, balance listening and suggesting, or offer next steps.',
+            enum: [...MODE_NAMES],
+            description: 'The mode this conversation should be in from now on.',
           },
         },
+        required: ['mode'],
         additionalProperties: false,
       },
     },
     {
       name: 'update_profile',
       description:
-        'Record a structured personal fact reverie has to read back out in code. Right now that is the ' +
-        "person's timezone, as an IANA name such as Asia/Kolkata or America/New_York. Call this as soon as the " +
-        'person tells you where they are or corrects the timezone you were assuming, rather than waiting for the ' +
-        'end of the conversation. The local times shown on their messages start using it from that point onward.',
+        'Record a plain fact about the person in their profile, the moment you learn it: what they want to be ' +
+        'called, their pronouns, where they live, their timezone, their birthday, what they do. Also record their ' +
+        'answer about birthday greetings when they give it. Write a fact only when they have actually told you; ' +
+        'never infer one, not pronouns from a name, not a location from a timezone, not a birthday from an ' +
+        'offhand remark about turning thirty. This is for the current value of a fact. What a fact means to them, ' +
+        'and how it changed, belongs in the record you write at the end of a session, not here. You cannot change ' +
+        'how you talk with them from this tool; that is /style in the terminal or the settings pane in the browser.',
       parameters: {
         type: 'object',
         properties: {
+          preferredName: {
+            type: 'string',
+            description: 'What to call them, which is not necessarily their legal name.',
+          },
+          pronouns: {
+            type: 'string',
+            description: 'Free text, exactly as they said it. Not a fixed list.',
+          },
+          location: { type: 'string', description: 'Where they live, as they say it.' },
           timezone: {
             type: 'string',
+            description: 'Their IANA timezone, for example Asia/Kolkata or Europe/Berlin.',
+          },
+          birthday: {
+            type: 'string',
+            description: 'MM-DD, or YYYY-MM-DD when they gave the year. Never guess a year.',
+          },
+          occupation: { type: 'string', description: 'Their current role, as they describe it.' },
+          birthdayGreetings: {
+            type: 'boolean',
             description:
-              'The IANA timezone name for where the person actually is, for example Asia/Kolkata or ' +
-              'America/New_York. Not an abbreviation like IST or EST, and not a UTC offset.',
+              'Whether they want you to say something on their birthday. Set this from their own answer, ' +
+              'never on your own judgment.',
           },
         },
-        required: ['timezone'],
         additionalProperties: false,
       },
     },
@@ -419,7 +417,7 @@ export async function dispatchTool(
   engine: MemoryEngine,
   sessionId: string,
   call: ToolCall,
-  deps?: ToolDeps,
+  hooks?: ToolHooks,
 ): Promise<string> {
   const parsedArgs = parseArguments(call.arguments)
   if (!parsedArgs.ok) {
@@ -446,8 +444,8 @@ export async function dispatchTool(
         return await dispatchListPeople(engine, parsedArgs.value)
       case 'list_entities':
         return await dispatchListEntities(engine, parsedArgs.value)
-      case 'update_style':
-        return await dispatchUpdateStyle(deps, parsedArgs.value)
+      case 'set_mode':
+        return await dispatchSetMode(hooks, parsedArgs.value)
       case 'update_profile':
         return await dispatchUpdateProfile(engine, parsedArgs.value)
       default:
@@ -574,49 +572,38 @@ async function dispatchListEntities(engine: MemoryEngine, value: unknown): Promi
   return JSON.stringify(engine.listEntities(options))
 }
 
-async function dispatchUpdateStyle(deps: ToolDeps | undefined, value: unknown): Promise<string> {
-  const parsed = updateStyleArgs.safeParse(value)
-  if (!parsed.success) return errorJson(zodErrorMessage('update_style', parsed.error))
+async function dispatchSetMode(hooks: ToolHooks | undefined, value: unknown): Promise<string> {
+  const parsed = setModeArgs.safeParse(value)
+  if (!parsed.success) return errorJson(zodErrorMessage('set_mode', parsed.error))
 
-  if (!deps?.updateStyle) {
-    return errorJson('update_style is not available in this session: no persister is configured')
+  if (!isModeName(parsed.data.mode)) {
+    return errorJson(`invalid arguments for set_mode: mode must be one of ${MODE_NAMES.join(', ')}`)
   }
-
-  // zod's .optional() fields type as `T | undefined` even though an
-  // absent key in the input yields an absent key in parsed.data, never an
-  // explicit `undefined` value. exactOptionalPropertyTypes distinguishes
-  // "absent" from "present and undefined", so the patch handed to the
-  // persister is rebuilt key-by-key to match Partial<StyleConfig> exactly.
-  const patch: Partial<StyleConfig> = {}
-  if (parsed.data.engagement !== undefined) patch.engagement = parsed.data.engagement
-  if (parsed.data.tone !== undefined) patch.tone = parsed.data.tone
-  if (parsed.data.orientation !== undefined) patch.orientation = parsed.data.orientation
-
-  const style = await deps.updateStyle(patch)
-  return JSON.stringify({
-    ok: true,
-    style,
-    message:
-      'These settings apply from this moment onward in this conversation, and persist into future sessions.',
-  })
+  if (!hooks?.setMode) {
+    return errorJson('set_mode is not available in this session')
+  }
+  await hooks.setMode(parsed.data.mode)
+  return JSON.stringify({ ok: true, mode: parsed.data.mode })
 }
 
-// Unlike update_style, this does not go through ToolDeps. Style lives in
+// Unlike set_mode, this does not go through ToolHooks. Style lives in
 // config.toml, whose path is a CLI concern core must not know; the profile
-// lives in the memory folder, which MemoryEngine already owns. An
-// unrecognized zone name throws inside updateProfile and is turned into a
-// tool error by dispatchTool's own catch, so the model sees its mistake in
-// the transcript and can correct it.
+// lives in the memory folder, which MemoryEngine already owns. The schema
+// is the shared MODEL-WRITE allowlist from @openreverie/memory, so this
+// tool and MemoryEngine.updateProfile can never disagree about what a
+// model may write. An invalid field (an unrecognized timezone, a malformed
+// birthday) is a validation failure here, reported as a tool error rather
+// than thrown, so the model sees its own mistake in the transcript and can
+// correct it.
 async function dispatchUpdateProfile(engine: MemoryEngine, value: unknown): Promise<string> {
-  const parsed = updateProfileArgs.safeParse(value)
+  const parsed = updateProfileArgsSchema.safeParse(value)
   if (!parsed.success) return errorJson(zodErrorMessage('update_profile', parsed.error))
 
-  const profile = await engine.updateProfile({ timezone: parsed.data.timezone })
+  const profile = await engine.updateProfile(parsed.data)
   return JSON.stringify({
     ok: true,
     timezone: profile.meta.timezone,
-    message:
-      'Saved. Local times on their messages use this from now on, in this conversation and in future ones.',
+    message: 'Saved.',
   })
 }
 

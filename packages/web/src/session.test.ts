@@ -193,8 +193,56 @@ describe('sessionReducer', () => {
     expect(state).toEqual({ ...initialChatState, session })
   })
 
+  it('clear-session drops the session entirely, back to the mode-card screen', () => {
+    let state = sessionReducer(initialChatState, { type: 'new-session', session })
+    state = sessionReducer(state, { type: 'turn-start', text: 'hi' })
+    state = sessionReducer(state, { type: 'clear-session' })
+
+    expect(state).toEqual(initialChatState)
+    expect(state.session).toBeNull()
+  })
+
   it('generates a unique turn id for each send', () => {
     expect(newTurnId()).not.toBe(newTurnId())
+  })
+})
+
+describe('mode events', () => {
+  it('starts in general', () => {
+    expect(initialChatState.mode).toBe('general')
+  })
+
+  it('updates the mode from a stream event', () => {
+    const next = sessionReducer(initialChatState, {
+      type: 'stream',
+      event: { schemaVersion: '1', seq: 1, type: 'mode', mode: 'listen' },
+    })
+    expect(next.mode).toBe('listen')
+    expect(next.lastSequence).toBe(1)
+  })
+
+  it('ignores a mode event that is behind the sequence cursor', () => {
+    const state = { ...initialChatState, lastSequence: 5, mode: 'listen' }
+    const next = sessionReducer(state, {
+      type: 'stream',
+      event: { schemaVersion: '1', seq: 3, type: 'mode', mode: 'solve' },
+    })
+    expect(next.mode).toBe('listen')
+  })
+
+  it('resets to general on a new session that reports no mode of its own', () => {
+    const state = { ...initialChatState, mode: 'journal' }
+    const next = sessionReducer(state, { type: 'new-session', session })
+    expect(next.mode).toBe('general')
+  })
+
+  it("adopts the new session's own mode when the session reports one", () => {
+    const state = { ...initialChatState, mode: 'journal' }
+    const next = sessionReducer(state, {
+      type: 'new-session',
+      session: { ...session, mode: 'solve' },
+    })
+    expect(next.mode).toBe('solve')
   })
 })
 

@@ -6,10 +6,20 @@
 // rewrite API here.
 
 import type { FileHandle } from 'node:fs/promises'
-import { access, appendFile, mkdir, open, readdir, readFile } from 'node:fs/promises'
+import {
+  access,
+  appendFile,
+  mkdir,
+  open,
+  readdir,
+  readFile,
+  rename,
+  writeFile,
+} from 'node:fs/promises'
 import { join } from 'node:path'
 import type { ToolCall } from '@openreverie/providers'
-import { decodeTime } from 'ulid'
+import { decodeTime, ulid } from 'ulid'
+import { z } from 'zod'
 import { newId, readDocument } from './documents.js'
 import type { MemoryPaths } from './paths.js'
 import { formatLocalDate, localDateFromStored } from './time.js'
@@ -31,7 +41,21 @@ export interface TranscriptLine {
   content: string
   toolCalls?: ToolCall[]
   toolCallId?: string
+  // Set only on lines the system wrote on the user's behalf, never on a
+  // line the person typed or spoke. true or absent, never false: the
+  // absence of the key means exactly what false would mean, which is why
+  // no existing transcript needs migrating and no reader written before
+  // this field existed breaks on it.
+  synthetic?: true
 }
+
+// A small, mutable piece of per-session metadata, kept in its own file
+// rather than as a marker line in the transcript. The transcript is
+// append-only, and mixing a value that is rewritten on every mode change
+// into that stream would mean either breaking append-only or accumulating
+// one line per change that every transcript reader then has to filter out.
+export const sessionMetaSchema = z.object({ mode: z.string().optional() }).passthrough()
+export type SessionMeta = z.infer<typeof sessionMetaSchema>
 
 export interface PublicTranscriptLine extends TranscriptLine {
   lineSequence: number
@@ -55,6 +79,7 @@ export interface StoredSessionDescription {
 
 const TRANSCRIPT_FILE = 'transcript.jsonl'
 const SUMMARY_FILE = 'summary.md'
+const SESSION_META_FILE = 'session.json'
 const SESSION_DIR_PATTERN = /^(\d{4}-\d{2}-\d{2})-(session_[0-9A-Za-z]+)$/
 
 export class SessionStore {
@@ -156,6 +181,37 @@ export class SessionStore {
       })
     }
     return result
+  }
+
+  static async writeMeta(paths: MemoryPaths, sessionId: string, meta: SessionMeta): Promise<void> {
+    const dir = await findSessionDir(paths, sessionId)
+    const target = join(dir, SESSION_META_FILE)
+    const tmpPath = `${target}.tmp-${ulid()}`
+    await writeFile(tmpPath, `${JSON.stringify(meta)}\n`, 'utf8')
+    await rename(tmpPath, target)
+  }
+
+  // A missing file, an unreadable one, and one that fails to parse all mean
+  // the same thing: this session has no recorded mode. Never a default.
+  static async readMeta(paths: MemoryPaths, sessionId: string): Promise<SessionMeta | undefined> {
+    let dir: string
+    try {
+      dir = await findSessionDir(paths, sessionId)
+    } catch {
+      return undefined
+    }
+    let raw: string
+    try {
+      raw = await readFile(join(dir, SESSION_META_FILE), 'utf8')
+    } catch {
+      return undefined
+    }
+    try {
+      const parsed = sessionMetaSchema.safeParse(JSON.parse(raw))
+      return parsed.success ? parsed.data : undefined
+    } catch {
+      return undefined
+    }
   }
 
   // The one way anything resolves a session directory from an id. It

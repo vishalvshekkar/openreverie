@@ -1,6 +1,6 @@
 import { Buffer } from 'node:buffer'
 import { createHash } from 'node:crypto'
-import { type AgentEvent, AgentSession, type ReverieConfig } from '@openreverie/core'
+import { type AgentEvent, AgentSession, isModeName, type ReverieConfig } from '@openreverie/core'
 import type { MemoryEngine, PublicSession, PublicTranscriptLine } from '@openreverie/memory'
 import { type ChatProvider, ProviderUnavailableError } from '@openreverie/providers'
 import { ApiError } from './api.js'
@@ -21,6 +21,7 @@ export type StreamEvent =
   | { schemaVersion: '1'; seq: number; type: 'thinking' }
   | { schemaVersion: '1'; seq: number; type: 'text'; text: string }
   | { schemaVersion: '1'; seq: number; type: 'tool'; name: string }
+  | { schemaVersion: '1'; seq: number; type: 'mode'; mode: string }
   | { schemaVersion: '1'; seq: number; type: 'done' }
   | {
       schemaVersion: '1'
@@ -35,6 +36,7 @@ type StreamEventInput =
   | { type: 'thinking' }
   | { type: 'text'; text: string }
   | { type: 'tool'; name: string }
+  | { type: 'mode'; mode: string }
   | { type: 'done' }
   | {
       type: 'error'
@@ -142,11 +144,17 @@ export class LiveSessionRegistry {
     return this.closePromise
   }
 
-  async create(): Promise<CreateSessionResponse> {
+  async create(options: { mode?: string } = {}): Promise<CreateSessionResponse> {
     if (this.live.size >= this.maxLiveSessions) {
       throw new ApiError(429, 'session_capacity', 'Too many live sessions are open.')
     }
-    const agent = await AgentSession.start(this.engine, this.config, this.chat)
+    const requested = options.mode
+    if (requested !== undefined && !isModeName(requested)) {
+      throw new ApiError(400, 'invalid_request', 'The request is invalid.')
+    }
+    const agent = await AgentSession.start(this.engine, this.config, this.chat, {
+      ...(requested === undefined ? {} : { mode: requested }),
+    })
     const stored = (await this.engine.listStoredSessions()).find(
       (session) => session.sessionId === agent.sessionId,
     )
@@ -159,6 +167,7 @@ export class LiveSessionRegistry {
         updatedAt: stored?.updatedAt ?? createdAt,
         status: 'live',
         readOnly: false,
+        mode: agent.mode,
         transcript: stored?.transcript ?? emptyTranscript(),
       },
       turns: new Map(),
@@ -265,6 +274,19 @@ export class LiveSessionRegistry {
     return { ...publicSession }
   }
 
+  async setMode(sessionId: string, mode: string): Promise<{ mode: string }> {
+    if (!isModeName(mode)) {
+      throw new ApiError(400, 'invalid_request', 'The request is invalid.')
+    }
+    const live = await this.requireLive(sessionId)
+    // source 'web': a click, with no keystroke behind it, so the /mode line
+    // this writes is marked synthetic.
+    await live.agent.setMode(mode, { source: 'web' })
+    live.public = { ...live.public, mode }
+    live.lastActivity = this.now()
+    return { mode }
+  }
+
   sweep(now = this.now()): void {
     if (this.closed) return
     for (const [sessionId, live] of this.live) {
@@ -305,7 +327,9 @@ export class LiveSessionRegistry {
         return
       }
       for await (const event of live.agent.send(message)) {
-        const recorded = this.record(live, streamEventFromAgent(event))
+        const input = streamEventFromAgent(event)
+        if (input === undefined) continue
+        const recorded = this.record(live, input)
         terminal ||= recorded.type === 'done' || recorded.type === 'error'
       }
       if (!terminal) {
@@ -336,7 +360,10 @@ export class LiveSessionRegistry {
 
   private async recordGreeting(live: LiveSession): Promise<void> {
     try {
-      for await (const event of live.agent.greet()) this.record(live, streamEventFromAgent(event))
+      for await (const event of live.agent.greet()) {
+        const input = streamEventFromAgent(event)
+        if (input !== undefined) this.record(live, input)
+      }
       await this.syncPublic(live)
     } catch {
       // AgentSession.greet intentionally suppresses provider failures. This catch only guards
@@ -476,7 +503,7 @@ const nodeIntervalScheduler: RegistryScheduler = {
   },
 }
 
-function streamEventFromAgent(event: AgentEvent): StreamEventInput {
+function streamEventFromAgent(event: AgentEvent): StreamEventInput | undefined {
   switch (event.type) {
     case 'thinking':
       return { type: 'thinking' }
@@ -484,6 +511,8 @@ function streamEventFromAgent(event: AgentEvent): StreamEventInput {
       return { type: 'text', text: event.text }
     case 'tool':
       return { type: 'tool', name: event.name }
+    case 'mode':
+      return { type: 'mode', mode: event.mode }
     case 'done':
       return { type: 'done' }
   }

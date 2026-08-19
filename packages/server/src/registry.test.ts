@@ -8,6 +8,7 @@ import {
   type ChatProvider,
   type ChatRequest,
   type ChatResult,
+  FakeChatProvider,
   FakeEmbeddingProvider,
   ProviderUnavailableError,
 } from '@openreverie/providers'
@@ -229,6 +230,19 @@ describe('LiveSessionRegistry', () => {
     })
     expect(events.filter((event) => event.type === 'error')).toHaveLength(1)
   })
+
+  it('records a mode event when the model switches mode mid-turn', async () => {
+    const registry = createRegistry({
+      chat: new FakeChatProvider([
+        { text: '', toolCalls: [] }, // greeting
+        { text: '', toolCalls: [{ id: 't1', name: 'set_mode', arguments: '{"mode":"listen"}' }] },
+        { text: 'ok', toolCalls: [] },
+      ]),
+    })
+    const { sessionId } = await registry.create()
+    const events = await collect(registry.message(sessionId, 'turn-1', { message: 'listen to me' }))
+    expect(events.some((event) => event.type === 'mode' && event.mode === 'listen')).toBe(true)
+  })
 })
 
 function createRegistry(
@@ -269,7 +283,6 @@ function testConfig(): ReverieConfig {
     provider: { name: 'openai', apiKey: 'test' },
     models: { chat: 'fake-chat', reflection: 'fake-reflect', embeddings: 'fake-embed' },
     safety: { mode: 'companion', resources: defaultCrisisResources },
-    style: { engagement: 'balanced', tone: 'warm', orientation: 'listening' },
   }
 }
 

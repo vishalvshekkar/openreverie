@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import {
   createServer,
   type IncomingHttpHeaders,
@@ -11,15 +11,24 @@ import { join } from 'node:path'
 import { defaultCrisisResources, type ReverieConfig } from '@openreverie/core'
 import type {
   GraphRecord,
+  Profile,
+  ProfileSettingsPatch,
   PublicDocument,
   PublicDocumentRow,
   PublicGraphEdge,
   PublicGraphNode,
   PublicSession,
   SequencedGraphRecord,
+  StyleConfig,
   TranscriptLine,
 } from '@openreverie/memory'
-import { type EngineDeps, MemoryEngine } from '@openreverie/memory'
+import {
+  type EngineDeps,
+  MemoryEngine,
+  memoryPaths,
+  resolveStyle,
+  writeProfile,
+} from '@openreverie/memory'
 import { FakeChatProvider, FakeEmbeddingProvider } from '@openreverie/providers'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createApp, type RecordEngine } from './app.js'
@@ -194,6 +203,42 @@ class FakeEngine implements RecordEngine {
     const document = this.documents.find((item) => item.docId === id)
     if (document) document.title = title
   }
+
+  profileState: Profile = { meta: { id: 'profile_fake' }, body: '' }
+
+  profile(): Profile {
+    return this.profileState
+  }
+
+  currentStyle(): StyleConfig {
+    return resolveStyle(this.profileState.meta.style)
+  }
+
+  async updateProfileSettings(patch: ProfileSettingsPatch): Promise<Profile> {
+    const meta: Profile['meta'] = { ...this.profileState.meta }
+    const mutableMeta: Record<string, unknown> = meta
+    for (const key of [
+      'preferredName',
+      'pronouns',
+      'location',
+      'timezone',
+      'birthday',
+      'occupation',
+      'birthdayGreetings',
+    ] as const) {
+      const value = patch[key]
+      if (value === undefined) continue
+      if (value === null) {
+        delete mutableMeta[key]
+      } else {
+        mutableMeta[key] = value
+      }
+    }
+    if (patch.style !== undefined) meta.style = { ...(meta.style ?? {}), ...patch.style }
+    if (patch.timezone !== undefined) meta.timezoneSource = 'user-confirmed'
+    this.profileState = { meta, body: patch.prose ?? this.profileState.body }
+    return this.profileState
+  }
 }
 
 describe('record browsing app', () => {
@@ -328,6 +373,14 @@ describe('record browsing app', () => {
         authenticated({ origin }),
       ),
     ).resolves.toMatchObject({ status: 200 })
+  })
+
+  it('reports settings as not found when the app was built without a config', async () => {
+    // createApp({ engine, auth, canonicalOrigin: origin }) in this file's own
+    // beforeEach passes no config, deliberately: config is optional on
+    // CreateAppDeps, and the settings route must not fabricate a default
+    // safety mode nor use a non-null assertion to paper over the absence.
+    await expect(getJson('/api/v1/settings')).resolves.toMatchObject({ status: 404 })
   })
 
   it('enforces read resource bounds and cursor pagination without partial records', async () => {
@@ -673,6 +726,124 @@ describe('live session HTTP routes', () => {
     expect(replay.headers['content-type']).toContain('application/json')
   })
 
+  describe('session mode endpoints', () => {
+    it('starts a session in a requested mode', async () => {
+      const response = await liveRequest(
+        'POST',
+        '/api/v1/sessions',
+        { mode: 'journal' },
+        authenticated({ origin }),
+      )
+      expect(response.status).toBe(201)
+      const json = response.json as { data: { mode: string } }
+      expect(json.data.mode).toBe('journal')
+    })
+
+    it('starts in general when no mode is given', async () => {
+      const response = await liveRequest(
+        'POST',
+        '/api/v1/sessions',
+        undefined,
+        authenticated({ origin }),
+      )
+      const json = response.json as { data: { mode: string } }
+      expect(json.data.mode).toBe('general')
+    })
+
+    it('sets the mode on a live session', async () => {
+      const created = await liveRequest(
+        'POST',
+        '/api/v1/sessions',
+        undefined,
+        authenticated({ origin }),
+      )
+      const sessionId = (created.json as { data: { sessionId: string } }).data.sessionId
+      const response = await liveRequest(
+        'POST',
+        `/api/v1/sessions/${sessionId}/mode`,
+        { mode: 'listen' },
+        authenticated({ origin }),
+      )
+      expect(response.status).toBe(200)
+      expect((response.json as { data: unknown }).data).toEqual({ mode: 'listen' })
+    })
+
+    it('reports the current mode on a live session so a reload recovers it', async () => {
+      const created = await liveRequest(
+        'POST',
+        '/api/v1/sessions',
+        undefined,
+        authenticated({ origin }),
+      )
+      const sessionId = (created.json as { data: { sessionId: string } }).data.sessionId
+      await liveRequest(
+        'POST',
+        `/api/v1/sessions/${sessionId}/mode`,
+        { mode: 'listen' },
+        authenticated({ origin }),
+      )
+      const fetched = await liveRequest(
+        'GET',
+        `/api/v1/sessions/${sessionId}`,
+        undefined,
+        authenticated(),
+      )
+      expect((fetched.json as { data: { mode: string } }).data.mode).toBe('listen')
+    })
+
+    it('rejects an unknown mode with 400', async () => {
+      const created = await liveRequest(
+        'POST',
+        '/api/v1/sessions',
+        undefined,
+        authenticated({ origin }),
+      )
+      const sessionId = (created.json as { data: { sessionId: string } }).data.sessionId
+      const response = await liveRequest(
+        'POST',
+        `/api/v1/sessions/${sessionId}/mode`,
+        { mode: 'moody' },
+        authenticated({ origin }),
+      )
+      expect(response.status).toBe(400)
+    })
+
+    it('returns 404 for a session that is not live', async () => {
+      const response = await liveRequest(
+        'POST',
+        '/api/v1/sessions/session_nope/mode',
+        { mode: 'listen' },
+        authenticated({ origin }),
+      )
+      expect([404, 409]).toContain(response.status)
+    })
+
+    it('marks a mode set from the browser as synthetic in the transcript', async () => {
+      const created = await liveRequest(
+        'POST',
+        '/api/v1/sessions',
+        undefined,
+        authenticated({ origin }),
+      )
+      const sessionId = (created.json as { data: { sessionId: string } }).data.sessionId
+      await liveRequest(
+        'POST',
+        `/api/v1/sessions/${sessionId}/mode`,
+        { mode: 'listen' },
+        authenticated({ origin }),
+      )
+      const transcript = await liveRequest(
+        'GET',
+        `/api/v1/sessions/${sessionId}/transcript`,
+        undefined,
+        authenticated(),
+      )
+      const lines = (transcript.json as { data: { content: string; synthetic?: boolean }[] }).data
+      const modeLine = lines.find((line) => line.content === '/mode listen')
+      expect(modeLine?.synthetic).toBe(true)
+    })
+  })
+
   function authenticated(overrides: Record<string, string> = {}): Record<string, string> {
     return { host, cookie, ...overrides }
   }
@@ -724,12 +895,371 @@ describe('live session HTTP routes', () => {
   }
 })
 
+describe('profile and settings endpoints', () => {
+  let server: Server
+  let memoryDir: string
+  let engine: MemoryEngine
+  let host: string
+  let origin: string
+  let cookie: string
+  let profilePath: string
+
+  async function boot(apiKey = 'test'): Promise<void> {
+    memoryDir = await mkdtemp(join(tmpdir(), 'openreverie-profile-app-'))
+    profilePath = memoryPaths(memoryDir).profile
+    const deps: EngineDeps = {
+      chat: new FakeChatProvider([]),
+      embeddings: new FakeEmbeddingProvider(),
+      reflectionModel: 'fake-reflect',
+      embeddingModel: 'fake-embed',
+    }
+    engine = await MemoryEngine.open(memoryDir, deps, { maintenance: false })
+    const config: ReverieConfig = { ...liveConfig(memoryDir), provider: { name: 'openai', apiKey } }
+    server = createServer()
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address() as AddressInfo
+    host = `127.0.0.1:${address.port}`
+    origin = `http://${host}`
+    const { token, auth } = createBootstrapAuth({
+      origin,
+      now: () => 0,
+      randomBytes: () => Buffer.alloc(32, 9),
+    })
+    server.on('request', createApp({ engine, auth, canonicalOrigin: origin, config }))
+    const bootstrap = await request('POST', '/api/v1/auth/bootstrap', { token }, { host })
+    cookie = bootstrap.headers['set-cookie']?.[0]?.split(';', 1)[0] ?? ''
+  }
+
+  beforeEach(() => boot())
+
+  afterEach(async () => {
+    server.closeAllConnections()
+    if (server.listening) {
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      )
+    }
+    await engine.close()
+    await rm(memoryDir, { recursive: true, force: true })
+  })
+
+  function authenticated(overrides: Record<string, string> = {}): Record<string, string> {
+    return { host, cookie, ...overrides }
+  }
+
+  function request(
+    method: string,
+    path: string,
+    body: unknown,
+    headers: Record<string, string>,
+  ): Promise<{ status: number; headers: IncomingHttpHeaders; json: unknown }> {
+    const text = body === undefined ? undefined : JSON.stringify(body)
+    return new Promise((resolve, reject) => {
+      const req = nodeRequest(
+        {
+          hostname: '127.0.0.1',
+          port: Number(host.split(':')[1]),
+          method,
+          path,
+          agent: false,
+          headers: {
+            connection: 'close',
+            ...(text === undefined
+              ? {}
+              : { 'content-type': 'application/json', 'content-length': Buffer.byteLength(text) }),
+            ...headers,
+          },
+        },
+        (response) => {
+          const chunks: Buffer[] = []
+          response.on('data', (chunk: Buffer) => chunks.push(chunk))
+          response.on('end', () => {
+            const responseBody = Buffer.concat(chunks).toString('utf8')
+            resolve({
+              status: response.statusCode ?? 0,
+              headers: response.headers,
+              json: responseBody === '' ? null : JSON.parse(responseBody),
+            })
+          })
+        },
+      )
+      req.on('error', reject)
+      req.end(text)
+    })
+  }
+
+  describe('profile endpoints', () => {
+    it('returns exactly the whitelisted shape, with nulls for unset fields', async () => {
+      const response = await request('GET', '/api/v1/profile', undefined, authenticated())
+      expect(response.status).toBe(200)
+      const data = (response.json as { data: Record<string, unknown> }).data
+      expect(Object.keys(data).sort()).toEqual(
+        [
+          'birthday',
+          'birthdayGreetings',
+          'location',
+          'occupation',
+          'preferredName',
+          'pronouns',
+          'prose',
+          'style',
+          'timezone',
+        ].sort(),
+      )
+      expect(data.preferredName).toBeNull()
+      expect(data.style).toEqual({ engagement: 'balanced', tone: 'warm', orientation: 'listening' })
+    })
+
+    it('does not echo a hand-added key from profile.md', async () => {
+      await engine.updateProfileSettings({ preferredName: 'Vish' })
+      const current = engine.profile()
+      await writeProfile(memoryPaths(memoryDir), {
+        ...current,
+        meta: { ...current.meta, favouriteTea: 'assam' },
+      })
+      const response = await request('GET', '/api/v1/profile', undefined, authenticated())
+      const data = (response.json as { data: Record<string, unknown> }).data
+      expect('favouriteTea' in data).toBe(false)
+      expect(current.meta.id).toBeDefined()
+    })
+
+    it('never exposes timezoneSource', async () => {
+      const response = await request('GET', '/api/v1/profile', undefined, authenticated())
+      const data = (response.json as { data: Record<string, unknown> }).data
+      expect('timezoneSource' in data).toBe(false)
+    })
+
+    it('writes a patch and returns the same shape', async () => {
+      const response = await request(
+        'PATCH',
+        '/api/v1/profile',
+        { preferredName: 'Vish', style: { tone: 'direct' } },
+        authenticated({ origin }),
+      )
+      expect(response.status).toBe(200)
+      const data = (
+        response.json as { data: Record<string, unknown> & { style: { tone: string } } }
+      ).data
+      expect(data.preferredName).toBe('Vish')
+      expect(data.style.tone).toBe('direct')
+    })
+
+    it('marks a timezone typed into settings as confirmed', async () => {
+      await request(
+        'PATCH',
+        '/api/v1/profile',
+        { timezone: 'Asia/Kolkata' },
+        authenticated({ origin }),
+      )
+      expect(engine.profile().meta.timezoneSource).toBe('user-confirmed')
+    })
+
+    it('rejects an unknown key with 400 and writes nothing', async () => {
+      const before = await readFile(profilePath, 'utf8')
+      const response = await request(
+        'PATCH',
+        '/api/v1/profile',
+        { nickname: 'V' },
+        authenticated({ origin }),
+      )
+      expect(response.status).toBe(400)
+      expect(await readFile(profilePath, 'utf8')).toEqual(before)
+    })
+
+    it('rejects infrastructure keys with 400', async () => {
+      for (const body of [
+        { provider: { apiKey: 'sk-leak' } },
+        { safety: { mode: 'firewall' } },
+        { models: { chat: 'gpt-5' } },
+        { memoryDir: '/tmp/elsewhere' },
+      ]) {
+        const response = await request('PATCH', '/api/v1/profile', body, authenticated({ origin }))
+        expect(response.status).toBe(400)
+      }
+    })
+
+    it('requires write auth for PATCH /api/v1/profile', async () => {
+      const response = await request(
+        'PATCH',
+        '/api/v1/profile',
+        { preferredName: 'V' },
+        authenticated(),
+      )
+      expect(response.status).toBe(403)
+    })
+  })
+
+  describe('settings endpoint', () => {
+    it('returns exactly one field', async () => {
+      const response = await request('GET', '/api/v1/settings', undefined, authenticated())
+      expect(response.status).toBe(200)
+      expect((response.json as { data: unknown }).data).toEqual({ safetyMode: 'companion' })
+    })
+
+    it('has no write route: PATCH and POST are 404', async () => {
+      expect(
+        (await request('PATCH', '/api/v1/settings', {}, authenticated({ origin }))).status,
+      ).toBe(404)
+      expect(
+        (await request('POST', '/api/v1/settings', {}, authenticated({ origin }))).status,
+      ).toBe(404)
+    })
+  })
+})
+
+// By value, not by field name. A field-name assertion would not catch a
+// nested key or an accidental spread of the config object.
+describe('the API key is never reachable', () => {
+  const SENTINEL = 'sk-sentinel-must-never-appear-anywhere'
+  let server: Server
+  let memoryDir: string
+  let engine: MemoryEngine
+  let host: string
+  let origin: string
+  let cookie: string
+  let sessionId: string
+
+  beforeEach(async () => {
+    memoryDir = await mkdtemp(join(tmpdir(), 'openreverie-sentinel-app-'))
+    const chat = new FakeChatProvider([{ text: '', toolCalls: [] }])
+    const deps: EngineDeps = {
+      chat,
+      embeddings: new FakeEmbeddingProvider(),
+      reflectionModel: 'fake-reflect',
+      embeddingModel: 'fake-embed',
+    }
+    engine = await MemoryEngine.open(memoryDir, deps, { maintenance: false })
+    sessionId = await engine.startSession(new Date('2026-08-15T09:00:00.000Z'))
+    await engine.appendTranscript(sessionId, {
+      ts: '2026-08-15T09:00:00.000Z',
+      role: 'user',
+      content: 'Hello.',
+    })
+    const config: ReverieConfig = {
+      ...liveConfig(memoryDir),
+      provider: { name: 'openai', apiKey: SENTINEL },
+    }
+    server = createServer()
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address() as AddressInfo
+    host = `127.0.0.1:${address.port}`
+    origin = `http://${host}`
+    const { token, auth } = createBootstrapAuth({
+      origin,
+      now: () => 0,
+      randomBytes: () => Buffer.alloc(32, 11),
+    })
+    const registry = new LiveSessionRegistry({
+      engine,
+      config,
+      chat,
+      providerAvailable: true,
+      maxReplayEvents: 1,
+      now: () => 0,
+    })
+    server.on('request', createApp({ engine, auth, canonicalOrigin: origin, registry, config }))
+    const bootstrap = await request('POST', '/api/v1/auth/bootstrap', { token }, { host })
+    cookie = bootstrap.headers['set-cookie']?.[0]?.split(';', 1)[0] ?? ''
+  })
+
+  afterEach(async () => {
+    server.closeAllConnections()
+    if (server.listening) {
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      )
+    }
+    await engine.close()
+    await rm(memoryDir, { recursive: true, force: true })
+  })
+
+  function authenticated(overrides: Record<string, string> = {}): Record<string, string> {
+    return { host, cookie, ...overrides }
+  }
+
+  function request(
+    method: string,
+    path: string,
+    body: unknown,
+    headers: Record<string, string>,
+  ): Promise<{ status: number; headers: IncomingHttpHeaders; json: unknown }> {
+    const text = body === undefined ? undefined : JSON.stringify(body)
+    return new Promise((resolve, reject) => {
+      const req = nodeRequest(
+        {
+          hostname: '127.0.0.1',
+          port: Number(host.split(':')[1]),
+          method,
+          path,
+          agent: false,
+          headers: {
+            connection: 'close',
+            ...(text === undefined
+              ? {}
+              : { 'content-type': 'application/json', 'content-length': Buffer.byteLength(text) }),
+            ...headers,
+          },
+        },
+        (response) => {
+          const chunks: Buffer[] = []
+          response.on('data', (chunk: Buffer) => chunks.push(chunk))
+          response.on('end', () => {
+            const responseBody = Buffer.concat(chunks).toString('utf8')
+            resolve({
+              status: response.statusCode ?? 0,
+              headers: response.headers,
+              json: responseBody === '' ? null : JSON.parse(responseBody),
+            })
+          })
+        },
+      )
+      req.on('error', reject)
+      req.end(text)
+    })
+  }
+
+  it('appears in no response body from any endpoint', async () => {
+    const calls: [string, string][] = [
+      ['GET', '/api/v1/profile'],
+      ['GET', '/api/v1/settings'],
+      ['GET', '/api/v1/documents'],
+      ['GET', '/api/v1/sessions'],
+      ['GET', '/api/v1/proposals'],
+      ['GET', '/api/v1/graph/snapshot'],
+      ['GET', `/api/v1/sessions/${sessionId}/transcript`],
+    ]
+    for (const [method, path] of calls) {
+      const response = await request(method, path, undefined, authenticated())
+      expect(JSON.stringify(response.json), `${method} ${path}`).not.toContain(SENTINEL)
+    }
+
+    const patched = await request(
+      'PATCH',
+      '/api/v1/profile',
+      { preferredName: 'V' },
+      authenticated({ origin }),
+    )
+    expect(JSON.stringify(patched.json)).not.toContain(SENTINEL)
+
+    const created = await request('POST', '/api/v1/sessions', undefined, authenticated({ origin }))
+    expect(JSON.stringify(created.json)).not.toContain(SENTINEL)
+    const createdSessionId = (created.json as { data: { sessionId: string } }).data.sessionId
+
+    const moded = await request(
+      'POST',
+      `/api/v1/sessions/${createdSessionId}/mode`,
+      { mode: 'listen' },
+      authenticated({ origin }),
+    )
+    expect(JSON.stringify(moded.json)).not.toContain(SENTINEL)
+  })
+})
+
 function liveConfig(memoryDir: string): ReverieConfig {
   return {
     memoryDir,
     provider: { name: 'openai', apiKey: 'test' },
     models: { chat: 'fake-chat', reflection: 'fake-reflect', embeddings: 'fake-embed' },
     safety: { mode: 'companion', resources: defaultCrisisResources },
-    style: { engagement: 'balanced', tone: 'warm', orientation: 'listening' },
   }
 }

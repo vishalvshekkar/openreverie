@@ -3829,7 +3829,9 @@ describe('MemoryEngine profile', () => {
     })
     const before = engine.timezone()
 
-    await expect(engine.updateProfile({ timezone: 'Nowhere/Fake' })).rejects.toThrow('Nowhere/Fake')
+    await expect(engine.updateProfile({ timezone: 'Nowhere/Fake' })).rejects.toThrow(
+      'is not a recognized IANA timezone',
+    )
     expect(engine.timezone()).toBe(before)
 
     await engine.close()
@@ -3851,6 +3853,97 @@ describe('MemoryEngine profile', () => {
     expect(onDisk.meta.pronouns).toBe('she/her')
     expect(onDisk.meta.timezone).toBe('Europe/Berlin')
 
+    await engine.close()
+  })
+})
+
+describe('profile writes', () => {
+  let dir: string
+  let paths: MemoryPaths
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-profile-writes-'))
+    paths = memoryPaths(dir)
+    await ensureMemoryTree(paths)
+  })
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  // No shared helper for opening an engine against a temp folder exists in
+  // this file (every other block builds one inline), so this follows the
+  // same pattern the "public read projections" and "MemoryEngine profile"
+  // blocks above already use.
+  async function openEngine(): Promise<MemoryEngine> {
+    return MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])), { maintenance: false })
+  }
+
+  it('exposes the cached profile synchronously', async () => {
+    const engine = await openEngine()
+    expect(engine.profile().meta.id).toMatch(/^doc_/)
+    await engine.close()
+  })
+
+  it('writes an allowlisted field and refreshes the cache', async () => {
+    const engine = await openEngine()
+    await engine.updateProfile({ preferredName: 'Vish', occupation: 'nurse' })
+    expect(engine.profile().meta.preferredName).toBe('Vish')
+    expect(engine.profile().meta.occupation).toBe('nurse')
+    await engine.close()
+  })
+
+  it('marks a timezone written through the model path as user-confirmed', async () => {
+    const engine = await openEngine()
+    await engine.updateProfile({ timezone: 'Asia/Kolkata' })
+    expect(engine.profile().meta.timezone).toBe('Asia/Kolkata')
+    expect(engine.profile().meta.timezoneSource).toBe('user-confirmed')
+    await engine.close()
+  })
+
+  it('rejects a style write through the model path', async () => {
+    const engine = await openEngine()
+    await expect(engine.updateProfile({ style: { tone: 'direct' } } as never)).rejects.toThrow(
+      /style/,
+    )
+    await engine.close()
+  })
+
+  it('writes style through the settings path and leaves other fields byte-identical', async () => {
+    const engine = await openEngine()
+    await engine.updateProfile({ preferredName: 'Vish', location: 'Bengaluru' })
+    await engine.updateProfileSettings({ style: { tone: 'direct' } })
+    const profile = engine.profile()
+    expect(profile.meta.style).toEqual({ tone: 'direct' })
+    expect(profile.meta.preferredName).toBe('Vish')
+    expect(profile.meta.location).toBe('Bengaluru')
+    expect(paths.profile.endsWith('profile.md')).toBe(true)
+    await engine.close()
+  })
+
+  it('clears a field when the settings path is given null', async () => {
+    const engine = await openEngine()
+    await engine.updateProfile({ location: 'Bengaluru' })
+    await engine.updateProfileSettings({ location: null })
+    expect(engine.profile().meta.location).toBeUndefined()
+    await engine.close()
+  })
+
+  it('resolves style with the balanced/warm/listening defaults when unset', async () => {
+    const engine = await openEngine()
+    expect(engine.currentStyle()).toEqual({
+      engagement: 'balanced',
+      tone: 'warm',
+      orientation: 'listening',
+    })
+    await engine.close()
+  })
+
+  it('writes the profile atomically, leaving no temp file behind', async () => {
+    const engine = await openEngine()
+    await engine.updateProfile({ preferredName: 'Vish' })
+    const entries = await readdir(paths.root)
+    expect(entries.filter((name) => name.includes('.tmp-'))).toEqual([])
     await engine.close()
   })
 })
@@ -4069,7 +4162,7 @@ describe('reflection profileUpdates', () => {
     await rm(dir, { recursive: true, force: true })
   })
 
-  it('writes a confirmed timezone reported by reflection, and ignores a null or invalid one', async () => {
+  it('writes a confirmed timezone reported by reflection', async () => {
     const reflectionWith = {
       ...emptyReflectionOutput('They moved to Berlin.'),
       profileUpdates: { timezone: 'Europe/Berlin' },
@@ -4097,10 +4190,10 @@ describe('reflection profileUpdates', () => {
     await engine.close()
   })
 
-  it('leaves the timezone alone when reflection reports null', async () => {
+  it('leaves the timezone alone when reflection reports no profile updates', async () => {
     const reflectionWithout = {
       ...emptyReflectionOutput('An ordinary session.'),
-      profileUpdates: { timezone: null },
+      profileUpdates: {},
     }
     const chat = new FakeChatProvider([
       { text: JSON.stringify(reflectionWithout), toolCalls: [] },
@@ -4550,5 +4643,95 @@ describe('reflection receives the full constitution', () => {
 
     await engine.close()
     await rm(dir, { recursive: true, force: true })
+  })
+})
+
+describe('session mode', () => {
+  // No shared helper for opening an engine against a temp folder exists in
+  // this file (every other block builds its own inline, see "profile
+  // writes" above), so this follows the same established pattern rather
+  // than introducing a second one. Tracks every root it creates so afterEach
+  // can clean them all up, since each test opens its own temp folder.
+  const roots: string[] = []
+
+  afterEach(async () => {
+    while (roots.length > 0) {
+      const root = roots.pop()
+      if (root) await rmWithRetry(root)
+    }
+  })
+
+  async function openTestEngine(): Promise<{
+    engine: MemoryEngine
+    root: string
+    deps: EngineDeps
+  }> {
+    const root = await mkdtemp(join(tmpdir(), 'openreverie-engine-session-mode-'))
+    roots.push(root)
+    const paths = memoryPaths(root)
+    await ensureMemoryTree(paths)
+    const deps = fakeDeps(
+      new FakeChatProvider([
+        { text: JSON.stringify(emptyReflectionOutput('A session.')), toolCalls: [] },
+      ]),
+    )
+    const engine = await MemoryEngine.open(root, deps, { maintenance: false })
+    return { engine, root, deps }
+  }
+
+  it('records a mode set at session start', async () => {
+    const { engine } = await openTestEngine()
+    const sessionId = await engine.startSession()
+    await engine.setSessionMode(sessionId, 'listen')
+    expect(await engine.sessionMode(sessionId)).toBe('listen')
+    await engine.close()
+  })
+
+  it('keeps the mode in force at the end, not the whole sequence', async () => {
+    const { engine } = await openTestEngine()
+    const sessionId = await engine.startSession()
+    await engine.setSessionMode(sessionId, 'general')
+    await engine.setSessionMode(sessionId, 'journal')
+    expect(await engine.sessionMode(sessionId)).toBe('journal')
+    await engine.close()
+  })
+
+  it('reports a session with no AgentSession behind it as having no mode', async () => {
+    const { engine } = await openTestEngine()
+    const sessionId = await engine.startSession()
+    expect(await engine.sessionMode(sessionId)).toBeUndefined()
+    await engine.close()
+  })
+
+  // The case section 9.4 exists to close. Holding the mode in an in-memory
+  // map instead of session.json fails here while the same-process cases
+  // above keep passing.
+  it('survives closing and reopening the engine between the write and the read', async () => {
+    const { engine, root, deps } = await openTestEngine()
+    const sessionId = await engine.startSession()
+    await engine.setSessionMode(sessionId, 'journal')
+    await engine.close()
+
+    const reopened = await MemoryEngine.open(root, deps, { maintenance: false })
+    expect(await reopened.sessionMode(sessionId)).toBe('journal')
+    await reopened.close()
+  })
+
+  it('has the mode available at end of session, from a fresh engine instance', async () => {
+    const { engine, root, deps } = await openTestEngine()
+    const sessionId = await engine.startSession()
+    await engine.setSessionMode(sessionId, 'journal')
+    await engine.appendTranscript(sessionId, {
+      ts: new Date().toISOString(),
+      role: 'user',
+      content: 'hello',
+    })
+    await engine.close()
+
+    const reopened = await MemoryEngine.open(root, deps, { maintenance: false })
+    expect(await reopened.sessionMode(sessionId)).toBe('journal')
+    await reopened.endSession(sessionId)
+    expect(await reopened.sessionMode(sessionId)).toBe('journal')
+    await reopened.close()
   })
 })
