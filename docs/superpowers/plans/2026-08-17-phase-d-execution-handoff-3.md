@@ -108,8 +108,8 @@ read each other's half-written build output.
 | E | 9 | `core/context.ts` profile block, 2000 char cap | sonnet | DONE, 897 tests | `8087dab` |
 | F | 10, 11 | `memory/transcripts.ts`, `memory/engine.ts` | sonnet | DONE, 912 tests | `63bda62` (combined, shared test block) |
 | G | 12 | `set_mode` replaces `update_style`, tools/agent/cli | sonnet | DONE, 919 tests | `c80f7bb` |
-| H | 13 | style leaves `config.toml`, migration plus 9 fixtures | sonnet | **NEXT, not started** | |
-| I | 14, 15 | `cli/commands.ts`, the `/mode` `/style` `/settings` `/whoami` table | sonnet | TODO | |
+| H | 13 | style leaves `config.toml`, migration plus 9 fixtures | sonnet | **ONGOING**, dispatched | |
+| I | 14, 15 | `cli/commands.ts`, the `/mode` `/style` `/settings` `/whoami` table | sonnet | NEXT | |
 | J | 16 | persistent status line, `cli/strip.ts` | sonnet | TODO | |
 | K | 17, 18 | `server/registry.ts`, `web/api.ts`, mode stream event and mode over HTTP | sonnet | TODO | |
 | L | 19 | profile/settings endpoints, **the API key that must never be reachable** | sonnet impl, **you verify the key test** | TODO | |
