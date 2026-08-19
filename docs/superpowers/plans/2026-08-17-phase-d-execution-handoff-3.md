@@ -77,6 +77,26 @@ knows what to verify rather than assume.
 | 19 final verification + README | DONE | `17dd15e` |
 | **retrieval merged into design** | DONE | merge `a0bd482`, worktree removed |
 
+### Watch item found in modes Task 14: the EOF loop depends on `bye` staying in the table
+
+`packages/cli/src/chat.ts` treats readline EOF as `line = '/bye'` and lets it flow through
+`parseInput` and `runCommand`. That is the design Task 14 asked for, and it works: there is one
+place that knows what `/bye` does. But it means the ONLY thing ending the input loop on EOF is
+`case 'bye'` returning `'exit'` from the dispatch table.
+
+A Task 14 falsification found what happens if that case ever goes missing: EOF makes
+`io.question` reject immediately, the synthesized `/bye` falls to the unknown-command branch,
+which writes one line and `continue`s, and the loop spins forever. It is not a normal test
+failure. The immediately-rejecting promise is awaited in a tight loop where no macrotask ever
+wins, so the event loop starves, vitest's own timeout never fires, and the run dies at the V8
+level with `ERR_IPC_CHANNEL_CLOSED` instead of a clean assertion diff.
+
+Nothing is broken today: `bye` is in the table and a test covers the EOF path. Recorded because
+the failure mode is a CPU-spinning hang rather than a red test, so whoever removes or renames
+that case will not get a useful signal. If the loop grows a second exit condition, consider
+tracking EOF explicitly and returning on it regardless of what the command table did. That is
+scope beyond the modes plan, so it was NOT done; raise it with the human first.
+
 ### Watch item carried forward from modes Batch B
 
 `profileUpdatesSchema` is a strict object with no nullable field, so a reflection reply
@@ -109,7 +129,7 @@ read each other's half-written build output.
 | F | 10, 11 | `memory/transcripts.ts`, `memory/engine.ts` | sonnet | DONE, 912 tests | `63bda62` (combined, shared test block) |
 | G | 12 | `set_mode` replaces `update_style`, tools/agent/cli | sonnet | DONE, 919 tests | `c80f7bb` |
 | H | 13 | style leaves `config.toml`, migration plus 9 fixtures | sonnet | DONE, 928 tests | `c5ba266` `49f3f3c` |
-| I | 14, 15 | `cli/commands.ts`, the `/mode` `/style` `/settings` `/whoami` table | sonnet | **ONGOING**, dispatched | |
+| I | 14, 15 | `cli/commands.ts`, the `/mode` `/style` `/settings` `/whoami` table | sonnet | 14 DONE 952 tests, 15 **ONGOING** | `ba311c9` |
 | J | 16 | persistent status line, `cli/strip.ts` | sonnet | NEXT | |
 | K | 17, 18 | `server/registry.ts`, `web/api.ts`, mode stream event and mode over HTTP | sonnet | TODO | |
 | L | 19 | profile/settings endpoints, **the API key that must never be reachable** | sonnet impl, **you verify the key test** | TODO | |
