@@ -111,6 +111,13 @@ describe('toolDefinitions', () => {
     expect(kinds.description).toContain('person')
   })
 
+  it('search_memory documents journal and journaling as valid kinds', () => {
+    const definitions = toolDefinitions()
+    const searchMemory = definitions.find((tool) => tool.name === 'search_memory')
+    const description = JSON.stringify(searchMemory?.parameters)
+    expect(description).toContain('journal, journaling')
+  })
+
   // The forget feature is parked: MemoryEngine.forget still exists as
   // dormant code, but no tool exposes it. This guards against it coming
   // back on the tool list by accident, unnoticed, in some later change.

@@ -111,7 +111,7 @@ export function toolDefinitions(): ToolDefinition[] {
             items: { type: 'string' },
             description:
               'Restrict results to these document kinds. Valid values: constitution, realm, arc, summary, ' +
-              'rollup_daily, rollup_weekly, person. Omit to search across all kinds.',
+              'rollup_daily, rollup_weekly, person, journal, journaling. Omit to search across all kinds.',
           },
           after: {
             type: 'string',

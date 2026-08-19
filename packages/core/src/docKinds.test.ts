@@ -41,6 +41,15 @@ const PROMPT_SECTION_CAP: Record<DocKind, number> = {
   rollup_daily: LATEST_DAILY_ROLLUP_CAP,
   rollup_weekly: ROLLUPS_AVAILABLE_CAP,
   person: PEOPLE_SECTION_CAP,
+  // journal entries are never injected into the system prompt: they are reached only through
+  // search_memory and read_document, by design (journal mode design spec, section 4.4). There
+  // is no prompt section for this kind, so no character cap applies.
+  journal: 0,
+  // journaling.md IS injected (context.ts's journalingProtocolSection), but the design spec
+  // (section 4.4) renders it uncapped: no capBody call, no truncation marker, unlike every
+  // other injected kind. Deliberate: a short, user-authored preference note, not an
+  // accumulating document like the constitution. No character cap applies.
+  journaling: 0,
 }
 
 function fakeDeps(): EngineDeps {
@@ -70,9 +79,14 @@ describe('DocKind wiring (P8)', () => {
     }
   })
 
-  it('every kind has a positive prompt cap that is part of the budget', () => {
+  it('every kind has a positive prompt cap that is part of the budget, except kinds declared prompt-exempt', () => {
+    const PROMPT_EXEMPT_KINDS: DocKind[] = ['journal', 'journaling']
     for (const kind of DOC_KINDS) {
       const cap = PROMPT_SECTION_CAP[kind]
+      if (PROMPT_EXEMPT_KINDS.includes(kind)) {
+        expect(cap).toBe(0)
+        continue
+      }
       expect(cap).toBeGreaterThan(0)
       expect(SECTION_CAPS).toContain(cap)
     }
@@ -152,6 +166,27 @@ describe('DocKind indexing and web API wiring', () => {
       body: 'A session summary.\n',
     })
     seeded.push({ kind: 'summary', docId: summaryId })
+
+    const journalEntryId = newId('doc')
+    await writeDocumentAtomic({
+      path: join(paths.journalDir, `2026-08-10-${journalEntryId}.md`),
+      meta: {
+        id: journalEntryId,
+        method: 'examen',
+        entryDate: '2026-08-10',
+        recordedAt: '2026-08-10T21:00:00.000Z',
+      },
+      body: 'A journal entry body.\n',
+    })
+    seeded.push({ kind: 'journal', docId: journalEntryId })
+
+    const journalingId = newId('doc')
+    await writeDocumentAtomic({
+      path: paths.journaling,
+      meta: { id: journalingId },
+      body: 'Once a week, gratitude journaling, hang back.\n',
+    })
+    seeded.push({ kind: 'journaling', docId: journalingId })
 
     expect(seeded.map((s) => s.kind).sort()).toEqual([...DOC_KINDS].sort())
 

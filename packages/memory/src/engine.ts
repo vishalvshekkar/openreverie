@@ -88,6 +88,8 @@ export interface PublicDocumentRow {
   title: string
   updatedAt: string
   readOnly: true
+  method?: string
+  entryDate?: string
 }
 
 export interface PublicDocument extends PublicDocumentRow {
@@ -1764,6 +1766,15 @@ export class MemoryEngine {
     for (const doc of await listDocuments(this.paths.rollupsWeeklyDir, this.onDocSkip)) {
       result.push({ doc, kind: 'rollup_weekly' })
     }
+    for (const doc of await listDocuments(this.paths.journalDir, this.onDocSkip)) {
+      result.push({ doc, kind: 'journal' })
+    }
+    try {
+      result.push({ doc: await readDocument(this.paths.journaling), kind: 'journaling' })
+    } catch {
+      // journaling.md does not exist yet: nobody has journaled in this
+      // memory folder. Not an error, just nothing to index.
+    }
 
     let sessionEntries: string[] = []
     try {
@@ -2162,12 +2173,18 @@ function errorMessage(err: unknown): string {
 }
 
 function publicDocumentRow(doc: Document, kind: DocKind): PublicDocumentRow {
-  return {
+  const base: PublicDocumentRow = {
     docId: doc.meta.id,
     kind,
     title: documentTitle(doc),
     updatedAt: documentUpdatedAt(doc),
     readOnly: true,
+  }
+  if (kind !== 'journal') return base
+  return {
+    ...base,
+    ...(typeof doc.meta.method === 'string' ? { method: doc.meta.method } : {}),
+    ...(typeof doc.meta.entryDate === 'string' ? { entryDate: doc.meta.entryDate } : {}),
   }
 }
 
@@ -2178,7 +2195,7 @@ function documentTitle(doc: Document): string {
 }
 
 function documentUpdatedAt(doc: Document): string {
-  for (const key of ['updated', 'date', 'week']) {
+  for (const key of ['updated', 'date', 'week', 'recordedAt']) {
     const value = doc.meta[key]
     if (typeof value === 'string') return value
   }

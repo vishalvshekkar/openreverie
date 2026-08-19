@@ -3618,6 +3618,88 @@ describe('MemoryEngine', () => {
       await engine.close()
     })
   })
+
+  describe('journal document kind', () => {
+    let dir: string
+    let paths: MemoryPaths
+
+    beforeEach(async () => {
+      dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-journal-'))
+      paths = memoryPaths(dir)
+      await ensureMemoryTree(paths)
+    })
+
+    afterEach(async () => {
+      await rm(dir, { recursive: true, force: true })
+    })
+
+    it('walkAllDocuments (via listPublicDocuments) includes a hand-written journal entry', async () => {
+      await writeDocumentAtomic({
+        path: join(paths.journalDir, '2026-08-16-doc_01JZZZ.md'),
+        meta: {
+          id: 'doc_01JZZZ',
+          kind: 'journal',
+          method: 'gratitude',
+          mode: 'journal',
+          entryDate: '2026-08-16',
+          recordedAt: '2026-08-16T21:04:00.000Z',
+          session: 'session_01JAAA',
+        },
+        body: 'Grateful for a quiet morning.\n',
+      })
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const rows = await engine.listPublicDocuments()
+      const journalRow = rows.find((row) => row.kind === 'journal')
+      expect(journalRow?.docId).toBe('doc_01JZZZ')
+      expect(journalRow?.method).toBe('gratitude')
+      expect(journalRow?.entryDate).toBe('2026-08-16')
+      await engine.close()
+    })
+
+    it('walkAllDocuments includes journaling.md, once it exists, with kind journaling', async () => {
+      await writeDocumentAtomic({
+        path: paths.journaling,
+        meta: { id: 'doc_01JZZZ2', kind: 'journaling', updated: '2026-08-16T21:04:00.000Z' },
+        body: 'Gratitude, three times a week.\n',
+      })
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const rows = await engine.listPublicDocuments()
+      expect(rows.find((row) => row.kind === 'journaling')?.docId).toBe('doc_01JZZZ2')
+      await engine.close()
+    })
+
+    it('walkAllDocuments does not fail when journaling.md is absent', async () => {
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const rows = await engine.listPublicDocuments()
+      expect(rows.find((row) => row.kind === 'journaling')).toBeUndefined()
+      await engine.close()
+    })
+
+    it('a journal row without a name-worthy title reports method and entryDate as its own fields, not folded into title', async () => {
+      await writeDocumentAtomic({
+        path: join(paths.journalDir, '2026-08-16-doc_01JZZZ.md'),
+        meta: {
+          id: 'doc_01JZZZ',
+          kind: 'journal',
+          method: 'examen',
+          mode: 'journal',
+          entryDate: '2026-08-16',
+          recordedAt: '2026-08-16T21:04:00.000Z',
+          session: 'session_01JAAA',
+        },
+        body: 'Right now, tired but okay.\n',
+      })
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const doc = await engine.getPublicDocument('doc_01JZZZ')
+      expect(doc?.method).toBe('examen')
+      expect(doc?.entryDate).toBe('2026-08-16')
+      await engine.close()
+    })
+  })
 })
 
 describe('buildReflectionContext people and entities wiring', () => {
