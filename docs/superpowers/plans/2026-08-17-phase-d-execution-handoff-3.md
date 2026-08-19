@@ -146,9 +146,9 @@ read each other's half-written build output.
 | H | 13 | style leaves `config.toml`, migration plus 9 fixtures | sonnet | DONE, 928 tests | `c5ba266` `49f3f3c` |
 | I | 14, 15 | `cli/commands.ts`, the `/mode` `/style` `/settings` `/whoami` table | sonnet | DONE, 962 tests | `ba311c9` `9272fd1` |
 | J | 16 | persistent status line, `cli/strip.ts` | sonnet | DONE, 974 tests | `1c644b2` |
-| K | 17, 18 | `server/registry.ts`, `web/api.ts`, mode stream event and mode over HTTP | sonnet | **ONGOING**, dispatched | |
-| L | 19 | profile/settings endpoints, **the API key that must never be reachable** | sonnet impl, **you verify the key test** | NEXT | |
-| M | 20, 21 | `web/views/*` journal and settings destinations, mode picker | sonnet | TODO | |
+| K | 17, 18 | `server/registry.ts`, `web/api.ts`, mode stream event and mode over HTTP | sonnet | DONE, 990 tests | `fa7499d` (combined, shared file) |
+| L | 19 | profile/settings endpoints, **the API key that must never be reachable** | sonnet impl, **you verify the key test** | **ONGOING**, dispatched | |
+| M | 20, 21 | `web/views/*` journal and settings destinations, mode picker | sonnet | NEXT | |
 | N | 22 | README | **you, personally** | TODO | |
 
 Batch D is the safety batch: Task 7 (stance doctrine), Task 7A (the one identity sentence the
