@@ -180,6 +180,22 @@ Phase D is not finished until all five have shipped and merged into `feat/phase-
 design has merged to `main`. Merging design into `main` and cutting a release is the human's call:
 raise it and wait. `main` is at `e72377b` (v0.5.0) and is a long way behind.
 
+**UPDATE, next session: the human gave the go-ahead and it happened.** `feat/phase-d-design` was
+fast-forward merged into `main` at `8be4993` (152 commits ahead, 0 behind, zero conflict risk
+confirmed before merging). Before merging, the untracked mode-at-launch design spec was committed
+(`8be4993` itself) since the handoff doc already referenced it. On `main`, in order: fixed a real
+CLI dispatcher bug found by hand-testing the exact commands this document's item 7 pointed at
+(`migrate --dry-run` and `migrate --list` were rejected as unrecognized options before ever
+reaching `runMigrate`, TDD RED/GREEN/FALSIFY, `866fa0f`), bumped all seven `package.json` files and
+the pinned version test to 0.6.0 (`6c0dc0b`), fixed `docs/retrieval.md`'s stale date-filter section
+(it still described the pre-fix `dateFromPath` behavior and claimed the fix was unimplemented;
+verified against `dateSpan.ts` and `sqlite.ts` directly, `682cc61`), fixed `CONTRIBUTING.md`'s
+"project is in its design phase" closing paragraph, stale since v0.1.0 (`7e8c680`), and added
+v0.5.0's and v0.6.0's own paragraphs to `ROADMAP.md`'s Done section (v0.5.0 never had one; the
+human's own uncommitted BUSL-license note in "Up next" item 6 was preserved untouched via
+`git stash push -- ROADMAP.md` / `pop`, not swept up, `53d32a4`). Full gate re-run on `main` after
+every change: build 0, lint 0, 1134/1134.
+
 ## MANUAL TESTING QUEUE, deliberately deferred, visit together near the end
 
 An automated gate (`tsc`, `vitest`, `biome`) proves the code is correct, not that a feature works.
