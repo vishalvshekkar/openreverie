@@ -503,9 +503,19 @@ the real invocation and what each trial caught.
    conversation itself (the one thing no automated test can cover). Do not run it unless a future
    session is explicitly asked to.
 
-2. Phase D is not finished until design merges to `main`. That merge, and cutting a release, is
-   the human's call: raise it and wait. Nothing else in this document's own record is blocking that
-   merge.
+2. ~~Phase D is not finished until design merges to `main`. That merge, and cutting a release, is
+   the human's call: raise it and wait.~~ **DONE, next session.** The human asked directly for the
+   merge, a release, and a documentation pass. `feat/phase-d-design` merged to `main` at `8be4993`,
+   version bumped to 0.6.0 across all seven manifests, tagged `v0.6.0`, pushed, and released at
+   https://github.com/vishalvshekkar/openreverie/releases/tag/v0.6.0. GitHub's own CI (not just the
+   local gate) passed on the push: lint, build, test all green. README restructured for a public
+   first impression (Opus subagent, `general-purpose`, explicitly authorized and pinned by the
+   human's own subagent-model policy; orchestrator diff-reviewed the output against the pinned
+   `release.test.ts` strings, grepped for em dashes and tropes itself, and verified two of the
+   agent's own flagged uncertainties against source before accepting them). Phase D is now fully
+   shipped. The MANUAL TESTING QUEUE above is still open and is the next session's responsibility
+   if the human wants it run; otherwise this document's job is done and it should not be treated as
+   an active resume state for a not-yet-started task.
 
 ## DO THIS FIRST: a design workshop on mode at launch — DONE
 
