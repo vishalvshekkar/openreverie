@@ -31,4 +31,4 @@ Node 22 or newer, pnpm 10.
 
 ## Scope honesty
 
-The project is in its design phase. Until the memory engine lands and stabilizes, large feature PRs are premature; small, well-understood improvements and issue reports are the useful contributions right now.
+The core has shipped and stabilized: the memory engine, agent loop, both safety modes, a terminal app, and a browser interface all work today (see the README's Status section for the full list). Large feature PRs still need a direction discussion first (see Ground rules above). [ROADMAP.md](ROADMAP.md) lists what is next, from project-sized work like provider adapters down to small, specific fixes; start there.
