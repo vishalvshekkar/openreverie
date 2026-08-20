@@ -78,12 +78,14 @@ A search runs these steps in order (`packages/memory/src/retrieval.ts:31-51`):
    brute-force linear scan: there is no ANN index and no vector extension
    such as `sqlite-vec` in the loop. These three steps run in sequence, not
    in parallel (`packages/memory/src/retrieval.ts:39-43`).
-4. **Fuse and filter.** The two ranked lists are combined with reciprocal
-   rank fusion (`packages/memory/src/retrieval.ts:53-95`): each document's
-   score is the sum of `1 / (60 + rank)` over every list it appears in
-   (`RRF_K = 60`), deduplicated by document id. There is no reranking model
-   or second pass over the fused list; RRF is the entire ranking step.
-   `after`/`before` date filters, if given, are applied after fusion.
+4. **Fuse.** The two ranked lists are combined with reciprocal rank fusion
+   (`packages/memory/src/retrieval.ts:76-95`): each document's score is the
+   sum of `1 / (60 + rank)` over every list it appears in (`RRF_K = 60`),
+   deduplicated by document id. There is no reranking model or second pass
+   over the fused list; RRF is the entire ranking step. `after`/`before`
+   date filters run earlier than this, inside `searchText` and
+   `searchVector`'s own SQL, against a date span stored on each document
+   row (see Known limitations below).
 
 Each search pulls up to 20 candidates from each of text and vector search
 (`CANDIDATE_LIMIT`) before fusion, and returns up to 8 results by default
@@ -108,22 +110,25 @@ today.
 logic. Results are not passed through a cross-encoder or any second-pass
 scoring.
 
-**Date filters are silently unreliable for most document kinds.** `after`
-and `before` only work correctly for documents whose path encodes a date:
-daily rollups (`rollups/daily/<date>.md`) and session summaries
-(`sessions/<date>-<sessionId>/summary.md`). The filter,
-`dateFromPath` in `packages/memory/src/retrieval.ts:112-146`, only reads a
-date from the start of a path segment. For every other kind, arcs, realms,
-person pages, the constitution, and weekly rollups, the path carries no
-date, and an undated hit is never excluded by a date filter
-(`packages/memory/src/retrieval.ts:114-116`). In practice this means a
-date-filtered search over-includes: an arc or person page can show up in
-results for a date range it has nothing to do with. The `search_memory` tool
-description makes no mention of this; it describes the filter as if it
-applied uniformly. A spec at
-`docs/superpowers/specs/2026-08-16-context-and-retrieval-design.md` is in
-progress to address this. As of this writing the fix it describes is not
-implemented in code, regardless of the spec's own state.
+**Date filters are precise for point-in-time documents and deliberately
+absent for living ones.** Each document's date span is computed once at
+index time by `documentDateSpan` (`packages/memory/src/dateSpan.ts`) and
+stored in the `date_start`/`date_end` columns added to `documents`. Session
+summaries and daily rollups get a single-day span from their `date`
+frontmatter, journal entries get one from `entryDate`, and weekly rollups
+get a Monday-to-Sunday span from their `week` frontmatter. `after`/`before`
+range-check against that stored span directly in `searchText` and
+`searchVector`'s SQL (`dateClause`, `packages/memory/src/sqlite.ts:665-679`).
+The constitution, and realm, arc, person, and journaling-protocol documents
+are continuously rewritten and have no one date they are about, so
+`documentDateSpan` returns null for them, and `dateClause` never excludes a
+null-span row no matter what filter is given. That is a stated, tested
+property of exactly those kinds, not a residual gap: a date-filtered search
+still surfaces an arc or person page outside the requested range, by design,
+alongside whichever point-in-time hits the filter actually narrowed. The
+`search_memory` tool's own `after`/`before` parameter descriptions
+(`packages/core/src/tools.ts:131-148`) state this distinction directly, so
+the model is not left to infer it.
 
 **Entities are not searchable.** Entities (books, films, companies, places,
 and the like) only ever get a graph node, never a document, so they never
