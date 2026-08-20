@@ -3,8 +3,8 @@
 // docs/superpowers/specs/2026-08-16-cli-polish-and-ci-fix-design.md
 // section 1.3 for the required top-level layout and the reflect/doctor
 // examples this module's other blocks follow the shape of. Each
-// per-subcommand block restates what README.md's Usage section already
-// says about that command, rather than diverging from it.
+// per-subcommand block restates what README.md's Command reference section
+// already says about that command, rather than diverging from it.
 
 export const TOP_LEVEL_HELP = `reverie: a self-hosted companion agent with a memory that does not forget.
 
