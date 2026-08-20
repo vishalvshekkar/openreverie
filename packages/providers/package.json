@@ -3,7 +3,7 @@
   "version": "0.6.0",
   "description": "Model provider abstraction for openreverie: chat and embedding interfaces with swappable adapters.",
   "homepage": "https://reverie.my",
-  "license": "AGPL-3.0-only",
+  "license": "FSL-1.1-ALv2",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

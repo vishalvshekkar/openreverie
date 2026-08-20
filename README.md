@@ -2,7 +2,7 @@
 
 A self-hosted companion agent with a memory that does not forget.
 
-openreverie is an open-source agent you run on your own machine. You talk to it about what you are dealing with and working toward: struggles, plans, patterns, good things and hard things. It remembers all of it, organizes it into an evolving record of your life, and brings that context into every new conversation. It is built for personal reflection and mental wellbeing, and it is yours: your data lives in a folder you own, readable in any text editor, versioned with git.
+openreverie is a source-available agent you run on your own machine. You talk to it about what you are dealing with and working toward: struggles, plans, patterns, good things and hard things. It remembers all of it, organizes it into an evolving record of your life, and brings that context into every new conversation. It is built for personal reflection and mental wellbeing, and it is yours: your data lives in a folder you own, readable in any text editor, versioned with git.
 
 Website: [reverie.my](https://reverie.my)
 
@@ -55,7 +55,7 @@ Each conversation starts with your constitution, active arcs, and recent context
 
 ## Why this exists
 
-Tools that hold your most personal thoughts should not live on someone else's servers under someone else's business model. openreverie is self-hosted and open source. The one honest caveat: when you use a hosted model provider (OpenAI, Anthropic, and others), your conversation text is sent to that provider for inference. The provider layer is swappable by design so that local models can close that gap for people who want it fully private.
+Tools that hold your most personal thoughts should not live on someone else's servers under someone else's business model. openreverie is self-hosted and source-available: you can read every line, run it yourself, and modify it for your own use. See [License](#license) below for the one commercial restriction and when it lifts. The other honest caveat: when you use a hosted model provider (OpenAI, Anthropic, and others), your conversation text is sent to that provider for inference. The provider layer is swappable by design so that local models can close that gap for people who want it fully private.
 
 ## Conversation modes
 
@@ -230,4 +230,6 @@ Contributions are welcome from people who know what they are doing. Please read 
 
 ## License
 
-[AGPL-3.0](LICENSE). You can run it, change it, and share it. If you host a modified version for others, you must share your changes.
+[Functional Source License 1.1, Apache 2.0 future license](LICENSE) (FSL-1.1-ALv2). This is source-available, not OSI-approved open source: the [Open Source Initiative](https://opensource.org/) requires a license not to restrict commercial use, and this one does, deliberately.
+
+In plain terms: you can read, run, modify, and self-host openreverie for anything except reselling or rehosting it (or a modified version of it) as a competing commercial product or service. Internal use, non-commercial research and education, and professional services you provide using it are all explicitly permitted. Two years after each version is published, that version automatically becomes available under the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0), a permissive, fully open-source license, with no action required from anyone.
