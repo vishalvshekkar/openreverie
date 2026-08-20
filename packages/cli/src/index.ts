@@ -47,6 +47,13 @@ const KNOWN_SUBCOMMANDS = new Set([
   'doctor',
 ])
 
+// Flags a subcommand accepts beyond the global ones (--config, --help).
+// Without this, the blanket unknown-flag scan below would reject them
+// before they ever reach the subcommand's own handler.
+const SUBCOMMAND_FLAGS: Record<string, Set<string>> = {
+  migrate: new Set(['--dry-run', '--list']),
+}
+
 // Colors are read from real process state exactly once, here at the edge:
 // disabled when stdout is not a TTY (piped, redirected, or captured by a
 // test harness) or when NO_COLOR is set, per the NO_COLOR convention. Every
@@ -217,7 +224,11 @@ export async function mainWith(args: string[], deps: CliMainDeps): Promise<void>
   const { configOverride, rest } = extraction
   const configPath = configOverride ?? deps.configPath
 
-  const unknownFlag = rest.find((token) => token.startsWith('-'))
+  const subcommand = rest[0]
+  const allowedSubcommandFlags = subcommand !== undefined ? SUBCOMMAND_FLAGS[subcommand] : undefined
+  const unknownFlag = rest.find(
+    (token) => token.startsWith('-') && !(allowedSubcommandFlags?.has(token) ?? false),
+  )
   if (unknownFlag !== undefined) {
     deps.write(
       `reverie: unknown option '${unknownFlag}'\nRun 'reverie --help' for a list of options.\n`,
@@ -226,7 +237,6 @@ export async function mainWith(args: string[], deps: CliMainDeps): Promise<void>
     return
   }
 
-  const subcommand = rest[0]
   if (subcommand !== undefined && !KNOWN_SUBCOMMANDS.has(subcommand)) {
     deps.write(
       `reverie: unknown command '${subcommand}'\nRun 'reverie --help' for a list of commands.\n`,

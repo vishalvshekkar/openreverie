@@ -341,6 +341,36 @@ describe('mainWith migrate', () => {
     expect(runMigrateDepConfigPath).toBe('/custom.toml')
     process.exitCode = 0
   })
+
+  it('migrate --dry-run reaches runMigrate instead of being rejected as an unknown option', async () => {
+    let runMigrateCalledWith: string[] | undefined
+    const { deps } = testDeps({
+      runMigrate: async (args) => {
+        runMigrateCalledWith = args
+        return 0
+      },
+    })
+
+    await mainWith(['migrate', '--dry-run'], deps)
+
+    expect(runMigrateCalledWith).toEqual(['--dry-run'])
+    process.exitCode = 0
+  })
+
+  it('migrate --list reaches runMigrate instead of being rejected as an unknown option', async () => {
+    let runMigrateCalledWith: string[] | undefined
+    const { deps } = testDeps({
+      runMigrate: async (args) => {
+        runMigrateCalledWith = args
+        return 0
+      },
+    })
+
+    await mainWith(['migrate', '--list'], deps)
+
+    expect(runMigrateCalledWith).toEqual(['--list'])
+    process.exitCode = 0
+  })
 })
 
 describe('mainWith chat interrupt exit code', () => {
