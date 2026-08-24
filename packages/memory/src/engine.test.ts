@@ -18,6 +18,7 @@ import { loadProfile, writeProfile } from './profile.js'
 import { appendProposals, type Proposal, pendingProposals } from './proposals.js'
 import { applyReflection, type ReflectionItem, type ReflectionOutput } from './reflection.js'
 import { buildDailyRollup } from './rollups.js'
+import { formatLocalDate } from './time.js'
 import { SessionStore } from './transcripts.js'
 
 async function rmWithRetry(path: string, attempts = 3, delayMs = 50): Promise<void> {
@@ -94,10 +95,6 @@ describe('rmWithRetry', () => {
 })
 
 const execFileAsync = promisify(execFile)
-
-function isoDate(date: Date): string {
-  return date.toISOString().slice(0, 10)
-}
 
 async function pinTimezoneUtc(paths: MemoryPaths): Promise<void> {
   const profile = await loadProfile(paths)
@@ -387,7 +384,10 @@ describe('MemoryEngine', () => {
       await engine.endSession(sessionId)
 
       // Summary landed on disk as the commit marker for reflection.
-      const sessionDir = join(paths.sessionsDir, `${isoDate(startedAt)}-${sessionId}`)
+      const sessionDir = join(
+        paths.sessionsDir,
+        `${formatLocalDate(startedAt, engine.timezone())}-${sessionId}`,
+      )
       const summaryDoc = await readDocument(join(sessionDir, 'summary.md'))
       expect(summaryDoc.body).toBe(`${scriptedReflection.summary}\n`)
       const items = summaryDoc.meta.items as ReflectionItem[]
@@ -537,7 +537,7 @@ describe('MemoryEngine', () => {
 
       const engine = await MemoryEngine.open(dir, deps)
 
-      const staleDate = isoDate(twoDaysAgo)
+      const staleDate = formatLocalDate(twoDaysAgo, 'UTC')
       const staleSummary = await readDocument(
         join(paths.sessionsDir, `${staleDate}-${staleStore.sessionId}`, 'summary.md'),
       )
@@ -546,7 +546,7 @@ describe('MemoryEngine', () => {
       const staleDaily = await readDocument(join(paths.rollupsDailyDir, `${staleDate}.md`))
       expect(staleDaily.body.length).toBeGreaterThan(0)
 
-      const yesterdayDate = isoDate(yesterday)
+      const yesterdayDate = formatLocalDate(yesterday, 'UTC')
       const yesterdayDaily = await readDocument(join(paths.rollupsDailyDir, `${yesterdayDate}.md`))
       expect(yesterdayDaily.body.length).toBeGreaterThan(0)
 
@@ -577,7 +577,7 @@ describe('MemoryEngine', () => {
 
       expect(chat.requests).toHaveLength(0)
 
-      const yesterdayDate = isoDate(yesterday)
+      const yesterdayDate = formatLocalDate(yesterday, 'UTC')
       await expect(
         readDocument(join(paths.rollupsDailyDir, `${yesterdayDate}.md`)),
       ).rejects.toThrow()
@@ -1620,7 +1620,10 @@ describe('MemoryEngine', () => {
         await chmod(paths.arcsDir, 0o700)
       }
 
-      const sessionDir = join(paths.sessionsDir, `${isoDate(new Date())}-${sessionId}`)
+      const sessionDir = join(
+        paths.sessionsDir,
+        `${formatLocalDate(new Date(), engine.timezone())}-${sessionId}`,
+      )
       await expect(readDocument(join(sessionDir, 'summary.md'))).rejects.toThrow()
 
       const graph = await readGraph(paths)
@@ -1690,7 +1693,7 @@ describe('MemoryEngine', () => {
 
       const staleSessionDir = join(
         paths.sessionsDir,
-        `${isoDate(twoDaysAgo)}-${staleStore.sessionId}`,
+        `${formatLocalDate(twoDaysAgo, 'UTC')}-${staleStore.sessionId}`,
       )
       await expect(readDocument(join(staleSessionDir, 'summary.md'))).rejects.toThrow()
 
@@ -2383,7 +2386,11 @@ describe('MemoryEngine', () => {
       await expect(engine.endSession(sessionId)).resolves.toBeUndefined()
 
       const summaryDoc = await readDocument(
-        join(paths.sessionsDir, `${isoDate(new Date())}-${sessionId}`, 'summary.md'),
+        join(
+          paths.sessionsDir,
+          `${formatLocalDate(new Date(), engine.timezone())}-${sessionId}`,
+          'summary.md',
+        ),
       )
       expect(summaryDoc.body).toBe(`${out.summary}\n`)
 
@@ -2550,7 +2557,7 @@ describe('MemoryEngine', () => {
       // caught even if it happened to be outranked in the fused results.
       const summaryPath = join(
         paths.sessionsDir,
-        `${isoDate(startedAt)}-${sessionId}`,
+        `${formatLocalDate(startedAt, engine.timezone())}-${sessionId}`,
         'summary.md',
       )
       const hits = (await engine.search('reflection')).documents
@@ -2916,7 +2923,7 @@ describe('MemoryEngine', () => {
       const context = await engine.sessionContext()
 
       expect(context.recentIntentions).toEqual([
-        { text: 'Call the dentist next week.', date: isoDate(yesterday) },
+        { text: 'Call the dentist next week.', date: formatLocalDate(yesterday, 'UTC') },
       ])
 
       await engine.close()
@@ -2947,7 +2954,11 @@ describe('MemoryEngine', () => {
       const context = await engine.sessionContext()
 
       expect(context.recentIntentions).toEqual([
-        { text: 'See Nightfall with Arjun.', date: isoDate(yesterday), eventTime: 'this evening' },
+        {
+          text: 'See Nightfall with Arjun.',
+          date: formatLocalDate(yesterday, 'UTC'),
+          eventTime: 'this evening',
+        },
       ])
 
       await engine.close()
@@ -2985,7 +2996,7 @@ describe('MemoryEngine', () => {
 
         const summaryPath = join(
           paths.sessionsDir,
-          `${isoDate(startedAt)}-${sessionId}`,
+          `${formatLocalDate(startedAt, engine.timezone())}-${sessionId}`,
           'summary.md',
         )
         const summaryDoc = await readDocument(summaryPath)
@@ -3677,7 +3688,10 @@ describe('MemoryEngine', () => {
         content: 'Jo and I had a falling out.',
       })
 
-      const sessionDir = join(forgetPaths.sessionsDir, `${isoDate(startedAt)}-${sessionId}`)
+      const sessionDir = join(
+        forgetPaths.sessionsDir,
+        `${formatLocalDate(startedAt, engine.timezone())}-${sessionId}`,
+      )
       const transcriptPath = join(sessionDir, 'transcript.jsonl')
       const before = await readFile(transcriptPath, 'utf8')
 

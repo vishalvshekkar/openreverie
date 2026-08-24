@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import {
   appendGraph,
   type EngineDeps,
+  formatLocalDate,
   MemoryEngine,
   memoryPaths,
   newId,
@@ -36,10 +37,6 @@ function fakeDeps(chat: FakeChatProvider = new FakeChatProvider([])): EngineDeps
 
 function call(name: string, args: unknown): ToolCall {
   return { id: 'call_1', name, arguments: JSON.stringify(args) }
-}
-
-function isoDate(date: Date): string {
-  return date.toISOString().slice(0, 10)
 }
 
 // ReflectionOutput itself is not part of @openreverie/memory's public
@@ -455,7 +452,11 @@ describe('dispatchTool', () => {
     await engine.endSession(sessionId)
 
     const paths = memoryPaths(dir)
-    const summaryPath = join(paths.sessionsDir, `${isoDate(startedAt)}-${sessionId}`, 'summary.md')
+    const summaryPath = join(
+      paths.sessionsDir,
+      `${formatLocalDate(startedAt, engine.timezone())}-${sessionId}`,
+      'summary.md',
+    )
     const summaryDoc = await readDocument(summaryPath)
     const items = summaryDoc.meta.items as { text: string; kind: string }[]
     expect(
@@ -520,7 +521,7 @@ describe('dispatchTool', () => {
       const paths = memoryPaths(dir)
       const summaryPath = join(
         paths.sessionsDir,
-        `${isoDate(startedAt)}-${sessionId}`,
+        `${formatLocalDate(startedAt, engine.timezone())}-${sessionId}`,
         'summary.md',
       )
       const summaryDoc = await readDocument(summaryPath)
