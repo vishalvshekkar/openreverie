@@ -5,6 +5,18 @@
 
 export * from './dateSpan.js'
 export * from './documents.js'
+export {
+  DREAM_EXPLORATION_INSTRUCTIONS,
+  type DreamInsight,
+  type DreamLookup,
+  type DreamRunResult,
+  type DreamVoice,
+  dreamInsightsOutputSchema,
+  type RunDreamArgs,
+  runDream,
+  runExploration,
+  toneCheckOutputSchema,
+} from './dreaming.js'
 export * from './dreamLog.js'
 export * from './dreamSchedule.js'
 export {

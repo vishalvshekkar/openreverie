@@ -1,7 +1,13 @@
+import { mkdtemp, readdir, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { FakeChatProvider } from '@openreverie/providers'
-import { describe, expect, it } from 'vitest'
-import type { DreamLookup } from './dreaming.js'
-import { runExploration } from './dreaming.js'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { readDocument } from './documents.js'
+import type { DreamInsight, DreamLookup, RunDreamArgs } from './dreaming.js'
+import { runDream, runExploration } from './dreaming.js'
+import { readDreamLog } from './dreamLog.js'
+import { ensureMemoryTree, type MemoryPaths, memoryPaths } from './paths.js'
 
 function fakeLookup(calls: string[]): DreamLookup {
   return {
@@ -151,5 +157,231 @@ describe('runExploration', () => {
     })
     const toolMessage = messages.find((m) => m.role === 'tool')
     expect(toolMessage?.content).toContain('error')
+  })
+
+  it('a tool call naming a tool that does not exist returns an error string result, not an exception', async () => {
+    const chat = new FakeChatProvider([
+      { text: '', toolCalls: [{ id: 't1', name: 'not_a_real_tool', arguments: '{}' }] },
+      { text: 'ok', toolCalls: [] },
+    ])
+    const messages = await runExploration({
+      chat,
+      model: 'fake',
+      persona: 'P',
+      lookup: fakeLookup([]),
+      maxToolCalls: 5,
+      packet: 'PACKET',
+      record: () => {},
+    })
+    const toolMessage = messages.find((m) => m.role === 'tool')
+    expect(toolMessage?.content).toContain('error')
+    expect(chat.requests).toHaveLength(2)
+    expect(messages.at(-1)?.content).toBe('ok')
+  })
+
+  it('a lookup whose method throws returns an error string result, not an exception', async () => {
+    const throwingLookup: DreamLookup = {
+      async search() {
+        throw new Error('search backend unavailable')
+      },
+      async readDocumentById() {
+        return null
+      },
+      async readTranscript() {
+        return []
+      },
+      neighbors() {
+        return []
+      },
+    }
+    const chat = new FakeChatProvider([
+      { text: '', toolCalls: [searchCall('t1')] },
+      { text: 'ok', toolCalls: [] },
+    ])
+    const messages = await runExploration({
+      chat,
+      model: 'fake',
+      persona: 'P',
+      lookup: throwingLookup,
+      maxToolCalls: 5,
+      packet: 'PACKET',
+      record: () => {},
+    })
+    const toolMessage = messages.find((m) => m.role === 'tool')
+    expect(toolMessage?.content).toContain('error')
+    expect(toolMessage?.content).toContain('search backend unavailable')
+    expect(chat.requests).toHaveLength(2)
+    expect(messages.at(-1)?.content).toBe('ok')
+  })
+})
+
+const INSIGHTS_JSON = JSON.stringify({
+  insights: [
+    {
+      kind: 'pattern',
+      headline: 'Asking late',
+      claim: 'It looks like help arrives only after weeks of solo effort.',
+      confidence: 0.6,
+      evidence: [{ doc: 'doc_ok' }],
+    },
+    {
+      kind: 'open_question',
+      headline: 'The garden',
+      claim: 'Whatever happened to the balcony garden plan?',
+      confidence: 0.5,
+      evidence: [{ doc: 'doc_missing' }],
+    },
+  ],
+})
+const TONE_OK = JSON.stringify({ narrativeOk: true, flaggedInsightIndexes: [] })
+
+function lookupResolving(okDocIds: string[]): DreamLookup {
+  return {
+    async search() {
+      return []
+    },
+    async readDocumentById(docId: string) {
+      return okDocIds.includes(docId) ? { path: '/x', meta: { id: docId }, body: 'b' } : null
+    },
+    async readTranscript() {
+      throw new Error('no such session')
+    },
+    neighbors() {
+      return []
+    },
+  }
+}
+
+function runArgs(paths: MemoryPaths, chat: FakeChatProvider): RunDreamArgs {
+  return {
+    chat,
+    model: 'fake',
+    persona: 'P',
+    lookup: lookupResolving(['doc_ok']),
+    paths,
+    maxToolCalls: 4,
+    voice: 'first',
+    now: new Date('2026-08-24T05:00:00.000Z'),
+    timezone: 'UTC',
+    period: '2026-08-24',
+    trigger: 'manual',
+    rngSeed: 7,
+    seeds: [],
+    walk: [],
+    seedBodies: ['seed body'],
+    recentDreamDigest: '(no past dreams)',
+    entitiesTouched: ['arc_01X'],
+    resolveNode: () => false,
+  }
+}
+
+describe('runDream', () => {
+  let dir: string
+  let paths: MemoryPaths
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'openreverie-dreaming-'))
+    paths = memoryPaths(dir)
+    await ensureMemoryTree(paths)
+  })
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  it('writes dream.md, insight.md, process.jsonl and the log; drops unresolvable insights', async () => {
+    const chat = new FakeChatProvider([
+      { text: 'noted', toolCalls: [] }, // exploration wrap-up
+      { text: INSIGHTS_JSON, toolCalls: [] }, // insights
+      { text: 'A quiet shoreline...', toolCalls: [] }, // narrative
+      { text: TONE_OK, toolCalls: [] }, // tone check
+    ])
+    const result = await runDream(runArgs(paths, chat))
+    expect(result.outcome).toBe('written')
+    const dirents = await readdir(paths.dreamsDir, { withFileTypes: true })
+    const dreamDir = dirents.find((d) => d.isDirectory())
+    expect(dreamDir?.name).toMatch(/^2026-08-24-dream_/)
+    const insightDoc = await readDocument(join(paths.dreamsDir, dreamDir!.name, 'insight.md'))
+    const insights = insightDoc.meta.insights as DreamInsight[]
+    expect(insights).toHaveLength(1) // doc_missing dropped
+    expect(insights[0]?.id).toMatch(/^ins_/)
+    expect(insightDoc.meta.rngSeed).toBe(7)
+    const dreamDoc = await readDocument(join(paths.dreamsDir, dreamDir!.name, 'dream.md'))
+    expect(dreamDoc.meta.kind).toBe('dream')
+    expect(dreamDoc.body).toContain('shoreline')
+    const log = await readDreamLog(paths)
+    expect(log).toHaveLength(1)
+    expect(log[0]).toMatchObject({ type: 'dreamt', period: '2026-08-24', entities: ['arc_01X'] })
+  })
+
+  it('retries a bad insights response once, then aborts with nothing written', async () => {
+    const chat = new FakeChatProvider([
+      { text: 'noted', toolCalls: [] },
+      { text: 'not json', toolCalls: [] },
+      { text: 'still not json', toolCalls: [] },
+    ])
+    const result = await runDream(runArgs(paths, chat))
+    expect(result.outcome).toBe('aborted')
+    expect(await readdir(paths.dreamsDir)).toEqual([]) // no dir, no log
+    expect(
+      chat.requests.some((r) => r.messages.some((m) => m.content.includes('failed validation'))),
+    ).toBe(true)
+  })
+
+  it('withholds the narrative after two failed tone checks but still writes insights', async () => {
+    const TONE_BAD = JSON.stringify({
+      narrativeOk: false,
+      reason: 'dread',
+      flaggedInsightIndexes: [],
+    })
+    const chat = new FakeChatProvider([
+      { text: 'noted', toolCalls: [] },
+      { text: INSIGHTS_JSON, toolCalls: [] },
+      { text: 'dark narrative', toolCalls: [] },
+      { text: TONE_BAD, toolCalls: [] },
+      { text: 'second narrative', toolCalls: [] },
+      { text: TONE_BAD, toolCalls: [] },
+    ])
+    const result = await runDream(runArgs(paths, chat))
+    expect(result.outcome).toBe('written')
+    const dirents = await readdir(paths.dreamsDir, { withFileTypes: true })
+    const dreamDir = dirents.find((d) => d.isDirectory())
+    const files = await readdir(join(paths.dreamsDir, dreamDir!.name))
+    expect(files.sort()).toEqual(['insight.md', 'process.jsonl'])
+  })
+
+  it('strips a dangling tool call left by the exploration wrap-up before reusing the transcript', async () => {
+    // maxToolCalls: 1 exhausts the budget on round one; the wrap-up round
+    // still offers tools, and here the model asks for one anyway. That
+    // tool call is never dispatched or answered, so runExploration's
+    // returned transcript ends with an assistant message carrying a
+    // tool call with no matching tool result. A real provider rejects
+    // that shape on the next call (insights, then narrative), so it must
+    // be stripped before either call reuses the transcript.
+    const chat = new FakeChatProvider([
+      { text: '', toolCalls: [searchCall('a')] }, // exploration round 1, hits the cap
+      { text: 'wrap', toolCalls: [searchCall('b')] }, // wrap-up, model still asks for a tool
+      { text: INSIGHTS_JSON, toolCalls: [] },
+      { text: 'a narrative', toolCalls: [] },
+      { text: TONE_OK, toolCalls: [] },
+    ])
+    const args = runArgs(paths, chat)
+    args.maxToolCalls = 1
+    const result = await runDream(args)
+    expect(result.outcome).toBe('written')
+    const insightsRequest = chat.requests[2]
+    const narrativeRequest = chat.requests[3]
+    for (const request of [insightsRequest, narrativeRequest]) {
+      const messages = request?.messages ?? []
+      const answeredToolCallIds = new Set(
+        messages.filter((m) => m.role === 'tool').map((m) => m.toolCallId),
+      )
+      for (const message of messages) {
+        if (message.role !== 'assistant') continue
+        for (const call of message.toolCalls ?? []) {
+          expect(answeredToolCallIds.has(call.id)).toBe(true)
+        }
+      }
+    }
   })
 })
