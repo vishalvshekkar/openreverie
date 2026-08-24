@@ -7,7 +7,13 @@ export * from './dateSpan.js'
 export * from './documents.js'
 export * from './dreamLog.js'
 export * from './dreamSchedule.js'
-export * from './dreamSelection.js'
+export {
+  candidateWeight,
+  type DreamCandidate,
+  mulberry32,
+  pickSeeds,
+  randomWalk,
+} from './dreamSelection.js'
 export * from './engine.js'
 export * from './gitSync.js'
 export * from './graph.js'
