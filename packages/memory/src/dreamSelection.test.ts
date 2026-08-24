@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   candidateWeight,
   type DreamCandidate,
+  fillRemainingSeeds,
   mulberry32,
   pickSeeds,
   randomWalk,
@@ -116,15 +117,20 @@ describe('pickSeeds', () => {
     expect(reservedOldHalf.has(seeds[0]?.id as string)).toBe(true)
   })
 
-  // Ruling C4: three candidates, all mutually adjacent, with count 2. This
-  // pool is larger than count, so pickSeeds cannot take the candidates.length
-  // <= count early return, and must actually consult `adjacent`. Since the
-  // callback always reports adjacency, no second seed can pass the
-  // adjacency check until it relaxes after RELAX_ADJACENCY_AFTER failed
-  // draws; dates are spread far apart so the date-gap rule never blocks
-  // the pick, isolating the adjacency relaxation as the only thing that
-  // can make this pool yield two distinct seeds.
-  it('relaxes the adjacency constraint rather than failing on a fully adjacent pool', () => {
+  // Ruling C4, reshaped per coordinator ruling: pickSeeds carries two
+  // routes to the same guarantee, a constrained loop that relaxes the
+  // adjacency and date rules progressively, and a final backstop
+  // (fillRemainingSeeds) that fills any slot the loop did not. Tasks 7 and
+  // 9 depend on the observable outcome, not on which route produced it:
+  // given a pool larger than count where every candidate is mutually
+  // adjacent, pickSeeds still returns count distinct seeds. That is what
+  // this test holds. Known limitation, accepted and recorded rather than
+  // solved here: because both routes exist, this test alone cannot
+  // distinguish "the loop relaxed adjacency" from "the backstop filled the
+  // gap"; falsifying the loop's relaxation in isolation requires also
+  // disabling the backstop, and fillRemainingSeeds is falsified directly,
+  // on its own, in the describe block below.
+  it('returns count distinct seeds even when every candidate in a larger pool is mutually adjacent', () => {
     const trio = [
       candidate('p', '2024-01-01', 1),
       candidate('q', '2024-08-01', 1),
@@ -141,6 +147,35 @@ describe('pickSeeds', () => {
     })
     expect(seeds.length).toBe(2)
     expect(new Set(seeds.map((s) => s.id)).size).toBe(2)
+  })
+})
+
+// fillRemainingSeeds is pickSeeds's post-loop backstop, restored per
+// coordinator ruling as the spec's "constraints relaxed progressively if
+// the pool is too small to satisfy it" guarantee. Tested directly here,
+// not only through pickSeeds end to end, since pickSeeds's own attempt
+// budget is sized so the constrained loop always fills every slot itself
+// for a well-formed call (count < candidates.length): once
+// attempts > RELAX_ADJACENCY_AFTER, every remaining attempt succeeds
+// unconditionally, and there are always more such attempts available than
+// slots left to fill. That makes the backstop unreachable through
+// pickSeeds's public behavior for any valid input, so it is exercised as
+// a unit instead.
+describe('fillRemainingSeeds', () => {
+  it('fills remaining slots with the highest-weight leftovers not already chosen', () => {
+    const candidates = [candidate('a'), candidate('b'), candidate('c'), candidate('d')]
+    const chosen = [candidates[0] as DreamCandidate]
+    const weightById: Record<string, number> = { a: 0, b: 3, c: 1, d: 2 }
+    const weightOf = (c: DreamCandidate) => weightById[c.id] ?? 0
+    const result = fillRemainingSeeds(candidates, chosen, weightOf, 3)
+    expect(result.map((s) => s.id)).toEqual(['a', 'b', 'd'])
+  })
+
+  it('is a no-op once chosen already has count seeds', () => {
+    const candidates = [candidate('a'), candidate('b')]
+    const chosen = [candidates[0] as DreamCandidate, candidates[1] as DreamCandidate]
+    const result = fillRemainingSeeds(candidates, chosen, () => 0, 2)
+    expect(result).toBe(chosen)
   })
 })
 
@@ -194,5 +229,56 @@ describe('randomWalk', () => {
     expect(path.length).toBeLessThanOrEqual(4)
     expect(new Set(path).size).toBe(path.length)
     expect(path).not.toContain('n4')
+  })
+
+  // Fix 1 (coordinator ruling): the spec calls this walk degree-weighted
+  // (Selection, step 4). hub has two eligible neighbors at the first hop:
+  // busy, whose own degree is 5 (one edge back to hub plus four more to
+  // its own neighbors), and quiet, whose degree is 1 (only the edge back
+  // to hub). A degree-weighted draw favors busy roughly 5-to-1 over many
+  // seeds; a uniform draw would land close to 50/50. The assertion sets
+  // its threshold well inside that gap so it holds under weighting and
+  // fails under uniform, rather than merely leaning the right direction.
+  it('favors higher-degree neighbors over many seeded draws', () => {
+    const nodeIds = ['hub', 'busy', 'quiet', 'busy2', 'busy3', 'busy4', 'busy5']
+    const graph: GraphState = {
+      nodes: new Map(
+        nodeIds.map((id) => [
+          id,
+          { id, type: 'entity' as const, label: id, ts: '2026-01-01T00:00:00.000Z' },
+        ]),
+      ),
+      edges: new Map(
+        [
+          ['hub', 'busy'],
+          ['hub', 'quiet'],
+          ['busy', 'busy2'],
+          ['busy', 'busy3'],
+          ['busy', 'busy4'],
+          ['busy', 'busy5'],
+        ].map(([from, to]) => [
+          `relates_to:${from}:${to}`,
+          {
+            edge: 'relates_to' as const,
+            from: from as string,
+            to: to as string,
+            confidence: 1,
+            confirmed: true,
+            ts: '2026-01-01T00:00:00.000Z',
+          },
+        ]),
+      ),
+    }
+    const runs = 100
+    let busyCount = 0
+    let quietCount = 0
+    for (let seed = 1; seed <= runs; seed += 1) {
+      const step = randomWalk(graph, 'hub', 1, mulberry32(seed))[1]
+      if (step === 'busy') busyCount += 1
+      if (step === 'quiet') quietCount += 1
+    }
+    expect(busyCount + quietCount).toBe(runs)
+    expect(busyCount).toBeGreaterThan(runs * 0.65)
+    expect(busyCount).toBeGreaterThan(quietCount)
   })
 })

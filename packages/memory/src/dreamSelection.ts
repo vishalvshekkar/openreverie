@@ -70,11 +70,16 @@ function daysApart(a?: string, b?: string): number | undefined {
   return Math.abs(parsedA - parsedB) / MS_PER_DAY
 }
 
-function weightedPick(
-  pool: DreamCandidate[],
-  weightOf: (c: DreamCandidate) => number,
+// Draws one item from pool with probability proportional to weightOf(item).
+// Falls back to a uniform draw when every weight is zero (or the weights
+// sum to a non-positive total), so a degenerate all-zero-weight pool never
+// divides by zero. Shared by pickSeeds's weighted draw and randomWalk's
+// degree-weighted neighbor draw.
+function weightedChoice<T>(
+  pool: T[],
+  weightOf: (item: T) => number,
   rng: () => number,
-): DreamCandidate | undefined {
+): T | undefined {
   if (pool.length === 0) return undefined
   const weights = pool.map(weightOf)
   const total = weights.reduce((sum, w) => sum + w, 0)
@@ -87,12 +92,40 @@ function weightedPick(
   return pool[pool.length - 1]
 }
 
+// Fills any seed slots the constrained draw in pickSeeds did not fill,
+// using the highest remaining weight with no further constraints. This is
+// the spec's "constraints relaxed progressively if the pool is too small
+// to satisfy it" guarantee's final backstop: pickSeeds must always return
+// count seeds for a caller with count < candidates.length. Exported so it
+// is directly testable on its own: pickSeeds's own attempt budget is sized
+// so the constrained loop above always fills every slot itself for a
+// well-formed call (attempts > RELAX_ADJACENCY_AFTER unconditionally
+// admits every remaining candidate, and there are always more such
+// attempts available than slots left to fill), so this path is a
+// defensive net rather than something pickSeeds's own end-to-end tests can
+// trigger. See task-5-report.md for the reasoning and for why it is kept
+// rather than removed.
+export function fillRemainingSeeds(
+  candidates: DreamCandidate[],
+  chosen: DreamCandidate[],
+  weightOf: (c: DreamCandidate) => number,
+  count: number,
+): DreamCandidate[] {
+  if (chosen.length >= count) return chosen
+  const leftovers = candidates
+    .filter((c) => !chosen.some((s) => s.id === c.id))
+    .sort((a, b) => weightOf(b) - weightOf(a))
+  return [...chosen, ...leftovers.slice(0, count - chosen.length)]
+}
+
 // Picks two or three seeds by weight, pushed apart so a dream connects
 // distant things rather than rehashing this week (dreaming design spec,
 // Selection). Constraints relax progressively when the pool is too small
 // to satisfy them: the date-gap rule drops after 20 failed draws, the
 // adjacency rule after 40. The first slot is reserved for a candidate no
 // newer than the median candidate date, so every dream reaches back.
+// fillRemainingSeeds backstops the whole thing: whatever the constrained
+// loop below does not fill, it fills from the remaining highest weight.
 export function pickSeeds(args: {
   candidates: DreamCandidate[]
   lastDreamt: Map<string, string>
@@ -125,7 +158,7 @@ export function pickSeeds(args: {
       chosen.length === 0 && median !== undefined
         ? candidates.filter((c) => c.date !== undefined && c.date <= median)
         : candidates.filter((c) => !chosen.some((s) => s.id === c.id))
-    const pick = weightedPick(pool, weightOf, rng)
+    const pick = weightedChoice(pool, weightOf, rng)
     if (pick === undefined) continue
     const dateOk =
       attempts > RELAX_DATE_AFTER ||
@@ -137,15 +170,18 @@ export function pickSeeds(args: {
       attempts > RELAX_ADJACENCY_AFTER || chosen.every((s) => !adjacent(s.id, pick.id))
     if (dateOk && adjacencyOk) chosen.push(pick)
   }
-  return chosen
+  return fillRemainingSeeds(candidates, chosen, weightOf, count)
 }
 
-// A bounded random walk over folded graph state, no revisits (dreaming
-// design spec, Selection, step 4). The spec describes this walk as
-// degree-weighted; the task brief this module follows specifies a uniform
-// draw among unvisited neighbors instead, and that is what is implemented
-// here. Recorded as a spec-vs-brief divergence for review, not resolved
-// silently (see task-5-report.md).
+// A bounded, degree-weighted random walk over folded graph state, no
+// revisits (dreaming design spec, Selection, step 4: "a bounded random
+// walk over folded graph state (default 3 hops, degree-weighted, no
+// revisits)"). Among the eligible neighbors at each hop (unvisited,
+// present in the graph), a neighbor's odds of being drawn are proportional
+// to its own degree in the folded graph, not to how many eligible
+// neighbors happen to be unvisited. A reachable neighbor always has degree
+// at least 1 (it has the edge that made it reachable), so the all-zero
+// fallback in weightedChoice is only ever exercised defensively here.
 export function randomWalk(
   graph: GraphState,
   start: string,
@@ -157,6 +193,7 @@ export function randomWalk(
     adjacency.set(edge.from, [...(adjacency.get(edge.from) ?? []), edge.to])
     adjacency.set(edge.to, [...(adjacency.get(edge.to) ?? []), edge.from])
   }
+  const degreeOf = (id: string) => adjacency.get(id)?.length ?? 0
   const path = [start]
   const visited = new Set([start])
   let current = start
@@ -165,7 +202,7 @@ export function randomWalk(
       (id) => !visited.has(id) && graph.nodes.has(id),
     )
     if (next.length === 0) break
-    const step = next[Math.floor(rng() * next.length)] as string
+    const step = weightedChoice(next, degreeOf, rng) as string
     path.push(step)
     visited.add(step)
     current = step
