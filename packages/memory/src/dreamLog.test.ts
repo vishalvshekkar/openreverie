@@ -2,12 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import {
-  appendDreamLog,
-  type DreamLogRecord,
-  foldDreamLog,
-  readDreamLog,
-} from './dreamLog.js'
+import { appendDreamLog, type DreamLogRecord, foldDreamLog, readDreamLog } from './dreamLog.js'
 import { ensureMemoryTree, type MemoryPaths, memoryPaths } from './paths.js'
 
 describe('dream log', () => {
@@ -56,9 +51,24 @@ describe('dream log', () => {
   })
 
   it('folds: newest ts wins per entity, later feedback wins per insight, mentions collect', async () => {
-    const later: DreamLogRecord = { ...dreamt, ts: '2026-08-25T02:00:00.000Z', dream: 'dream_01C', period: '2026-08-25', entities: ['arc_01X'] }
-    const overturn: DreamLogRecord = { ...feedback, ts: '2026-08-26T09:00:00.000Z', verdict: 'right', source: 'tool' } as DreamLogRecord
-    const mention: DreamLogRecord = { ts: '2026-08-25T08:00:00.000Z', type: 'mentioned', dream: 'dream_01C' }
+    const later: DreamLogRecord = {
+      ...dreamt,
+      ts: '2026-08-25T02:00:00.000Z',
+      dream: 'dream_01C',
+      period: '2026-08-25',
+      entities: ['arc_01X'],
+    }
+    const overturn: DreamLogRecord = {
+      ...feedback,
+      ts: '2026-08-26T09:00:00.000Z',
+      verdict: 'right',
+      source: 'tool',
+    } as DreamLogRecord
+    const mention: DreamLogRecord = {
+      ts: '2026-08-25T08:00:00.000Z',
+      type: 'mentioned',
+      dream: 'dream_01C',
+    }
     const state = foldDreamLog([dreamt, feedback, later, overturn, mention])
     expect(state.lastDreamt.get('arc_01X')).toBe('2026-08-25T02:00:00.000Z')
     expect(state.lastDreamt.get('person_01Y')).toBe('2026-08-24T02:00:00.000Z')

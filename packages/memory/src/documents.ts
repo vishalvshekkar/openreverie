@@ -7,7 +7,17 @@ import { join } from 'node:path'
 import matter from 'gray-matter'
 import { ulid } from 'ulid'
 
-export type IdPrefix = 'doc' | 'item' | 'arc' | 'realm' | 'session' | 'person' | 'entity' | 'prop' | 'dream' | 'ins'
+export type IdPrefix =
+  | 'doc'
+  | 'item'
+  | 'arc'
+  | 'realm'
+  | 'session'
+  | 'person'
+  | 'entity'
+  | 'prop'
+  | 'dream'
+  | 'ins'
 
 export function newId(prefix: IdPrefix): string {
   return `${prefix}_${ulid()}`

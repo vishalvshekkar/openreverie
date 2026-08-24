@@ -27,6 +27,11 @@ describe('documents', () => {
     expect(id).toMatch(/^doc_[0-9A-Z]{26}$/)
   })
 
+  it('newId accepts the dream and ins prefixes', () => {
+    expect(newId('dream')).toMatch(/^dream_[0-9A-Z]{26}$/)
+    expect(newId('ins')).toMatch(/^ins_[0-9A-Z]{26}$/)
+  })
+
   it('round-trips write and read, preserving meta and body', async () => {
     const path = join(dir, 'note.md')
     const doc: Document = {
