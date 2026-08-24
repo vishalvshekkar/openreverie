@@ -1274,16 +1274,22 @@ export class MemoryEngine implements DreamLookup {
       }
     }
 
-    // The newest dream that actually has something in it. Task 7's own
-    // carried ruling is that a partial directory (a crash between mkdir
-    // and the insight.md write, or a run the tone gate withheld the
-    // narrative from) must never throw when read; it does not follow from
-    // that ruling that such a directory is fit to offer in a greeting.
-    // insightCount === 0 covers both a missing insight.md and one that
-    // parsed but held nothing, so a dream with nothing to actually share
-    // is skipped here rather than offered and then coming up empty the
-    // moment the person says yes.
-    const newestDream = dreamSummaries.find((summary) => summary.insightCount > 0)
+    // The newest dream that actually has a narrative to offer. A run
+    // aborts entirely when no insights survive evidence resolution or the
+    // tone pass, so every dream directory that was written at all already
+    // has at least one insight: insightCount === 0 would only ever catch
+    // a crashed, partial directory, not the case that matters here. The
+    // case that matters is a dream whose narrative the tone gate withheld:
+    // that directory has insight.md and no dream.md, so it still needs a
+    // hasNarrative check to be excluded. The opener promises a dream the
+    // person can read, which is dream.md, so hasNarrative is the right
+    // predicate: it excludes both a tone-withheld narrative and a crashed,
+    // partial directory (which never got as far as writing dream.md
+    // either) in one check. This does not affect dreamInsights above:
+    // insights from a narrative-withheld dream still reach the prompt
+    // section, since that is for the model, not for what gets offered to
+    // the person.
+    const newestDream = dreamSummaries.find((summary) => summary.hasNarrative)
     const freshDream: SessionContext['freshDream'] =
       dreamsMeta?.openerMention !== false &&
       newestDream !== undefined &&

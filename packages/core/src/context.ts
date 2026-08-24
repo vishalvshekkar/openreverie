@@ -179,6 +179,16 @@ function dreamsSection(context: SessionContext): string | undefined {
     (insight) => `- [${insight.insightId}] (${insight.kind}) ${insight.headline}: ${insight.claim}`,
   )
   const capped = capRows(lines, DREAM_INSIGHTS_SECTION_CAP)
+  const rows = capped.rows
+  if (capped.shown < lines.length) {
+    // capRows never renders its own marker (see its comment in budget.ts):
+    // the wording differs per section and always names the tool that
+    // reaches the rest, so that is this section's job, the same way
+    // recentIntentionsSection and peopleSection each render their own.
+    rows.push(
+      `(showing ${capped.shown} of ${lines.length} dream insights. Find older ones with search_memory using kind dream_insight.)`,
+    )
+  }
   return (
     '## Between-session reflections (dreams)\n\n' +
     "Between conversations you turn over this person's memory and keep what looked worth " +
@@ -187,7 +197,7 @@ function dreamsSection(context: SessionContext): string | undefined {
     'you told me..."), and if the person says one is wrong, accept that and record it with ' +
     'dream_feedback. Open questions are things worth asking when the moment is natural, never ' +
     'a checklist.\n\n' +
-    capped.rows.join('\n')
+    rows.join('\n')
   )
 }
 

@@ -73,12 +73,29 @@ async function pinTimezoneUtc(paths: MemoryPaths): Promise<void> {
 // built rather than run through the model: for a freshDream test all that
 // matters is that listDreams finds a dream here, and it has never been
 // marked mentioned in the log.
+// A complete dream: both dream.md and insight.md written, the shape a
+// normal run leaves when the tone gate does not withhold the narrative.
+// hasNarrative must be true for freshDream to pick this up (see Fix 1 in
+// task-10-report.md), so dream.md is not optional here even though only
+// insight.md matters for most of these fixtures' assertions.
 async function writeDream(
   paths: MemoryPaths,
   args: { date: string; dreamId: string },
 ): Promise<void> {
   const dir = join(paths.dreamsDir, `${args.date}-${args.dreamId}`)
   await mkdir(dir, { recursive: true })
+  await writeDocumentAtomic({
+    path: join(dir, 'dream.md'),
+    meta: {
+      id: newId('doc'),
+      kind: 'dream',
+      dream: args.dreamId,
+      date: args.date,
+      period: args.date,
+      voice: 'first',
+    },
+    body: 'A dream narrative, for the greet() opener mention fixtures.\n',
+  })
   const insight: DreamInsight = {
     id: newId('ins'),
     kind: 'pattern',
@@ -103,15 +120,50 @@ async function writeDream(
 
 // A partial dream directory: mkdir happened but insight.md never got
 // written, the shape a crash between the two leaves (Task 7's carried
-// ruling). listDreamSummaries reports this with insightCount: 0 rather
-// than throwing; it must not become freshDream, since there is nothing in
-// it to actually offer.
+// ruling). listDreamSummaries reports this with insightCount: 0 and
+// hasNarrative: false rather than throwing; it must not become freshDream,
+// since there is nothing in it to actually offer.
 async function writePartialDream(
   paths: MemoryPaths,
   args: { date: string; dreamId: string },
 ): Promise<void> {
   const dir = join(paths.dreamsDir, `${args.date}-${args.dreamId}`)
   await mkdir(dir, { recursive: true })
+}
+
+// A dream whose narrative the tone gate withheld: insight.md exists (a run
+// only aborts entirely, writing nothing, when no insight survives at all),
+// but there is no dream.md. This must not become freshDream either: the
+// opener promises a dream the person can read, and there is none here. The
+// insights in it still belong in the prompt section (dreamsSection reads
+// insight.md regardless of dream.md), which is what makes this case
+// different from writePartialDream above.
+async function writeToneWithheldDream(
+  paths: MemoryPaths,
+  args: { date: string; dreamId: string; insightId: string },
+): Promise<void> {
+  const dir = join(paths.dreamsDir, `${args.date}-${args.dreamId}`)
+  await mkdir(dir, { recursive: true })
+  const insight: DreamInsight = {
+    id: args.insightId,
+    kind: 'pattern',
+    headline: 'An insight with no narrative',
+    claim: 'The tone gate withheld the story but kept this.',
+    confidence: 0.7,
+    evidence: [],
+  }
+  await writeDocumentAtomic({
+    path: join(dir, 'insight.md'),
+    meta: {
+      id: newId('doc'),
+      kind: 'dream_insight',
+      dream: args.dreamId,
+      date: args.date,
+      period: args.date,
+      insights: [insight],
+    },
+    body: 'A dream insight document with no accompanying dream.md.\n',
+  })
 }
 
 function emptyReflectionOutput(summary: string) {
@@ -818,6 +870,44 @@ describe('AgentSession', () => {
       const system = chat.requests[0]?.system ?? ''
       expect(system).toContain('While the person was away you dreamt.')
       expect(markSpy).toHaveBeenCalledWith('dream_real1')
+
+      await engine.close()
+    })
+
+    it('never offers a tone-withheld dream (insight.md with no dream.md) in the opener, while its insights still reach the prompt section', async () => {
+      const paths = memoryPaths(dir)
+      // An arc so this is not treated as a first session, which would skip
+      // dreamsSection entirely (see context.test.ts's own first-session
+      // tests for the same setup). Appended before MemoryEngine.open,
+      // since the engine snapshots graph state at open.
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'arc_any',
+          type: 'arc',
+          label: 'Any Arc',
+        },
+      ])
+      await writeToneWithheldDream(paths, {
+        date: '2026-08-20',
+        dreamId: 'dream_withheld1',
+        insightId: 'ins_withheld1',
+      })
+      const chat = new FakeChatProvider([{ text: 'Hello again.', toolCalls: [] }])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const markSpy = vi.spyOn(engine, 'markDreamMentioned')
+      const session = await AgentSession.start(engine, testConfig(), chat)
+
+      await collect(session.greet())
+
+      const system = chat.requests[0]?.system ?? ''
+      expect(system).not.toContain('While the person was away you dreamt.')
+      expect(markSpy).not.toHaveBeenCalled()
+      // The insight still belongs in the prompt section: only the opener
+      // mention is gated on having a narrative to offer.
+      expect(system).toContain('ins_withheld1')
+      expect(system).toContain('An insight with no narrative')
 
       await engine.close()
     })

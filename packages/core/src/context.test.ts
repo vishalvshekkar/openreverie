@@ -754,6 +754,37 @@ describe('assembleSystemPrompt', () => {
       expect(prompt).toContain('AAAA marker')
       expect(prompt).not.toContain('BBBB marker')
       expect(prompt).not.toContain('CCCC marker')
+      expect(prompt).toContain(
+        '(showing 1 of 3 dream insights. Find older ones with search_memory using kind dream_insight.)',
+      )
+
+      await engine.close()
+    })
+
+    it('shows no truncation marker on the dreams section when nothing was dropped', async () => {
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'arc_any',
+          type: 'arc',
+          label: 'Any Arc',
+        },
+      ])
+      await writeDream(paths, {
+        date: '2026-08-20',
+        dreamId: 'dream_a',
+        insights: [
+          makeInsight({ id: 'ins_short1', headline: 'A short one', claim: 'Nothing long here.' }),
+        ],
+      })
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const prompt = await assembleSystemPrompt(engine, testConfig())
+
+      expect(prompt).toContain('ins_short1')
+      expect(prompt).not.toContain('showing')
+      expect(prompt).not.toContain('search_memory using kind dream_insight')
 
       await engine.close()
     })
