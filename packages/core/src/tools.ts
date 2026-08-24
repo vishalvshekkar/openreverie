@@ -101,6 +101,12 @@ const listEntitiesArgs = z.strictObject({
 
 const setModeArgs = z.strictObject({ mode: z.string() })
 
+const dreamFeedbackArgs = z.strictObject({
+  insightId: z.string(),
+  verdict: z.enum(['right', 'wrong', 'do_not_bring_up']),
+  note: z.string().optional(),
+})
+
 export function toolDefinitions(): ToolDefinition[] {
   return [
     {
@@ -475,6 +481,35 @@ export function toolDefinitions(): ToolDefinition[] {
         additionalProperties: false,
       },
     },
+    {
+      name: 'dream_feedback',
+      description:
+        "Record the person's reaction to a dream insight they just heard, the moment they say it is wrong or " +
+        'right, or ask you to stop bringing it up. Call this whenever a dream insight comes up in conversation and ' +
+        'the person corrects or confirms it: right when they confirm it, wrong when they say it is mistaken, ' +
+        'do_not_bring_up when they want it left alone even if it might be true. A rejected or silenced insight is ' +
+        'excluded from future dreams once recorded here, so this is how a correction actually sticks.',
+      parameters: {
+        type: 'object',
+        properties: {
+          insightId: {
+            type: 'string',
+            description: 'The id of the dream insight the person is reacting to.',
+          },
+          verdict: {
+            type: 'string',
+            enum: ['right', 'wrong', 'do_not_bring_up'],
+            description: 'What the person said about the insight.',
+          },
+          note: {
+            type: 'string',
+            description: 'Anything the person said about why, in their own words. Optional.',
+          },
+        },
+        required: ['insightId', 'verdict'],
+        additionalProperties: false,
+      },
+    },
   ]
 }
 
@@ -517,6 +552,8 @@ export async function dispatchTool(
         return await dispatchSetMode(hooks, parsedArgs.value)
       case 'update_profile':
         return await dispatchUpdateProfile(engine, parsedArgs.value)
+      case 'dream_feedback':
+        return await dispatchDreamFeedback(engine, parsedArgs.value)
       default:
         return errorJson(`unknown tool: ${call.name}`)
     }
@@ -697,6 +734,28 @@ async function dispatchUpdateProfile(engine: MemoryEngine, value: unknown): Prom
     timezone: profile.meta.timezone,
     message: 'Saved.',
   })
+}
+
+// The model's only path back into a rejected or confirmed dream insight.
+// recordDreamFeedback returns false, rather than throwing, when the insight
+// id does not match any insight.md on disk, so an unknown id is reported as
+// a normal tool error the model can see and correct, not a crash. source is
+// fixed to 'tool' here, never taken from the model's arguments, since that
+// is what distinguishes an in-conversation correction from one made in the
+// web UI.
+async function dispatchDreamFeedback(engine: MemoryEngine, value: unknown): Promise<string> {
+  const parsed = dreamFeedbackArgs.safeParse(value)
+  if (!parsed.success) return errorJson(zodErrorMessage('dream_feedback', parsed.error))
+
+  const { insightId, verdict, note } = parsed.data
+  const ok = await engine.recordDreamFeedback({
+    insightId,
+    verdict,
+    source: 'tool',
+    ...(note !== undefined ? { note } : {}),
+  })
+  if (!ok) return errorJson(`unknown insight: ${insightId}`)
+  return JSON.stringify({ ok: true })
 }
 
 function parseArguments(raw: string): { ok: true; value: unknown } | { ok: false; error: string } {

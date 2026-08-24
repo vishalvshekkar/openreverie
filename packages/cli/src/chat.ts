@@ -44,6 +44,7 @@ const TOOL_NOTICES: Record<string, string> = {
   graph_query: 'checking connections',
   list_arcs: 'checking memory',
   list_realms: 'checking memory',
+  dream_feedback: 'noting your reaction',
 }
 
 export function toolNotice(name: string): string {

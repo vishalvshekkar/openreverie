@@ -1213,6 +1213,7 @@ describe('toolNotice', () => {
     expect(toolNotice('graph_query')).toBe('[checking connections]')
     expect(toolNotice('list_arcs')).toBe('[checking memory]')
     expect(toolNotice('list_realms')).toBe('[checking memory]')
+    expect(toolNotice('dream_feedback')).toBe('[noting your reaction]')
   })
 
   it('falls back to a plain, truthful notice for an unknown tool', () => {

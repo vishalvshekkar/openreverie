@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -8,6 +8,7 @@ import {
   memoryPaths,
   newId,
   readDocument,
+  readDreamLog,
   writeDocumentAtomic,
 } from '@openreverie/memory'
 import { FakeChatProvider, FakeEmbeddingProvider, type ToolCall } from '@openreverie/providers'
@@ -62,12 +63,13 @@ function emptyReflectionOutput(summary: string) {
 }
 
 describe('toolDefinitions', () => {
-  it('lists exactly the thirteen memory and style tools with non-empty descriptions and a JSON schema', () => {
+  it('lists exactly the fourteen memory and style tools with non-empty descriptions and a JSON schema', () => {
     const defs = toolDefinitions()
     const names = defs.map((d) => d.name).sort()
     expect(names).toEqual(
       [
         'declare_journal_method',
+        'dream_feedback',
         'graph_query',
         'list_arcs',
         'list_entities',
@@ -695,6 +697,111 @@ describe('dispatchTool', () => {
       )
 
       expect(JSON.parse(result).error).toBe('unknown tool: update_style')
+
+      await engine.close()
+    })
+  })
+
+  describe('dream_feedback', () => {
+    it('is offered as a tool with insightId and verdict required', () => {
+      const definition = toolDefinitions().find((entry) => entry.name === 'dream_feedback')
+      if (!definition) throw new Error('expected a dream_feedback tool definition')
+      expect(definition.parameters.required).toEqual(['insightId', 'verdict'])
+      const properties = (definition.parameters as { properties: { verdict: { enum?: string[] } } })
+        .properties
+      expect(properties.verdict.enum).toEqual(['right', 'wrong', 'do_not_bring_up'])
+    })
+
+    it('records feedback against a real insight with source fixed to tool', async () => {
+      const paths = memoryPaths(dir)
+      await MemoryEngine.open(dir, fakeDeps()).then((e) => e.close())
+
+      const dreamDir = join(paths.dreamsDir, '2026-08-01-dream_test1')
+      await mkdir(dreamDir, { recursive: true })
+      await writeDocumentAtomic({
+        path: join(dreamDir, 'insight.md'),
+        meta: {
+          id: 'doc_insight_1',
+          period: '2026-08-01',
+          insights: [
+            {
+              id: 'ins_test1',
+              kind: 'pattern',
+              headline: 'A quiet thread',
+              claim: 'Something recurring showed up.',
+              confidence: 0.6,
+              evidence: [],
+            },
+          ],
+        },
+        body: 'A quiet thread.\n',
+      })
+
+      const engine = await MemoryEngine.open(dir, fakeDeps())
+      const sessionId = await engine.startSession()
+
+      const result = await dispatchTool(
+        engine,
+        sessionId,
+        call('dream_feedback', { insightId: 'ins_test1', verdict: 'wrong', note: 'not accurate' }),
+      )
+      expect(JSON.parse(result)).toEqual({ ok: true })
+
+      const log = await readDreamLog(paths)
+      const record = log.find((r) => r.type === 'feedback' && r.insight === 'ins_test1')
+      expect(record).toMatchObject({ verdict: 'wrong', source: 'tool', note: 'not accurate' })
+
+      await engine.close()
+    })
+
+    // Falsification check for the unknown-insight path: this asserts the
+    // actual error payload dispatchDreamFeedback returns, not merely that
+    // the call did not throw. Deleting the `if (!ok) return errorJson(...)`
+    // branch in tools.ts would make this fail, since dispatchTool would
+    // otherwise report {"ok":true} for an insight recordDreamFeedback never
+    // found.
+    it('returns an error JSON, not ok:true and not a throw, for an unknown insight id', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps())
+      const sessionId = await engine.startSession()
+
+      const result = await dispatchTool(
+        engine,
+        sessionId,
+        call('dream_feedback', { insightId: 'ins_does_not_exist', verdict: 'right' }),
+      )
+      const parsed = JSON.parse(result) as { error?: string; ok?: boolean }
+      expect(parsed.ok).toBeUndefined()
+      expect(parsed.error).toBe('unknown insight: ins_does_not_exist')
+
+      await engine.close()
+    })
+
+    it('returns a zod error JSON for an invalid verdict', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps())
+      const sessionId = await engine.startSession()
+
+      const result = await dispatchTool(
+        engine,
+        sessionId,
+        call('dream_feedback', { insightId: 'ins_test1', verdict: 'meh' }),
+      )
+      const parsed = JSON.parse(result) as { error?: string; ok?: boolean }
+      expect(parsed.ok).toBeUndefined()
+      expect(parsed.error).toMatch(/dream_feedback/)
+
+      await engine.close()
+    })
+
+    it("rejects an unknown key, matching every other tool's strict schema", async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps())
+      const sessionId = await engine.startSession()
+
+      const result = await dispatchTool(
+        engine,
+        sessionId,
+        call('dream_feedback', { insightId: 'ins_test1', verdict: 'right', extra: 'nope' }),
+      )
+      expect(JSON.parse(result).error).toMatch(/dream_feedback/)
 
       await engine.close()
     })
