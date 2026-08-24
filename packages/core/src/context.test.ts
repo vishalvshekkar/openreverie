@@ -206,6 +206,11 @@ describe('assembleSystemPrompt', () => {
       },
       body: 'Talked through a quiet, low-key evening.\n',
     })
+    await writeDream(paths, {
+      date: '2026-08-20',
+      dreamId: 'dream_order1',
+      insights: [makeInsight({ id: 'ins_order1' })],
+    })
 
     const config = testConfig()
     const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
@@ -236,6 +241,9 @@ describe('assembleSystemPrompt', () => {
     expect(prompt).toContain('## Recent intentions')
     expect(prompt).toContain('Call the dentist next week.')
 
+    expect(prompt).toContain('## Between-session reflections (dreams)')
+    expect(prompt).toContain('ins_order1')
+
     expect(prompt).toContain('## Latest daily rollup')
     expect(prompt).toContain('A steady day of small wins.')
 
@@ -246,7 +254,7 @@ describe('assembleSystemPrompt', () => {
 
     // Every populated section appears in the order specified by the brief:
     // constitution, realms, active arcs, people, entities, recent
-    // intentions, latest daily rollup, recent sessions.
+    // intentions, dreams, latest daily rollup, recent sessions.
     const headers = [
       '## Constitution',
       '## Realms',
@@ -254,6 +262,7 @@ describe('assembleSystemPrompt', () => {
       '## People',
       '## Entities',
       '## Recent intentions',
+      '## Between-session reflections (dreams)',
       '## Latest daily rollup',
       '## Recent sessions',
     ]
