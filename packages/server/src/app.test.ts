@@ -427,6 +427,45 @@ describe('record browsing app', () => {
     ).resolves.toMatchObject({ status: 304, json: null })
   })
 
+  it('serves a snapshot containing a commitment node and a waits_on edge instead of 500ing', async () => {
+    // Regression guard for the bug this task fixes: writePublicJson
+    // validates the server's own outbound response against
+    // publicGraphSnapshotSchema, and that schema's node/edge type enums
+    // used to be a hand copied list that fell out of sync with
+    // @openreverie/memory's NodeType/EdgeType the moment 'commitment' and
+    // 'waits_on' were added there. A stale copy makes this request 500
+    // for any user with a single commitment in their graph.
+    engine.snapshot = {
+      nodes: [
+        {
+          id: 'commitment_1',
+          type: 'commitment',
+          label: 'See Nightfall with Arjun',
+          assertedAt: '2026-08-15T10:00:00.000Z',
+        },
+      ],
+      edges: [
+        {
+          key: 'waits_on:commitment_1:entity_1',
+          type: 'waits_on',
+          from: 'commitment_1',
+          to: 'entity_1',
+          confidence: 1,
+          confirmed: true,
+          assertedAt: '2026-08-15T10:00:00.000Z',
+        },
+      ],
+    }
+
+    const response = (await getJson('/api/v1/graph/snapshot')) as Response & {
+      json: { data: { nodes: unknown[]; edges: unknown[] } }
+    }
+
+    expect(response.status).toBe(200)
+    expect(response.json.data.nodes).toMatchObject([{ id: 'commitment_1', type: 'commitment' }])
+    expect(response.json.data.edges).toMatchObject([{ type: 'waits_on' }])
+  })
+
   it('preserves asserts and retracts in append sequence even when they are dangling', async () => {
     const response = (await getJson('/api/v1/graph/events?limit=2')) as Response & {
       json: { data: unknown[]; meta: { nextCursor: string } }

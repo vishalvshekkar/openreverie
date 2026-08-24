@@ -4,13 +4,36 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
   appendGraph,
+  EDGE_TYPES,
   edgeKey,
+  edgeRecordSchema,
   foldGraph,
   type GraphRecord,
+  NODE_TYPES,
+  nodeRecordSchema,
   readGraph,
   readGraphRecords,
 } from './graph.js'
 import { ensureMemoryTree, memoryPaths } from './paths.js'
+
+// NODE_TYPES/EDGE_TYPES are the single source of truth for the graph
+// vocabulary (see the comment above their definition in graph.ts). This
+// test exists as a regression lock: if a future edit hand-rewrites the
+// z.enum in nodeRecordSchema or edgeRecordSchema instead of building it
+// from NODE_TYPES/EDGE_TYPES, the two lists can drift apart again exactly
+// the way they used to before this file was made derived, and this test
+// catches that the moment it happens.
+describe('graph vocabulary stays derived from a single source', () => {
+  it('nodeRecordSchema accepts exactly the members of NODE_TYPES', () => {
+    const typeField = nodeRecordSchema.shape.type
+    expect([...typeField.options].sort()).toEqual([...NODE_TYPES].sort())
+  })
+
+  it('edgeRecordSchema accepts exactly the members of EDGE_TYPES', () => {
+    const edgeField = edgeRecordSchema.shape.edge
+    expect([...edgeField.options].sort()).toEqual([...EDGE_TYPES].sort())
+  })
+})
 
 describe('edgeKey', () => {
   it('builds a key from edge, from, and to', () => {

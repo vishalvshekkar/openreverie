@@ -14,8 +14,28 @@ import { z } from 'zod'
 import type { ResolvedWindow } from './commitmentTime.js'
 import type { MemoryPaths } from './paths.js'
 
-export type NodeType = 'realm' | 'arc' | 'item' | 'session' | 'person' | 'entity' | 'commitment'
-export type EdgeType = 'part_of' | 'in' | 'from' | 'involves' | 'relates_to' | 'waits_on'
+// NODE_TYPES and EDGE_TYPES are the single source of truth for the graph
+// vocabulary. NodeType and EdgeType are derived from these arrays, and the
+// record schemas below build their z.enum from the same arrays, so there is
+// exactly one place in this file that lists the members. Before this
+// change, the type union above and the z.enum in nodeRecordSchema were two
+// hand written copies that a reviewer had to check matched by eye. Other
+// packages (server, web) keep their own copies of this vocabulary for
+// reasons documented at each copy; when adding a member here, update those
+// too, and see their guard tests.
+export const NODE_TYPES = [
+  'realm',
+  'arc',
+  'item',
+  'session',
+  'person',
+  'entity',
+  'commitment',
+] as const
+export type NodeType = (typeof NODE_TYPES)[number]
+
+export const EDGE_TYPES = ['part_of', 'in', 'from', 'involves', 'relates_to', 'waits_on'] as const
+export type EdgeType = (typeof EDGE_TYPES)[number]
 
 // Task 1 added the 'commitment' node type and the 'waits_on' edge to the
 // vocabulary above but deliberately left NodeRecord's shape untouched. Task 3
@@ -155,7 +175,7 @@ export const nodeRecordSchema = z.object({
   ts: z.string(),
   op: z.enum(['assert', 'retract']),
   node: z.string(),
-  type: z.enum(['realm', 'arc', 'item', 'session', 'person', 'entity', 'commitment']),
+  type: z.enum(NODE_TYPES),
   label: z.string(),
   doc: z.string().optional(),
   commitment: commitmentPayloadSchema.optional(),
@@ -164,7 +184,7 @@ export const nodeRecordSchema = z.object({
 export const edgeRecordSchema = z.object({
   ts: z.string(),
   op: z.enum(['assert', 'retract']),
-  edge: z.enum(['part_of', 'in', 'from', 'involves', 'relates_to', 'waits_on']),
+  edge: z.enum(EDGE_TYPES),
   from: z.string(),
   to: z.string(),
   confidence: z.number().min(0).max(1),
