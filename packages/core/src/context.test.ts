@@ -1,8 +1,10 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  appendDreamLog,
   appendGraph,
+  type DreamInsight,
   type EngineDeps,
   ensureMemoryTree,
   loadProfile,
@@ -51,6 +53,41 @@ async function pinTimezoneUtc(paths: MemoryPaths): Promise<void> {
   await writeProfile(paths, {
     meta: { ...profile.meta, timezone: 'UTC', timezoneSource: 'user-confirmed' },
     body: profile.body,
+  })
+}
+
+function makeInsight(overrides: Partial<DreamInsight> = {}): DreamInsight {
+  return {
+    id: newId('ins'),
+    kind: 'pattern',
+    headline: 'A quiet pattern',
+    claim: 'They tend to go quiet for a day after a hard conversation.',
+    confidence: 0.7,
+    evidence: [],
+    ...overrides,
+  }
+}
+
+// Writes a dream directory the same shape runDream leaves on disk (Task 7),
+// but hand-built rather than run through the model: dreamsSection only
+// ever reads insight.md's meta.insights, so that is all this needs to seed.
+async function writeDream(
+  paths: MemoryPaths,
+  args: { date: string; dreamId: string; insights: DreamInsight[] },
+): Promise<void> {
+  const dir = join(paths.dreamsDir, `${args.date}-${args.dreamId}`)
+  await mkdir(dir, { recursive: true })
+  await writeDocumentAtomic({
+    path: join(dir, 'insight.md'),
+    meta: {
+      id: newId('doc'),
+      kind: 'dream_insight',
+      dream: args.dreamId,
+      date: args.date,
+      period: args.date,
+      insights: args.insights,
+    },
+    body: 'A dream insight document, for the dreamsSection test fixtures.\n',
   })
 }
 
@@ -503,6 +540,244 @@ describe('assembleSystemPrompt', () => {
     expect(prompt.startsWith(persona)).toBe(true)
 
     await engine.close()
+  })
+
+  describe('dreamsSection', () => {
+    it("renders a selected insight's id, kind, headline, and claim", async () => {
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'arc_any',
+          type: 'arc',
+          label: 'Any Arc',
+        },
+      ])
+      await writeDream(paths, {
+        date: '2026-08-20',
+        dreamId: 'dream_a',
+        insights: [
+          makeInsight({
+            id: 'ins_visible1',
+            kind: 'connection',
+            headline: 'A quiet thread',
+            claim: 'Work stress and skipped runs seem to move together.',
+          }),
+        ],
+      })
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const prompt = await assembleSystemPrompt(engine, testConfig())
+
+      expect(prompt).toContain('## Between-session reflections (dreams)')
+      expect(prompt).toContain(
+        '- [ins_visible1] (connection) A quiet thread: Work stress and skipped runs seem to move together.',
+      )
+
+      await engine.close()
+    })
+
+    it('omits the section entirely when no dream has ever run', async () => {
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'arc_any',
+          type: 'arc',
+          label: 'Any Arc',
+        },
+      ])
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const prompt = await assembleSystemPrompt(engine, testConfig())
+
+      expect(prompt).not.toContain('## Between-session reflections')
+
+      await engine.close()
+    })
+
+    it('permanently excludes an insight the person said was wrong, keeping one with no feedback', async () => {
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'arc_any',
+          type: 'arc',
+          label: 'Any Arc',
+        },
+      ])
+      const wrongInsight = makeInsight({
+        id: 'ins_wrong1',
+        headline: 'A pattern that was not real',
+        claim: 'This claim is not actually true.',
+      })
+      const keptInsight = makeInsight({
+        id: 'ins_kept1',
+        headline: 'A pattern that held up',
+        claim: 'This claim was never disputed.',
+      })
+      await writeDream(paths, {
+        date: '2026-08-20',
+        dreamId: 'dream_a',
+        insights: [wrongInsight, keptInsight],
+      })
+      await appendDreamLog(paths, [
+        {
+          ts: '2026-08-21T00:00:00.000Z',
+          type: 'feedback',
+          insight: 'ins_wrong1',
+          dream: 'dream_a',
+          verdict: 'wrong',
+          source: 'ui',
+        },
+      ])
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const prompt = await assembleSystemPrompt(engine, testConfig())
+
+      expect(prompt).not.toContain('ins_wrong1')
+      expect(prompt).not.toContain('A pattern that was not real')
+      expect(prompt).toContain('ins_kept1')
+      expect(prompt).toContain('A pattern that held up')
+
+      await engine.close()
+    })
+
+    it('permanently excludes an insight marked do_not_bring_up', async () => {
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'arc_any',
+          type: 'arc',
+          label: 'Any Arc',
+        },
+      ])
+      await writeDream(paths, {
+        date: '2026-08-20',
+        dreamId: 'dream_a',
+        insights: [
+          makeInsight({
+            id: 'ins_hush1',
+            headline: 'A sensitive topic',
+            claim: 'They asked not to hear this again.',
+          }),
+          makeInsight({
+            id: 'ins_kept2',
+            headline: 'Fine to mention',
+            claim: 'Nothing sensitive here.',
+          }),
+        ],
+      })
+      await appendDreamLog(paths, [
+        {
+          ts: '2026-08-21T00:00:00.000Z',
+          type: 'feedback',
+          insight: 'ins_hush1',
+          dream: 'dream_a',
+          verdict: 'do_not_bring_up',
+          source: 'ui',
+        },
+      ])
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const prompt = await assembleSystemPrompt(engine, testConfig())
+
+      expect(prompt).not.toContain('ins_hush1')
+      expect(prompt).toContain('ins_kept2')
+
+      await engine.close()
+    })
+
+    it('is omitted when profile.dreams.promptSection is false, even with insights on disk', async () => {
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'arc_any',
+          type: 'arc',
+          label: 'Any Arc',
+        },
+      ])
+      await writeDream(paths, {
+        date: '2026-08-20',
+        dreamId: 'dream_a',
+        insights: [makeInsight({ id: 'ins_hidden1' })],
+      })
+      const profile = await loadProfile(paths)
+      await writeProfile(paths, {
+        meta: { ...profile.meta, dreams: { promptSection: false } },
+        body: profile.body,
+      })
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const prompt = await assembleSystemPrompt(engine, testConfig())
+
+      expect(prompt).not.toContain('## Between-session reflections')
+      expect(prompt).not.toContain('ins_hidden1')
+
+      await engine.close()
+    })
+
+    it('caps the rendered rows by the section character budget, dropping the rest', async () => {
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'arc_any',
+          type: 'arc',
+          label: 'Any Arc',
+        },
+      ])
+      await writeDream(paths, {
+        date: '2026-08-20',
+        dreamId: 'dream_a',
+        insights: [
+          makeInsight({ id: 'ins_first1', headline: 'AAAA marker', claim: 'a'.repeat(900) }),
+          makeInsight({ id: 'ins_second1', headline: 'BBBB marker', claim: 'b'.repeat(900) }),
+          makeInsight({ id: 'ins_third1', headline: 'CCCC marker', claim: 'c'.repeat(900) }),
+        ],
+      })
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const prompt = await assembleSystemPrompt(engine, testConfig())
+
+      expect(prompt).toContain('AAAA marker')
+      expect(prompt).not.toContain('BBBB marker')
+      expect(prompt).not.toContain('CCCC marker')
+
+      await engine.close()
+    })
+
+    it('carries at most 8 insights even when the character budget would fit more', async () => {
+      await appendGraph(paths, [
+        {
+          ts: '2026-08-01T00:00:00.000Z',
+          op: 'assert',
+          node: 'arc_any',
+          type: 'arc',
+          label: 'Any Arc',
+        },
+      ])
+      // Ten short insights: each row is well under a tenth of
+      // DREAM_INSIGHTS_SECTION_CAP, so if all ten showed up the character
+      // budget alone would not have stopped them. Only a row-count cap
+      // (DREAM_INSIGHTS_CAP in engine.ts) explains fewer than ten.
+      const insights = Array.from({ length: 10 }, (_, i) => {
+        const n = String(i + 1).padStart(2, '0')
+        return makeInsight({ id: `ins_n${n}`, headline: `Marker ${n}`, claim: `Short claim ${n}.` })
+      })
+      await writeDream(paths, { date: '2026-08-20', dreamId: 'dream_a', insights })
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const prompt = await assembleSystemPrompt(engine, testConfig())
+
+      expect(prompt).toContain('ins_n08')
+      expect(prompt).not.toContain('ins_n09')
+      expect(prompt).not.toContain('ins_n10')
+
+      await engine.close()
+    })
   })
 
   describe('journalingProtocolSection', () => {

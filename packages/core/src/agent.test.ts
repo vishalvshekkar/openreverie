@@ -1,14 +1,18 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  appendDreamLog,
   appendGraph,
+  type DreamInsight,
   type EngineDeps,
   ensureMemoryTree,
   loadProfile,
   MemoryEngine,
   type MemoryPaths,
   memoryPaths,
+  newId,
+  writeDocumentAtomic,
   writeProfile,
 } from '@openreverie/memory'
 import {
@@ -63,6 +67,51 @@ async function pinTimezoneUtc(paths: MemoryPaths): Promise<void> {
     meta: { ...profile.meta, timezone: 'UTC', timezoneSource: 'user-confirmed' },
     body: profile.body,
   })
+}
+
+// A dream directory on disk, the same shape runDream leaves (Task 7), hand
+// built rather than run through the model: for a freshDream test all that
+// matters is that listDreams finds a dream here, and it has never been
+// marked mentioned in the log.
+async function writeDream(
+  paths: MemoryPaths,
+  args: { date: string; dreamId: string },
+): Promise<void> {
+  const dir = join(paths.dreamsDir, `${args.date}-${args.dreamId}`)
+  await mkdir(dir, { recursive: true })
+  const insight: DreamInsight = {
+    id: newId('ins'),
+    kind: 'pattern',
+    headline: 'A quiet pattern',
+    claim: 'They tend to go quiet for a day after a hard conversation.',
+    confidence: 0.7,
+    evidence: [],
+  }
+  await writeDocumentAtomic({
+    path: join(dir, 'insight.md'),
+    meta: {
+      id: newId('doc'),
+      kind: 'dream_insight',
+      dream: args.dreamId,
+      date: args.date,
+      period: args.date,
+      insights: [insight],
+    },
+    body: 'A dream insight document, for the greet() opener mention fixtures.\n',
+  })
+}
+
+// A partial dream directory: mkdir happened but insight.md never got
+// written, the shape a crash between the two leaves (Task 7's carried
+// ruling). listDreamSummaries reports this with insightCount: 0 rather
+// than throwing; it must not become freshDream, since there is nothing in
+// it to actually offer.
+async function writePartialDream(
+  paths: MemoryPaths,
+  args: { date: string; dreamId: string },
+): Promise<void> {
+  const dir = join(paths.dreamsDir, `${args.date}-${args.dreamId}`)
+  await mkdir(dir, { recursive: true })
 }
 
 function emptyReflectionOutput(summary: string) {
@@ -639,6 +688,139 @@ describe('AgentSession', () => {
     expect(line?.toolCallId).toBeUndefined()
 
     await engine.close()
+  })
+
+  describe('dream opener mention', () => {
+    it('adds the dream mention guidance and marks the dream mentioned when the context carries a freshDream', async () => {
+      const paths = memoryPaths(dir)
+      await writeDream(paths, { date: '2026-08-20', dreamId: 'dream_fresh1' })
+      const chat = new FakeChatProvider([{ text: 'Hello again.', toolCalls: [] }])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const markSpy = vi.spyOn(engine, 'markDreamMentioned')
+      const session = await AgentSession.start(engine, testConfig(), chat)
+
+      await collect(session.greet())
+
+      const system = chat.requests[0]?.system ?? ''
+      expect(system).toContain('While the person was away you dreamt.')
+      expect(markSpy).toHaveBeenCalledWith('dream_fresh1')
+
+      await engine.close()
+    })
+
+    it('adds no dream mention guidance and marks nothing when there is no fresh dream', async () => {
+      const chat = new FakeChatProvider([{ text: 'Hello again.', toolCalls: [] }])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const markSpy = vi.spyOn(engine, 'markDreamMentioned')
+      const session = await AgentSession.start(engine, testConfig(), chat)
+
+      await collect(session.greet())
+
+      const system = chat.requests[0]?.system ?? ''
+      expect(system).not.toContain('you dreamt')
+      expect(markSpy).not.toHaveBeenCalled()
+
+      await engine.close()
+    })
+
+    it('never mentions the dream and never marks it mentioned in decompress mode, leaving it available for later', async () => {
+      const paths = memoryPaths(dir)
+      await writeDream(paths, { date: '2026-08-20', dreamId: 'dream_fresh2' })
+      const chat = new FakeChatProvider([{ text: 'Hello again.', toolCalls: [] }])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const markSpy = vi.spyOn(engine, 'markDreamMentioned')
+      const session = await AgentSession.start(engine, testConfig(), chat, { mode: 'decompress' })
+
+      await collect(session.greet())
+
+      const system = chat.requests[0]?.system ?? ''
+      expect(system).not.toContain('you dreamt')
+      expect(markSpy).not.toHaveBeenCalled()
+
+      await engine.close()
+    })
+
+    it('adds no dream mention guidance and marks nothing once the dream has already been mentioned', async () => {
+      const paths = memoryPaths(dir)
+      await writeDream(paths, { date: '2026-08-20', dreamId: 'dream_seen1' })
+      await appendDreamLog(paths, [
+        { ts: '2026-08-21T00:00:00.000Z', type: 'mentioned', dream: 'dream_seen1' },
+      ])
+      const chat = new FakeChatProvider([{ text: 'Hello again.', toolCalls: [] }])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const markSpy = vi.spyOn(engine, 'markDreamMentioned')
+      const session = await AgentSession.start(engine, testConfig(), chat)
+
+      await collect(session.greet())
+
+      const system = chat.requests[0]?.system ?? ''
+      expect(system).not.toContain('you dreamt')
+      expect(markSpy).not.toHaveBeenCalled()
+
+      await engine.close()
+    })
+
+    it('adds no dream mention guidance and marks nothing when profile.dreams.openerMention is false', async () => {
+      const paths = memoryPaths(dir)
+      await writeDream(paths, { date: '2026-08-20', dreamId: 'dream_fresh3' })
+      const profile = await loadProfile(paths)
+      await writeProfile(paths, {
+        meta: { ...profile.meta, dreams: { openerMention: false } },
+        body: profile.body,
+      })
+      const chat = new FakeChatProvider([{ text: 'Hello again.', toolCalls: [] }])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const markSpy = vi.spyOn(engine, 'markDreamMentioned')
+      const session = await AgentSession.start(engine, testConfig(), chat)
+
+      await collect(session.greet())
+
+      const system = chat.requests[0]?.system ?? ''
+      expect(system).not.toContain('you dreamt')
+      expect(markSpy).not.toHaveBeenCalled()
+
+      await engine.close()
+    })
+
+    it('still adds the dream mention guidance when profile.dreams.promptSection is false: the opener is independent of the section', async () => {
+      const paths = memoryPaths(dir)
+      await writeDream(paths, { date: '2026-08-20', dreamId: 'dream_fresh4' })
+      const profile = await loadProfile(paths)
+      await writeProfile(paths, {
+        meta: { ...profile.meta, dreams: { promptSection: false } },
+        body: profile.body,
+      })
+      const chat = new FakeChatProvider([{ text: 'Hello again.', toolCalls: [] }])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const markSpy = vi.spyOn(engine, 'markDreamMentioned')
+      const session = await AgentSession.start(engine, testConfig(), chat)
+
+      await collect(session.greet())
+
+      const system = chat.requests[0]?.system ?? ''
+      expect(system).toContain('While the person was away you dreamt.')
+      expect(markSpy).toHaveBeenCalledWith('dream_fresh4')
+
+      await engine.close()
+    })
+
+    it('does not offer a partial dream directory that has no insight.md, even when it is the newest', async () => {
+      const paths = memoryPaths(dir)
+      await writeDream(paths, { date: '2026-08-19', dreamId: 'dream_real1' })
+      await writePartialDream(paths, { date: '2026-08-20', dreamId: 'dream_partial1' })
+      const chat = new FakeChatProvider([{ text: 'Hello again.', toolCalls: [] }])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const markSpy = vi.spyOn(engine, 'markDreamMentioned')
+      const session = await AgentSession.start(engine, testConfig(), chat)
+
+      await collect(session.greet())
+
+      const system = chat.requests[0]?.system ?? ''
+      expect(system).toContain('While the person was away you dreamt.')
+      expect(markSpy).toHaveBeenCalledWith('dream_real1')
+
+      await engine.close()
+    })
   })
 
   it('greet() abandons silently, writing no transcript line, when the provider fails', async () => {

@@ -23,7 +23,13 @@ import {
   readDocument,
   writeDocumentAtomic,
 } from './documents.js'
-import { type DreamLookup, type DreamRunResult, type DreamVoice, runDream } from './dreaming.js'
+import {
+  type DreamInsight,
+  type DreamLookup,
+  type DreamRunResult,
+  type DreamVoice,
+  runDream,
+} from './dreaming.js'
 import { type DreamLogState, type DreamVerdict, foldDreamLog, readDreamLog } from './dreamLog.js'
 import {
   acquireDreamLock,
@@ -383,6 +389,23 @@ export interface SessionContext {
   // JOURNALING_PROTOCOL_ABSENT sentinel, never assembled ad hoc, so its
   // wording cannot drift between call sites.
   journalingProtocol: string | undefined
+  // Selected insights from past dreams, newest dream first, at most
+  // DREAM_INSIGHTS_CAP. Any insight whose latest feedback verdict is
+  // 'wrong' or 'do_not_bring_up' is excluded permanently: once a person
+  // says an insight is wrong, it must never resurface. Empty when
+  // profile.dreams.promptSection is false, or when no dream has ever run.
+  dreamInsights: {
+    insightId: string
+    dreamId: string
+    kind: string
+    headline: string
+    claim: string
+  }[]
+  // The newest dream, only when it has never been mentioned in a greeting
+  // yet and profile.dreams.openerMention is not explicitly false.
+  // Independent of dreamInsights/promptSection: a person can have the
+  // opener without the section, or the section without the opener.
+  freshDream?: { dreamId: string; date: string }
 }
 
 export type GraphQuery =
@@ -438,6 +461,11 @@ const DREAM_SEED_BODY_CAP = 2000
 const DREAM_SEED_COUNT = 3
 const DREAM_WALK_HOPS = 3
 const DREAM_DIGEST_COUNT = 3
+// Task 10: the most dreamInsights carries into the chat prompt, newest
+// dream first. A character budget (DREAM_INSIGHTS_SECTION_CAP, in
+// @openreverie/core) trims further at render time; this is a row-count
+// backstop, the same role PEOPLE_CAP and ENTITIES_CAP play above.
+const DREAM_INSIGHTS_CAP = 8
 
 export class MemoryEngine implements DreamLookup {
   private readonly paths: MemoryPaths
@@ -1201,6 +1229,68 @@ export class MemoryEngine implements DreamLookup {
     const journalingProtocol =
       mode === 'journal' ? await readJournalingProtocol(this.paths) : undefined
 
+    // Task 10: dream state for the chat prompt. Both dreamInsights and
+    // freshDream read the same fold and the same newest-first directory
+    // scan; dreamsMeta gates each independently (promptSection for the
+    // insights, openerMention for the opener), so a person can have one
+    // without the other. Neither reads the clock: both are entirely a
+    // function of what is on disk right now, exactly like every other
+    // section this method builds.
+    const dreamsMeta = this.profileCache.meta.dreams
+    const dreamLogState = foldDreamLog(await readDreamLog(this.paths))
+    const dreamSummaries = await listDreamSummaries(this.paths)
+
+    const dreamInsights: SessionContext['dreamInsights'] = []
+    if (dreamsMeta?.promptSection !== false) {
+      for (const summary of dreamSummaries) {
+        if (dreamInsights.length >= DREAM_INSIGHTS_CAP) break
+        let insightDoc: Document
+        try {
+          insightDoc = await readDocument(join(summary.dir, 'insight.md'))
+        } catch {
+          // No insight.md, or it does not parse: nothing usable from this
+          // dream, same tolerance listDreamSummaries and readDreamById use.
+          continue
+        }
+        const insights = Array.isArray(insightDoc.meta.insights)
+          ? (insightDoc.meta.insights as DreamInsight[])
+          : []
+        for (const insight of insights) {
+          if (dreamInsights.length >= DREAM_INSIGHTS_CAP) break
+          // An insight someone said was wrong, or asked not to hear about
+          // again, is excluded permanently: this is the whole point of
+          // dream_feedback, and it must hold even after the character
+          // budget trims the rest of this list at render time.
+          const verdict = dreamLogState.feedback.get(insight.id)?.verdict
+          if (verdict === 'wrong' || verdict === 'do_not_bring_up') continue
+          dreamInsights.push({
+            insightId: insight.id,
+            dreamId: summary.dreamId,
+            kind: insight.kind,
+            headline: insight.headline,
+            claim: insight.claim,
+          })
+        }
+      }
+    }
+
+    // The newest dream that actually has something in it. Task 7's own
+    // carried ruling is that a partial directory (a crash between mkdir
+    // and the insight.md write, or a run the tone gate withheld the
+    // narrative from) must never throw when read; it does not follow from
+    // that ruling that such a directory is fit to offer in a greeting.
+    // insightCount === 0 covers both a missing insight.md and one that
+    // parsed but held nothing, so a dream with nothing to actually share
+    // is skipped here rather than offered and then coming up empty the
+    // moment the person says yes.
+    const newestDream = dreamSummaries.find((summary) => summary.insightCount > 0)
+    const freshDream: SessionContext['freshDream'] =
+      dreamsMeta?.openerMention !== false &&
+      newestDream !== undefined &&
+      !dreamLogState.mentioned.has(newestDream.dreamId)
+        ? { dreamId: newestDream.dreamId, date: newestDream.date }
+        : undefined
+
     return {
       constitution: constitutionDoc.body,
       constitutionDocId: constitutionDoc.meta.id,
@@ -1225,6 +1315,8 @@ export class MemoryEngine implements DreamLookup {
       timezoneSource: this.timezoneSource(),
       isFirstSession,
       journalingProtocol,
+      dreamInsights,
+      ...(freshDream ? { freshDream } : {}),
     }
   }
 

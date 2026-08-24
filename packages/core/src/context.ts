@@ -29,6 +29,7 @@ import {
   CONSTITUTION_CAP,
   capBody,
   capRows,
+  DREAM_INSIGHTS_SECTION_CAP,
   ENTITIES_SECTION_CAP,
   LATEST_DAILY_ROLLUP_CAP,
   PEOPLE_SECTION_CAP,
@@ -75,6 +76,7 @@ export async function assembleSystemPrompt(
     peopleSection(context),
     entitiesSection(context),
     recentIntentionsSection(context),
+    dreamsSection(context),
     latestDailyRollupSection(context),
     rollupsAvailableSection(context),
     recentSummariesSection(context),
@@ -161,6 +163,32 @@ function arcsSection(context: SessionContext): string | undefined {
     )
   }
   return `## Active arcs\n\n${rows.join('\n')}`
+}
+
+// Between-session reflections: selected insights from past dreams. Omitted
+// entirely when context.dreamInsights is empty, which covers all three
+// reasons it could be: no dream has ever run, profile.dreams.promptSection
+// is false, or every candidate insight was excluded by feedback
+// (MemoryEngine.sessionContext already applied the wrong/do_not_bring_up
+// exclusion before this ever runs). Framed to the model as its own tentative
+// between-session thinking, not established fact, so it draws on these
+// naturally and attributes them honestly rather than reciting them.
+function dreamsSection(context: SessionContext): string | undefined {
+  if (context.dreamInsights.length === 0) return undefined
+  const lines = context.dreamInsights.map(
+    (insight) => `- [${insight.insightId}] (${insight.kind}) ${insight.headline}: ${insight.claim}`,
+  )
+  const capped = capRows(lines, DREAM_INSIGHTS_SECTION_CAP)
+  return (
+    '## Between-session reflections (dreams)\n\n' +
+    "Between conversations you turn over this person's memory and keep what looked worth " +
+    'keeping. These are your own tentative observations, not established facts. Draw on them ' +
+    'naturally when they fit, attribute them honestly when you use one ("going back over what ' +
+    'you told me..."), and if the person says one is wrong, accept that and record it with ' +
+    'dream_feedback. Open questions are things worth asking when the moment is natural, never ' +
+    'a checklist.\n\n' +
+    capped.rows.join('\n')
+  )
 }
 
 function latestDailyRollupSection(context: SessionContext): string | undefined {

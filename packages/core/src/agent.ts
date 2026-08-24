@@ -24,7 +24,7 @@
 // what keeps every request a strict extension of the previous one, which is
 // the shape a provider's prefix cache is built to serve.
 
-import type { MemoryEngine } from '@openreverie/memory'
+import type { MemoryEngine, SessionContext } from '@openreverie/memory'
 import { renderLiveStamp, renderLocalTime, utcOffsetMinutesFor } from '@openreverie/memory'
 import type { ChatProvider, ToolCall } from '@openreverie/providers'
 import type { ReverieConfig } from './config.js'
@@ -72,6 +72,12 @@ If there is something worth opening with, choose exactly one, in this order, and
 Never open with a list. Never summarize the record. Never give a status report. Never open with housekeeping, bookkeeping, or anything about managing memory: no mentioning that you remembered something, added someone to your notes, or updated a page. Open with the person's life, not with your own record keeping. Say the one thing you picked the way you would say it out loud to someone you know, not the way you would write a briefing.
 
 How hard you reach for a thread depends on your configured engagement: following stays light, leading is more willing to name one directly.`
+
+// Appended to GREETING_INSTRUCTION only when this session has a fresh,
+// unmentioned dream to offer (see AgentSession.start and runGreeting
+// below). A light, one-time mention, never a retelling, and never in
+// decompress mode.
+const DREAM_MENTION_GUIDANCE = `While the person was away you dreamt. If it fits the opening, mention it in one light sentence and offer to share it; do not retell it unprompted, and let it go if the person arrives in distress or wants to talk about something else. Never mention it in decompress mode.`
 
 // A single-use, per-call timeout wrapper around an async iterable: each
 // call to the underlying iterator races against a fresh ms-long timer, so
@@ -169,6 +175,16 @@ export class AgentSession {
   private readonly config: ReverieConfig
   private readonly now: () => Date
   private activeMode: ModeName
+  // Set once, in start(), from the same sessionContext() read that
+  // assembleSystemPrompt already performs internally. Ruling A2:
+  // assembleSystemPrompt returns a bare string and three call sites (this
+  // one, refreshSystemPrompt, and the mid-turn refresh) rely on that shape,
+  // so this is a second, narrower read rather than a change to what it
+  // returns. Only ever consumed by runGreeting, and only the first time it
+  // runs guidance off it: nothing here ever clears it, but nothing after
+  // start() ever refreshes it either, so a later greet() call (not part of
+  // any normal flow today) would see the same value start() captured.
+  private readonly freshDream: SessionContext['freshDream']
 
   private constructor(
     engine: MemoryEngine,
@@ -179,6 +195,7 @@ export class AgentSession {
     config: ReverieConfig,
     now: () => Date,
     mode: ModeName,
+    freshDream: SessionContext['freshDream'],
   ) {
     this.engine = engine
     this.chat = chat
@@ -188,6 +205,7 @@ export class AgentSession {
     this.config = config
     this.now = now
     this.activeMode = mode
+    this.freshDream = freshDream
   }
 
   get mode(): ModeName {
@@ -201,7 +219,13 @@ export class AgentSession {
     options: AgentSessionOptions = {},
   ): Promise<AgentSession> {
     const mode = options.mode ?? 'general'
+    const now = options.now ?? (() => new Date())
     const system = await assembleSystemPrompt(engine, config, mode)
+    // A second, narrower read of session context, just for freshDream (see
+    // the field comment above): sessionContext reads only disk state as of
+    // `now`, so calling it twice here costs an extra read, never a
+    // different answer than what assembleSystemPrompt already used.
+    const context = await engine.sessionContext(now(), mode)
     const sessionId = await engine.startSession()
     // Recorded from the session's first moment, so a process that dies
     // before /bye still leaves the mode where reflection can find it.
@@ -213,8 +237,9 @@ export class AgentSession {
       system,
       sessionId,
       config,
-      options.now ?? (() => new Date()),
+      now,
       mode,
+      context.freshDream,
     )
   }
 
@@ -301,10 +326,24 @@ export class AgentSession {
     // this.system plus messages), so this suffix costs no cache. No other
     // call site gets a system-string suffix.
     const openedAt = this.now()
+    // The opener mention (Ruling A2): only added when there is a fresh,
+    // unmentioned dream to offer, and never in decompress mode, checked
+    // here rather than baked into freshDream at start() so a mode change
+    // between start() and this greeting (setMode before greet()) is still
+    // respected. markDreamMentioned is called exactly where the guidance
+    // is actually injected into the request, not unconditionally at
+    // session start: a session that never got the guidance (decompress,
+    // or no fresh dream at all) must never burn the one mention, or the
+    // dream would be lost with nothing having offered it.
+    let greetingInstruction = GREETING_INSTRUCTION
+    if (this.freshDream && this.activeMode !== 'decompress') {
+      greetingInstruction = `${GREETING_INSTRUCTION}\n\n${DREAM_MENTION_GUIDANCE}`
+      await this.engine.markDreamMentioned(this.freshDream.dreamId)
+    }
     try {
       const stream = this.chat.stream({
         model: this.model,
-        system: `${this.system}\n\n${GREETING_INSTRUCTION}\n\nThe current local time is ${renderLocalTime(openedAt, this.engine.timezone())}.`,
+        system: `${this.system}\n\n${greetingInstruction}\n\nThe current local time is ${renderLocalTime(openedAt, this.engine.timezone())}.`,
         messages: [],
         tools: [],
       })
