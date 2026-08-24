@@ -10,15 +10,7 @@ import {
   readGraph,
   readGraphRecords,
 } from './graph.js'
-import type { MemoryPaths } from './paths.js'
 import { ensureMemoryTree, memoryPaths } from './paths.js'
-
-async function tempPaths(): Promise<MemoryPaths> {
-  const dir = await mkdtemp(join(tmpdir(), 'openreverie-memory-'))
-  const paths = memoryPaths(dir)
-  await ensureMemoryTree(paths)
-  return paths
-}
 
 describe('edgeKey', () => {
   it('builds a key from edge, from, and to', () => {
@@ -346,35 +338,35 @@ describe('appendGraph and readGraph', () => {
   })
 
   it('round-trips a commitment node and a waits_on edge through the log', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'openreverie-memory-'))
     const paths = memoryPaths(dir)
     await ensureMemoryTree(paths)
-    try {
-      await appendGraph(paths, [
-        {
-          ts: '2026-08-24T10:00:00.000Z',
-          op: 'assert',
-          node: 'commitment_01ABC',
-          type: 'commitment',
-          label: 'See Nightfall with Arjun',
-        },
-        {
-          ts: '2026-08-24T10:00:00.000Z',
-          op: 'assert',
-          edge: 'waits_on',
-          from: 'commitment_01ABC',
-          to: 'entity_01WEDDING',
-          confidence: 1,
-          confirmed: true,
-        },
-      ])
 
-      const graph = await readGraph(paths)
+    await appendGraph(paths, [
+      {
+        ts: '2026-08-24T10:00:00.000Z',
+        op: 'assert',
+        node: 'commitment_01ABC',
+        type: 'commitment',
+        label: 'See Nightfall with Arjun',
+      },
+      {
+        ts: '2026-08-24T10:00:00.000Z',
+        op: 'assert',
+        edge: 'waits_on',
+        from: 'commitment_01ABC',
+        to: 'entity_01WEDDING',
+        confidence: 1,
+        confirmed: true,
+      },
+    ])
 
-      expect(graph.nodes.get('commitment_01ABC')?.type).toBe('commitment')
-      expect(Array.from(graph.edges.values()).some((e) => e.edge === 'waits_on' && e.from === 'commitment_01ABC')).toBe(true)
-    } finally {
-      await rm(dir, { recursive: true, force: true })
-    }
+    const graph = await readGraph(paths)
+
+    expect(graph.nodes.get('commitment_01ABC')?.type).toBe('commitment')
+    expect(
+      Array.from(graph.edges.values()).some(
+        (e) => e.edge === 'waits_on' && e.from === 'commitment_01ABC',
+      ),
+    ).toBe(true)
   })
 })
