@@ -679,9 +679,14 @@ export class MemoryEngine {
   // remember() above, this writes straight through to graph.jsonl: a
   // commitment is a thing with a lifecycle, not a fact queued for
   // end-of-session reflection.
+  //
+  // No waitsOn parameter here: the live remember tool no longer exposes
+  // it (packages/core/src/tools.ts), so nothing calls this with one.
+  // recordCommitmentRecord itself still accepts waitsOn for the data
+  // model; that is unchanged, only unreachable from this method.
   async recordCommitment(
     sessionId: string,
-    input: { label: string; flavor: CommitmentFlavor; statedTime?: string; waitsOn?: string },
+    input: { label: string; flavor: CommitmentFlavor; statedTime?: string },
   ): Promise<Commitment> {
     const timing = this.buildCommitmentTiming(input.statedTime)
     return recordCommitmentRecord(this.paths, {
@@ -689,7 +694,6 @@ export class MemoryEngine {
       flavor: input.flavor,
       sessionId,
       ...(timing !== undefined ? { timing } : {}),
-      ...(input.waitsOn !== undefined ? { waitsOn: input.waitsOn } : {}),
     })
   }
 

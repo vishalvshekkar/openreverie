@@ -599,6 +599,35 @@ describe('dispatchTool', () => {
       await engine.close()
     })
 
+    // waitsOn is real on the Commitment record and on selectCommitments's
+    // exclusion, but nothing anywhere clears it once set (see BACKLOG.md),
+    // so it must not be reachable from a live tool call. rememberCommitmentArgs
+    // is a z.strictObject, so an unknown key is refused rather than silently
+    // dropped: silently dropping it would be worse, since the caller would
+    // believe the field was recorded when it never reached the engine at all.
+    it('refuses a commitment call that still carries waitsOn', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps())
+      const sessionId = await engine.startSession()
+
+      const result = await dispatchTool(
+        engine,
+        sessionId,
+        call('remember', {
+          commitment: {
+            label: 'See Nightfall with Arjun',
+            flavor: 'plan',
+            waitsOn: 'once she confirms the venue',
+          },
+        }),
+      )
+      expect(JSON.parse(result).error).toBeDefined()
+
+      const live = await readCommitments(memoryPaths(dir))
+      expect(live).toHaveLength(0)
+
+      await engine.close()
+    })
+
     it('resolves a stated time it understands into the resolved branch, with no interpretation', async () => {
       const engine = await MemoryEngine.open(dir, fakeDeps())
       const sessionId = await engine.startSession()

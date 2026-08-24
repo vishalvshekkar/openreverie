@@ -108,14 +108,23 @@ const rememberItemArgs = z.strictObject({
 })
 
 // Record a brand new commitment. flavor is required because an errand and
-// a plan are selected and asked about differently; statedTime and waitsOn
-// are real, distinct fields, never prose packed into label.
+// a plan are selected and asked about differently; statedTime is a real,
+// distinct field, never prose packed into label.
+//
+// waitsOn is deliberately absent from this shape. Commitment.waitsOn still
+// exists on the record type in packages/memory/src/commitments.ts, and
+// selectCommitments still excludes any commitment with waitsOn set, but
+// nothing anywhere reactivates a commitment once the thing it waits on
+// happens: that reactivation is spec Section 5, and it is not built. A
+// live tool call that could set waitsOn would make a commitment
+// permanently unselectable with no path to undo it, which is worse than
+// not offering the field at all. Restore it here only once Section 5's
+// waits_on edge and reactivation check exist.
 const rememberCommitmentArgs = z.strictObject({
   commitment: z.strictObject({
     label: z.string(),
     flavor: z.enum(['errand', 'plan']),
     statedTime: statedTimeField,
-    waitsOn: z.string().optional(),
   }),
 })
 
@@ -320,8 +329,7 @@ export function toolDefinitions(): ToolDefinition[] {
         'cleaning") or a plan with someone else ("see the film with Arjun"). Give it a plain label, a flavor ' +
         '(errand or plan), and, only when the person actually stated one, statedTime in their own words ("sunday", ' +
         '"by Friday", "next month"). Never fold a stated time into the label itself: "See the film with Arjun by ' +
-        'Friday" as a label is the exact mistake this shape exists to prevent. waitsOn is for a commitment that ' +
-        'depends on someone else acting first ("once she confirms the venue"), in the person\'s own words. Use ' +
+        'Friday" as a label is the exact mistake this shape exists to prevent. Use ' +
         'reviseCommitment when a commitment already recorded has changed, a firmer date, a different plan, and ' +
         'name commitmentId so it is clear which commitment is being changed, never a new remember call describing ' +
         'the same thing again. Use resolveCommitment when a commitment is finished one way or another: name ' +
@@ -369,12 +377,6 @@ export function toolDefinitions(): ToolDefinition[] {
                 description:
                   'When the person said this happens, in their own words ("sunday", "by Friday", "come summer"). ' +
                   'Only when they actually stated one. Leave it out otherwise.',
-              },
-              waitsOn: {
-                type: 'string',
-                description:
-                  'What this commitment is waiting on before it can happen, in the person\'s own words ("once ' +
-                  'she confirms the venue"), only when they said the commitment depends on something else first.',
               },
             },
             required: ['label', 'flavor'],
@@ -785,7 +787,6 @@ async function dispatchRemember(
       label: commitment.label,
       flavor: commitment.flavor,
       ...(commitment.statedTime !== undefined ? { statedTime: commitment.statedTime } : {}),
-      ...(commitment.waitsOn !== undefined ? { waitsOn: commitment.waitsOn } : {}),
     })
     return JSON.stringify({ ok: true, commitmentId: recorded.id })
   }
