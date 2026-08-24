@@ -998,6 +998,77 @@ describe('command loop', () => {
 
     await engine.close()
   })
+
+  // Before this fix, EOF while a mode selection was pending was consumed
+  // as the selection itself: the synthesized '/bye' failed to match any
+  // mode, so commandModeSelect printed a spurious "Mode unchanged." before
+  // the loop's next iteration finally saw EOF again and exited. That exit
+  // only worked because question() happened to reject a second time too.
+  // This fake proves the fix no longer depends on that: the third call to
+  // question() never settles at all (a real closed stream that blocks
+  // instead of rejecting again), so a correct loop must exit on the very
+  // first EOF and never make that third call. The old code parks on it
+  // forever; the explicit 2000ms timeout is what turns that hang into a
+  // failed test instead of a wedged suite.
+  it('exits on the first EOF during a pending mode selection, without a second read and without printing Mode unchanged', async () => {
+    const chat = new FakeChatProvider([])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const output: string[] = []
+    let calls = 0
+    const io: ChatIo = {
+      question(prompt: string) {
+        output.push(prompt)
+        calls += 1
+        if (calls === 1) return Promise.resolve('/mode')
+        if (calls === 2) return Promise.reject(new Error('readline closed'))
+        // A closed stream that blocks rather than rejecting again. The
+        // fixed loop must never reach this call.
+        return new Promise<string>(() => {})
+      },
+      write(text: string) {
+        output.push(text)
+      },
+      onInterrupt() {},
+      cancelPending() {},
+    }
+
+    await expect(runChat({ engine, config, chat, io })).resolves.toEqual({ interrupted: false })
+
+    expect(output.join('')).not.toContain('Mode unchanged.')
+    expect(calls).toBe(2)
+
+    await engine.close()
+  }, 2000)
+
+  // The owner was asked directly whether a typed command like /bye at the
+  // mode selection prompt should run or cancel the selection, and chose
+  // deliberately to keep cancelling: see the comment at the decision point
+  // in commands.ts. This locks that choice in with a test, since it looks
+  // enough like an oversight that a future contributor would plausibly
+  // "fix" it. The check that matters most is the last one: /bye typed here
+  // must never reach the model, which is the original bug this whole
+  // selection-state feature exists to prevent.
+  it('cancels the selection on a typed /bye, prints Mode unchanged, does not exit, and never sends it to the model', async () => {
+    const chat = new FakeChatProvider([
+      { text: 'Good to see you.', toolCalls: [] },
+      { text: emptyReflectionJson('Looked at modes, then left.'), toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    // First /bye lands at the selection prompt and only cancels it; the
+    // second /bye is read as an ordinary command on the next iteration and
+    // actually ends the session.
+    const { io, output } = scriptedIo(['/mode', '/bye', '/bye'])
+
+    await expect(runChat({ engine, config, chat, io })).resolves.toEqual({ interrupted: false })
+
+    expect(output.join('')).toContain('Mode unchanged.')
+    expect(output.join('')).toContain('reflecting on this session')
+    expect(lastUserMessage(chat)).toBeUndefined()
+
+    await engine.close()
+  })
 })
 
 describe('printWarnings', () => {

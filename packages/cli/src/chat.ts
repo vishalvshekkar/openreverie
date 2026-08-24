@@ -269,24 +269,42 @@ export async function runChat(deps: {
   // (not a nested question() inside the command itself), which is what
   // keeps the second-Ctrl-C exit contract working here for free: the
   // interruptLevel >= 2 check right after that question() still runs
-  // before this state is ever consulted.
+  // before this state is ever consulted. One exception: EOF (the endOfInput
+  // flag below) always bypasses this state and exits, since EOF is not a
+  // typed line and has no mode selection to make.
   let modeSelectionPending = false
 
   for (;;) {
     writeStatusStrip()
     let line: string
+    let endOfInput = false
     try {
       line = await io.question(cyan('you> ', colorEnabled))
     } catch {
-      // readline closed (EOF): treat exactly like /bye.
+      // readline closed (EOF): treat exactly like /bye. This is the input
+      // stream ending, not the person typing something, so it must exit
+      // immediately whatever state the loop is in: a pending mode
+      // selection is irrelevant to it. endOfInput is what lets the check
+      // below tell an EOF-synthesized '/bye' apart from someone actually
+      // typing /bye at the selection prompt (that path is handled by the
+      // modeSelectionPending branch on purpose; see commands.ts).
+      //
+      // modeSelectionPending itself is deliberately left set here, not
+      // cleared: this path always falls through to parseInput('/bye') and
+      // commandBye, which returns 'exit' on every path (try and catch
+      // alike), so runChat returns before another loop iteration could
+      // ever consult modeSelectionPending again. Clearing it here would
+      // add a second guard that no test could pin independently of the
+      // one below.
       line = '/bye'
+      endOfInput = true
     }
 
     if (interruptLevel >= 2) {
       return { interrupted: true }
     }
 
-    if (modeSelectionPending) {
+    if (modeSelectionPending && !endOfInput) {
       modeSelectionPending = false
       await commandModeSelect(line, commandContext)
       continue

@@ -171,6 +171,13 @@ export async function commandModeSelect(input: string, ctx: CommandContext): Pro
     requested = trimmed.toLowerCase()
   }
 
+  // Deliberate, owner-decided on 2026-08-24, not an oversight: anything
+  // that is not a mode name or number cancels the selection this same
+  // way, including a slash command like /bye or /help typed here instead
+  // of a mode. The tradeoff is accepted plainly: a command typed at this
+  // prompt does not run, and the person has to retype it once the
+  // selection has been cancelled. Do not special-case commands to run
+  // them from this state instead.
   if (requested === undefined || !isModeName(requested)) {
     ctx.io.write('Mode unchanged.\n')
     return
