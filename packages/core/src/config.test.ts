@@ -62,6 +62,28 @@ describe('saveConfig and loadConfig round trip', () => {
 
     expect(loaded).toEqual(config)
   })
+
+  it('round-trips every models field, including the optional dreaming model', async () => {
+    const configPath = path.join(dir, 'config.toml')
+    const config = fullConfig({
+      models: {
+        chat: 'chat-model-alpha',
+        reflection: 'reflection-model-beta',
+        embeddings: 'embeddings-model-gamma',
+        dreaming: 'dreaming-model-delta',
+      },
+    })
+
+    await saveConfig(config, configPath)
+    const loaded = await loadConfig(configPath)
+
+    expect(loaded.models).toEqual({
+      chat: 'chat-model-alpha',
+      reflection: 'reflection-model-beta',
+      embeddings: 'embeddings-model-gamma',
+      dreaming: 'dreaming-model-delta',
+    })
+  })
 })
 
 describe('loadConfig defaults', () => {
