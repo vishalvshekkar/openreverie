@@ -835,7 +835,7 @@ The loop: system prompt is `persona + '\n\n' + DREAM_EXPLORATION_INSTRUCTIONS`; 
 
 The instruction text must state the restraint rule from the spec: follow what the seeds raise; reading the constitution is fine; do not attempt to read the whole record. The hard cap is what enforces it.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```ts
 // packages/memory/src/dreaming.test.ts (first block)
@@ -907,9 +907,9 @@ describe('runExploration', () => {
 })
 ```
 
-- [ ] **Step 2: Run, verify failure.**
+- [x] **Step 2: Run, verify failure.**
 
-- [ ] **Step 3: Implement** (in new `dreaming.ts`)
+- [x] **Step 3: Implement** (in new `dreaming.ts`)
 
 ```ts
 // packages/memory/src/dreaming.ts
@@ -1061,9 +1061,9 @@ export async function runExploration(args: {
 }
 ```
 
-- [ ] **Step 4: Run, verify pass.** Adjust the cap test's expected request count if the loop shape differs, but the invariants must hold: lookup called exactly `maxToolCalls` times, loop terminates, final message is the model's wrap-up.
+- [x] **Step 4: Run, verify pass.** Adjust the cap test's expected request count if the loop shape differs, but the invariants must hold: lookup called exactly `maxToolCalls` times, loop terminates, final message is the model's wrap-up.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/memory/src/dreaming.ts packages/memory/src/dreaming.test.ts
