@@ -254,7 +254,7 @@ git commit -m "feat(memory): dream log, dreams paths, dream and ins id prefixes"
 **Interfaces:**
 - Produces: `DocKind` now includes `'dream' | 'dream_insight'`. Frontmatter contract (written in Task 7, consumed by dateSpan now): both kinds carry `date: 'YYYY-MM-DD'`. New budget constant `DREAM_INSIGHTS_SECTION_CAP = 1800`; `PROMPT_BUDGET_TOTAL = 30000`.
 
-- [ ] **Step 1: Extend the P8 test first (it is the failing test)**
+- [x] **Step 1: Extend the P8 test first (it is the failing test)**
 
 In `docKinds.test.ts` add to `PROMPT_SECTION_CAP`:
 
@@ -278,12 +278,12 @@ it('returns the dream date for dream and dream_insight kinds', () => {
 })
 ```
 
-- [ ] **Step 2: Run, verify failure**
+- [x] **Step 2: Run, verify failure**
 
 Run: `pnpm vitest run packages/core/src/docKinds.test.ts packages/memory/src/dateSpan.test.ts`
 Expected: FAIL, TypeScript rejects the unknown `dream` keys in `Record<DocKind, number>` until DOC_KINDS grows; dateSpan cases missing.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `sqlite.ts`: append `'dream', 'dream_insight'` to `DOC_KINDS`. `dateSpan.ts`: extend the existing `case 'summary': case 'rollup_daily':` group to `case 'summary': case 'rollup_daily': case 'dream': case 'dream_insight':` (they share the `meta.date` logic verbatim). `budget.ts`:
 
@@ -294,12 +294,12 @@ export const DREAM_INSIGHTS_SECTION_CAP = 1800
 
 Append `DREAM_INSIGHTS_SECTION_CAP` to `SECTION_CAPS` and set `PROMPT_BUDGET_TOTAL = 30000` (sum becomes 29,600). `tools.ts` search_memory kinds description: append `, dream, dream_insight` to the valid-values sentence.
 
-- [ ] **Step 4: Run the suite for both packages**
+- [x] **Step 4: Run the suite for both packages**
 
 Run: `pnpm vitest run packages/core packages/memory`
 Expected: PASS except the known pre-existing context.test.ts failure. `INDEX_SCHEMA_VERSION` does not change: kinds are data in the `documents.kind` column, not schema.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/memory/src/sqlite.ts packages/memory/src/dateSpan.ts packages/memory/src/dateSpan.test.ts packages/core/src/budget.ts packages/core/src/tools.ts packages/core/src/docKinds.test.ts
