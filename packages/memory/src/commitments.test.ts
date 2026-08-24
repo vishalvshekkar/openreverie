@@ -7,6 +7,7 @@ import {
   recordCommitment,
   resolveCommitment,
   reviseCommitment,
+  selectCommitments,
 } from './commitments.js'
 import { appendGraph } from './graph.js'
 import { ensureMemoryTree, type MemoryPaths, memoryPaths } from './paths.js'
@@ -157,5 +158,85 @@ describe('commitments', () => {
     ])
 
     expect(await readCommitments(paths)).toHaveLength(0)
+  })
+})
+
+describe('selectCommitments', () => {
+  const base = {
+    id: 'c1',
+    label: 'x',
+    flavor: 'plan' as const,
+    state: 'open' as const,
+    sessionId: 's1',
+  }
+
+  it('surfaces a day-precision commitment on its day, not a week early', () => {
+    const c = {
+      ...base,
+      timing: {
+        words: 'sunday',
+        anchor: '2026-08-22T00:00:00.000Z',
+        resolved: { from: '2026-08-30', to: '2026-08-30', statedPrecision: 'day' as const },
+      },
+    }
+    expect(selectCommitments([c], '2026-08-23', 5)).toHaveLength(0)
+    expect(selectCommitments([c], '2026-08-30', 5)).toHaveLength(1)
+  })
+
+  // The brief's draft of this test carried an interpretation shaped before
+  // Task 3's ruling that split statedPrecision from interpretationConfidence
+  // (see commitments.ts / graph.ts CommitmentInterpretation). Corrected here
+  // to the real shape, title kept verbatim from the brief: 'come summer'
+  // names a season, which is the 'period' example in
+  // CommitmentInterpretation's own doc comment ('period' for a named span
+  // such as a season, 'vague' for anything looser), and the confidence
+  // field is interpretationConfidence, not confidence.
+  it('surfaces a vague seasonal commitment weeks ahead of its bracket', () => {
+    const c = {
+      ...base,
+      timing: {
+        words: 'come summer',
+        anchor: '2026-08-24T00:00:00.000Z',
+        interpretation: {
+          statedPrecision: 'period' as const,
+          gloss: 'Summer in Bangalore runs roughly February to May.',
+          bracketFrom: '2027-02-01',
+          bracketTo: '2027-05-31',
+          interpretationConfidence: 'medium' as const,
+        },
+      },
+    }
+    expect(selectCommitments([c], '2027-01-10', 5)).toHaveLength(1)
+  })
+
+  it('never surfaces a commitment that has already been asked about once', () => {
+    const c = {
+      ...base,
+      askedAt: '2026-08-31',
+      timing: {
+        words: 'sunday',
+        anchor: '2026-08-22T00:00:00.000Z',
+        resolved: { from: '2026-08-30', to: '2026-08-30', statedPrecision: 'day' as const },
+      },
+    }
+    expect(selectCommitments([c], '2026-08-30', 5)).toHaveLength(0)
+  })
+
+  it('never surfaces a quiet commitment, whatever its timing', () => {
+    const c = {
+      ...base,
+      state: 'quiet' as const,
+      timing: {
+        words: 'sunday',
+        anchor: '2026-08-22T00:00:00.000Z',
+        resolved: { from: '2026-08-30', to: '2026-08-30', statedPrecision: 'day' as const },
+      },
+    }
+    expect(selectCommitments([c], '2026-08-30', 5)).toHaveLength(0)
+  })
+
+  it('never surfaces a commitment waiting on something, whatever its timing', () => {
+    const c = { ...base, waitsOn: 'entity_01WEDDING' }
+    expect(selectCommitments([c], '2026-08-30', 5)).toHaveLength(0)
   })
 })
