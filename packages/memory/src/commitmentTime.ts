@@ -35,10 +35,6 @@ export function resolveStatedTime(
   const text = words.trim().toLowerCase()
   if (text.length === 0) return undefined
 
-  // "next <weekday>" is ambiguous and must be refused before the bare
-  // weekday branch below can match the weekday inside it.
-  if (/\bnext\b/.test(text)) return undefined
-
   const offset = dayOffsetFor(text, anchor, timezone)
   if (offset === undefined) return undefined
 
@@ -53,9 +49,15 @@ function dayOffsetFor(text: string, anchor: Date, timezone: string): number | un
   const inDays = text.match(/^in (\d+) days?$/)
   if (inDays?.[1]) return Number(inDays[1])
 
-  const weekday = text.match(/^(?:on |this )?([a-z]+)$/)
-  const named = weekday?.[1]
+  const weekday = text.match(/^(on |this |next )?([a-z]+)$/)
+  const qualifier = weekday?.[1]
+  const named = weekday?.[2]
   if (named && WEEKDAYS.includes(named)) {
+    // "next <weekday>" is ambiguous: English speakers do not agree on
+    // whether it names the coming occurrence of that weekday or the one
+    // after, so refuse rather than invent a fact the person did not state.
+    if (qualifier === 'next ') return undefined
+
     const todayIndex = weekdayIndex(anchor, timezone)
     const targetIndex = WEEKDAYS.indexOf(named)
     // The next occurrence, and today counts as zero days away only when the
