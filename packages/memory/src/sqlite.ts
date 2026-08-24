@@ -25,6 +25,8 @@ export const DOC_KINDS = [
   'person',
   'journal',
   'journaling',
+  'dream',
+  'dream_insight',
 ] as const
 
 export type DocKind = (typeof DOC_KINDS)[number]

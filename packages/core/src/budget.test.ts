@@ -4,7 +4,7 @@ import { CONSTITUTION_CAP, capBody, capRows, PROMPT_BUDGET_TOTAL, SECTION_CAPS }
 describe('the budget arithmetic', () => {
   it('keeps the sum of every per-section character cap inside the stated total', () => {
     const sum = SECTION_CAPS.reduce((total, cap) => total + cap, 0)
-    expect(sum).toBe(27800)
+    expect(sum).toBe(29600)
     expect(sum).toBeLessThanOrEqual(PROMPT_BUDGET_TOTAL)
   })
 })

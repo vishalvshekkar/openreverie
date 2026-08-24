@@ -3790,6 +3790,72 @@ describe('MemoryEngine', () => {
     })
   })
 
+  describe('dream document kind', () => {
+    let dir: string
+    let paths: MemoryPaths
+
+    beforeEach(async () => {
+      dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-dream-'))
+      paths = memoryPaths(dir)
+      await ensureMemoryTree(paths)
+    })
+
+    afterEach(async () => {
+      await rm(dir, { recursive: true, force: true })
+    })
+
+    it('serves a dream directory that has only insight.md, with no dream.md, without throwing', async () => {
+      const dreamDir = join(paths.dreamsDir, '2026-08-20-dream_a')
+      await mkdir(dreamDir, { recursive: true })
+      await writeDocumentAtomic({
+        path: join(dreamDir, 'insight.md'),
+        meta: { id: 'doc_01JZDREAM1', date: '2026-08-20' },
+        body: 'An insight with no accompanying narrative.\n',
+      })
+
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const rows = await engine.listPublicDocuments()
+      const dreamRows = rows.filter((row) => row.kind === 'dream' || row.kind === 'dream_insight')
+      expect(dreamRows).toHaveLength(1)
+      expect(dreamRows[0]?.kind).toBe('dream_insight')
+      expect(dreamRows[0]?.docId).toBe('doc_01JZDREAM1')
+      const full = await engine.getPublicDocument('doc_01JZDREAM1')
+      expect(full?.kind).toBe('dream_insight')
+      await engine.close()
+    })
+
+    it('never serves dreams/log.jsonl, dreams/.lock, or a dream directory process.jsonl as documents', async () => {
+      const dreamDir = join(paths.dreamsDir, '2026-08-21-dream_b')
+      await mkdir(dreamDir, { recursive: true })
+      await writeDocumentAtomic({
+        path: join(dreamDir, 'dream.md'),
+        meta: { id: 'doc_01JZDREAM2', date: '2026-08-21' },
+        body: 'A dream narrative.\n',
+      })
+      await writeDocumentAtomic({
+        path: join(dreamDir, 'insight.md'),
+        meta: { id: 'doc_01JZDREAM3', date: '2026-08-21' },
+        body: 'A dream insight.\n',
+      })
+      // A non-document sibling inside the dream directory, and two
+      // non-document files at the top of dreamsDir. None of these have
+      // frontmatter and none should ever be read as a document.
+      await writeFile(join(dreamDir, 'process.jsonl'), '{"step":"explore"}\n', 'utf8')
+      await writeFile(join(paths.dreamsDir, 'log.jsonl'), '{"dreamId":"dream_b"}\n', 'utf8')
+      await writeFile(join(paths.dreamsDir, '.lock'), '', 'utf8')
+
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const rows = await engine.listPublicDocuments()
+      const dreamRows = rows.filter((row) => row.kind === 'dream' || row.kind === 'dream_insight')
+      expect(dreamRows.map((row) => row.docId).sort()).toEqual(
+        ['doc_01JZDREAM2', 'doc_01JZDREAM3'].sort(),
+      )
+      await engine.close()
+    })
+  })
+
   describe('session journal method', () => {
     let dir: string
 

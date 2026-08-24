@@ -1880,6 +1880,34 @@ export class MemoryEngine {
       }
     }
 
+    let dreamEntries: string[] = []
+    try {
+      const entries = await readdir(this.paths.dreamsDir, { withFileTypes: true })
+      dreamEntries = entries.filter((e) => e.isDirectory()).map((e) => e.name)
+    } catch {
+      dreamEntries = []
+    }
+    for (const name of dreamEntries) {
+      const dreamDir = join(this.paths.dreamsDir, name)
+      // Unlike every other directory here, one dream directory holds two
+      // kinds, discriminated by filename. dreams/log.jsonl, dreams/.lock,
+      // and each directory's process.jsonl are never read as documents.
+      try {
+        result.push({ doc: await readDocument(join(dreamDir, 'dream.md')), kind: 'dream' })
+      } catch {
+        // No dream.md: the tone gate withheld the narrative for this dream,
+        // or it has not been written yet.
+      }
+      try {
+        result.push({
+          doc: await readDocument(join(dreamDir, 'insight.md')),
+          kind: 'dream_insight',
+        })
+      } catch {
+        // No insight.md yet: this dream has not produced an insight.
+      }
+    }
+
     return result
   }
 

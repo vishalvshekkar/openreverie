@@ -32,7 +32,9 @@ const ISO_WEEK_PATTERN = /^\d{4}-W\d{2}$/
 export function documentDateSpan(kind: DocKind, meta: DocumentMeta): DateSpan | null {
   switch (kind) {
     case 'summary':
-    case 'rollup_daily': {
+    case 'rollup_daily':
+    case 'dream':
+    case 'dream_insight': {
       const date = meta.date
       if (typeof date !== 'string' || !ISO_DATE_PATTERN.test(date)) {
         return null

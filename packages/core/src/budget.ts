@@ -38,11 +38,13 @@ export const ROLLUPS_AVAILABLE_CAP = 800
 export const RECENT_SUMMARIES_SECTION_CAP = 6000
 // Three summaries at 2,000 characters each is the section cap above.
 export const RECENT_SUMMARY_CAP = 2000
+// The dreams prompt section: selected insight rows from recent dreams.
+export const DREAM_INSIGHTS_SECTION_CAP = 1800
 
 // The target for the whole assembled body. Not runtime behavior: nothing
 // measures the finished prompt against it. It is an invariant asserted by a
 // test over the constants, which fails if anyone raises a cap past the total.
-export const PROMPT_BUDGET_TOTAL = 28000
+export const PROMPT_BUDGET_TOTAL = 30000
 
 // Every character cap that contributes to the assembled body, in prompt
 // order. Row caps (ARCS_CAP, PEOPLE_CAP, ENTITIES_CAP) are deliberately
@@ -58,6 +60,7 @@ export const SECTION_CAPS: number[] = [
   LATEST_DAILY_ROLLUP_CAP,
   ROLLUPS_AVAILABLE_CAP,
   RECENT_SUMMARIES_SECTION_CAP,
+  DREAM_INSIGHTS_SECTION_CAP,
 ]
 
 // Cuts a prose body to `limit` characters and, when it cuts, appends a

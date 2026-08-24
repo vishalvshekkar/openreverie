@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -50,6 +50,13 @@ const PROMPT_SECTION_CAP: Record<DocKind, number> = {
   // other injected kind. Deliberate: a short, user-authored preference note, not an
   // accumulating document like the constitution. No character cap applies.
   journaling: 0,
+  // dream narratives are never injected into the system prompt: they are written for the
+  // person, reached only through search_memory and read_document (dreaming design spec,
+  // Surfacing). No prompt section, no character cap.
+  dream: 0,
+  // dream_insight documents are not injected wholesale either: the dreams prompt section
+  // renders selected insights and is capped by DREAM_INSIGHTS_SECTION_CAP in budget.ts.
+  dream_insight: 0,
 }
 
 function fakeDeps(): EngineDeps {
@@ -80,7 +87,7 @@ describe('DocKind wiring (P8)', () => {
   })
 
   it('every kind has a positive prompt cap that is part of the budget, except kinds declared prompt-exempt', () => {
-    const PROMPT_EXEMPT_KINDS: DocKind[] = ['journal', 'journaling']
+    const PROMPT_EXEMPT_KINDS: DocKind[] = ['journal', 'journaling', 'dream', 'dream_insight']
     for (const kind of DOC_KINDS) {
       const cap = PROMPT_SECTION_CAP[kind]
       if (PROMPT_EXEMPT_KINDS.includes(kind)) {
@@ -187,6 +194,25 @@ describe('DocKind indexing and web API wiring', () => {
       body: 'Once a week, gratitude journaling, hang back.\n',
     })
     seeded.push({ kind: 'journaling', docId: journalingId })
+
+    const dreamDir = join(paths.dreamsDir, '2026-08-24-dream_seed')
+    await mkdir(dreamDir, { recursive: true })
+
+    const dreamId = newId('doc')
+    await writeDocumentAtomic({
+      path: join(dreamDir, 'dream.md'),
+      meta: { id: dreamId, date: '2026-08-24' },
+      body: 'A dream narrative.\n',
+    })
+    seeded.push({ kind: 'dream', docId: dreamId })
+
+    const dreamInsightId = newId('doc')
+    await writeDocumentAtomic({
+      path: join(dreamDir, 'insight.md'),
+      meta: { id: dreamInsightId, date: '2026-08-24' },
+      body: 'A dream insight.\n',
+    })
+    seeded.push({ kind: 'dream_insight', docId: dreamInsightId })
 
     expect(seeded.map((s) => s.kind).sort()).toEqual([...DOC_KINDS].sort())
 

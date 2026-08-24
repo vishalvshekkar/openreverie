@@ -42,6 +42,18 @@ describe('documentDateSpan', () => {
     expect(documentDateSpan('rollup_weekly', { id: 'doc_11', week: '2026-33' })).toBeNull()
   })
 
+  it('returns the dream date for dream and dream_insight kinds', () => {
+    expect(documentDateSpan('dream', { id: 'doc_1', date: '2026-08-24' })).toEqual({
+      start: '2026-08-24',
+      end: '2026-08-24',
+    })
+    expect(documentDateSpan('dream_insight', { id: 'doc_2', date: '2026-08-24' })).toEqual({
+      start: '2026-08-24',
+      end: '2026-08-24',
+    })
+    expect(documentDateSpan('dream', { id: 'doc_3' })).toBeNull()
+  })
+
   it('never returns undefined for any kind that exists today', () => {
     const kinds = [
       'constitution',
