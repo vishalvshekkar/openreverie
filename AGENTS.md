@@ -19,6 +19,27 @@ Applies to all prose: README, docs, comments, commit messages, error messages, C
 
 The README's Status section must reflect reality at all times. After any meaningful build session, update the README so it stays true: status, what works, what does not. Never let the README claim capability that does not exist in the code. Overstating status in this project is a serious defect, not a cosmetic one.
 
+## Backlog and roadmap
+
+Two files, one job each. An item lives in exactly one of them, never both.
+
+- `BACKLOG.md` is canonical for everything named but not yet started: deferred work, known gaps, ideas, and features not built. If it has not shipped, this is where it lives.
+- `ROADMAP.md` is the honest Done narrative and the current direction, and it points at `BACKLOG.md` for everything not started. It does not keep its own list of future work.
+
+**Every deferral gets an entry in the same change that makes it.** When a spec, plan, or review says something is out of scope, deferred, future work, or worth revisiting, add it to `BACKLOG.md` then, not later. A deferral recorded only inside a spec is invisible the moment that spec stops being the active one. This has already cost this project real time: structured event-time resolution sat deferred in one section of a 1064-line spec from 2026-08-16, and only resurfaced on 2026-08-24 because someone happened to read that file for an unrelated reason.
+
+Each entry carries five things:
+
+- what it is, in one or two sentences
+- why it was deferred
+- where the thinking already lives, linking the spec or plan section
+- what would trigger picking it up
+- rough size
+
+Two rules about those fields. **Never invent a reason or a trigger.** If the source gives none, write `not stated`, the same way this project prefers an honest gap to a confident guess anywhere else. And keep the reason distinguishable from your own summary: quote the source's own words when it gave them.
+
+When a backlog item ships, remove its entry and record it in the `ROADMAP.md` Done narrative. Do not leave it in both, and do not leave a shipped item sitting in the backlog marked done. The same honesty bar as the README applies to both files: nothing is claimed done unless it works.
+
 ## Architecture rules
 
 - Six packages with downward-only dependencies: `cli` -> `core` -> `memory` -> `providers`, and `server` -> `core` -> `memory` -> `providers`. `cli` and `server` are sibling outer interfaces. `web` communicates with `server` through HTTP only and never imports runtime engine packages. Never import upward or sideways around these boundaries.

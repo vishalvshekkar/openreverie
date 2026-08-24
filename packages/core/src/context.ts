@@ -47,8 +47,14 @@ export async function assembleSystemPrompt(
   engine: MemoryEngine,
   config: ReverieConfig,
   activeMode: ModeName = 'general',
+  // Injectable clock, matching AgentSessionOptions.now in agent.ts. It is
+  // read exactly once, only to pick which recent sessions and rollups fall
+  // inside their recency windows: it never appears in the rendered prompt.
+  // A test can pin it without touching process-wide state; every existing
+  // caller that omits it keeps reading the real wall clock unchanged.
+  now: () => Date = () => new Date(),
 ): Promise<string> {
-  const context = await engine.sessionContext(new Date(), activeMode)
+  const context = await engine.sessionContext(now(), activeMode)
   const profile = engine.profile()
   const persona = buildPersona(
     config.safety.mode,
@@ -102,6 +108,8 @@ function timeSection(context: SessionContext): string {
     '## Time',
     '',
     `This person's timezone is ${context.timezone}. Every message from them is stamped with the local date and time it was sent, in square brackets at the start of the message. Read the newest stamp as the current time, and read the gaps between stamps as elapsed time: something the person described as happening later in the day may already have happened by a later message.`,
+    '',
+    "A stated event time elsewhere in this prompt, such as in a recent intention or a memory, is the person's own wording, not a resolved instant: read it as relative to the date printed beside it, and resolve it against the current message stamp rather than as if it were said today.",
   ]
   if (context.timezoneSource === 'system-default') {
     lines.push(
@@ -299,9 +307,15 @@ function profileSection(profile: Profile): string | undefined {
 
 function recentIntentionsSection(context: SessionContext): string | undefined {
   if (context.recentIntentions.length === 0) return undefined
-  const lines = context.recentIntentions.map(
-    (intention) => `- ${intention.date}: ${intention.text}`,
-  )
+  const lines = context.recentIntentions.map((intention) => {
+    // eventTime is the person's own stated wording ("tonight", "next
+    // week"), never resolved into a date or a timestamp. The date already
+    // leading this line is what it is relative to, so it renders right
+    // next to that date and is left out entirely, not as an empty
+    // parenthetical, when the item stated none.
+    const anchor = intention.eventTime !== undefined ? ` (eventTime: "${intention.eventTime}")` : ''
+    return `- ${intention.date}: ${intention.text}${anchor}`
+  })
   const capped = capRows(lines, RECENT_INTENTIONS_SECTION_CAP)
   const rows = capped.rows
   if (capped.shown < lines.length) {
@@ -310,5 +324,5 @@ function recentIntentionsSection(context: SessionContext): string | undefined {
     // unreachable in practice; the character cap is a budget backstop.
     rows.push(`(showing ${capped.shown} of ${lines.length} recent intentions.)`)
   }
-  return `## Recent intentions\n\n${rows.join('\n')}`
+  return `## Recent intentions\n\nA recorded intention is evidence the person said they meant to do something. It is never evidence that they did it.\n\n${rows.join('\n')}`
 }

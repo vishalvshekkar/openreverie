@@ -12,7 +12,7 @@ import type { EngineDeps, MemoryEngine } from '@openreverie/memory'
 import { listDocuments, memoryPaths, readDocument } from '@openreverie/memory'
 import type { ChatProvider, EmbeddingProvider } from '@openreverie/providers'
 import { cyan, dim, magenta } from './colors.js'
-import { type CommandContext, parseInput, runCommand } from './commands.js'
+import { type CommandContext, commandModeSelect, parseInput, runCommand } from './commands.js'
 import { createStartupSpinner } from './startup.js'
 import { createStatusLine, type StatusLine } from './status.js'
 import { formatStripTime, renderStatusStrip } from './strip.js'
@@ -44,6 +44,11 @@ const TOOL_NOTICES: Record<string, string> = {
   graph_query: 'checking connections',
   list_arcs: 'checking memory',
   list_realms: 'checking memory',
+  list_people: 'checking memory',
+  list_entities: 'checking memory',
+  update_profile: 'updating profile',
+  declare_journal_method: 'setting journal method',
+  update_journaling_protocol: 'updating journal setup',
 }
 
 export function toolNotice(name: string): string {
@@ -257,6 +262,16 @@ export async function runChat(deps: {
     io.write(`${dim(line, colorEnabled)}\n`)
   }
 
+  // Set when a bare /mode just printed its numbered list and returned
+  // 'select-mode': the very next line typed is read as a mode selection,
+  // never parsed as a command or sent to the model as chat text. This is
+  // read through the same io.question() call as the ordinary prompt below
+  // (not a nested question() inside the command itself), which is what
+  // keeps the second-Ctrl-C exit contract working here for free: the
+  // interruptLevel >= 2 check right after that question() still runs
+  // before this state is ever consulted.
+  let modeSelectionPending = false
+
   for (;;) {
     writeStatusStrip()
     let line: string
@@ -271,11 +286,20 @@ export async function runChat(deps: {
       return { interrupted: true }
     }
 
+    if (modeSelectionPending) {
+      modeSelectionPending = false
+      await commandModeSelect(line, commandContext)
+      continue
+    }
+
     const parsed = parseInput(line)
     if (parsed.kind === 'command') {
       const outcome = await runCommand(parsed.name, parsed.arg, commandContext)
       if (outcome === 'exit') {
         return { interrupted: false }
+      }
+      if (outcome === 'select-mode') {
+        modeSelectionPending = true
       }
       continue
     }

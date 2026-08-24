@@ -616,6 +616,20 @@ describe('AgentSession', () => {
     await engine.close()
   })
 
+  it('greet() instructs not asking how something went unless the record shows it happened', async () => {
+    const chat = new FakeChatProvider([{ text: 'Hello again.', toolCalls: [] }])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const session = await AgentSession.start(engine, testConfig(), chat)
+
+    await collect(session.greet())
+
+    const system = chat.requests[0]?.system ?? ''
+    expect(system.toLowerCase()).toContain('do not ask how something went')
+    expect(system.toLowerCase()).toContain('unless the record shows it actually happened')
+
+    await engine.close()
+  })
+
   it('greet() writes a transcript line in the same shape as a normal assistant line', async () => {
     const chat = new FakeChatProvider([{ text: 'Hello again.', toolCalls: [] }])
     const engine = await MemoryEngine.open(dir, fakeDeps(chat))

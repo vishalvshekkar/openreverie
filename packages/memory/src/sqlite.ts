@@ -41,8 +41,36 @@ export interface SearchHit {
   docId: string
   path: string
   kind: DocKind
+  // The chunk's own text, verbatim, not a lane-rendered approximation of
+  // it. Both searchText and searchVector join the chunks table already
+  // (for identity and, previously, for the vector lane's truncation), so
+  // this is simply c.text: the same row a direct read_document call would
+  // eventually reach anyway. It used to differ by lane (searchText's
+  // snippet(chunks_fts, ...) windowed to 12 tokens around the match,
+  // searchVector's makeSnippet cut at 200 characters), which meant a chunk
+  // matched by only one lane reached retrieval.ts's payload as a fragment.
+  // Bounded by construction, not by truncation here: chunks are split to
+  // at most MAX_CHUNK_CHARS (1200) at index time (paragraphChunks), so this
+  // field never exceeds that regardless of chunk content.
   snippet: string
   score: number
+  // The document's date span (documentDateSpan, written at index time),
+  // start and end always present together or not at all. A dated kind
+  // (summary, rollup_daily, rollup_weekly, journal) carries it. A living
+  // document (constitution, realm, arc, person, journaling) has no single
+  // date and the keys are omitted entirely here, not sent as null: a
+  // guessed or defaulted date is worse than no date, so absence has to be
+  // visibly absence, not a value a careless caller could render as one.
+  dateStart?: string
+  dateEnd?: string
+  // The chunk's position within its document (chunks.seq), 0-indexed.
+  // Populated on every chunk-level hit returned by searchText and
+  // searchVector: a single physical chunk can be matched by both lanes,
+  // and docId+seq is the stable identity retrieval.ts uses to recognize
+  // that as one chunk rather than two. Optional, not required, because
+  // the fused, document-level hit searchMemory returns is no longer one
+  // chunk (see DocumentHit in retrieval.ts) and carries no single seq.
+  seq?: number
 }
 
 // A graph node whose name matched a search query. Separate from SearchHit
@@ -367,7 +395,8 @@ export class MemoryIndex {
     const rows = this.db
       .prepare(
         `SELECT d.id as docId, d.path as path, d.kind as kind,
-                snippet(chunks_fts, 0, '', '', '...', 12) as snippet,
+                d.date_start as dateStart, d.date_end as dateEnd, c.seq as seq,
+                c.text as text,
                 chunks_fts.rank as rank
          FROM chunks_fts
          JOIN chunks c ON c.id = chunks_fts.rowid
@@ -377,7 +406,10 @@ export class MemoryIndex {
          LIMIT ?`,
       )
       .all(ftsQuery, ...(kinds ?? []), ...dates.params, limit) as (DocumentRow & {
-      snippet: string
+      dateStart: string | null
+      dateEnd: string | null
+      seq: number
+      text: string
       rank: number
     })[]
 
@@ -385,8 +417,10 @@ export class MemoryIndex {
       docId: row.docId,
       path: row.path,
       kind: row.kind,
-      snippet: row.snippet,
+      snippet: row.text,
       score: -row.rank,
+      seq: row.seq,
+      ...dateSpanFields(row.dateStart, row.dateEnd),
     }))
   }
 
@@ -417,7 +451,8 @@ export class MemoryIndex {
     const whereClause = predicates.length > 0 ? `WHERE ${predicates.join(' AND ')}` : ''
     const rows = this.db
       .prepare(
-        `SELECT e.vector as vector, d.id as docId, d.path as path, d.kind as kind, c.text as text
+        `SELECT e.vector as vector, d.id as docId, d.path as path, d.kind as kind,
+                d.date_start as dateStart, d.date_end as dateEnd, c.seq as seq, c.text as text
          FROM embeddings e
          JOIN chunks c ON c.id = e.chunk_id
          JOIN documents d ON d.id = c.doc_id
@@ -428,6 +463,9 @@ export class MemoryIndex {
       docId: string
       path: string
       kind: DocKind
+      dateStart: string | null
+      dateEnd: string | null
+      seq: number
       text: string
     }[]
 
@@ -435,8 +473,10 @@ export class MemoryIndex {
       docId: row.docId,
       path: row.path,
       kind: row.kind,
-      snippet: makeSnippet(row.text),
+      snippet: row.text,
       score: cosineSimilarity(queryVec, blobToVector(row.vector)),
+      seq: row.seq,
+      ...dateSpanFields(row.dateStart, row.dateEnd),
     }))
 
     scored.sort((a, b) => b.score - a.score)
@@ -544,6 +584,21 @@ export class MemoryIndex {
   }
 }
 
+// Projects the documents table's nullable date_start/date_end columns onto
+// the object-spread shape SearchHit expects: both keys present when the
+// document has a span, neither key present when it does not (a living
+// document). documentDateSpan always writes both columns together or
+// neither, so checking dateStart alone is enough to decide.
+function dateSpanFields(
+  dateStart: string | null,
+  dateEnd: string | null,
+): { dateStart: string; dateEnd: string } | Record<string, never> {
+  if (dateStart === null || dateEnd === null) {
+    return {}
+  }
+  return { dateStart, dateEnd }
+}
+
 function rowToNode(row: NodeRow): GraphNode {
   return {
     id: row.id,
@@ -569,8 +624,14 @@ function buildChunks(doc: Document): string[] {
   const chunks = paragraphChunks(doc.body)
   const items = doc.meta.items
   if (Array.isArray(items)) {
+    // The document's own date (meta.date on a summary, set by
+    // applyReflection to the session's date) is the anchor for any
+    // eventTime an item carries. Not item.ts: several fixtures and one
+    // hand-written summary.md leave that blank, and recentIntentions in
+    // engine.ts already treats the session date as the reliable one.
+    const docDate = typeof doc.meta.date === 'string' ? doc.meta.date : undefined
     for (const item of items) {
-      chunks.push(itemChunkText(item))
+      chunks.push(itemChunkText(item, docDate))
     }
   }
   return chunks
@@ -616,24 +677,58 @@ async function fileMtime(path: string): Promise<string> {
   }
 }
 
-function itemChunkText(item: unknown): string {
-  const record = item as { id?: unknown; text?: unknown }
+// docDate anchors eventTime, when present, to the record this item came
+// from. The anchor is the person's own wording plus the date it is
+// relative to, never a resolved instant: see reflection.ts:332 and the
+// time spec (docs/superpowers/specs/2026-08-16-time-as-first-class-design.md,
+// section 2) on why eventTime stays free text. An item with no eventTime,
+// or a document with no date of its own (a living document has none),
+// gets no anchor at all rather than a guessed one.
+function itemChunkText(item: unknown, docDate?: string): string {
+  const record = item as { id?: unknown; text?: unknown; eventTime?: unknown }
   const id = typeof record.id === 'string' ? record.id : ''
   const text = typeof record.text === 'string' ? record.text : ''
+  const eventTime = typeof record.eventTime === 'string' ? record.eventTime : undefined
+  if (eventTime !== undefined && docDate !== undefined) {
+    return `${id}: ${text} (eventTime: "${eventTime}", as stated on ${docDate})`
+  }
   return `${id}: ${text}`
 }
 
 // Builds an FTS5 MATCH expression from free text. Each word is wrapped as
 // a quoted phrase so punctuation and FTS operator characters (hyphens,
-// colons, apostrophes) never reach the query parser as syntax. Returns
-// null for a query with no words, so callers can skip the query entirely
-// instead of asking FTS5 to match on nothing.
+// colons, apostrophes) never reach the query parser as syntax, which also
+// rules out a query-injection path: nothing from `query` is ever unquoted
+// FTS5 syntax. Terms are joined with OR, not the whitespace that FTS5
+// reads as an implicit AND: a chunk is about one summary item, roughly 100
+// characters, and the model writes queries in plain language per the
+// search_memory tool description, 10 to 15 tokens long. ANDing them meant
+// every single term had to land in the same ~100 characters, which starved
+// the lane on almost every real query (defect 5 in
+// docs/superpowers/plans/2026-08-24-recall-and-event-time-fixes.md). OR
+// lets bm25 do the ranking job it exists for: a chunk matching more terms
+// still outranks one matching fewer, ordered by chunks_fts.rank exactly as
+// before, just over a much larger candidate set.
+//
+// A term that tokenizes to nothing under FTS5's own tokenizer (pure
+// punctuation, for instance) contributes an empty quoted phrase to the OR
+// chain. FTS5 accepts that without error and it simply never matches, so a
+// punctuation-only query returns no rows rather than throwing. A
+// stopword-only query ("the of and is") is not filtered here: every term
+// is still a term, and OR means each one can match on its own. That is
+// deliberately not fixed by term selection, because the LIMIT clause in
+// searchText already bounds every query, stopword-only or not, to at most
+// `limit` rows: there is no path from this function to "return the whole
+// corpus".
+//
+// Returns null for a query with no words at all, so callers can skip the
+// query entirely instead of asking FTS5 to match on nothing.
 function toFtsQuery(query: string): string | null {
   const terms = query.trim().split(/\s+/).filter(Boolean)
   if (terms.length === 0) {
     return null
   }
-  return terms.map((term) => `"${term.replace(/"/g, '""')}"`).join(' ')
+  return terms.map((term) => `"${term.replace(/"/g, '""')}"`).join(' OR ')
 }
 
 // Splits a search query into the tokens the node scan matches on. The query
@@ -677,10 +772,6 @@ function dateClause(after?: string, before?: string): { sql: string; params: str
     return { sql: '', params: [] }
   }
   return { sql: `AND (d.date_start IS NULL OR (${halves.join(' AND ')}))`, params }
-}
-
-function makeSnippet(text: string, maxChars = 200): string {
-  return text.length > maxChars ? `${text.slice(0, maxChars)}...` : text
 }
 
 function vectorToBlob(vector: number[]): Buffer {

@@ -286,8 +286,11 @@ export interface SessionContext {
   // what the person said they wanted to do. The date matters here exactly
   // as it does for recentSummaries and the daily rollup: without it the
   // model cannot tell an intention from yesterday apart from one from last
-  // week.
-  recentIntentions: { text: string; date: string }[]
+  // week. eventTime, when the item carries one, is the person's own stated
+  // wording ("tonight", "next week"), never a resolved instant: see
+  // ReflectionItem.eventTime (reflection.ts) and the time spec's section 2.
+  // It is relative to date above, not to whenever the model reads it.
+  recentIntentions: { text: string; date: string; eventTime?: string }[]
   latestDailyRollup?: { date: string; body: string; docId: string }
   recentSummaries: { sessionId: string; date: string; body: string; docId: string }[]
   // The newest WEEKLY_INDEX_CAP weekly rollups, newest first, each with the
@@ -1076,7 +1079,12 @@ export class MemoryEngine {
             // recentSummaries and the daily rollup, and unlike ts (empty
             // on a hand-written summary.md in several tests) it is always
             // present.
-            recentIntentions.push({ text: (item as { text: string }).text, date: session.date })
+            const eventTime = (item as { eventTime?: unknown }).eventTime
+            recentIntentions.push({
+              text: (item as { text: string }).text,
+              date: session.date,
+              ...(typeof eventTime === 'string' ? { eventTime } : {}),
+            })
           }
         }
       }

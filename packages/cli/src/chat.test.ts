@@ -2,6 +2,7 @@ import { chmod, mkdir, mkdtemp, readdir, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import type { ReverieConfig } from '@openreverie/core'
+import { toolDefinitions } from '@openreverie/core'
 import {
   appendGraph,
   type EngineDeps,
@@ -146,6 +147,18 @@ async function waitForPrompt(output: string[]): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 0))
   }
   throw new Error('timed out waiting for the you> prompt')
+}
+
+// Like waitForPrompt, but waits for the Nth you> prompt rather than the
+// first, for tests that need to script an answer to one prompt and then
+// observe the next one before acting (e.g. triggering Ctrl-C once the
+// selection-state prompt is actually up).
+async function waitForPromptCount(output: string[], count: number): Promise<void> {
+  for (let i = 0; i < 200; i++) {
+    if (output.filter((chunk) => chunk.includes('you> ')).length >= count) return
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  }
+  throw new Error(`timed out waiting for ${count} you> prompts`)
 }
 
 async function sessionSummaryFiles(memoryDir: string): Promise<string[]> {
@@ -861,6 +874,130 @@ describe('command loop', () => {
 
     await engine.close()
   })
+
+  // The bug this whole unit exists for: bare /mode used to list modes and
+  // then let the very next line typed fall through parseInput and reach
+  // the model as an ordinary chat message, so /mode then deep silently
+  // sent "deep" to the companion instead of switching. lastUserMessage
+  // being undefined after this run is the actual regression check; the
+  // status strip check on top of it confirms the mode really did switch
+  // (not just that nothing was sent), the same way the existing "shows
+  // the new mode on the next strip" test at describe('status strip')
+  // verifies /mode <name>.
+  it('enters a selection state on bare /mode and switches on the next line, never sending that line to the model', async () => {
+    const chat = new FakeChatProvider([])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const { io, output } = scriptedIo(['/mode', 'deep', '/bye'])
+
+    await runChat({ engine, config, chat, io, interactive: true })
+
+    expect(lastUserMessage(chat)).toBeUndefined()
+
+    // Three prompts run in this script (/mode, deep, /bye), so three strips
+    // are printed: the one before /mode and the one before deep are both
+    // still "general" (the mode has not switched yet when that second
+    // strip is drawn, only after the "deep" line is read and processed),
+    // and the third, before /bye, is the first to show the switch.
+    const strips = output
+      .join('')
+      .split('\n')
+      .filter((line) => line.includes(' · '))
+    expect(strips.length).toBeGreaterThanOrEqual(3)
+    expect(strips[0]).toContain('general · ')
+    expect(strips[1]).toContain('general · ')
+    expect(strips[2]).toContain('deep · ')
+
+    await engine.close()
+  })
+
+  it('accepts a numbered selection the same way as a typed name', async () => {
+    const chat = new FakeChatProvider([])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    // 5 is "deep" in MODE_NAMES order, per the numbered list /mode prints.
+    const { io, output } = scriptedIo(['/mode', '5', '/bye'])
+
+    await runChat({ engine, config, chat, io, interactive: true })
+
+    expect(lastUserMessage(chat)).toBeUndefined()
+    const strips = output
+      .join('')
+      .split('\n')
+      .filter((line) => line.includes(' · '))
+    expect(strips.length).toBeGreaterThanOrEqual(3)
+    expect(strips[2]).toContain('deep · ')
+
+    await engine.close()
+  })
+
+  it('leaves the mode unchanged on an empty line after /mode, sends nothing to the model, and keeps working afterward', async () => {
+    const chat = new FakeChatProvider([
+      { text: 'Good to see you.', toolCalls: [] },
+      { text: 'Hi there.', toolCalls: [] },
+      { text: emptyReflectionJson('Said hello.'), toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const { io, output } = scriptedIo(['/mode', '', 'hello', '/bye'])
+
+    await runChat({ engine, config, chat, io, interactive: true })
+
+    expect(output.join('')).toContain('Mode unchanged.')
+    // The empty line never reached the model, and neither did anything
+    // that looks like a mode name; the ordinary "hello" typed right after
+    // still goes through normally.
+    expect(lastUserMessage(chat)).toMatch(/hello$/)
+
+    const strips = output
+      .join('')
+      .split('\n')
+      .filter((line) => line.includes(' · '))
+    for (const strip of strips) expect(strip).toContain('general · ')
+
+    await engine.close()
+  })
+
+  it('leaves the mode unchanged on unrecognised input after /mode, without sending it to the model', async () => {
+    const chat = new FakeChatProvider([])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const { io, output } = scriptedIo(['/mode', 'purple', '/bye'])
+
+    await runChat({ engine, config, chat, io, interactive: true })
+
+    expect(output.join('')).toContain('Mode unchanged.')
+    expect(lastUserMessage(chat)).toBeUndefined()
+
+    await engine.close()
+  })
+
+  // Second Ctrl-C must still exit cleanly (interrupted: true, pending
+  // question() actually unblocked) while the loop is sitting at the
+  // selection-state prompt, exactly as it does at the ordinary you>
+  // prompt. This only holds because the selection line is read through
+  // the same io.question() call the ordinary prompt uses, wired to the
+  // same cancelPending() contract; a nested question() call inside the
+  // command itself would not get this for free.
+  it('does not break the second Ctrl-C exit contract while awaiting a mode selection', async () => {
+    const chat = new FakeChatProvider([])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const { io, output, triggerInterrupt, answerPending, cancelCount } = pendingQuestionIo()
+
+    const done = runChat({ engine, config, chat, io })
+    await waitForPrompt(output)
+    answerPending('/mode')
+    await waitForPromptCount(output, 2)
+
+    triggerInterrupt() // first: reminder only, question() stays pending
+    triggerInterrupt() // second: aborts the pending question() and exits
+
+    await expect(done).resolves.toEqual({ interrupted: true })
+    expect(cancelCount.value).toBeGreaterThanOrEqual(1)
+
+    await engine.close()
+  })
 })
 
 describe('printWarnings', () => {
@@ -1207,6 +1344,11 @@ describe('toolNotice', () => {
     expect(toolNotice('graph_query')).toBe('[checking connections]')
     expect(toolNotice('list_arcs')).toBe('[checking memory]')
     expect(toolNotice('list_realms')).toBe('[checking memory]')
+    expect(toolNotice('list_people')).toBe('[checking memory]')
+    expect(toolNotice('list_entities')).toBe('[checking memory]')
+    expect(toolNotice('update_profile')).toBe('[updating profile]')
+    expect(toolNotice('declare_journal_method')).toBe('[setting journal method]')
+    expect(toolNotice('update_journaling_protocol')).toBe('[updating journal setup]')
   })
 
   it('falls back to a plain, truthful notice for an unknown tool', () => {
@@ -1217,6 +1359,18 @@ describe('toolNotice', () => {
   // back to the same plain, truthful default as any other unlisted tool.
   it('has no notice of its own for forget, since the feature is parked', () => {
     expect(toolNotice('forget')).toBe('[using: forget]')
+  })
+
+  // The gap this guards: TOOL_NOTICES is a hand-maintained table next to a
+  // tool list that grows in a different file. When toolDefinitions() grew
+  // from eight to thirteen, five names were never added here and fell
+  // through to the generic "[using: name]" fallback. This test derives the
+  // expected names from toolDefinitions() itself, never a hardcoded list,
+  // so the next tool added cannot reopen the same gap silently.
+  it('has a specific notice for every tool the agent can actually call', () => {
+    for (const tool of toolDefinitions()) {
+      expect(toolNotice(tool.name)).not.toBe(`[using: ${tool.name}]`)
+    }
   })
 })
 

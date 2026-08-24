@@ -70,6 +70,28 @@ describe('MemoryIndex', () => {
       expect(hits[0]?.snippet.length).toBeGreaterThan(0)
     })
 
+    it('returns the chunk verbatim rather than a 12-token window around the match', async () => {
+      // The match sits in the middle of a single paragraph (one chunk) with
+      // a marker word more than 12 tokens away on each side. FTS5's own
+      // snippet(chunks_fts, 0, '', '', '...', 12) would clip both markers
+      // out, since it renders only the 12 tokens surrounding the match.
+      // This is the exact defect: a chunk matched by the FTS lane must
+      // reach the caller as its full text, not that window.
+      const filler = Array.from({ length: 16 }, (_, i) => `filler${i}`).join(' ')
+      const body = `startmarker ${filler} targetword ${filler} endmarker`
+      await index.upsertDocument(
+        doc({ meta: { id: 'realm_full_chunk' }, body }),
+        'realm',
+        embedFn(),
+      )
+
+      const hits = index.searchText('targetword', 10)
+      expect(hits.length).toBe(1)
+      expect(hits[0]?.snippet).toBe(body)
+      expect(hits[0]?.snippet).toContain('startmarker')
+      expect(hits[0]?.snippet).toContain('endmarker')
+    })
+
     it('ranks a document mentioning the term repeatedly above one mentioning it once', async () => {
       await index.upsertDocument(
         doc({
@@ -132,6 +154,63 @@ describe('MemoryIndex', () => {
       expect(runHits.length).toBe(1)
     })
 
+    it("anchors a summary item's stated eventTime to the document's own date, never a resolved instant", async () => {
+      const summaryDoc = doc({
+        meta: {
+          id: 'summary_2',
+          date: '2026-08-16',
+          items: [
+            {
+              id: 'item_ccc',
+              text: 'Watching Zephyrquest',
+              ts: '2026-08-16',
+              kind: 'intention',
+              eventTime: 'tonight',
+            },
+          ],
+        },
+        body: 'A short summary paragraph.',
+      })
+
+      await index.upsertDocument(summaryDoc, 'summary', embedFn())
+
+      // searchText's snippet is the chunk's own verbatim text, so it
+      // carries both the match and the date anchor together regardless of
+      // where in the chunk the matched word sits.
+      const hits = index.searchText('tonight', 10)
+      expect(hits.length).toBe(1)
+      const snippet = hits[0]?.snippet ?? ''
+      // The person's own words, anchored to the date the record was made,
+      // not resolved into any kind of timestamp.
+      expect(snippet).toContain('tonight')
+      expect(snippet).toContain('2026-08-16')
+      expect(snippet).not.toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/)
+
+      const titleHits = index.searchText('Zephyrquest', 10)
+      expect(titleHits.length).toBe(1)
+    })
+
+    it('leaves a summary item with no eventTime chunked exactly as before, no anchor text at all', async () => {
+      const summaryDoc = doc({
+        meta: {
+          id: 'summary_3',
+          date: '2026-08-16',
+          items: [
+            { id: 'item_ddd', text: 'Went for a long walk', ts: '2026-08-16', kind: 'event' },
+          ],
+        },
+        body: 'A short summary paragraph.',
+      })
+
+      await index.upsertDocument(summaryDoc, 'summary', embedFn())
+
+      const hits = index.searchText('walk', 10)
+      expect(hits.length).toBe(1)
+      const snippet = hits[0]?.snippet ?? ''
+      expect(snippet).not.toContain('stated')
+      expect(snippet).not.toContain('eventTime')
+    })
+
     it('removeDocument deletes the document and its chunks', async () => {
       await index.upsertDocument(doc(), 'realm', embedFn())
       expect(index.searchText('work', 10).length).toBe(1)
@@ -180,6 +259,99 @@ describe('MemoryIndex', () => {
       expect(index.searchText('kite', 10, [])).toEqual([])
     })
 
+    it('ORs terms so a realistic twelve-token natural-language query still finds the chunk (defect 5, A2)', async () => {
+      // Regression for defect 5 (docs/superpowers/plans/2026-08-24-recall-and-event-time-fixes.md,
+      // Unit A): toFtsQuery used to AND every whitespace-separated term, so a
+      // natural-language query of 10 to 15 tokens matched zero chunks
+      // against a ~100-character chunk. This is the shape the model actually
+      // writes per the search_memory tool description ("in plain
+      // language"), so this must stay non-empty for this exact kind of
+      // query, not just a short keyword one.
+      const summaryDoc = doc({
+        meta: {
+          id: 'summary_natural',
+          date: '2026-08-20',
+          items: [
+            {
+              id: 'item_natural',
+              text: 'Tickets are booked with Arjun for Nightfall on Sunday, 23 Aug 2026 at 6:45pm.',
+              ts: '2026-08-20',
+              kind: 'event',
+            },
+          ],
+        },
+        body: 'A short summary paragraph.',
+      })
+      await index.upsertDocument(summaryDoc, 'summary', embedFn())
+
+      // 12 tokens, the length named in the plan.
+      const query = 'What day and time is the Nightfall booking with Arjun actually for?'
+      const hits = index.searchText(query, 10)
+      expect(hits.length).toBeGreaterThan(0)
+      expect(hits.map((h) => h.docId)).toContain('summary_natural')
+    })
+
+    it('still ranks the document matching more OR-ed terms above one matching fewer', async () => {
+      await index.upsertDocument(
+        doc({
+          meta: { id: 'doc_more_terms' },
+          body: 'Nightfall tickets booked with Arjun for Sunday night showtime plans.',
+        }),
+        'realm',
+        embedFn(),
+      )
+      await index.upsertDocument(
+        doc({ meta: { id: 'doc_fewer_terms' }, body: 'Arjun mentioned Nightfall once in passing.' }),
+        'realm',
+        embedFn(),
+      )
+
+      const hits = index.searchText(
+        'Nightfall tickets booked with Arjun for Sunday night showtime plans',
+        10,
+      )
+      expect(hits.length).toBe(2)
+      expect(hits[0]?.docId).toBe('doc_more_terms')
+      expect(hits[0]?.score).toBeGreaterThan(hits[1]?.score ?? Number.POSITIVE_INFINITY)
+    })
+
+    it('a stopword-only or punctuation-only query does not throw and stays within the requested limit', async () => {
+      await index.upsertDocument(
+        doc({ body: 'The quick brown fox and a fast dog were in the yard.' }),
+        'realm',
+        embedFn(),
+      )
+
+      expect(() => index.searchText('the of and is', 5)).not.toThrow()
+      expect(index.searchText('the of and is', 5).length).toBeLessThanOrEqual(5)
+
+      expect(() => index.searchText('!!! ??? ...', 5)).not.toThrow()
+      expect(index.searchText('!!! ??? ...', 5)).toEqual([])
+    })
+
+    it('searchText and searchVector both carry the chunk position within its document (A4 identity)', async () => {
+      const summaryDoc = doc({
+        meta: {
+          id: 'summary_seq',
+          items: [
+            { id: 'item_first', text: 'Kayak trip notes, first item.' },
+            { id: 'item_second', text: 'Kayak trip notes, second item.' },
+          ],
+        },
+        body: '',
+      })
+      await index.upsertDocument(summaryDoc, 'summary', embedFn())
+
+      const textHits = index.searchText('kayak trip notes', 10)
+      expect(textHits.map((h) => h.seq).sort()).toEqual([0, 1])
+
+      const provider = new FakeEmbeddingProvider()
+      const [queryVec] = await provider.embed('fake-model', ['kayak trip notes'])
+      if (!queryVec) throw new Error('expected a query vector')
+      const vectorHits = await index.searchVector(queryVec, 10)
+      expect(vectorHits.map((h) => h.seq).sort()).toEqual([0, 1])
+    })
+
     it('searchText treats a kinds value containing a quote as an ordinary bound value, not SQL syntax', async () => {
       await index.upsertDocument(
         doc({ meta: { id: 'realm_kite3' }, body: 'A note about kite surfing.' }),
@@ -224,6 +396,36 @@ describe('MemoryIndex', () => {
         { id: 'doc_daily', date_start: '2026-08-12', date_end: '2026-08-12' },
         { id: 'doc_weekly', date_start: '2026-08-10', date_end: '2026-08-16' },
       ])
+    })
+
+    it('searchText carries the document date span on the hit for a dated document (A3)', async () => {
+      await index.upsertDocument(
+        doc({
+          meta: { id: 'doc_dated', date: '2026-08-12' },
+          body: 'A dated summary about kayaking.',
+        }),
+        'summary',
+        embedFn(),
+      )
+
+      const hits = index.searchText('kayaking', 10)
+      expect(hits.length).toBe(1)
+      expect(hits[0]?.dateStart).toBe('2026-08-12')
+      expect(hits[0]?.dateEnd).toBe('2026-08-12')
+    })
+
+    it('searchText leaves the date span absent, not guessed, for a living document (A3)', async () => {
+      await index.upsertDocument(
+        doc({ meta: { id: 'doc_living' }, body: 'A living arc page about kayaking.' }),
+        'arc',
+        embedFn(),
+      )
+
+      const hits = index.searchText('kayaking', 10)
+      expect(hits.length).toBe(1)
+      expect(hits[0]?.dateStart).toBeUndefined()
+      expect(hits[0]?.dateEnd).toBeUndefined()
+      expect('dateStart' in (hits[0] ?? {})).toBe(false)
     })
   })
 
@@ -323,6 +525,29 @@ describe('MemoryIndex', () => {
       expect(hits[0]?.score).toBeGreaterThan(hits[1]?.score ?? 0)
     })
 
+    it('returns the chunk verbatim rather than truncating it at 200 characters', async () => {
+      const provider = new FakeEmbeddingProvider()
+      const embed = (texts: string[]) => provider.embed('fake-model', texts)
+
+      // Well past makeSnippet's old 200-character cutoff, and past that
+      // cutoff with content that survives to the end, "trailingmarker".
+      const filler = Array.from({ length: 40 }, (_, i) => `filler${i}`).join(' ')
+      const body = `${filler} trailingmarker`
+      await index.upsertDocument(doc({ meta: { id: 'realm_long' }, body }), 'realm', embed)
+
+      const [queryVec] = await provider.embed('fake-model', [body])
+      if (!queryVec) {
+        throw new Error('expected a query vector')
+      }
+
+      const hits = await index.searchVector(queryVec, 5)
+      expect(hits.length).toBe(1)
+      expect(body.length).toBeGreaterThan(200)
+      expect(hits[0]?.snippet).toBe(body)
+      expect(hits[0]?.snippet).toContain('trailingmarker')
+      expect(hits[0]?.snippet.endsWith('...')).toBe(false)
+    })
+
     it('applies a kinds filter at the SQL level', async () => {
       const provider = new FakeEmbeddingProvider()
       const embed = (texts: string[]) => provider.embed('fake-model', texts)
@@ -392,6 +617,39 @@ describe('MemoryIndex', () => {
       const maliciousKinds = ["realm' OR '1'='1"] as unknown as DocKind[]
 
       await expect(index.searchVector(queryVec, 5, maliciousKinds)).resolves.toEqual([])
+    })
+
+    it('carries the document date span on the hit for a dated document, absent for a living one (A3)', async () => {
+      const provider = new FakeEmbeddingProvider()
+      const embed = (texts: string[]) => provider.embed('fake-model', texts)
+
+      await index.upsertDocument(
+        doc({
+          meta: { id: 'doc_dated_vec', date: '2026-08-12' },
+          body: 'A dated summary about rafting.',
+        }),
+        'summary',
+        embed,
+      )
+      await index.upsertDocument(
+        doc({ meta: { id: 'doc_living_vec' }, body: 'A living arc page about rafting.' }),
+        'arc',
+        embed,
+      )
+
+      const [queryVec] = await provider.embed('fake-model', ['rafting'])
+      if (!queryVec) {
+        throw new Error('expected a query vector')
+      }
+
+      const hits = await index.searchVector(queryVec, 5)
+      const dated = hits.find((h) => h.docId === 'doc_dated_vec')
+      const living = hits.find((h) => h.docId === 'doc_living_vec')
+      expect(dated?.dateStart).toBe('2026-08-12')
+      expect(dated?.dateEnd).toBe('2026-08-12')
+      expect(living?.dateStart).toBeUndefined()
+      expect(living?.dateEnd).toBeUndefined()
+      expect('dateStart' in (living ?? {})).toBe(false)
     })
   })
 

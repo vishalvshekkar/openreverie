@@ -2922,6 +2922,37 @@ describe('MemoryEngine', () => {
       await engine.close()
     })
 
+    it("carries an intention item's stated eventTime into recentIntentions when present", async () => {
+      const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)
+      const store = await SessionStore.start(paths, yesterday)
+      await store.appendLine({ ts: yesterday.toISOString(), role: 'user', content: 'Hi.' })
+      await writeDocumentAtomic({
+        path: join(store.dir, 'summary.md'),
+        meta: {
+          id: newId('doc'),
+          items: [
+            {
+              id: newId('item'),
+              text: 'See Nightfall with Arjun.',
+              kind: 'intention',
+              ts: '',
+              eventTime: 'this evening',
+            },
+          ],
+        },
+        body: 'A quiet day.\n',
+      })
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const context = await engine.sessionContext()
+
+      expect(context.recentIntentions).toEqual([
+        { text: 'See Nightfall with Arjun.', date: isoDate(yesterday), eventTime: 'this evening' },
+      ])
+
+      await engine.close()
+    })
+
     it('tolerates a hand-written summary.md with no items key at all, in the same recentSummaries window', async () => {
       const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)
       const store = await SessionStore.start(paths, yesterday)

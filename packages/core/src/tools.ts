@@ -109,11 +109,20 @@ export function toolDefinitions(): ToolDefinition[] {
         'Search memory before answering from a vague impression of what was probably said. Use this whenever the ' +
         'conversation touches something that might already be recorded: an ongoing arc, a past event, a person, a ' +
         'decision made earlier. Retrieve before asserting: check the record rather than guess. Results come back ' +
-        'in two parts. documents are ranked passages from pages, summaries and rollups, each with a snippet. ' +
-        'nodes are graph nodes whose name matches the query, including people and things that have no page of ' +
-        'their own; a node hit carries an id you can pass to graph_query, and a docId only when a page exists. A ' +
-        'node hit with hasPage: false means this person or thing is known and recorded, and there is nothing ' +
-        'written about them beyond their name and their links.',
+        'in two parts. documents are ranked passages from pages, summaries and rollups. Each document hit carries ' +
+        'a snippet (its single best-matching passage) and chunks, a list of every matching passage from that same ' +
+        'document, most relevant first: a summary can hold both a vague early mention and a later, precise, dated ' +
+        'version of the same fact, and chunks is how both reach you instead of only whichever ranked best. ' +
+        'chunksTotal is the true count before any cap trims the list, so a document whose chunks does not equal ' +
+        'chunksTotal has more passages than shown; read_document with its docId gets the rest. dateStart and ' +
+        'dateEnd give the date, or date range, this content is about, read from the document, not guessed. ' +
+        'Session summaries, daily rollups, weekly rollups and journal entries carry one. Living documents that are ' +
+        'rewritten over time (the constitution, and realm, arc and person pages) have no single date and dateStart ' +
+        '/ dateEnd are absent on their hits rather than filled with a stand-in: absence there means the content is ' +
+        'ongoing, not that its date is unknown. nodes are graph nodes whose name matches the query, including ' +
+        'people and things that have no page of their own; a node hit carries an id you can pass to graph_query, ' +
+        'and a docId only when a page exists. A node hit with hasPage: false means this person or thing is known ' +
+        'and recorded, and there is nothing written about them beyond their name and their links.',
       parameters: {
         type: 'object',
         properties: {

@@ -157,6 +157,19 @@ describe('toolDefinitions', () => {
     expect(searchMemory.description).toContain('hasPage: false')
     expect(searchMemory.description).toContain('graph_query')
   })
+
+  it('explains the date span and the multi-chunk fields on a document hit (A7)', () => {
+    const defs = toolDefinitions()
+    const searchMemory = defs.find((d) => d.name === 'search_memory')
+    if (!searchMemory) throw new Error('expected a search_memory tool definition')
+    expect(searchMemory.description).toContain('dateStart')
+    expect(searchMemory.description).toContain('dateEnd')
+    expect(searchMemory.description).toContain('chunks')
+    expect(searchMemory.description).toContain('chunksTotal')
+    // Absence of a date on a living document must read as absence, not as
+    // a fact worth guessing at.
+    expect(searchMemory.description.toLowerCase()).toContain('no single date')
+  })
 })
 
 describe('dispatchTool', () => {
@@ -244,9 +257,25 @@ describe('dispatchTool', () => {
       sessionId,
       call('search_memory', { query: 'kayaking', kinds: ['summary'], limit: 5 }),
     )
-    const results = JSON.parse(result) as { documents: { docId: string; kind: string }[] }
+    const results = JSON.parse(result) as {
+      documents: {
+        docId: string
+        kind: string
+        dateStart?: string
+        dateEnd?: string
+        chunks: string[]
+        chunksTotal: number
+      }[]
+    }
     expect(results.documents.length).toBeGreaterThan(0)
     expect(results.documents[0]?.kind).toBe('summary')
+    // The JSON the model actually receives carries the new fields, not
+    // just the internal SearchHit/DocumentHit types. A summary is a dated
+    // kind (documentDateSpan), so its date span must be present.
+    expect(results.documents[0]?.dateStart).toBeDefined()
+    expect(results.documents[0]?.dateEnd).toBeDefined()
+    expect(results.documents[0]?.chunks.length).toBeGreaterThan(0)
+    expect(results.documents[0]?.chunksTotal).toBeGreaterThan(0)
 
     await engine.close()
   })
