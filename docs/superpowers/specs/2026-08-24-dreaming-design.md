@@ -335,6 +335,43 @@ retains everything a later bandit-style tuner would need (working record, idea 1
   costs (model calls on a cadence), that insights are the model's guesses and can be marked
   wrong, and where the files live. The Status section is updated honestly as pieces land.
 
+## Interactions with the recall-and-event-time work
+
+A concurrent worktree (`recall-and-event-time`) carries an execution plan
+(`2026-08-24-recall-and-event-time-fixes.md`, partially landed) and an unapproved design
+(`2026-08-24-commitments-design.md`). Reviewed on 2026-08-24. Four interactions bind this spec;
+the rest is merge-order housekeeping.
+
+1. **Event time is stated, never resolved.** That work establishes the convention that a
+   person's stated event time ("tonight", "come summer") is carried as words paired with the
+   date it was said, rendered as `(eventTime: "...", as stated on <date>)`, and never resolved
+   to a timestamp. Dreaming adopts it: a document's date is when something was recorded, not
+   when it happened or will happen. The pipeline prompt states this, insights about intentions
+   inherit the same rule that work added to the prompt ("a recorded intention is evidence the
+   person said they meant to do something, never evidence that they did it"), and an insight
+   that turns a stated plan into a completed fact is exactly the kind of unhedged claim the
+   tone check rejects. Calendar resonance keys off record dates and says so ("around this time
+   last year you were talking about...", not "a year since you did...").
+2. **Commitments, when they land, get dreamed about but never nagged about.** The commitments
+   design's structural guarantees (no overdue state, one follow-up ask recorded in `askedAt`,
+   quiet state, never enumerated as a list, the interpreted time bracket selects but only the
+   stated gloss speaks) bind dreaming too. The candidate pool is defined over all graph node
+   types, so a future `commitment` node joins selection and walks automatically. But an
+   `open_question` insight must never target a commitment whose one ask is spent or that is
+   marked quiet, and dream prose never renders an interpreted time bracket. Nothing to build in
+   v1 (no commitment type exists in code yet); this paragraph is the contract for whichever
+   lands second.
+3. **`dream_feedback` needs a CLI tool notice.** That worktree adds a completeness test over
+   the CLI's `TOOL_NOTICES` table: every tool must have a notice entry. The `dream_feedback`
+   tool ships with one.
+4. **Search results now carry optional date spans.** `SearchHit` gained `dateStart`/`dateEnd`
+   (present together or absent together). The dream tool loop treats absent dates as a living,
+   continuously rewritten document, never guesses a date for one.
+
+Merge order: both branches touch `context.ts`, `engine.ts` (`SessionContext`), `sqlite.ts`, and
+the CLI chat module. Conflicts are routine but real; the dreaming implementation plan starts by
+rebasing onto whatever of that work has merged.
+
 ## Package placement
 
 - `packages/memory`: `dreaming.ts` (selection, pipeline, storage), dream log read/write,
@@ -363,7 +400,8 @@ behavior, and falsification for every test (delete the behavior, watch the test 
 - Fixture-driven: the pipeline against `FakeChatProvider` scripts covering the happy path,
   schema failure then retry, double failure aborting with no artifact, tone-check failure
   withholding the narrative, tool-loop cap enforcement.
-- Wiring: the P8 docKinds test extended for both kinds; the SECTION_CAPS sum test updated.
+- Wiring: the P8 docKinds test extended for both kinds; the SECTION_CAPS sum test updated; a
+  `TOOL_NOTICES` entry for `dream_feedback` so the CLI notice completeness test passes.
 - Manual checks (deferred to the manual testing queue): reading actual dreams for tone and
   quality across the three voices, opener behavior, web view.
 

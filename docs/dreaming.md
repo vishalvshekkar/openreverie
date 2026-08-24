@@ -233,7 +233,32 @@ Prose-only in v1. Options for when we revisit:
 - **Retract on feedback.** "Wrong" appends a retract record for the edge the insight created. Fits fold semantics exactly.
 - **Confirmation by use.** If the companion draws on a dream edge in conversation and the user does not object, raise confidence slightly. Speculative; risk of confirming by silence.
 
-## 11. Decisions log
+## 11. Concurrent work reviewed (2026-08-24)
+
+The `recall-and-event-time` worktree (recall fixes, event-time anchoring, and an unapproved
+commitments design) was reviewed for interactions. Findings, folded into the spec's
+"Interactions with the recall-and-event-time work" section:
+
+- Dreaming adopts the stated-event-time convention: event times are the person's words paired
+  with the record date, never resolved to a timestamp, and a stated plan is never treated as a
+  completed fact.
+- If the `commitment` node type lands, it joins the dream candidate pool automatically, but
+  dreaming must honor the anti-taskmaster guarantees: no open-question insight about a
+  commitment whose single ask is spent or that is marked quiet, and interpreted time brackets
+  are never rendered in dream prose. Recorded here so the constraint survives even if either
+  design changes shape.
+- `dream_feedback` needs a `TOOL_NOTICES` entry (new CLI completeness test in that worktree).
+- `SearchHit` now carries optional date spans; absent dates mean a living document.
+- No collisions on doc kinds, id prefixes, budget caps, tools, or scheduling. Both branches
+  touch `context.ts`, `engine.ts`, `sqlite.ts`, and the CLI chat module, so the implementation
+  plan rebases onto whatever merges first.
+
+Idea for later, prompted by this review: **39. Commitment-aware dreams.** Once commitments
+exist, a dream could notice quiet-but-alive threads (a `waitsOn` event that has passed, a
+seasonal gloss whose season has arrived) and surface them as gentle open questions, within the
+one-ask rule. **open**, blocked on the commitments design landing.
+
+## 12. Decisions log
 
 - 2026-08-24: Approach 1 chosen. Approaches 2 and 3 retained here as future paths.
 - 2026-08-24: Storage is `dreams/YYYY-MM-DD-<id>/` with two files, `dream.md` and `insight.md`, separate because the two are written in different registers. Both are doc kinds, searchable and readable through the existing tools.
@@ -250,6 +275,8 @@ Prose-only in v1. Options for when we revisit:
 - 2026-08-24: Minimum memory before dreaming activates: five reflected sessions (9d).
 - 2026-08-24: Weekly cadence has no preferred day; the first trigger inside a due period runs the dream (9c).
 
-## 12. Changelog
+## 13. Changelog
 
 - 2026-08-24: Document created from the first brainstorming session. Terrain, prior art, idea catalog, three approaches, decisions, and open questions recorded.
+- 2026-08-24: Open questions 9a-9d resolved; decisions logged. Spec written (`docs/superpowers/specs/2026-08-24-dreaming-design.md`).
+- 2026-08-24: Reviewed the concurrent recall-and-event-time worktree; interactions recorded in section 11 and in the spec. Idea 39 added.
