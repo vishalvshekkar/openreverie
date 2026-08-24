@@ -1396,7 +1396,7 @@ Implementation notes, concrete:
 - Trigger hooks: at the end of `MemoryEngine.open` (after `refreshDocPaths`), `if (deps.dreaming?.enabled && deps.dreaming.triggers.onStart) { void engine.maybeDream('onStart').catch(() => {}) }` with a comment saying it is deliberately not awaited. At the end of `_doEndSession` (after `commitMemory`), `if (this.deps.dreaming?.enabled && this.deps.dreaming.triggers.afterSession) { await this.maybeDream('afterSession') }`.
 - `recordDreamFeedback`: scan insight docs for the insight id, append the feedback record with the owning dream id; `markDreamMentioned` appends a mentioned record.
 
-- [ ] **Step 1: Write the failing tests.** Use the docKinds.test.ts pattern for a real engine over a temp folder with `FakeChatProvider`/`FakeEmbeddingProvider`. Cover, with scripted providers sized to the pipeline (1 exploration wrap-up + 1 insights + 1 narrative + 1 tone per successful run):
+- [x] **Step 1: Write the failing tests.** Use the docKinds.test.ts pattern for a real engine over a temp folder with `FakeChatProvider`/`FakeEmbeddingProvider`. Cover, with scripted providers sized to the pipeline (1 exploration wrap-up + 1 insights + 1 narrative + 1 tone per successful run):
 
 ```ts
 it('dreamNow with force writes a dream and indexes both docs', async () => { /* seed 5 reflected sessions via the seeding helper, run dreamNow({force:true}), assert a dreams/ dir exists, listDreams() length 1, engine.search finds the narrative text with kinds ['dream'] */ })
@@ -1406,13 +1406,13 @@ it('recordDreamFeedback appends to the log and returns false for an unknown insi
 it('dreamNow dryRun returns seeds and walk without calling the chat provider', async () => { /* chat.requests stays empty */ })
 ```
 
-- [ ] **Step 2: Run, verify failure.**
+- [x] **Step 2: Run, verify failure.**
 
-- [ ] **Step 3: Implement** per the notes above. Keep every dreaming-specific method in a clearly commented region of engine.ts; if the additions push past roughly 250 lines, extract an `engineDreams.ts` helper module taking `{ paths, index, graphState, deps, profile }` style narrow arguments rather than the whole engine.
+- [x] **Step 3: Implement** per the notes above. Keep every dreaming-specific method in a clearly commented region of engine.ts; if the additions push past roughly 250 lines, extract an `engineDreams.ts` helper module taking `{ paths, index, graphState, deps, profile }` style narrow arguments rather than the whole engine.
 
-- [ ] **Step 4: Run `pnpm vitest run packages/memory`, verify pass.**
+- [x] **Step 4: Run `pnpm vitest run packages/memory`, verify pass.**
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/memory/src/engine.ts packages/memory/src/engineDreaming.test.ts
