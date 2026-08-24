@@ -45,7 +45,7 @@
   - `paths.dreamsDir` (`<root>/dreams`) and `paths.dreamLog` (`<root>/dreams/log.jsonl`)
   - `newId('dream')` valid.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```ts
 // packages/memory/src/dreamLog.test.ts
@@ -119,12 +119,12 @@ describe('dream log', () => {
 })
 ```
 
-- [ ] **Step 2: Run the test, verify it fails**
+- [x] **Step 2: Run the test, verify it fails**
 
 Run: `pnpm vitest run packages/memory/src/dreamLog.test.ts`
 Expected: FAIL, cannot resolve `./dreamLog.js` (and `dreamsDir` missing from paths).
 
-- [ ] **Step 3: Implement paths and id prefix**
+- [x] **Step 3: Implement paths and id prefix**
 
 In `paths.ts` add to `MemoryPaths`: `dreamsDir: string` and `dreamLog: string`; in `memoryPaths()` add `dreamsDir: join(root, 'dreams')` and `dreamLog: join(root, 'dreams', 'log.jsonl')`; in `ensureMemoryTree` add `paths.dreamsDir` to the directory-creation list (same pattern as `journalDir`). In `documents.ts:10` extend the union:
 
@@ -132,7 +132,7 @@ In `paths.ts` add to `MemoryPaths`: `dreamsDir: string` and `dreamLog: string`; 
 export type IdPrefix = 'doc' | 'item' | 'arc' | 'realm' | 'session' | 'person' | 'entity' | 'prop' | 'dream' | 'ins'
 ```
 
-- [ ] **Step 4: Implement dreamLog.ts**
+- [x] **Step 4: Implement dreamLog.ts**
 
 ```ts
 // packages/memory/src/dreamLog.ts
@@ -227,12 +227,12 @@ export function foldDreamLog(records: DreamLogRecord[]): DreamLogState {
 
 Re-export everything public from `packages/memory/src/index.ts` alongside the graph exports.
 
-- [ ] **Step 5: Run the test, verify it passes**
+- [x] **Step 5: Run the test, verify it passes**
 
 Run: `pnpm vitest run packages/memory/src/dreamLog.test.ts`
 Expected: PASS (4 tests). Also run `pnpm vitest run packages/memory` to confirm no path-shape test broke (`ensureMemoryTree` tests may assert the directory list; update them to include `dreams/`).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add packages/memory/src/dreamLog.ts packages/memory/src/dreamLog.test.ts packages/memory/src/paths.ts packages/memory/src/documents.ts packages/memory/src/index.ts
