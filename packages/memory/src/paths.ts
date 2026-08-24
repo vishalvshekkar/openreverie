@@ -24,6 +24,8 @@ export interface MemoryPaths {
   graphLog: string
   proposals: string
   indexDb: string
+  dreamsDir: string
+  dreamLog: string
 }
 
 export function memoryPaths(root: string): MemoryPaths {
@@ -43,6 +45,8 @@ export function memoryPaths(root: string): MemoryPaths {
     graphLog: join(root, 'graph.jsonl'),
     proposals: join(root, 'proposals.jsonl'),
     indexDb: join(root, 'index.db'),
+    dreamsDir: join(root, 'dreams'),
+    dreamLog: join(root, 'dreams', 'log.jsonl'),
   }
 }
 
@@ -58,6 +62,7 @@ export async function ensureMemoryTree(paths: MemoryPaths): Promise<void> {
     paths.rollupsDailyDir,
     paths.rollupsWeeklyDir,
     paths.journalDir,
+    paths.dreamsDir,
   ]) {
     await mkdir(dir, { recursive: true })
   }
