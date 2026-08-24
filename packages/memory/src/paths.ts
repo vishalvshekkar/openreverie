@@ -2,7 +2,7 @@
 // make up one user's memory. Everything here is derived from a single root
 // path so the rest of the engine never hardcodes a folder name.
 
-import { access, mkdir, writeFile } from 'node:fs/promises'
+import { access, appendFile, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { newId, writeDocumentAtomic } from './documents.js'
 import { starterProfileDocument } from './profile.js'
@@ -87,12 +87,38 @@ export async function ensureMemoryTree(paths: MemoryPaths): Promise<void> {
     await writeDocumentAtomic(starterProfileDocument(paths.profile, systemTimeZone()))
   }
 
-  // Seed .gitignore to exclude the SQLite index and atomic-write temp files
-  const gitignorePath = join(paths.root, '.gitignore')
+  // Seed .gitignore to exclude the SQLite index, atomic-write temp files,
+  // and the dream lock. The lock (dreams/.lock) has to exist as a real file
+  // on disk, since the CLI and server share it purely through the
+  // filesystem, but it must never enter the person's git history:
+  // commitMemory's `git add -A` runs before the lock is released (the
+  // written dream is already durable by the time it does), so without this
+  // rule the lock gets staged and committed on every dream, and its later
+  // deletion leaves the working tree reporting a pending removal forever
+  // after. Ignoring the lock declaratively here, rather than reordering the
+  // release, also covers a crashed run that leaves a stale lock behind.
+  await ensureGitignoreLine(paths.root, DREAM_LOCK_IGNORE_LINE)
+}
+
+const DREAM_LOCK_IGNORE_LINE = 'dreams/.lock'
+
+// Writes a fresh .gitignore seeded with the standing exclusions when none
+// exists yet. When one already exists, appends the given line only if no
+// existing line already matches it exactly, so a folder created before
+// this rule existed picks it up on the next open without ever touching,
+// reordering, or duplicating anything already there.
+async function ensureGitignoreLine(root: string, line: string): Promise<void> {
+  const gitignorePath = join(root, '.gitignore')
   const gitignoreExists = await pathExists(gitignorePath)
   if (!gitignoreExists) {
-    await writeFile(gitignorePath, 'index.db\n*.tmp-*\n', 'utf8')
+    await writeFile(gitignorePath, `index.db\n*.tmp-*\n${line}\n`, 'utf8')
+    return
   }
+  const existing = await readFile(gitignorePath, 'utf8')
+  const alreadyPresent = existing.split('\n').some((row) => row.trim() === line)
+  if (alreadyPresent) return
+  const separator = existing.length > 0 && !existing.endsWith('\n') ? '\n' : ''
+  await appendFile(gitignorePath, `${separator}${line}\n`, 'utf8')
 }
 
 async function pathExists(path: string): Promise<boolean> {

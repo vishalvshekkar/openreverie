@@ -202,16 +202,16 @@ describe('paths and ensureMemoryTree', () => {
     expect(second.meta.id).toBe(first.meta.id)
   })
 
-  it('seeds .gitignore with index.db and *.tmp-* patterns', async () => {
+  it('seeds .gitignore with index.db, *.tmp-*, and the dream lock', async () => {
     const paths = memoryPaths(dir)
     await ensureMemoryTree(paths)
 
     const gitignorePath = join(dir, '.gitignore')
     const content = await readFile(gitignorePath, 'utf8')
-    expect(content).toBe('index.db\n*.tmp-*\n')
+    expect(content).toBe('index.db\n*.tmp-*\ndreams/.lock\n')
   })
 
-  it('does not overwrite a user-modified .gitignore', async () => {
+  it('preserves a user-modified .gitignore, only appending the dream lock rule if missing', async () => {
     const paths = memoryPaths(dir)
     await ensureMemoryTree(paths)
 
@@ -222,6 +222,6 @@ describe('paths and ensureMemoryTree', () => {
     await ensureMemoryTree(paths)
 
     const content = await readFile(gitignorePath, 'utf8')
-    expect(content).toBe(customContent)
+    expect(content).toBe('custom user content\ndreams/.lock\n')
   })
 })
