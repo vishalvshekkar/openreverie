@@ -27,6 +27,12 @@ function testConfig(overrides: Partial<ReverieConfig> = {}): ReverieConfig {
     provider: { name: 'openai', apiKeyEnv: 'OPENREVERIE_TEST_KEY' },
     models: { chat: 'gpt-5', reflection: 'gpt-5-mini', embeddings: 'text-embedding-3-small' },
     safety: { mode: 'companion', resources: defaultCrisisResources },
+    dreaming: {
+      enabled: false,
+      cadence: 'daily',
+      triggers: { afterSession: true, onStart: true, serverTimer: true },
+      maxToolCalls: 10,
+    },
     ...overrides,
   }
 }

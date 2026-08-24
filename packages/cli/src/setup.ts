@@ -233,6 +233,12 @@ export async function runSetup(io: SetupIo, configPath?: string): Promise<void> 
     provider,
     models: { chat: chatModel, reflection: reflectionModel, embeddings: embeddingsModel },
     safety: { mode, resources: defaultCrisisResources.map((resource) => ({ ...resource })) },
+    dreaming: {
+      enabled: false,
+      cadence: 'daily',
+      triggers: { afterSession: true, onStart: true, serverTimer: true },
+      maxToolCalls: 10,
+    },
   }
 
   const resolvedPath = configPath ?? defaultConfigPath()

@@ -30,8 +30,14 @@ export const defaultCrisisResources: CrisisResource[] = [
 export interface ReverieConfig {
   memoryDir: string
   provider: { name: 'openai'; apiKeyEnv?: string; apiKey?: string; baseUrl?: string }
-  models: { chat: string; reflection: string; embeddings: string }
+  models: { chat: string; reflection: string; embeddings: string; dreaming?: string }
   safety: { mode: 'companion' | 'firewall'; resources: CrisisResource[] }
+  dreaming: {
+    enabled: boolean
+    cadence: 'daily' | 'weekly'
+    triggers: { afterSession: boolean; onStart: boolean; serverTimer: boolean }
+    maxToolCalls: number
+  }
 }
 
 function defaultMemoryDir(): string {
@@ -54,6 +60,7 @@ const modelsSchema = z.strictObject({
   chat: z.string().default('gpt-5'),
   reflection: z.string().default('gpt-5-mini'),
   embeddings: z.string().default('text-embedding-3-small'),
+  dreaming: z.string().optional(),
 })
 
 const safetySchema = z.strictObject({
@@ -63,21 +70,44 @@ const safetySchema = z.strictObject({
     .default(() => defaultCrisisResources.map((resource) => ({ ...resource }))),
 })
 
+// dreaming spends the person's money on a background process, so enabled
+// defaults to false: it is opt-in, never on by default for convenience.
+const dreamingTriggersSchema = z.strictObject({
+  afterSession: z.boolean().default(true),
+  onStart: z.boolean().default(true),
+  serverTimer: z.boolean().default(true),
+})
+
+const dreamingSchema = z.strictObject({
+  enabled: z.boolean().default(false),
+  cadence: z.enum(['daily', 'weekly']).default('daily'),
+  triggers: dreamingTriggersSchema.default(() => ({
+    afterSession: true,
+    onStart: true,
+    serverTimer: true,
+  })),
+  maxToolCalls: z.number().int().positive().default(10),
+})
+
 const configSchema = z.strictObject({
   memoryDir: z.string().default(defaultMemoryDir),
   provider: providerSchema,
   models: modelsSchema,
   safety: safetySchema,
+  dreaming: dreamingSchema,
 })
 
 // zod's object-level .default() only applies when a key is entirely absent,
 // and it does not re-run the value through the nested schema. To get
-// field-level defaults inside an omitted "models" section, we make sure the
-// key is present (as an empty table) before validating.
+// field-level defaults inside an omitted "models" (or "dreaming") section,
+// we make sure the key is present (as an empty table) before validating.
 function withNestedDefaultsFillable(raw: Record<string, unknown>): Record<string, unknown> {
   const filled = { ...raw }
   if (filled.models === undefined) {
     filled.models = {}
+  }
+  if (filled.dreaming === undefined) {
+    filled.dreaming = {}
   }
   return filled
 }
@@ -152,11 +182,19 @@ export async function loadConfig(configPath?: string): Promise<ReverieConfig> {
   if (parsed.provider.apiKey !== undefined) provider.apiKey = parsed.provider.apiKey
   if (parsed.provider.baseUrl !== undefined) provider.baseUrl = parsed.provider.baseUrl
 
+  const models: ReverieConfig['models'] = {
+    chat: parsed.models.chat,
+    reflection: parsed.models.reflection,
+    embeddings: parsed.models.embeddings,
+  }
+  if (parsed.models.dreaming !== undefined) models.dreaming = parsed.models.dreaming
+
   return {
     memoryDir: parsed.memoryDir,
     provider,
-    models: parsed.models,
+    models,
     safety: parsed.safety,
+    dreaming: parsed.dreaming,
   }
 }
 

@@ -64,6 +64,12 @@ function config(memoryDir: string): ReverieConfig {
     provider: { name: 'openai', apiKeyEnv: 'OPENAI_API_KEY' },
     models: { chat: 'chat', reflection: 'reflection', embeddings: 'embeddings' },
     safety: { mode: 'companion', resources: [] },
+    dreaming: {
+      enabled: false,
+      cadence: 'daily',
+      triggers: { afterSession: true, onStart: true, serverTimer: true },
+      maxToolCalls: 10,
+    },
   }
 }
 

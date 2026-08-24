@@ -162,6 +162,28 @@ describe('profileMetaSchema personal fields', () => {
     const parsed = profileMetaSchema.parse({ id: 'd', favouriteTea: 'assam' })
     expect(parsed.favouriteTea).toBe('assam')
   })
+
+  it('round-trips dreams preferences and rejects an invalid voice', () => {
+    const ok = profileMetaSchema.safeParse({
+      id: 'doc_1',
+      dreams: { voice: 'second', openerMention: false },
+    })
+    expect(ok.success).toBe(true)
+    if (ok.success) {
+      expect(ok.data.dreams).toEqual({ voice: 'second', openerMention: false })
+    }
+
+    const bad = profileMetaSchema.safeParse({ id: 'doc_1', dreams: { voice: 'fourth' } })
+    expect(bad.success).toBe(false)
+  })
+
+  it('passes an unknown key inside dreams through, since dreams is passthrough too', () => {
+    const parsed = profileMetaSchema.parse({
+      id: 'doc_1',
+      dreams: { voice: 'first', futureField: true },
+    })
+    expect((parsed.dreams as Record<string, unknown>).futureField).toBe(true)
+  })
 })
 
 describe('MODEL-WRITE profile schemas', () => {

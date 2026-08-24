@@ -283,6 +283,12 @@ function testConfig(): ReverieConfig {
     provider: { name: 'openai', apiKey: 'test' },
     models: { chat: 'fake-chat', reflection: 'fake-reflect', embeddings: 'fake-embed' },
     safety: { mode: 'companion', resources: defaultCrisisResources },
+    dreaming: {
+      enabled: false,
+      cadence: 'daily',
+      triggers: { afterSession: true, onStart: true, serverTimer: true },
+      maxToolCalls: 10,
+    },
   }
 }
 

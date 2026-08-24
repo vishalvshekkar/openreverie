@@ -34,6 +34,12 @@ export interface ProfileMeta {
   occupation?: string
   birthdayGreetings?: boolean
   style?: StyleMeta
+  dreams?: {
+    voice?: 'first' | 'second' | 'third'
+    openerMention?: boolean
+    promptSection?: boolean
+    [key: string]: unknown
+  }
   [key: string]: unknown
 }
 
@@ -62,6 +68,14 @@ export const profileMetaSchema = z
     occupation: z.string().optional(),
     birthdayGreetings: z.boolean().optional(),
     style: styleMetaSchema.optional(),
+    dreams: z
+      .object({
+        voice: z.enum(['first', 'second', 'third']).optional(),
+        openerMention: z.boolean().optional(),
+        promptSection: z.boolean().optional(),
+      })
+      .passthrough()
+      .optional(),
   })
   .passthrough()
 

@@ -27,6 +27,12 @@ function fullConfig(overrides: Partial<ReverieConfig> = {}): ReverieConfig {
     provider: { name: 'openai', apiKeyEnv: 'OPENREVERIE_TEST_KEY' },
     models: { chat: 'gpt-5', reflection: 'gpt-5-mini', embeddings: 'text-embedding-3-small' },
     safety: { mode: 'companion', resources: defaultCrisisResources },
+    dreaming: {
+      enabled: false,
+      cadence: 'daily',
+      triggers: { afterSession: true, onStart: true, serverTimer: true },
+      maxToolCalls: 10,
+    },
     ...overrides,
   }
 }
@@ -85,6 +91,93 @@ describe('loadConfig defaults', () => {
     })
     expect(loaded.safety.resources).toEqual(defaultCrisisResources)
     expect(loaded.safety.resources).not.toBe(defaultCrisisResources)
+  })
+})
+
+describe('loadConfig dreaming defaults', () => {
+  it('defaults the dreaming section when absent: off, daily, all triggers on', async () => {
+    const configPath = path.join(dir, 'config.toml')
+    await writeFile(
+      configPath,
+      [
+        '[provider]',
+        'name = "openai"',
+        'apiKey = "sk-test"',
+        '',
+        '[safety]',
+        'mode = "companion"',
+        '',
+      ].join('\n'),
+      'utf8',
+    )
+
+    const config = await loadConfig(configPath)
+
+    expect(config.dreaming).toEqual({
+      enabled: false,
+      cadence: 'daily',
+      triggers: { afterSession: true, onStart: true, serverTimer: true },
+      maxToolCalls: 10,
+    })
+    expect(config.models.dreaming).toBeUndefined()
+  })
+
+  it('accepts models.dreaming and a partial [dreaming] table', async () => {
+    const configPath = path.join(dir, 'config.toml')
+    await writeFile(
+      configPath,
+      [
+        '[provider]',
+        'name = "openai"',
+        'apiKey = "sk-test"',
+        '',
+        '[safety]',
+        'mode = "companion"',
+        '',
+        '[models]',
+        'dreaming = "gpt-5-mini"',
+        '',
+        '[dreaming]',
+        'enabled = true',
+        'cadence = "weekly"',
+        '',
+      ].join('\n'),
+      'utf8',
+    )
+
+    const config = await loadConfig(configPath)
+
+    expect(config.models.dreaming).toBe('gpt-5-mini')
+    expect(config.dreaming.enabled).toBe(true)
+    expect(config.dreaming.cadence).toBe('weekly')
+    expect(config.dreaming.triggers).toEqual({
+      afterSession: true,
+      onStart: true,
+      serverTimer: true,
+    })
+    expect(config.dreaming.maxToolCalls).toBe(10)
+  })
+
+  it('rejects an unknown key inside the [dreaming] table', async () => {
+    const configPath = path.join(dir, 'config.toml')
+    await writeFile(
+      configPath,
+      [
+        '[provider]',
+        'name = "openai"',
+        'apiKey = "sk-test"',
+        '',
+        '[safety]',
+        'mode = "companion"',
+        '',
+        '[dreaming]',
+        'bogusField = "oops"',
+        '',
+      ].join('\n'),
+      'utf8',
+    )
+
+    await expect(loadConfig(configPath)).rejects.toThrow('bogusField')
   })
 })
 
