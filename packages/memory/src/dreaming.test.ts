@@ -1,11 +1,11 @@
-import { mkdtemp, readdir, rm } from 'node:fs/promises'
+import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FakeChatProvider } from '@openreverie/providers'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { readDocument } from './documents.js'
 import type { DreamInsight, DreamLookup, RunDreamArgs } from './dreaming.js'
-import { runDream, runExploration } from './dreaming.js'
+import { dreamInsightsOutputSchema, runDream, runExploration } from './dreaming.js'
 import { readDreamLog } from './dreamLog.js'
 import { ensureMemoryTree, type MemoryPaths, memoryPaths } from './paths.js'
 
@@ -261,6 +261,27 @@ const INSIGHTS_JSON = JSON.stringify({
 })
 const TONE_OK = JSON.stringify({ narrativeOk: true, flaggedInsightIndexes: [] })
 
+const DISTINCTIVE_PERSONA = 'REVERIE_SAFETY_PERSONA_TOKEN_9f2c'
+
+const GROUNDED_INSIGHTS_JSON = JSON.stringify({
+  insights: [
+    {
+      kind: 'connection',
+      headline: 'A steady thread',
+      claim: 'It looks like this session returned to the same thread as before.',
+      confidence: 0.5,
+      evidence: [{ session: 'session_ok' }],
+    },
+    {
+      kind: 'strength',
+      headline: 'A durable habit',
+      claim: 'It seems this habit has held up over time.',
+      confidence: 0.7,
+      evidence: [{ node: 'node_ok' }],
+    },
+  ],
+})
+
 function lookupResolving(okDocIds: string[]): DreamLookup {
   return {
     async search() {
@@ -278,11 +299,29 @@ function lookupResolving(okDocIds: string[]): DreamLookup {
   }
 }
 
+function lookupGrounded(): DreamLookup {
+  return {
+    async search() {
+      return []
+    },
+    async readDocumentById() {
+      return null
+    },
+    async readTranscript(sessionId: string) {
+      if (sessionId === 'session_ok') return []
+      throw new Error('no such session')
+    },
+    neighbors() {
+      return []
+    },
+  }
+}
+
 function runArgs(paths: MemoryPaths, chat: FakeChatProvider): RunDreamArgs {
   return {
     chat,
     model: 'fake',
-    persona: 'P',
+    persona: DISTINCTIVE_PERSONA,
     lookup: lookupResolving(['doc_ok']),
     paths,
     maxToolCalls: 4,
@@ -370,10 +409,24 @@ describe('runDream', () => {
     ])
     const result = await runDream(runArgs(paths, chat))
     expect(result.outcome).toBe('written')
+    // Pins the second attempt: a regression that skips regeneration and
+    // withholds on the first tone failure would leave two scripted
+    // responses unconsumed, which this length check catches.
+    expect(chat.requests).toHaveLength(6)
     const dirents = await readdir(paths.dreamsDir, { withFileTypes: true })
     const dreamDir = dirents.find((d) => d.isDirectory())
     const files = await readdir(join(paths.dreamsDir, dreamDir!.name))
     expect(files.sort()).toEqual(['insight.md', 'process.jsonl'])
+    const processRaw = await readFile(
+      join(paths.dreamsDir, dreamDir!.name, 'process.jsonl'),
+      'utf8',
+    )
+    const processEvents = processRaw
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+    expect(processEvents.some((e) => e.stage === 'narrative_retry')).toBe(true)
+    expect(processEvents.some((e) => e.event === 'narrative_withheld')).toBe(true)
   })
 
   it('aborts with nothing written when every insight fails evidence resolution', async () => {
@@ -386,5 +439,63 @@ describe('runDream', () => {
     const result = await runDream(args)
     expect(result.outcome).toBe('aborted')
     expect(await readdir(paths.dreamsDir)).toEqual([])
+  })
+
+  it('carries the persona in the system prompt of every model request the run makes', async () => {
+    const chat = new FakeChatProvider([
+      { text: 'noted', toolCalls: [] },
+      { text: INSIGHTS_JSON, toolCalls: [] },
+      { text: 'a narrative', toolCalls: [] },
+      { text: TONE_OK, toolCalls: [] },
+    ])
+    const args = runArgs(paths, chat)
+    const result = await runDream(args)
+    expect(result.outcome).toBe('written')
+    expect(chat.requests.length).toBeGreaterThan(0)
+    for (const request of chat.requests) {
+      expect(request.system ?? '').toContain(args.persona)
+    }
+  })
+
+  it('grounds insights via session and node evidence pointers, not just doc pointers', async () => {
+    const chat = new FakeChatProvider([
+      { text: 'noted', toolCalls: [] },
+      { text: GROUNDED_INSIGHTS_JSON, toolCalls: [] },
+      { text: 'a narrative', toolCalls: [] },
+      { text: TONE_OK, toolCalls: [] },
+    ])
+    const args = runArgs(paths, chat)
+    args.lookup = lookupGrounded()
+    args.resolveNode = (id) => id === 'node_ok'
+    const result = await runDream(args)
+    expect(result.outcome).toBe('written')
+    const dirents = await readdir(paths.dreamsDir, { withFileTypes: true })
+    const dreamDir = dirents.find((d) => d.isDirectory())
+    const insightDoc = await readDocument(join(paths.dreamsDir, dreamDir!.name, 'insight.md'))
+    const insights = insightDoc.meta.insights as DreamInsight[]
+    expect(insights).toHaveLength(2)
+  })
+})
+
+describe('dreamInsightsOutputSchema', () => {
+  const baseInsight = {
+    kind: 'pattern' as const,
+    headline: 'A headline',
+    claim: 'A claim.',
+    confidence: 0.5,
+  }
+
+  it('rejects an evidence pointer that names none of doc, session, node', () => {
+    const result = dreamInsightsOutputSchema.safeParse({
+      insights: [{ ...baseInsight, evidence: [{}] }],
+    })
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects an evidence pointer that names more than one of doc, session, node', () => {
+    const result = dreamInsightsOutputSchema.safeParse({
+      insights: [{ ...baseInsight, evidence: [{ doc: 'doc_1', node: 'node_1' }] }],
+    })
+    expect(result.success).toBe(false)
   })
 })

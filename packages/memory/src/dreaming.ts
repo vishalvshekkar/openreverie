@@ -346,30 +346,41 @@ Rules:
   actually saw in the packet or while exploring. Do not invent ids.
 - A recorded intention is evidence the person said they meant to do something. It is never
   evidence that they did it.
+- Treat stated times ("come summer") as the person's words anchored to the date they were said,
+  never as a resolved date.
+- Never name or imply a clinical diagnosis.
 - Never point at a past dream as evidence. A dream is not a record of what happened, and chaining
   from one dream to the next compounds guesses instead of grounding them.
 - Open questions and strengths are welcome alongside patterns and connections. A dream does not
   need to resolve anything.`
 
-function narrativeInstruction(voice: DreamVoice): string {
+function narrativeInstruction(voice: DreamVoice, retryFeedback?: string): string {
   const voiceLine =
     voice === 'first'
       ? 'Write in the first person, as the companion who is dreaming: "I dreamt..."'
       : voice === 'second'
         ? 'Write in the second person, addressing the person directly: "you were walking..."'
         : 'Write in the third person, as a figure seen from outside, dreamt of rather than dreaming.'
-  return `## Dreaming: narrative
-
-Write the dream itself, 300 to 600 words. Give it a setting and an atmosphere. Recombine what
-you explored non-literally: this is a dream, not a report, so images, places, and people can
-blend and shift the way they do in sleep. Counterfactual framings are welcome here, and only
-here: things that did not happen, could happen, or could have gone differently.
-
-Keep the register gently positive or curious. No dread, no threat, nothing bleak.
-
-${voiceLine}
-
-Respond with the narrative text only. No heading, no JSON, no preamble.`
+  const parts = [
+    '## Dreaming: narrative',
+    '',
+    'Write the dream itself, 300 to 600 words. Give it a setting and an atmosphere. Recombine what',
+    'you explored non-literally: this is a dream, not a report, so images, places, and people can',
+    'blend and shift the way they do in sleep. Counterfactual framings are welcome here, and only',
+    'here: things that did not happen, could happen, or could have gone differently.',
+    '',
+    'Keep the register gently positive or curious. No dread, no threat, nothing bleak.',
+    '',
+    voiceLine,
+  ]
+  if (retryFeedback !== undefined) {
+    parts.push(
+      '',
+      `The previous attempt did not pass the tone check: ${retryFeedback}. Write a different dream this time, one that does not repeat that problem.`,
+    )
+  }
+  parts.push('', 'Respond with the narrative text only. No heading, no JSON, no preamble.')
+  return parts.join('\n')
 }
 
 function toneCheckInstruction(narrative: string, insights: { claim: string }[]): string {
@@ -567,8 +578,11 @@ export async function runDream(args: RunDreamArgs): Promise<DreamRunResult> {
   }
 
   if (!toneResult.data.narrativeOk) {
-    // Regenerate the narrative once and re-check. Still bad: the run
-    // completes but withholds dream.md, writing insight.md only.
+    // Regenerate the narrative once and re-check, telling the model what
+    // was wrong so this is a real second attempt, not the same prompt
+    // asked twice. Still bad: the run completes but withholds dream.md,
+    // writing insight.md only.
+    const retryFeedback = toneResult.data.reason ?? 'the tone check rejected it'
     const retryStart = Date.now()
     narrative = (
       await args.chat.complete({
@@ -576,7 +590,7 @@ export async function runDream(args: RunDreamArgs): Promise<DreamRunResult> {
         system,
         messages: [
           ...explorationMessages,
-          { role: 'user', content: narrativeInstruction(args.voice) },
+          { role: 'user', content: narrativeInstruction(args.voice, retryFeedback) },
         ],
         temperature: 0.9,
       })
