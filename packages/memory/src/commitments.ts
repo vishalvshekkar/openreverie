@@ -277,8 +277,8 @@ function windowStart(
 // Deliberately no upper bound: once eligible, a commitment stays eligible
 // past its window closing. Spec Section 6 requires exactly this ("did you
 // end up going" is a valid one-time follow-up after the date has passed
-// with no outcome recorded). No computed state marks the commitment as late,
-// so there is nothing to bind an upper bound to.
+// with no outcome recorded), and there is no overdue state anywhere in
+// this feature to compute an upper bound from in the first place.
 function isTimeEligible(timing: CommitmentTiming | undefined, today: string): boolean {
   if (timing === undefined) return true
   const start = windowStart(timing)

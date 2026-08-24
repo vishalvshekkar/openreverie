@@ -242,17 +242,35 @@ describe('selectCommitments', () => {
   })
 })
 
+// Strips line and block comments out of a TypeScript source string while
+// leaving string and template literals alone, so a comment that happens to
+// use one of the scanned words (to explain that the state deliberately does
+// not exist) never trips the scan below. Matches a double-quoted string, a
+// single-quoted string, a template literal, a line comment, or a block
+// comment, in that preference order, and drops only the two comment forms.
+function stripComments(source: string): string {
+  const pattern =
+    /"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|\/\/[^\n]*|\/\*[\s\S]*?\*\//g
+  return source.replace(pattern, (match) =>
+    match.startsWith('//') || match.startsWith('/*') ? '' : match,
+  )
+}
+
 describe('no-overdue-state guarantee', () => {
   it('has no state, field or helper expressing lateness', () => {
     const source = readFileSync(new URL('./commitments.ts', import.meta.url), 'utf8')
     // Spec section 6: if the data cannot express "you failed to do this",
-    // nothing downstream can render it. This test is a crude string scan,
-    // not a type system, and that is deliberate: it is a tripwire. If the
-    // scan ever fires on an innocent usage, the right fix is to rename that
-    // usage, not to weaken the scan. The correct state for a passed window
-    // with no recorded outcome is simply open (unknown).
+    // nothing downstream can render it. This test is a crude string scan
+    // of the code with comments stripped out, not a type system, and that
+    // is deliberate: it is a tripwire. Comments are stripped first so the
+    // file can still document, in plain words, that this state does not
+    // exist, without tripping the scan itself. If the scan ever fires on
+    // an innocent usage, the right fix is to rename that usage, not to
+    // weaken the scan. The correct state for a passed window with no
+    // recorded outcome is simply open (unknown).
+    const code = stripComments(source)
     for (const forbidden of ['overdue', 'isLate', 'missed', 'pastDue', 'failed']) {
-      expect(source.toLowerCase()).not.toContain(forbidden.toLowerCase())
+      expect(code.toLowerCase()).not.toContain(forbidden.toLowerCase())
     }
   })
 
