@@ -121,9 +121,12 @@ embeddings), searchable through `search_memory`, and readable through `read_docu
   prompt-exempt in `PROMPT_SECTION_CAP` with a comment pointing at `DREAM_INSIGHTS_SECTION_CAP`,
   which joins `SECTION_CAPS`, and `PROMPT_BUDGET_TOTAL` is raised by the same amount.
 
-`dream_state` is a new derived SQLite table, rebuildable at any time by replaying `log.jsonl`
-against the current folder: `(entity_id, entity_type, last_dreamt_ts, times_dreamt)`. It is an
-index artifact like `nodes` and `edges`, never a source of truth.
+Dream coverage state (last-dreamt time per entity, latest feedback per insight, mentions) is
+derived by folding `dreams/log.jsonl` in memory at the moment it is needed. At one dream per
+period the log stays small for years, so v1 has no `dream_state` SQLite table; if the fold ever
+becomes measurable, a derived table is the optimization, and like `nodes` and `edges` it would
+never be a source of truth. (Amended 2026-08-24 during planning; the working record has the
+reasoning.)
 
 ## Selection
 
@@ -131,8 +134,12 @@ Deterministic given the memory folder and a recorded RNG seed. A small seeded PR
 (mulberry32-style, no `Math.random`) drives all sampling; the seed is recorded in
 `insight.md` frontmatter and `process.jsonl`, so any dream's selection is reproducible.
 
-1. **Candidate pool**: every indexed document (except `journaling`) and every graph node.
-   Journal entries are included; their prompt exemption is about injection, not about dreaming.
+1. **Candidate pool**: every indexed document (except `journaling`, `dream`, and
+   `dream_insight`) and every graph node. Journal entries are included; their prompt exemption
+   is about injection, not about dreaming. Dream documents are excluded on purpose: past dreams
+   reach a run only through the digest, as context, so a dream can never select itself or a
+   sibling as source material, which closes the reflect-on-reflections loop structurally.
+   (Amended 2026-08-24 during planning.)
 2. **Weight** per candidate: `staleness * significance + jitter`.
    - Staleness: days since `last_dreamt_ts` (never dreamt counts from the entity's own date),
      with a soft cap so ancient untouched entities do not drown everything else.
