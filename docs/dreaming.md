@@ -245,6 +245,10 @@ Prose-only in v1. Options for when we revisit:
 - 2026-08-24: On/off switch and a `daily | weekly` cadence. Off never deletes; on resumes from the switch date.
 - 2026-08-24: The dream process keeps read-only tool access with a hard call cap and prompt-level restraint.
 - 2026-08-24: Triggers: after reflection at session end, background at process start, server timer, on demand.
+- 2026-08-24: Feedback attribution resolved (9a): feedback lives on the artifact (per-insight controls in the dream views), plus a `dream_feedback` tool so the companion can record a correction when the user reacts in conversation. Transcript-level tagging deferred.
+- 2026-08-24: Config split confirmed (9b): system-level settings (on/off, cadence, model, triggers, caps) in `config.toml`; reading preferences (narrative voice, opener mention, prompt section) in `profile.md`.
+- 2026-08-24: Minimum memory before dreaming activates: five reflected sessions (9d).
+- 2026-08-24: Weekly cadence has no preferred day; the first trigger inside a due period runs the dream (9c).
 
 ## 12. Changelog
 
