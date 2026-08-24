@@ -1450,11 +1450,11 @@ questions are things worth asking when the moment is natural, never a checklist.
 
 rendered with `capRows(lines, DREAM_INSIGHTS_SECTION_CAP)`.
 
-- [ ] **Step 1: Write the failing tests.** In context.test.ts follow the existing fixture pattern (the file builds a fake SessionContext): assert the section renders id, kind, headline, claim; is omitted when empty; and respects the cap (`capRows`). In agent.test.ts: when `freshDream` is present in the context the system prompt's greeting instruction contains the dream mention guidance, and `engine.markDreamMentioned` was called with the dream id; when absent, neither.
+- [x] **Step 1: Write the failing tests.** In context.test.ts follow the existing fixture pattern (the file builds a fake SessionContext): assert the section renders id, kind, headline, claim; is omitted when empty; and respects the cap (`capRows`). In agent.test.ts: when `freshDream` is present in the context the system prompt's greeting instruction contains the dream mention guidance, and `engine.markDreamMentioned` was called with the dream id; when absent, neither.
 
-- [ ] **Step 2: Run, verify failure.**
+- [x] **Step 2: Run, verify failure.**
 
-- [ ] **Step 3: Implement.** `sessionContext`: scan dream dirs newest-first (reuse `listDreams`), read insight metas, fold the log once, filter `feedback.get(id)?.verdict` in `('wrong', 'do_not_bring_up')`, flatten to 8. `freshDream`: newest dream dir where `!state.mentioned.has(dreamId)`. In agent.ts, where `AgentSession.start` assembles the greeting turn, append to the greeting instruction when `context.freshDream` exists (thread it through `assembleSystemPrompt`'s return or a second engine call, matching how the greeting currently gets its context):
+- [x] **Step 3: Implement.** `sessionContext`: scan dream dirs newest-first (reuse `listDreams`), read insight metas, fold the log once, filter `feedback.get(id)?.verdict` in `('wrong', 'do_not_bring_up')`, flatten to 8. `freshDream`: newest dream dir where `!state.mentioned.has(dreamId)`. In agent.ts, where `AgentSession.start` assembles the greeting turn, append to the greeting instruction when `context.freshDream` exists (thread it through `assembleSystemPrompt`'s return or a second engine call, matching how the greeting currently gets its context):
 
 ```
 While the person was away you dreamt. If it fits the opening, mention it in one light
@@ -1464,9 +1464,9 @@ arrives in distress or wants to talk about something else. Never mention it in d
 
 and call `await engine.markDreamMentioned(context.freshDream.dreamId)` at session start so the offer happens once. Mode guard: skip the addition entirely when the session mode is `decompress`.
 
-- [ ] **Step 4: Run, verify pass** (`pnpm vitest run packages/core`).
+- [x] **Step 4: Run, verify pass** (`pnpm vitest run packages/core`).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/memory/src/engine.ts packages/core/src/context.ts packages/core/src/context.test.ts packages/core/src/agent.ts packages/core/src/agent.test.ts
