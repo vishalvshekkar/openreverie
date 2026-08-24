@@ -326,7 +326,7 @@ git commit -m "feat: dream and dream_insight doc kinds with date-span, search, a
 
 `existingDreamDates` are the `YYYY-MM-DD` prefixes of existing dream directory names, so dueness needs no file reads. A dream made under daily cadence covers its week if the user later switches to weekly: coverage is computed from dates, not stored period strings.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```ts
 // packages/memory/src/dreamSchedule.test.ts
@@ -380,12 +380,12 @@ describe('dreamIsDue', () => {
 })
 ```
 
-- [ ] **Step 2: Run, verify failure**
+- [x] **Step 2: Run, verify failure**
 
 Run: `pnpm vitest run packages/memory/src/dreamSchedule.test.ts`
 Expected: FAIL, module not found.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```ts
 // packages/memory/src/dreamSchedule.ts
@@ -432,12 +432,12 @@ export function dreamIsDue(check: {
 
 Export from index.ts.
 
-- [ ] **Step 4: Run, verify pass**
+- [x] **Step 4: Run, verify pass**
 
 Run: `pnpm vitest run packages/memory/src/dreamSchedule.test.ts`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/memory/src/dreamSchedule.ts packages/memory/src/dreamSchedule.test.ts packages/memory/src/index.ts
@@ -455,7 +455,7 @@ git commit -m "feat(memory): dream period math and dueness"
 **Interfaces:**
 - Produces (Task 9): `DREAM_LOCK_STALE_MS = 15 * 60 * 1000`, `acquireDreamLock(paths: MemoryPaths, now: Date): Promise<boolean>`, `releaseDreamLock(paths: MemoryPaths): Promise<void>`. Lock file: `<dreamsDir>/.lock`, JSON `{ ts, pid }`, exclusive create; a lock older than the stale window is taken over.
 
-- [ ] **Step 1: Write the failing tests** (append to dreamSchedule.test.ts; reuse the mkdtemp/ensureMemoryTree beforeEach pattern from dreamLog.test.ts)
+- [x] **Step 1: Write the failing tests** (append to dreamSchedule.test.ts; reuse the mkdtemp/ensureMemoryTree beforeEach pattern from dreamLog.test.ts)
 
 ```ts
 describe('dream lock', () => {
@@ -477,9 +477,9 @@ describe('dream lock', () => {
 })
 ```
 
-- [ ] **Step 2: Run, verify failure** (`acquireDreamLock` not exported).
+- [x] **Step 2: Run, verify failure** (`acquireDreamLock` not exported).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```ts
 import { readFile as readLockFile, rm as rmLock, writeFile as writeLock } from 'node:fs/promises'
@@ -520,7 +520,7 @@ export async function releaseDreamLock(paths: MemoryPaths): Promise<void> {
 
 Note: the takeover path has a small race window between `rm` and `wx` create; two processes both past the staleness check can still collide and one loses on the second `wx`. That is the intended behavior, not a bug to fix.
 
-- [ ] **Step 4: Run, verify pass**, then **Step 5: Commit**
+- [x] **Step 4: Run, verify pass**, then **Step 5: Commit**
 
 ```bash
 git add packages/memory/src/dreamSchedule.ts packages/memory/src/dreamSchedule.test.ts
