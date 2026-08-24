@@ -2457,7 +2457,22 @@ export class MemoryEngine implements DreamLookup {
       )
       return undefined
     } finally {
-      if (lockHeld) await releaseDreamLock(this.paths)
+      // The release itself can fail (EACCES, EROFS; ENOENT is already
+      // swallowed by releaseDreamLock's own force:true rm). This method is
+      // awaited from _doEndSession's afterSession trigger, and a release
+      // failure is never worth failing endSession() over: the dream this
+      // lock guarded is either already written or already abandoned, so a
+      // stuck lock file here is a warning, not a reason to break session
+      // end for a dreaming-only cause.
+      if (lockHeld) {
+        try {
+          await releaseDreamLock(this.paths)
+        } catch (releaseErr) {
+          this.warnings.push(
+            `Could not release the dream lock for period ${period} (trigger ${trigger}): ${errorMessage(releaseErr)}`,
+          )
+        }
+      }
     }
   }
 

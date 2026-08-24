@@ -1,6 +1,6 @@
 // Engine wiring for dreaming: candidate collection, dueness, the lock,
 // the once-per-period guard, feedback, and listing. Task 9.
-import { mkdir, mkdtemp, readdir, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -9,6 +9,7 @@ import {
   FakeEmbeddingProvider,
 } from '@openreverie/providers'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { DreamRunResult } from './dreaming.js'
 import { readDreamLog } from './dreamLog.js'
 import * as dreamSchedule from './dreamSchedule.js'
 import { type EngineDeps, MemoryEngine } from './engine.js'
@@ -23,6 +24,15 @@ async function pinTimezoneUtc(paths: MemoryPaths): Promise<void> {
     meta: { ...profile.meta, timezone: 'UTC', timezoneSource: 'user-confirmed' },
     body: profile.body,
   })
+}
+
+async function lockFileExists(paths: MemoryPaths): Promise<boolean> {
+  try {
+    await stat(join(paths.dreamsDir, '.lock'))
+    return true
+  } catch {
+    return false
+  }
 }
 
 function emptyReflectionOutput(summary: string): ReflectionOutput {
@@ -160,6 +170,14 @@ describe('MemoryEngine dreaming', () => {
     expect(insightHits.some((h) => h.kind === 'dream_insight')).toBe(true)
 
     expect(chat.requests).toHaveLength(5 + 4) // 5 reflections + the dream pipeline
+
+    // dreamPersona exists solely so memory never has to import buildPersona
+    // from core; assert its payoff is real, not just that the callback was
+    // provided. The 5 reflectSession calls carry no system prompt at all,
+    // so only the dream pipeline's own 4 requests are checked here.
+    const dreamRequests = chat.requests.slice(5)
+    expect(dreamRequests).toHaveLength(4)
+    expect(dreamRequests.every((r) => r.system?.includes('DREAM_PERSONA'))).toBe(true)
   })
 
   it('maybeDream is a no-op when disabled, under the session floor, or already covered', async () => {
@@ -494,21 +512,54 @@ describe('MemoryEngine dreaming', () => {
     })
 
     // The onStart hook is deliberately un-awaited (open() returns before it
-    // settles), so this polls for its effect instead of awaiting it.
-    const deadline = Date.now() + 2000
+    // settles), so this polls for the pipeline's true terminal effect
+    // instead of awaiting it directly (the promise is not exposed on
+    // MemoryEngine's public API). Breaking as soon as the dream directory
+    // first appears is not enough: mkdir happens well before dream.md,
+    // insight.md, process.jsonl, the reindex of both docs, and the final
+    // commitMemory git write, so closing the engine and letting afterEach
+    // remove the folder right after the directory appears used to race
+    // that still-in-flight tail (this was the source of an earlier flake).
+    //
+    // process.jsonl is runDream's own last write, so waiting for it proves
+    // the chat pipeline itself is done. What follows inside executeDream
+    // (two reindexOrWarn calls, then commitMemory's git add and commit)
+    // still has to run afterward with no further externally observable
+    // checkpoint before engine.close(). An earlier version of this fix
+    // polled `git status --porcelain` from the test itself as that missing
+    // checkpoint; that polling loop is itself a concurrent git invocation
+    // against the same repository commitMemory is committing to, and on
+    // this host it measurably collided with commitMemory's own git commit
+    // for `.git/index.lock`, making the run fail for a reason this test
+    // caused, not one it was testing for. So this waits for process.jsonl
+    // (fs only, no subprocess), then gives the short, fixed tail a
+    // generous settle window before closing, without ever spawning git
+    // itself.
+    const dreamDirDeadline = Date.now() + 5000
     let dirs: string[] = []
-    while (Date.now() < deadline) {
+    let processLogFound = false
+    while (Date.now() < dreamDirDeadline) {
       dirs = (await readdir(paths.dreamsDir, { withFileTypes: true }))
         .filter((e) => e.isDirectory())
         .map((e) => e.name)
-      if (dirs.length > 0) break
+      if (dirs.length > 0) {
+        try {
+          await stat(join(paths.dreamsDir, dirs[0] as string, 'process.jsonl'))
+          processLogFound = true
+          break
+        } catch {
+          // Not written yet.
+        }
+      }
       await new Promise((resolve) => setTimeout(resolve, 20))
     }
+    await new Promise((resolve) => setTimeout(resolve, 500))
     await engine2.close()
 
+    expect(processLogFound).toBe(true)
     expect(dirs).toHaveLength(1)
     expect(chat2.requests).toHaveLength(4)
-  })
+  }, 15000)
 
   it('markDreamMentioned appends a mentioned record to the dream log', async () => {
     const { paths, engine } = await openTestEngine({ dreaming: ENABLED_DREAMING })
@@ -538,5 +589,123 @@ describe('MemoryEngine dreaming', () => {
     })
 
     expect(await engine.readDream(partialDreamId)).toBeNull()
+  })
+
+  it('maybeDream still resolves when releasing the lock itself fails', async () => {
+    // A release failure (EACCES, EROFS) must never surface as a rejection:
+    // maybeDream is awaited from _doEndSession's afterSession trigger, and
+    // this method's own contract promises it never throws.
+    const { engine, chat, script } = await openTestEngine({ dreaming: ENABLED_DREAMING })
+    const sessionId = await seedReflectedSessions(engine, script, 5)
+    script.push(
+      { text: 'noted', toolCalls: [] },
+      { text: insightsJsonForSession(sessionId), toolCalls: [] },
+      { text: NARRATIVE_TEXT, toolCalls: [] },
+      { text: TONE_OK, toolCalls: [] },
+    )
+    const spy = vi
+      .spyOn(dreamSchedule, 'releaseDreamLock')
+      .mockRejectedValue(new Error('EACCES: permission denied, unlink'))
+
+    let thrown: unknown
+    let result: DreamRunResult | undefined
+    try {
+      result = await engine.maybeDream('onStart')
+    } catch (err) {
+      thrown = err
+    }
+    spy.mockRestore()
+
+    expect(thrown).toBeUndefined()
+    expect(result?.outcome).toBe('written') // the run itself still completed
+    expect(chat.requests).toHaveLength(5 + 4)
+    expect(engine.warnings.some((w) => w.toLowerCase().includes('lock'))).toBe(true)
+  })
+
+  it('maybeDream releases the lock even when the run aborts', async () => {
+    const { paths, engine, script } = await openTestEngine({ dreaming: ENABLED_DREAMING })
+    await seedReflectedSessions(engine, script, 5)
+    script.push(
+      { text: 'noted', toolCalls: [] }, // exploration wrap-up
+      { text: 'not json', toolCalls: [] }, // insights, first attempt
+      { text: 'still not json', toolCalls: [] }, // insights, retry
+    )
+
+    const result = await engine.maybeDream('onStart')
+
+    expect(result?.outcome).toBe('aborted')
+    expect(await lockFileExists(paths)).toBe(false)
+  })
+
+  it('dreamNow releases the lock even when the run aborts', async () => {
+    const { paths, engine, script } = await openTestEngine({ dreaming: ENABLED_DREAMING })
+    await seedReflectedSessions(engine, script, 5)
+    script.push(
+      { text: 'noted', toolCalls: [] },
+      { text: 'not json', toolCalls: [] },
+      { text: 'still not json', toolCalls: [] },
+    )
+
+    const result = await engine.dreamNow({ force: true })
+    if ('dryRun' in result) throw new Error('expected a real run, not a dry run preview')
+
+    expect(result.outcome).toBe('aborted')
+    expect(await lockFileExists(paths)).toBe(false)
+  })
+
+  it('Ruling A5: skipped sessions never count toward the reflected-session floor', async () => {
+    const { engine, chat } = await openTestEngine({ dreaming: ENABLED_DREAMING })
+    // Each of these ends with no user transcript line at all, so
+    // _doEndSession takes the writeSkippedSummary path: reflected: true,
+    // skipped: true, and no reflectSession chat call at all.
+    for (let i = 0; i < 5; i += 1) {
+      const sessionId = await engine.startSession()
+      await engine.endSession(sessionId)
+    }
+
+    const preview = await engine.dreamNow({ dryRun: true })
+    if (!('dryRun' in preview)) throw new Error('expected a dry run preview')
+
+    expect(preview.due).toBe(false)
+    expect(chat.requests).toHaveLength(0)
+  })
+
+  it('maybeDream declines and spends nothing when the lock is already held', async () => {
+    const { paths, engine, chat, script } = await openTestEngine({ dreaming: ENABLED_DREAMING })
+    await seedReflectedSessions(engine, script, 5)
+    // Simulates another process already mid-dream: a fresh, non-stale lock
+    // file already sitting at the path acquireDreamLock itself would use.
+    await writeFile(
+      join(paths.dreamsDir, '.lock'),
+      JSON.stringify({ ts: new Date().toISOString(), pid: 999999 }),
+      'utf8',
+    )
+
+    const before = chat.requests.length
+    const result = await engine.maybeDream('onStart')
+
+    expect(result).toBeUndefined()
+    expect(chat.requests.length).toBe(before)
+  })
+
+  it('maybeDream declines and spends nothing when the given trigger switch is off (serverTimer)', async () => {
+    // serverTimer has no call-site guard the way open() and _doEndSession
+    // guard onStart and afterSession: this one line inside maybeDream is
+    // the only thing standing between a disabled switch and a spent dream,
+    // and Task 13's serverTimer caller depends on it entirely.
+    const SERVER_TIMER_OFF: NonNullable<EngineDeps['dreaming']> = {
+      enabled: true,
+      cadence: 'daily',
+      triggers: { afterSession: false, onStart: false, serverTimer: false },
+      maxToolCalls: 4,
+    }
+    const { engine, chat, script } = await openTestEngine({ dreaming: SERVER_TIMER_OFF })
+    await seedReflectedSessions(engine, script, 5)
+
+    const before = chat.requests.length
+    const result = await engine.maybeDream('serverTimer')
+
+    expect(result).toBeUndefined()
+    expect(chat.requests.length).toBe(before)
   })
 })
