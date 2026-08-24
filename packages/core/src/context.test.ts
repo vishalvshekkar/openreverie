@@ -442,6 +442,79 @@ describe('assembleSystemPrompt', () => {
     await engine.close()
   })
 
+  it('renders no parenthetical for an intention whose eventTime came in as an empty or whitespace-only string, at either write site (a live remember() call and a reflected item)', async () => {
+    await pinTimezoneUtc(paths)
+    // The reflection response carries one item with an empty eventTime and
+    // one with a whitespace-only eventTime, exercising mintItems (the
+    // reflection.ts write site). A live remember() call for a third item,
+    // also with an empty eventTime, exercises engine.remember (the
+    // engine.ts write site) in the same session.
+    const chat = new FakeChatProvider([
+      {
+        text: JSON.stringify({
+          summary: 'A quiet check-in.',
+          items: [
+            {
+              text: 'See Nightfall with Priya, reflected empty case',
+              kind: 'intention',
+              eventTime: '',
+            },
+            {
+              text: 'See Nightfall with Meera, reflected whitespace case',
+              kind: 'intention',
+              eventTime: '   ',
+            },
+          ],
+          attributions: [],
+          newArcs: [],
+          newPersons: [],
+          newEntities: [],
+          pagePromotions: [],
+          arcUpdates: [],
+          personUpdates: [],
+          constitutionUpdate: null,
+          journalingUpdate: null,
+        }),
+        toolCalls: [],
+      },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const startedAt = new Date()
+    const sessionId = await engine.startSession(startedAt)
+    await engine.appendTranscript(sessionId, {
+      ts: startedAt.toISOString(),
+      role: 'user',
+      content: 'Just checking in.',
+    })
+    await engine.remember(
+      sessionId,
+      'See Nightfall with Arjun, remembered empty case',
+      'intention',
+      '',
+    )
+
+    await engine.endSession(sessionId)
+
+    const prompt = await assembleSystemPrompt(engine, testConfig())
+    expect(prompt).toContain('## Recent intentions')
+    const lines = prompt.split('\n')
+
+    for (const text of [
+      'See Nightfall with Priya, reflected empty case',
+      'See Nightfall with Meera, reflected whitespace case',
+      'See Nightfall with Arjun, remembered empty case',
+    ]) {
+      const line = lines.find((l) => l.includes(text))
+      expect(line).toBeDefined()
+      expect(line).not.toContain('eventTime')
+      // Nothing trailing at all, not even an empty "()": the line ends
+      // exactly at the item's own text.
+      expect(line?.endsWith(text)).toBe(true)
+    }
+
+    await engine.close()
+  })
+
   it('states plainly in the recent intentions section that a recorded intention is not evidence it happened', async () => {
     await pinTimezoneUtc(paths)
     const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)

@@ -143,11 +143,38 @@ const reflectionItemKindSchema = z.enum(['observation', 'feeling', 'event', 'int
 export const reflectionOutputSchema: z.ZodType<ReflectionOutput> = z.object({
   summary: z.string(),
   items: z.array(
-    z.object({
-      text: z.string(),
-      kind: reflectionItemKindSchema,
-      eventTime: z.string().exactOptional(),
-    }),
+    // Preprocessed at the whole-object level, not just the eventTime
+    // field, because exactOptionalPropertyTypes forbids a schema whose
+    // output type is `string | undefined` for a key typed `eventTime?:
+    // string` (ReflectionItem never means "present but undefined"). A
+    // field-level transform can turn a blank string into undefined as a
+    // VALUE, but the key still counts as present, which trips that check.
+    // Stripping the key from the raw object before validation, when a
+    // model emits `"eventTime": ""` instead of omitting the key (a well
+    // known structured-output tendency, not malice), makes the object
+    // arrive at exactOptional looking exactly like one that never had the
+    // key: absent, not a blank string. Treated as absent rather than
+    // rejected, same reasoning as rememberArgs in tools.ts: the person
+    // stated no time, and failing the whole item over a blank optional
+    // field would lose real content to punish a shape the model did not
+    // mean maliciously. Whitespace-only is stripped the same way.
+    z.preprocess(
+      (raw) => {
+        if (raw !== null && typeof raw === 'object' && 'eventTime' in raw) {
+          const value = (raw as { eventTime?: unknown }).eventTime
+          if (typeof value === 'string' && value.trim().length === 0) {
+            const { eventTime: _drop, ...rest } = raw as Record<string, unknown>
+            return rest
+          }
+        }
+        return raw
+      },
+      z.object({
+        text: z.string(),
+        kind: reflectionItemKindSchema,
+        eventTime: z.string().exactOptional(),
+      }),
+    ),
   ),
   attributions: z.array(
     z.object({ itemIndex: z.number(), arcId: z.string(), confidence: z.number().min(0).max(1) }),
@@ -405,13 +432,24 @@ export async function reflectSession(
 
 function mintItems(items: ReflectionOutput['items'], now: Date): ReflectionItem[] {
   const ts = now.toISOString()
-  return items.map((item) => ({
-    id: newId('item'),
-    text: item.text,
-    kind: item.kind,
-    ts,
-    ...(item.eventTime !== undefined ? { eventTime: item.eventTime } : {}),
-  }))
+  return items.map((item) => {
+    // Normalized here too, not only at reflectionOutputSchema: mintItems
+    // can be handed a ReflectionOutput built directly, not only one that
+    // passed through that schema (several tests do exactly this, and
+    // applyReflection's public signature accepts one too), so the write
+    // site itself must not trust that its input already stripped a blank
+    // eventTime. Same reasoning as the schema: empty or whitespace-only is
+    // never a stated time, and treated as absent rather than rejected.
+    const statedEventTime =
+      item.eventTime !== undefined && item.eventTime.trim().length > 0 ? item.eventTime : undefined
+    return {
+      id: newId('item'),
+      text: item.text,
+      kind: item.kind,
+      ts,
+      ...(statedEventTime !== undefined ? { eventTime: statedEventTime } : {}),
+    }
+  })
 }
 
 function mergeLiveItems(minted: ReflectionItem[], liveItems: ReflectionItem[]): ReflectionItem[] {

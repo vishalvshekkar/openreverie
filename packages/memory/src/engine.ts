@@ -638,12 +638,21 @@ export class MemoryEngine {
     kind: ReflectionItemKind = 'observation',
     eventTime?: string,
   ): Promise<void> {
+    // Normalized here too, not only at tools.ts's rememberArgs schema:
+    // remember() is a public method other callers (direct tests among
+    // them) can reach without going through that schema, so the write
+    // site itself must not trust that its caller already stripped a blank
+    // eventTime. An empty or whitespace-only string is never a stated
+    // time; treated as absent, not rejected, for the same reason as the
+    // schema: the text is still worth keeping.
+    const statedEventTime =
+      eventTime !== undefined && eventTime.trim().length > 0 ? eventTime : undefined
     const item: ReflectionItem = {
       id: newId('item'),
       text,
       kind,
       ts: new Date().toISOString(),
-      ...(eventTime !== undefined ? { eventTime } : {}),
+      ...(statedEventTime !== undefined ? { eventTime: statedEventTime } : {}),
     }
     const items = this.liveItems.get(sessionId)
     if (items) {

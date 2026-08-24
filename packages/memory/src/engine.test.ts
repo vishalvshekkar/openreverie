@@ -2953,6 +2953,69 @@ describe('MemoryEngine', () => {
       await engine.close()
     })
 
+    it.each([
+      ['empty string', ''],
+      ['whitespace-only', '   '],
+    ])(
+      'remember normalizes a %s eventTime to absent: no eventTime key in the summary, no anchor in the indexed chunk, no eventTime in recentIntentions',
+      async (_label, eventTime) => {
+        const chat = new FakeChatProvider([
+          { text: JSON.stringify(emptyReflectionOutput('A quiet check-in.')), toolCalls: [] },
+        ])
+        const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+        const startedAt = new Date()
+        const sessionId = await engine.startSession(startedAt)
+        await engine.appendTranscript(sessionId, {
+          ts: startedAt.toISOString(),
+          role: 'user',
+          content: 'Just checking in.',
+        })
+
+        // Called directly, bypassing tools.ts's schema entirely, so this
+        // proves the write-site normalization in engine.remember() itself,
+        // not just the schema layer in front of it.
+        await engine.remember(
+          sessionId,
+          'See Nightfall with Arjun, unstated time',
+          'intention',
+          eventTime,
+        )
+
+        await engine.endSession(sessionId)
+
+        const summaryPath = join(
+          paths.sessionsDir,
+          `${isoDate(startedAt)}-${sessionId}`,
+          'summary.md',
+        )
+        const summaryDoc = await readDocument(summaryPath)
+        const items = summaryDoc.meta.items as { text: string; eventTime?: string }[]
+        const item = items.find((i) => i.text === 'See Nightfall with Arjun, unstated time')
+        expect(item).toBeDefined()
+        expect('eventTime' in (item ?? {})).toBe(false)
+
+        // No fabricated anchor in the indexed chunk: itemChunkText only
+        // appends the "(eventTime: ..., as stated on ...)" anchor when
+        // eventTime is present, so its absence here is the assertion.
+        const hits = (await engine.search('Nightfall')).documents
+        expect(hits.length).toBeGreaterThan(0)
+        const snippet = hits[0]?.snippet ?? ''
+        expect(snippet).not.toContain('eventTime')
+        expect(snippet).not.toContain('as stated on')
+
+        // No parenthetical possible in the rendered prompt either: the
+        // object context.ts renders from has no eventTime key to render.
+        const context = await engine.sessionContext()
+        const intention = context.recentIntentions.find(
+          (i) => i.text === 'See Nightfall with Arjun, unstated time',
+        )
+        expect(intention).toBeDefined()
+        expect('eventTime' in (intention ?? {})).toBe(false)
+
+        await engine.close()
+      },
+    )
+
     it('tolerates a hand-written summary.md with no items key at all, in the same recentSummaries window', async () => {
       const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)
       const store = await SessionStore.start(paths, yesterday)

@@ -488,6 +488,53 @@ describe('dispatchTool', () => {
     await engine.close()
   })
 
+  it.each([
+    ['empty string', ''],
+    ['whitespace-only', '   '],
+  ])(
+    'remember treats a %s eventTime as absent, not a fabricated anchor, writing no eventTime key at all',
+    async (_label, eventTime) => {
+      const chat = new FakeChatProvider([
+        { text: JSON.stringify(emptyReflectionOutput('A quiet check-in.')), toolCalls: [] },
+      ])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const startedAt = new Date()
+      const sessionId = await engine.startSession(startedAt)
+      await engine.appendTranscript(sessionId, {
+        ts: startedAt.toISOString(),
+        role: 'user',
+        content: 'Just checking in.',
+      })
+
+      // The exact shape a model emits instead of omitting the key: see
+      // AGENTS-instructed Fix 1, packages/core/src/tools.ts's rememberArgs.
+      const result = await dispatchTool(
+        engine,
+        sessionId,
+        call('remember', { text: 'Went out for a walk', kind: 'event', eventTime }),
+      )
+      expect(JSON.parse(result)).toEqual({ ok: true })
+
+      await engine.endSession(sessionId)
+
+      const paths = memoryPaths(dir)
+      const summaryPath = join(
+        paths.sessionsDir,
+        `${isoDate(startedAt)}-${sessionId}`,
+        'summary.md',
+      )
+      const summaryDoc = await readDocument(summaryPath)
+      const items = summaryDoc.meta.items as { text: string; eventTime?: string }[]
+      const item = items.find((i) => i.text === 'Went out for a walk')
+      expect(item).toBeDefined()
+      // Absent, not present as an empty string: this is the write-site
+      // fix, not just a falsy-string check, so the key itself must be gone.
+      expect('eventTime' in (item ?? {})).toBe(false)
+
+      await engine.close()
+    },
+  )
+
   it('declare_journal_method records the method on the session', async () => {
     const engine = await MemoryEngine.open(dir, fakeDeps())
     const sessionId = await engine.startSession()

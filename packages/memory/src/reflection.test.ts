@@ -1,7 +1,7 @@
 import { chmod, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { type ChatProvider, FakeChatProvider } from '@openreverie/providers'
+import { type ChatProvider, FakeChatProvider, FakeEmbeddingProvider } from '@openreverie/providers'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { newId, readDocument, writeDocumentAtomic } from './documents.js'
 import { appendGraph, readGraph } from './graph.js'
@@ -17,6 +17,7 @@ import {
   resolveNarratives,
   rewriteNarrative,
 } from './reflection.js'
+import { type EmbedFn, MemoryIndex } from './sqlite.js'
 import { SessionStore, type TranscriptLine } from './transcripts.js'
 
 const TRANSCRIPT: TranscriptLine[] = [
@@ -1071,6 +1072,84 @@ describe('reflection', () => {
       expect(mintedItems[0]?.eventTime).toBe('tonight at 7:25pm')
       expect(mintedItems[0]?.ts).toBe('2026-08-16T10:49:00.000Z')
       expect(mintedItems[1]?.eventTime).toBeUndefined()
+    })
+
+    it('reflectionOutputSchema normalizes an empty or whitespace-only item eventTime to absent, the model\'s \'"eventTime": ""\' shape rather than an omitted key', () => {
+      const out = {
+        ...emptyReflectionOutput('An evening plan.'),
+        items: [
+          { text: 'Watching Halcyon', kind: 'event', eventTime: '' },
+          { text: 'Watching Nightfall', kind: 'event', eventTime: '   ' },
+          { text: 'Feeling behind lately', kind: 'feeling' },
+        ],
+      }
+      const parsed = reflectionOutputSchema.safeParse(out)
+      expect(parsed.success).toBe(true)
+      if (!parsed.success) return
+      expect(parsed.data.items[0]?.eventTime).toBeUndefined()
+      expect(parsed.data.items[1]?.eventTime).toBeUndefined()
+      expect(parsed.data.items[2]?.eventTime).toBeUndefined()
+      // Absent means the key itself is gone, not present with value
+      // undefined: the two read differently to `'eventTime' in item`, and
+      // only the former matches what an omitted key produces.
+      expect('eventTime' in (parsed.data.items[0] ?? {})).toBe(false)
+      expect('eventTime' in (parsed.data.items[1] ?? {})).toBe(false)
+    })
+
+    it('mints an item with an empty or whitespace-only eventTime as fully absent, and the indexed chunk carries no fabricated anchor', async () => {
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('An evening plan.'),
+        items: [
+          { text: 'Watching Halcyon empty case', kind: 'event', eventTime: '' },
+          { text: 'Watching Nightfall whitespace case', kind: 'event', eventTime: '   ' },
+          { text: 'Feeling behind lately absent case', kind: 'feeling' },
+        ],
+      }
+
+      const store = await SessionStore.start(paths, new Date('2026-08-16T10:49:00Z'), 'UTC')
+      await store.appendLine({
+        ts: '2026-08-16T10:49:00.000Z',
+        utcOffsetMinutes: 330,
+        role: 'user',
+        content: 'Watching Halcyon tonight',
+      })
+
+      const { mintedItems, summaryDoc } = await applyReflection(
+        paths,
+        out,
+        store.sessionId,
+        [],
+        new Date('2026-08-16T10:49:00.000Z'),
+        new Map(),
+        async () => {},
+      )
+
+      expect(mintedItems[0]?.eventTime).toBeUndefined()
+      expect(mintedItems[1]?.eventTime).toBeUndefined()
+      expect(mintedItems[2]?.eventTime).toBeUndefined()
+      expect('eventTime' in (mintedItems[0] ?? {})).toBe(false)
+      expect('eventTime' in (mintedItems[1] ?? {})).toBe(false)
+
+      const dbPath = join(
+        await mkdtemp(join(tmpdir(), 'openreverie-reflection-index-')),
+        'index.db',
+      )
+      const index = MemoryIndex.open(dbPath)
+      try {
+        const provider = new FakeEmbeddingProvider()
+        const embed: EmbedFn = (texts: string[]) => provider.embed('fake-model', texts)
+        await index.upsertDocument(summaryDoc, 'summary', embed)
+
+        for (const term of ['empty', 'whitespace', 'absent']) {
+          const hits = index.searchText(term, 10)
+          expect(hits.length).toBeGreaterThan(0)
+          const snippet = hits[0]?.snippet ?? ''
+          expect(snippet).not.toContain('eventTime')
+          expect(snippet).not.toContain('as stated on')
+        }
+      } finally {
+        index.close()
+      }
     })
 
     it('writes journaling.md when journalingUpdate is set, preserving the id on a second write', async () => {

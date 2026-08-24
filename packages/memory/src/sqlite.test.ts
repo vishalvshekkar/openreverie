@@ -181,10 +181,18 @@ describe('MemoryIndex', () => {
       expect(hits.length).toBe(1)
       const snippet = hits[0]?.snippet ?? ''
       // The person's own words, anchored to the date the record was made,
-      // not resolved into any kind of timestamp.
+      // not resolved into any kind of timestamp. Guards against a clock
+      // time appended in ANY shape, not only "date-T-time" ISO 8601 (a
+      // narrower `/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/` guard here would pass
+      // vacuously against, say, "as stated on 2026-08-16 at 19:25": no T,
+      // so it slips through, but it is exactly the resolved instant the
+      // spec forbids). The eventTime fixture above ("tonight") and the
+      // docDate ("2026-08-16") both contain no HH:MM-shaped substring, so
+      // this general check is safe against them and only fires on a
+      // fabricated clock time appended by the code under test.
       expect(snippet).toContain('tonight')
       expect(snippet).toContain('2026-08-16')
-      expect(snippet).not.toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/)
+      expect(snippet).not.toMatch(/\d{1,2}:\d{2}/)
 
       const titleHits = index.searchText('Zephyrquest', 10)
       expect(titleHits.length).toBe(1)
@@ -415,8 +423,18 @@ describe('MemoryIndex', () => {
     })
 
     it('searchText leaves the date span absent, not guessed, for a living document (A3)', async () => {
+      // opened and updated are set here on purpose, not left off: an arc
+      // fixture with neither field can never distinguish "documentDateSpan
+      // correctly returns null for a living document" from "there was
+      // nothing to derive a span from anyway." Setting both, to two
+      // different dates, means a mutation that started deriving a span
+      // from either field would have real values to fabricate a span out
+      // of, and this test would catch it.
       await index.upsertDocument(
-        doc({ meta: { id: 'doc_living' }, body: 'A living arc page about kayaking.' }),
+        doc({
+          meta: { id: 'doc_living', opened: '2026-06-01', updated: '2026-08-18' },
+          body: 'A living arc page about kayaking.',
+        }),
         'arc',
         embedFn(),
       )

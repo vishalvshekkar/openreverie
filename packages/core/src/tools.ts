@@ -57,7 +57,21 @@ const readTranscriptArgs = z.strictObject({
 const rememberArgs = z.strictObject({
   text: z.string(),
   kind: z.enum(['observation', 'feeling', 'event', 'intention']).optional(),
-  eventTime: z.string().optional(),
+  // A model emitting `"eventTime": ""` instead of omitting the key is a
+  // well known structured-output tendency, not malice: the person stated
+  // no time. Treated as absent rather than rejected: the text itself is
+  // still worth keeping, and failing the whole remember call over a blank
+  // optional field would lose real content to punish a shape the model
+  // did not mean maliciously. Whitespace-only input is treated the same
+  // way. This flows into engine.remember's optional `eventTime?: string`
+  // parameter, not an object property, so a normalized `string |
+  // undefined` here is fine under exactOptionalPropertyTypes; see
+  // reflection.ts's reflectionOutputSchema for why that schema needs a
+  // different shape to normalize the same way.
+  eventTime: z
+    .string()
+    .transform((value) => (value.trim().length === 0 ? undefined : value))
+    .optional(),
 })
 
 const declareJournalMethodArgs = z.strictObject({

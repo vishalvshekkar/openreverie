@@ -3,21 +3,15 @@
 // This is the harness, and it changes no search behavior of its own. It
 // measured the pre-A2 baseline (recall@5 = 0.79, with the keyword lane
 // returning zero hits for 20 of 24 queries) and now measures the state
-// after A2 through A6 landed.
+// after A2 through A6 landed: recall@5 = 0.88 (21/24), and the FTS lane
+// returns at least one hit for every query shape in the fixture set.
 //
-// Two kinds of assertion appear below, deliberately different shapes for
-// deliberately different reasons:
-//
-// - The recall@5 floor test asserts a number the CURRENT, unmodified code
-//   already clears (via the vector lane alone; see the comment on the
-//   test). It describes correct behavior, and A2/A5/A6 are expected to
-//   raise this number, never to lower it silently.
-// - The FTS-lane test is `it.skip`, because the current code does not
-//   clear it: `toFtsQuery` ANDs every term, so a natural-language query
-//   of 10-15 tokens matches nothing. Asserting that as a passing test
-//   would assert the bug, and it would then fail the moment A2 fixes it.
-//   The skipped assertion states what correct looks like and names the
-//   step (A2) that turns it on.
+// Every assertion below is live; none is skipped. The FTS-lane test
+// (`it('FTS lane returns at least one hit for every natural-language
+// query...')` further down) used to be `it.skip`, written before A2
+// landed to state what correct looked like without asserting the bug.
+// A2 landed (toFtsQuery ORs terms instead of ANDing them), the assertion
+// held on the first try, and it has run as a normal passing test since.
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -36,16 +30,37 @@ import { type EmbedFn, MemoryIndex } from './sqlite.js'
 
 const RECALL_K = 5
 
-// The floor the fixture corpus's recall@5 must not drop below. Measured
-// against the current, unmodified code (see the report printed by the test
-// below): the vector lane alone, scored by the deterministic bag-of-words
-// stub, already resolves most of the near-miss clusters correctly, because
-// cosine similarity over shared content words is enough signal on its own
-// when nothing from the FTS lane is there to fuse against it. This is a
-// floor, not a target: A2 (revive the FTS lane), A5 (retune RRF_K and
-// CANDIDATE_LIMIT) and A6 (recency tiebreaker) are all expected to raise
-// it, and this assertion exists so none of them can lower it by accident.
-const BASELINE_RECALL_AT_5_FLOOR = 0.75
+// The floor the fixture corpus's recall@5 must not drop below. The current
+// code, with A2 (revive the FTS lane), A5 (retune RRF_K and
+// CANDIDATE_LIMIT) and A6 (recency tiebreaker) all landed, clears
+// recall@5 = 0.88 (21/24; see the report printed by the test below).
+//
+// 0.83 (20/24) is deliberately NOT 0.88: with 24 fixed queries, one lost
+// hit is worth 1/24 ≈ 0.042, so a floor pinned at the exact current value
+// would fail on any single query's worth of noise from an unrelated
+// fixture change. 0.83 tolerates losing one query but still fails on
+// losing two, which is what this floor exists to catch: reverting A2
+// (the FTS-lane implicit-AND fix) during falsification dropped recall@5
+// to 0.79 (19/24, two queries lost: q11 and q12, see the pinned-rank test
+// below), and the OLD floor of 0.75 did not fail on that regression. This
+// floor would.
+//
+// Raise this number only when a real improvement lands and the new,
+// higher recall is confirmed stable (not a one-off from fixture ordering
+// or embedding-stub noise), and update the reasoning above to match.
+// Lowering it to make a failing suite pass is exactly the wrong move: a
+// dropping recall@5 means retrieval got worse, and the fix is to find out
+// why, not to stop measuring it.
+const BASELINE_RECALL_AT_5_FLOOR = 0.83
+
+// The two queries that flip from hit to miss when the FTS lane's
+// implicit-AND bug (defect 5, toFtsQuery joining terms with AND instead
+// of OR) comes back: q11 (rank 3 today) and q12 (rank 5 today), both
+// natural-language "is there anything/has anything been decided" queries
+// whose expected document is a near-miss the vector lane alone ranks
+// lower than 5. See the pinned-rank test below for why this list exists
+// as its own assertion, separate from the aggregate recall@5 floor.
+const FTS_REGRESSION_CLUSTER = ['q11', 'q12']
 
 function embedFn(provider: BagOfWordsEmbeddingProvider): EmbedFn {
   return (texts: string[]) => provider.embed(EVAL_MODEL, texts)
@@ -173,21 +188,38 @@ describe('retrieval eval (fixture corpus)', () => {
 
   // Defect 5 (docs/superpowers/plans/2026-08-24-recall-and-event-time-fixes.md,
   // Unit A, "the keyword lane of the hybrid search returns nothing for
-  // real queries"): toFtsQuery joins terms with an implicit AND, so most
-  // of the natural-language queries above (10 to 15 tokens) match zero
-  // chunks in the FTS lane today, and so does q24, a 3-token keyword query
-  // where a word-form mismatch ('flight' in the query, 'Flights' in the
-  // document) is enough on its own to starve it. Both assertions describe
-  // the CORRECT behavior: every one of these should get at least one hit
-  // from the keyword lane once it ORs terms instead of ANDing them. They
-  // are skipped, not asserted, because the current code does not clear
-  // them; unskip this when A2 lands.
-  it('FTS lane returns at least one hit for every natural-language query, and for q24 (enable at A2)', () => {
+  // real queries"): before A2, toFtsQuery joined terms with an implicit
+  // AND, so most of the natural-language queries above (10 to 15 tokens)
+  // matched zero chunks in the FTS lane, and so did q24, a 3-token keyword
+  // query where a word-form mismatch ('flight' in the query, 'Flights' in
+  // the document) was enough on its own to starve it. A2 landed
+  // (toFtsQuery now ORs terms instead of ANDing them), and both
+  // assertions below hold as ordinary passing tests, not aspirational
+  // ones.
+  it('FTS lane returns at least one hit for every natural-language query, and for q24', () => {
     const naturalOrMismatched = results.filter(
       (result) => result.query.shape === 'natural' || result.query.id === 'q24',
     )
     for (const result of naturalOrMismatched) {
       expect(result.lane.textHits).toBeGreaterThan(0)
+    }
+  })
+
+  it('pins the FTS-regression cluster (q11, q12) within the top 5, so a change that keeps aggregate recall@5 flat cannot silently reopen the implicit-AND bug for these two', () => {
+    // Deliberately a looser check than "rank equals exactly 3" and
+    // "exactly 5": the invariant this test protects is that these two
+    // stay HITS (rank within RECALL_K), not that their exact position
+    // never moves for unrelated reasons. Reverting A2 alone (see
+    // BASELINE_RECALL_AT_5_FLOOR's comment) pushes q11 to rank 13 and q12
+    // to rank 10, both misses; a future change that improves some other
+    // query enough to hold aggregate recall@5 steady while reintroducing
+    // that regression would slip past the floor test above but not this
+    // one.
+    for (const id of FTS_REGRESSION_CLUSTER) {
+      const result = results.find((r) => r.query.id === id)
+      expect(result).toBeDefined()
+      expect(result?.rank).not.toBeNull()
+      expect(result?.rank).toBeLessThanOrEqual(RECALL_K)
     }
   })
 })
