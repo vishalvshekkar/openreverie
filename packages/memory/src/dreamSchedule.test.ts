@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -86,5 +86,17 @@ describe('dream lock', () => {
   })
   it('release is a no-op when no lock exists', async () => {
     await expect(releaseDreamLock(paths)).resolves.toBeUndefined()
+  })
+  it('takes over a lock file whose contents cannot be parsed', async () => {
+    await writeFile(join(paths.dreamsDir, '.lock'), 'not json at all', 'utf8')
+    expect(await acquireDreamLock(paths, NOW)).toBe(true)
+  })
+  it('does not take over a lock file that is valid and fresh', async () => {
+    await writeFile(
+      join(paths.dreamsDir, '.lock'),
+      JSON.stringify({ ts: NOW.toISOString(), pid: 999999 }),
+      'utf8',
+    )
+    expect(await acquireDreamLock(paths, NOW)).toBe(false)
   })
 })

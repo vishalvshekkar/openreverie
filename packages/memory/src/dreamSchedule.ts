@@ -55,18 +55,28 @@ export async function acquireDreamLock(paths: MemoryPaths, now: Date): Promise<b
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err
   }
+  // A lock file whose timestamp will not parse is stale (age is NaN). A lock
+  // file whose entire body will not parse, or cannot be read at all, is the
+  // same situation one level up: also stale, taken over the same way.
+  let stale: boolean
   try {
     const existing = JSON.parse(await readLockFile(lockPath(paths), 'utf8')) as { ts?: string }
     const age = now.getTime() - Date.parse(existing.ts ?? '')
-    if (Number.isNaN(age) || age > DREAM_LOCK_STALE_MS) {
-      await rmLock(lockPath(paths), { force: true })
-      await writeLock(lockPath(paths), payload, { encoding: 'utf8', flag: 'wx' })
-      return true
-    }
+    stale = Number.isNaN(age) || age > DREAM_LOCK_STALE_MS
   } catch {
+    stale = true
+  }
+  if (!stale) return false
+  try {
+    await rmLock(lockPath(paths), { force: true })
+    await writeLock(lockPath(paths), payload, { encoding: 'utf8', flag: 'wx' })
+    return true
+  } catch (err) {
+    // The excused race: another process can win the wx create between our
+    // rm and our own write. That process's win is this process's loss.
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err
     return false
   }
-  return false
 }
 
 export async function releaseDreamLock(paths: MemoryPaths): Promise<void> {
