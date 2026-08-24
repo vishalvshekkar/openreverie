@@ -23,6 +23,30 @@ import {
   readDocument,
   writeDocumentAtomic,
 } from './documents.js'
+import { type DreamLookup, type DreamRunResult, type DreamVoice, runDream } from './dreaming.js'
+import { type DreamLogState, type DreamVerdict, foldDreamLog, readDreamLog } from './dreamLog.js'
+import {
+  acquireDreamLock,
+  type DreamCadence,
+  dreamIsDue,
+  MIN_REFLECTED_SESSIONS,
+  periodCovered,
+  periodFor,
+  releaseDreamLock,
+} from './dreamSchedule.js'
+import { candidateWeight, type DreamCandidate, mulberry32, pickSeeds } from './dreamSelection.js'
+import {
+  markDreamMentioned as appendDreamMentionedRecord,
+  buildRecentDreamDigest as buildDreamDigest,
+  collectDreamCandidates,
+  reflectedSessionCount as countReflectedSessions,
+  adjacent as dreamNodesAdjacent,
+  listDreamSummaries,
+  existingDreamDates as listExistingDreamDates,
+  readDreamById,
+  recordDreamFeedback as recordDreamFeedbackInLog,
+  walkSeeds as walkDreamSeeds,
+} from './engineDreams.js'
 import { commitMemory } from './gitSync.js'
 import {
   appendGraph,
@@ -240,6 +264,37 @@ export interface EngineDeps {
   embeddings: EmbeddingProvider
   reflectionModel: string
   embeddingModel: string
+  // The model dreaming's own pipeline calls use. Falls back to
+  // reflectionModel when unset, the same non-chat model already used for
+  // every other structured, off-conversation call.
+  dreamingModel?: string
+  // Builds the persona string a dream run's system prompt carries. Lives on
+  // deps, not here, because buildPersona is in @openreverie/core and memory
+  // must never import upward from core.
+  dreamPersona?: (style: StyleConfig) => string
+  dreaming?: {
+    enabled: boolean
+    cadence: DreamCadence
+    triggers: { afterSession: boolean; onStart: boolean; serverTimer: boolean }
+    maxToolCalls: number
+  }
+}
+
+export interface DreamSummary {
+  dreamId: string
+  date: string
+  period: string
+  hasNarrative: boolean
+  insightCount: number
+  dir: string
+}
+
+export interface DreamDryRun {
+  dryRun: true
+  period: string
+  due: boolean
+  seeds: { id: string; label: string; weight: number }[]
+  walk: string[]
 }
 
 export interface SessionContext {
@@ -376,14 +431,26 @@ const ARCS_CAP = 30
 // character budget.
 const WEEKLY_INDEX_CAP = 12
 const PERSON_STARTER_BODY = 'This page is new. It grows as we talk.\n'
+// Dreaming (Task 9): a seed's body text handed into the dream packet is
+// capped the same way every other prompt input in this file is, so one
+// long document cannot blow the packet's own size out on its own.
+const DREAM_SEED_BODY_CAP = 2000
+const DREAM_SEED_COUNT = 3
+const DREAM_WALK_HOPS = 3
+const DREAM_DIGEST_COUNT = 3
 
-export class MemoryEngine {
+export class MemoryEngine implements DreamLookup {
   private readonly paths: MemoryPaths
   private readonly deps: EngineDeps
   private readonly index: MemoryIndex
   private graphState: GraphState
   private docPaths = new Map<string, string>()
   private docIdByPath = new Map<string, string>()
+  // Per-process, per-period dreaming attempt guard (see maybeDream below).
+  // Never persisted: a fresh process is always willing to try a period
+  // again, since the actual once-per-period record lives in the folded
+  // dream log and on disk (existingDreamDates), not here.
+  private readonly dreamAttemptedPeriods = new Set<string>()
   // The loaded profile.md, cached for cheap synchronous reads the same way
   // graphState and docPaths are. Source of truth is the file; this copy is
   // refreshed on every write that touches it, so the next read inside this
@@ -472,6 +539,18 @@ export class MemoryEngine {
       )
     }
     await engine.refreshDocPaths()
+    // Ruling A4: gated behind the same options.maintenance flag as the rest
+    // of open()'s background work, not just the onStart trigger switch.
+    // Without this gate any test that opens an engine with dreaming enabled
+    // and does not explicitly ask for { maintenance: false } would get a
+    // background dream pipeline racing its own teardown. Deliberately not
+    // awaited: onStart must never delay handing the engine back to the
+    // caller. A failure here is recorded on the engine's own warnings by
+    // maybeDream itself; the .catch is a backstop against anything that
+    // could still escape that.
+    if (options.maintenance !== false && deps.dreaming?.enabled && deps.dreaming.triggers.onStart) {
+      void engine.maybeDream('onStart').catch(() => {})
+    }
     return engine
   }
 
@@ -929,6 +1008,10 @@ export class MemoryEngine {
     if (!commitResult.ok && commitResult.warning) {
       this.warnings.push(commitResult.warning)
     }
+
+    if (this.deps.dreaming?.enabled && this.deps.dreaming.triggers.afterSession) {
+      await this.maybeDream('afterSession')
+    }
   }
 
   async sessionContext(now: Date = new Date(), mode?: string): Promise<SessionContext> {
@@ -1173,6 +1256,15 @@ export class MemoryEngine {
       return hit
     })
     return { documents: results.documents, nodes }
+  }
+
+  // DreamLookup's graph_query tool, distinct from graphQuery below: this
+  // one answers directly with the index's own neighbor shape, with no
+  // docId projection, because dreaming's tool dispatch (dreaming.ts) treats
+  // the result as opaque JSON handed back to the model, not a typed row a
+  // caller here inspects.
+  neighbors(nodeId: string): unknown {
+    return this.index.neighbors(nodeId)
   }
 
   graphQuery(query: GraphQuery): unknown[] {
@@ -2270,6 +2362,328 @@ export class MemoryEngine {
     // out and abort an otherwise-successful arc creation.
     await this.reindexOrWarn(realmDoc, 'realm', `realm page for ${realm}`)
     return realmNodeId
+  }
+
+  // ---------------------------------------------------------------------
+  // Dreaming (Task 9). Candidate collection, dueness, the lock, the
+  // triggers wired at the end of open() and _doEndSession above, on-demand
+  // runs, feedback, and listing. The pipeline itself (exploration,
+  // insights, narrative, tone gate, the atomic writes) lives in
+  // dreaming.ts; everything here is about deciding whether to call it and
+  // handing it what it needs.
+
+  // Called un-awaited from open() (onStart) and awaited from _doEndSession
+  // (afterSession); a serverTimer caller (Task 13) awaits it too. Never
+  // throws: a failure anywhere in the pipeline is recorded as a warning and
+  // answered with undefined, the same "no-op" result as every other reason
+  // this can decline to run, because a background trigger must never take
+  // down the caller that fired it.
+  async maybeDream(
+    trigger: 'afterSession' | 'onStart' | 'serverTimer',
+  ): Promise<DreamRunResult | undefined> {
+    const dreaming = this.deps.dreaming
+    if (!dreaming?.enabled) return undefined
+    const triggerOn =
+      trigger === 'afterSession'
+        ? dreaming.triggers.afterSession
+        : trigger === 'onStart'
+          ? dreaming.triggers.onStart
+          : dreaming.triggers.serverTimer
+    if (!triggerOn) return undefined
+
+    const now = new Date()
+    const timezone = this.timezone()
+    const period = periodFor(now, dreaming.cadence, timezone)
+    // Once per period, per process (see the class-level dreamAttemptedPeriods
+    // field): a hard failure below must never turn into a retry loop that
+    // keeps spending model calls on the same period.
+    if (this.dreamAttemptedPeriods.has(period)) return undefined
+
+    // Everything from here down, including acquiring the lock, is inside
+    // one try/catch: acquireDreamLock is not a total function (Ruling B3,
+    // Task 4) and throws when dreamsDir itself is missing, a damaged memory
+    // folder. That must not escape as an uncaught rejection: the awaited
+    // afterSession caller would fail endSession() for a dreaming-only
+    // reason, which this method's own contract above rules out. lockHeld
+    // tracks whether release is actually owed, so a throw from
+    // acquireDreamLock itself does not try to release a lock nobody holds.
+    let lockHeld = false
+    try {
+      const reflectedCount = await countReflectedSessions(this.paths)
+      const existingDreamDates = await listExistingDreamDates(this.paths)
+      const due = dreamIsDue({
+        enabled: dreaming.enabled,
+        cadence: dreaming.cadence,
+        timezone,
+        reflectedSessionCount: reflectedCount,
+        existingDreamDates,
+        now,
+      })
+      if (!due) return undefined
+
+      lockHeld = await acquireDreamLock(this.paths, now)
+      if (!lockHeld) return undefined
+
+      // Marked attempted here, under the lock and before any model call,
+      // not at the top of this method: a call that never got this far
+      // (trigger off, not due, lock held by another process) spent nothing
+      // and is free to try again later. Only a real attempt burns the
+      // period.
+      this.dreamAttemptedPeriods.add(period)
+
+      // Re-check dueness under the lock: two processes can both pass the
+      // due check above before either one wins the lock.
+      const recheckDates = await listExistingDreamDates(this.paths)
+      if (periodCovered(recheckDates, now, dreaming.cadence, timezone)) return undefined
+
+      const docs = await this.listPublicDocuments()
+      const candidates = collectDreamCandidates(this.graphState, docs)
+      const logState = foldDreamLog(await readDreamLog(this.paths))
+      const rngSeed = Date.now() >>> 0
+      const rng = mulberry32(rngSeed)
+      const seeds = pickSeeds({
+        candidates,
+        lastDreamt: logState.lastDreamt,
+        now,
+        rng,
+        adjacent: (a, b) => dreamNodesAdjacent(this.graphState, a, b),
+        count: DREAM_SEED_COUNT,
+      })
+      const walk = walkDreamSeeds(this.graphState, seeds, DREAM_WALK_HOPS, rng)
+      return await this.executeDream({ now, period, trigger, seeds, walk, rngSeed, logState })
+    } catch (err) {
+      this.warnings.push(
+        `Dreaming failed for period ${period} (trigger ${trigger}): ${errorMessage(err)}`,
+      )
+      return undefined
+    } finally {
+      if (lockHeld) await releaseDreamLock(this.paths)
+    }
+  }
+
+  // The on-demand path (CLI `dream` command, Task 12). Unlike maybeDream,
+  // this ignores the per-trigger switch and the once-per-period guard: a
+  // person asking for a dream right now is not a background trigger. force
+  // skips the dueness check (still requires dreaming to be configured at
+  // all, since there is no cadence or tool budget to run with otherwise).
+  // dryRun stops after selection, before the lock and before any model
+  // call, and returns the preview instead.
+  async dreamNow(
+    options: { force?: boolean; dryRun?: boolean } = {},
+  ): Promise<DreamRunResult | DreamDryRun> {
+    const dreaming = this.deps.dreaming
+    const now = new Date()
+    const timezone = this.timezone()
+
+    if (!dreaming) {
+      return { outcome: 'aborted', reason: 'dreaming is not configured' }
+    }
+
+    const period = periodFor(now, dreaming.cadence, timezone)
+    const reflectedCount = await countReflectedSessions(this.paths)
+    const existingDreamDates = await listExistingDreamDates(this.paths)
+    const due = dreamIsDue({
+      enabled: dreaming.enabled,
+      cadence: dreaming.cadence,
+      timezone,
+      reflectedSessionCount: reflectedCount,
+      existingDreamDates,
+      now,
+    })
+
+    if (!due && !options.force && !options.dryRun) {
+      const reason = !dreaming.enabled
+        ? 'dreaming is off'
+        : reflectedCount < MIN_REFLECTED_SESSIONS
+          ? `fewer than ${MIN_REFLECTED_SESSIONS} reflected sessions (have ${reflectedCount})`
+          : `period ${period} is already covered`
+      return { outcome: 'aborted', reason }
+    }
+
+    const docs = await this.listPublicDocuments()
+    const candidates = collectDreamCandidates(this.graphState, docs)
+    const logState = foldDreamLog(await readDreamLog(this.paths))
+    const rngSeed = Date.now() >>> 0
+    const rng = mulberry32(rngSeed)
+    const seeds = pickSeeds({
+      candidates,
+      lastDreamt: logState.lastDreamt,
+      now,
+      rng,
+      adjacent: (a, b) => dreamNodesAdjacent(this.graphState, a, b),
+      count: DREAM_SEED_COUNT,
+    })
+    const walk = walkDreamSeeds(this.graphState, seeds, DREAM_WALK_HOPS, rng)
+
+    if (options.dryRun) {
+      return {
+        dryRun: true,
+        period,
+        due,
+        seeds: seeds.map((s) => ({
+          id: s.id,
+          label: s.label,
+          weight: candidateWeight(s, logState.lastDreamt, now),
+        })),
+        walk,
+      }
+    }
+
+    const acquired = await acquireDreamLock(this.paths, now)
+    if (!acquired) {
+      return { outcome: 'aborted', reason: 'another process is already dreaming' }
+    }
+    try {
+      if (!options.force) {
+        const recheckDates = await listExistingDreamDates(this.paths)
+        if (periodCovered(recheckDates, now, dreaming.cadence, timezone)) {
+          return { outcome: 'aborted', reason: `period ${period} is already covered` }
+        }
+      }
+      return await this.executeDream({
+        now,
+        period,
+        trigger: 'manual',
+        seeds,
+        walk,
+        rngSeed,
+        logState,
+      })
+    } finally {
+      await releaseDreamLock(this.paths)
+    }
+  }
+
+  // Thin delegations onto engineDreams.ts (see that file's own header for
+  // why these are split out): each of listDreams, readDream,
+  // recordDreamFeedback, and markDreamMentioned needs only this.paths, no
+  // other engine state, so the real logic lives there and stays directly
+  // unit-testable without an engine instance.
+
+  async listDreams(): Promise<DreamSummary[]> {
+    return listDreamSummaries(this.paths)
+  }
+
+  async readDream(dreamId: string): Promise<{
+    summary: DreamSummary
+    narrative?: Document
+    insights: Document
+    processLog: string
+  } | null> {
+    return readDreamById(this.paths, dreamId)
+  }
+
+  async recordDreamFeedback(args: {
+    insightId: string
+    verdict: DreamVerdict
+    note?: string
+    source: 'ui' | 'tool'
+  }): Promise<boolean> {
+    return recordDreamFeedbackInLog(this.paths, args)
+  }
+
+  async markDreamMentioned(dreamId: string): Promise<void> {
+    await appendDreamMentionedRecord(this.paths, dreamId)
+  }
+
+  // The shared final step of maybeDream and dreamNow, once a run has
+  // actually been decided on: calls the pipeline, then reindexes whatever
+  // it wrote and commits. A written dream's insight.md always exists;
+  // dream.md may not, when the tone gate withheld the narrative, so its
+  // reindex is best-effort and its absence is not an error.
+  private async executeDream(args: {
+    now: Date
+    period: string
+    trigger: string
+    seeds: DreamCandidate[]
+    walk: string[]
+    rngSeed: number
+    logState: DreamLogState
+  }): Promise<DreamRunResult> {
+    const dreaming = this.deps.dreaming
+    if (!dreaming) {
+      // Every caller already guards on deps.dreaming being present before
+      // reaching here; this only fires if a future caller forgets to.
+      throw new Error('executeDream called with no dreaming config')
+    }
+    const model = this.deps.dreamingModel ?? this.deps.reflectionModel
+    const voice: DreamVoice = this.profileCache.meta.dreams?.voice ?? 'first'
+    const persona = this.deps.dreamPersona?.(this.currentStyle()) ?? ''
+    const seedBodies = await this.buildSeedBodies(args.seeds)
+    const recentDreamDigest = await buildDreamDigest(this.paths, args.logState, DREAM_DIGEST_COUNT)
+
+    const result = await runDream({
+      chat: this.deps.chat,
+      model,
+      persona,
+      lookup: this,
+      paths: this.paths,
+      maxToolCalls: dreaming.maxToolCalls,
+      voice,
+      now: args.now,
+      timezone: this.timezone(),
+      period: args.period,
+      trigger: args.trigger,
+      rngSeed: args.rngSeed,
+      seeds: args.seeds,
+      walk: args.walk,
+      seedBodies,
+      recentDreamDigest,
+      entitiesTouched: args.seeds.map((s) => s.id),
+      resolveNode: (id) => this.graphState.nodes.has(id),
+    })
+
+    if (result.outcome === 'written' && result.dir !== undefined && result.dreamId !== undefined) {
+      try {
+        const insightDoc = await readDocument(join(result.dir, 'insight.md'))
+        await this.reindexOrWarn(insightDoc, 'dream_insight', `dream ${result.dreamId} insights`)
+      } catch (err) {
+        this.warnings.push(
+          `Could not reindex insights for dream ${result.dreamId}: ${errorMessage(err)}`,
+        )
+      }
+      try {
+        const narrativeDoc = await readDocument(join(result.dir, 'dream.md'))
+        await this.reindexOrWarn(narrativeDoc, 'dream', `dream ${result.dreamId} narrative`)
+      } catch {
+        // No dream.md: the tone gate withheld the narrative. Nothing to index.
+      }
+      const commitResult = await commitMemory(this.paths.root, `dream: ${args.period}`)
+      if (!commitResult.ok && commitResult.warning) {
+        this.warnings.push(commitResult.warning)
+      }
+    }
+
+    return result
+  }
+
+  // A node seed contributes its page body when it has one (no page means
+  // nothing more than its label and type to offer). A document seed
+  // contributes its own body. Either way the text is capped, the same as
+  // every other prompt input in this file. Kept here rather than in
+  // engineDreams.ts because it needs this.readDocumentById, which reads
+  // through the live docPaths cache, not just paths.
+  private async buildSeedBodies(seeds: DreamCandidate[]): Promise<string[]> {
+    const bodies: string[] = []
+    for (const seed of seeds) {
+      let body: string | undefined
+      if (seed.kind === 'node') {
+        const node = this.graphState.nodes.get(seed.id)
+        if (node?.doc) {
+          try {
+            body = (await readDocument(node.doc)).body
+          } catch {
+            body = undefined
+          }
+        }
+      } else {
+        body = (await this.readDocumentById(seed.id))?.body
+      }
+      const header = `${seed.label} (${seed.kind === 'node' ? seed.nodeType : seed.kind}, ${seed.id})`
+      const text = body !== undefined ? `${header}\n\n${body}` : header
+      bodies.push(text.length > DREAM_SEED_BODY_CAP ? text.slice(0, DREAM_SEED_BODY_CAP) : text)
+    }
+    return bodies
   }
 }
 
