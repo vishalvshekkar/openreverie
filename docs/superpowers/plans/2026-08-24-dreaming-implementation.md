@@ -547,7 +547,7 @@ git commit -m "feat(memory): dream lock with stale takeover"
 
 Selection rules (spec, Selection): weight = staleness × significance (+ jitter applied inside pickSeeds); staleness soft-capped at 365 days; seeds pairwise distant (not adjacent in the graph, dates ≥ 60 days apart when both dated), constraints relaxed progressively (drop the date rule after 20 failed draws, the adjacency rule after 40); one seed slot reserved for a candidate older than the median candidate date. Candidates exclude `journaling`, `dream`, and `dream_insight` kinds (built by the caller in Task 9; this module just consumes the list).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```ts
 // packages/memory/src/dreamSelection.test.ts
@@ -643,9 +643,9 @@ describe('randomWalk', () => {
 
 If `GraphEdge`'s literal shape differs from the object literals above (check `packages/memory/src/graph.ts:77-85`), match the real fields; the behavioral assertions stand.
 
-- [ ] **Step 2: Run, verify failure.**
+- [x] **Step 2: Run, verify failure.**
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```ts
 // packages/memory/src/dreamSelection.ts
@@ -808,9 +808,9 @@ export function randomWalk(
 }
 ```
 
-- [ ] **Step 4: Run, verify pass** (`pnpm vitest run packages/memory/src/dreamSelection.test.ts`), then falsify one: comment out the old-half reservation, confirm the median test fails, restore.
+- [x] **Step 4: Run, verify pass** (`pnpm vitest run packages/memory/src/dreamSelection.test.ts`), then falsify one: comment out the old-half reservation, confirm the median test fails, restore.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/memory/src/dreamSelection.ts packages/memory/src/dreamSelection.test.ts packages/memory/src/index.ts
