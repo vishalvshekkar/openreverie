@@ -1096,7 +1096,7 @@ Frontmatter contracts (consumed by Tasks 2, 9, 10, 13, 14):
 
 Behavior (spec, pipeline steps 3 to 6): insights call with the exploration messages plus an output instruction, parse with zod, retry once appending the validation error, abort on second failure. Assign `ins_` ids after parse. Resolve evidence pointers (doc via `lookup.readDocumentById`, session via `lookup.readTranscript` inside try/catch, node via a `resolveNode: (id: string) => boolean` callback included in RunDreamArgs); drop unresolvable insights; abort if none survive. Narrative call at `temperature: 0.9` in the configured voice. Tone check call; on `narrativeOk: false` regenerate the narrative once and re-check; still bad, write `insight.md` only. Flagged insights are dropped; if all are flagged, abort. Directory `<dreamsDir>/<localDate>-<dreamId>` is created only after all model calls succeed; then both docs via `writeDocumentAtomic`, `process.jsonl` via one `writeFile`, and the `dreamt` log record.
 
-- [ ] **Step 1: Write the failing tests** (append to dreaming.test.ts; use mkdtemp paths + ensureMemoryTree as in Task 1)
+- [x] **Step 1: Write the failing tests** (append to dreaming.test.ts; use mkdtemp paths + ensureMemoryTree as in Task 1)
 
 ```ts
 const INSIGHTS_JSON = JSON.stringify({
@@ -1188,9 +1188,9 @@ describe('runDream', () => {
 })
 ```
 
-- [ ] **Step 2: Run, verify failure.**
+- [x] **Step 2: Run, verify failure.**
 
-- [ ] **Step 3: Implement.** Key pieces beyond the flow described above:
+- [x] **Step 3: Implement.** Key pieces beyond the flow described above:
 
 ```ts
 export const dreamInsightsOutputSchema = z.object({
@@ -1260,9 +1260,9 @@ return { outcome: 'written', dreamId, dir }
 
 `events` buffers `{ ts, event, ... }` objects from run start onward (seeds with weights, every tool call via the Task 6 `record` hook, every model call with duration, tone verdicts, outcome). Insight ids: `survivors` get `id: newId('ins')` assigned after validation and evidence resolution.
 
-- [ ] **Step 4: Run, verify pass**, then falsify: make evidence resolution accept everything and confirm the drop test fails; restore.
+- [x] **Step 4: Run, verify pass**, then falsify: make evidence resolution accept everything and confirm the drop test fails; restore.
 
-- [ ] **Step 5: Run the whole memory package** (`pnpm vitest run packages/memory`), **commit**
+- [x] **Step 5: Run the whole memory package** (`pnpm vitest run packages/memory`), **commit**
 
 ```bash
 git add packages/memory/src/dreaming.ts packages/memory/src/dreaming.test.ts packages/memory/src/index.ts
