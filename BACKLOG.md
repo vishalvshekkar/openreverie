@@ -734,6 +734,22 @@ help welcome" section. Read [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](A
   - Trigger: not stated.
   - Size: medium (contained to one file, per the description above).
 
+- **No warning when reflection drops a malformed commitment.** In `applyReflection`
+  (`packages/memory/src/reflection.ts`), a commitment or commitment revision that fails to write
+  (a schema-invalid payload, or a `commitmentRevisions` entry naming an id that does not resolve
+  to a live commitment) is caught and dropped silently, with the rest of reflection still
+  completing. `resolveNarratives` in the same file has an `onFailure` callback the engine uses to
+  push a visible warning for an equivalent per-entry failure; the commitment write path has no
+  equivalent, so a dropped commitment currently leaves no trace anywhere the person or a developer
+  would see.
+  - Why deferred: noted in task-7-report.md as a judgment call made under time pressure, not
+    something the task-7 brief asked for.
+  - Where: `packages/memory/src/reflection.ts`, the two `try`/`catch` blocks in `applyReflection`
+    that call `recordCommitment`/`reviseCommitment` for `out.commitments` and
+    `out.commitmentRevisions`; `.superpowers/sdd/2026-08-24-commitments-engine/task-7-report.md`.
+  - Trigger: not stated.
+  - Size: small.
+
 - **Graceful handling of a corrupt `constitution.md`.** A hand-mangled arc or realm file is
   skipped with a warning, but a corrupt constitution still crashes engine startup loudly. It
   should degrade with a clear message instead.

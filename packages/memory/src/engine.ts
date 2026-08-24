@@ -23,6 +23,7 @@ import type {
   CommitmentTiming,
 } from './commitments.js'
 import {
+  readCommitments,
   recordCommitment as recordCommitmentRecord,
   resolveCommitment as resolveCommitmentRecord,
   reviseCommitment as reviseCommitmentRecord,
@@ -939,6 +940,7 @@ export class MemoryEngine {
       now,
       narratives,
       materializeNew,
+      this.timezone(),
     )
     this.liveItems.delete(sessionId)
 
@@ -1791,6 +1793,12 @@ export class MemoryEngine {
     const cappedPeople = capPeople(allPeople)
     const cappedEntities = capEntities(allEntities)
     const journalingProtocol = await readJournalingProtocolIfPresent(this.paths)
+    // Every commitment, so reflection can reference an existing id in
+    // commitmentRevisions instead of proposing a duplicate. Uncapped,
+    // unlike people/entities above: a person accumulates far fewer open
+    // commitments than named people or things over time, so there is no
+    // truncation story to tell yet; revisit if that stops being true.
+    const commitments = await readCommitments(this.paths)
     return {
       constitution: constitutionDoc.body,
       arcs,
@@ -1799,6 +1807,7 @@ export class MemoryEngine {
       peopleTruncated: cappedPeople.truncated,
       entities: cappedEntities.nodes,
       entitiesTruncated: cappedEntities.truncated,
+      commitments,
       profile: this.profileCache.meta,
       ...(journalingProtocol !== undefined ? { journalingProtocol } : {}),
     }

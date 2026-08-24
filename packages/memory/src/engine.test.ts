@@ -2404,6 +2404,124 @@ describe('MemoryEngine', () => {
     })
   })
 
+  describe('commitments: reflection-side wiring', () => {
+    let dir: string
+    let paths: MemoryPaths
+
+    beforeEach(async () => {
+      dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-commitments-'))
+      paths = memoryPaths(dir)
+      await ensureMemoryTree(paths)
+      await pinTimezoneUtc(paths)
+    })
+
+    afterEach(async () => {
+      await rmWithRetry(dir)
+    })
+
+    // Guards the engine.ts wiring itself, not just applyReflection in
+    // isolation: this.timezone() actually has to reach applyReflection's
+    // buildCommitmentTiming through the real endSession path. Runs the
+    // same session twice, once per profile timezone, and requires the two
+    // resolved dates to differ. Deliberately not a fixed expected date
+    // against a single timezone: applyReflection falls back to the
+    // machine's own system timezone when none is passed (see reflection.ts,
+    // the default on the `timezone` parameter), and this suite's own
+    // machine timezone is not something a test should have to know or
+    // pin. Deleting `this.timezone()` from the applyReflection call site
+    // in engine.ts makes both runs silently fall back to that same system
+    // default regardless of profile, so the two dates collapse to one and
+    // this test fails, while reflection.test.ts's own suite (which calls
+    // applyReflection directly and always passes its own timezone) stays
+    // green.
+    async function resolvedDateFor(zone: string): Promise<string | undefined> {
+      const runDir = await mkdtemp(join(tmpdir(), 'openreverie-engine-commitments-tz-'))
+      const runPaths = memoryPaths(runDir)
+      await ensureMemoryTree(runPaths)
+      await pinTimezoneUtc(runPaths)
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('A late-night reminder.'),
+        commitments: [{ label: 'Call the dentist', flavor: 'errand', statedTime: 'tomorrow' }],
+      }
+      const chat = new FakeChatProvider([{ text: JSON.stringify(out), toolCalls: [] }])
+      const engine = await MemoryEngine.open(runDir, fakeDeps(chat))
+      await engine.updateProfile({ timezone: zone })
+
+      const sessionId = await engine.startSession()
+      await engine.appendTranscript(sessionId, {
+        ts: '2026-08-13T20:00:00.000Z',
+        role: 'user',
+        content: 'Remind me to call the dentist tomorrow.',
+      })
+      await engine.endSession(sessionId)
+
+      const graph = await readGraph(runPaths)
+      const commitmentNode = [...graph.nodes.values()].find((n) => n.type === 'commitment')
+      const resolvedFrom = commitmentNode?.commitment?.timing?.resolved?.from
+      await engine.close()
+      await rmWithRetry(runDir)
+      return resolvedFrom
+    }
+
+    it("resolves a commitment's stated time in the person's own timezone, differently for two far-apart zones", async () => {
+      // Asia/Kolkata (UTC+5:30) and Etc/GMT+12 (UTC-12, POSIX sign
+      // reversed) are as far apart as the IANA database gets: for the
+      // same UTC anchor they can never land on the same local calendar
+      // day, so "tomorrow" resolved against each must differ.
+      const kolkata = await resolvedDateFor('Asia/Kolkata')
+      const farBehind = await resolvedDateFor('Etc/GMT+12')
+      expect(kolkata).toBeDefined()
+      expect(farBehind).toBeDefined()
+      expect(kolkata).not.toBe(farBehind)
+    })
+
+    // Guards buildReflectionContext's own commitments wiring: deleting
+    // `commitments,` from its return object makes this test fail while
+    // reflection.test.ts's prompt test, which builds a ReflectionContext
+    // literal directly, stays green.
+    it("carries a commitment recorded in one session into the next session's reflection prompt", async () => {
+      const firstOut: ReflectionOutput = {
+        ...emptyReflectionOutput('Made a plan with Arjun.'),
+        commitments: [{ label: 'See Nightfall with Arjun', flavor: 'plan' }],
+      }
+      const secondOut = emptyReflectionOutput('A quieter second session.')
+      const chat = new FakeChatProvider([
+        { text: JSON.stringify(firstOut), toolCalls: [] },
+        { text: JSON.stringify(secondOut), toolCalls: [] },
+      ])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      const firstSessionId = await engine.startSession()
+      await engine.appendTranscript(firstSessionId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'Made a plan to see Nightfall with Arjun.',
+      })
+      await engine.endSession(firstSessionId)
+
+      const graph = await readGraph(paths)
+      const commitmentNode = [...graph.nodes.values()].find((n) => n.type === 'commitment')
+      if (!commitmentNode) throw new Error('expected a commitment node from the first session')
+
+      const secondSessionId = await engine.startSession()
+      await engine.appendTranscript(secondSessionId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'Nothing much today.',
+      })
+      await engine.endSession(secondSessionId)
+
+      const secondPrompt = chat.requests[1]?.messages[0]?.content
+      if (typeof secondPrompt !== 'string') {
+        throw new Error('expected the second session to send a reflection prompt')
+      }
+      expect(secondPrompt).toContain(commitmentNode.id)
+      expect(secondPrompt).toContain('See Nightfall with Arjun')
+
+      await engine.close()
+    })
+  })
+
   describe('peopleDir indexing', () => {
     let dir: string
     let paths: MemoryPaths

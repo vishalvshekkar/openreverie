@@ -28,6 +28,13 @@ import { basename, join } from 'node:path'
 import type { ChatProvider } from '@openreverie/providers'
 import { z } from 'zod'
 import {
+  type Commitment,
+  type CommitmentFlavor,
+  recordCommitment,
+  reviseCommitment,
+} from './commitments.js'
+import { resolveStatedTime } from './commitmentTime.js'
+import {
   type Document,
   type DocumentMeta,
   newId,
@@ -36,6 +43,7 @@ import {
 } from './documents.js'
 import {
   appendGraph,
+  type CommitmentTiming,
   type GraphNode,
   type GraphRecord,
   type GraphState,
@@ -44,7 +52,7 @@ import {
 import { writeJournalingProtocol } from './journal.js'
 import type { MemoryPaths } from './paths.js'
 import { type ProfileMeta, type ProfileUpdates, profileUpdatesSchema } from './profile.js'
-import { localDateFromStored, renderStoredStamp } from './time.js'
+import { localDateFromStored, renderStoredStamp, systemTimeZone } from './time.js'
 import { SessionStore, type TranscriptLine } from './transcripts.js'
 
 export type ReflectionItemKind = 'observation' | 'feeling' | 'event' | 'intention'
@@ -60,6 +68,48 @@ export interface ReflectionItem {
   // week", and "sometime in the fall" cannot honestly be reduced to one.
   // Absent when the person attached no particular moment to it.
   eventTime?: string
+}
+
+// A commitment reflection proposes from scratch: a bounded thing the
+// person said they mean to do (an errand or a plan), captured whether or
+// not the live remember tool ever ran this session. This is the backstop
+// spec Section 7 requires: a chat model that never calls a tool still
+// gets its commitments recorded, because reflection reads the transcript,
+// not a tool call.
+export interface ReflectionCommitment {
+  label: string
+  flavor: CommitmentFlavor
+  // The person's exact wording for timing, unchanged, the same discipline
+  // as ReflectionItem.eventTime above. Absent when the person attached no
+  // particular time to this commitment at all.
+  statedTime?: string
+  // One or two sentences interpreting statedTime for this person, in the
+  // place they live, written only when statedTime is not a single day
+  // named outright (see buildCommitmentTiming below, which prefers a
+  // deterministic resolution over this whenever one exists). Never a
+  // resolved date itself: the gloss records what was said and what it
+  // plausibly means, it does not commit to an instant.
+  gloss?: string
+  // A rough outer date range (YYYY-MM-DD) for the gloss above. Internal
+  // only: used later to decide whether this commitment is worth
+  // mentioning, never rendered or spoken to the person. Present only
+  // alongside gloss, and even then only when the stated words support a
+  // range this concrete.
+  bracketFrom?: string
+  bracketTo?: string
+  // How sure the gloss's own reading is, not how precisely the person
+  // spoke (that distinction lives in commitmentTimingSchema's
+  // statedPrecision, in graph.ts). Only meaningful alongside gloss.
+  confidence?: 'high' | 'medium' | 'low'
+}
+
+// The same shape as ReflectionCommitment, plus the id of the commitment
+// being changed. Every other field is optional: a revision only carries
+// what changed, and applyReflection below fills in anything left out from
+// the commitment's current live version (see reviseCommitment in
+// commitments.ts).
+export interface ReflectionCommitmentRevision extends Partial<ReflectionCommitment> {
+  commitmentId: string
 }
 
 export interface ReflectionOutput {
@@ -94,6 +144,16 @@ export interface ReflectionOutput {
   pagePromotions: { nodeId: string; reason: string; itemIndexes: number[]; narrative: string }[]
   arcUpdates: { arcId: string; note: string }[]
   personUpdates: { personId: string; note: string }[]
+  // A brand new commitment: a bounded thing the person said they mean to
+  // do. Optional so existing callers (engine.ts's degraded-reflection
+  // literal, older test fixtures) that never mention commitments keep
+  // compiling; absent reads the same as an empty list. See
+  // ReflectionCommitment below for what each field means.
+  commitments?: ReflectionCommitment[]
+  // A change to a commitment already recorded, referencing its existing
+  // id from the Known commitments listing rather than creating a
+  // duplicate entry in commitments above.
+  commitmentRevisions?: ReflectionCommitmentRevision[]
   constitutionUpdate: string | null
   // The backstop half of the journaling.md rewrite mechanism (spec
   // section 4.5): null when nothing about the person's journaling setup
@@ -126,6 +186,13 @@ export interface ReflectionContext {
   peopleTruncated?: boolean
   entities: GraphNode[]
   entitiesTruncated?: boolean
+  // Commitments already recorded (by the live tool earlier this session,
+  // or any past session), so reflection can reference an existing id in
+  // commitmentRevisions instead of proposing a duplicate in commitments.
+  // Optional so existing test fixtures that build a ReflectionContext
+  // literal without this field keep compiling; a missing list renders as
+  // "none yet", the same as an empty one.
+  commitments?: Commitment[]
   // The current profile.md fields, so reflection can tell a fact not yet
   // known from one already recorded and stop proposing writes that would
   // change nothing.
@@ -139,6 +206,56 @@ export interface ReflectionContext {
 }
 
 const reflectionItemKindSchema = z.enum(['observation', 'feeling', 'event', 'intention'])
+
+// YYYY-MM-DD only. bracketFrom/bracketTo are an internal scheduling
+// bracket, never shown to the person, but shiftDate and the eligibility
+// arithmetic in commitments.ts do plain string arithmetic on this shape;
+// a bracket in any other shape ("February 2027") would silently corrupt
+// that arithmetic downstream. Reflection is the model boundary, so the
+// shape is enforced here, per AGENTS.md's rule to validate all LLM
+// structured output with zod at the boundary.
+const commitmentBracketDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
+
+const commitmentConfidenceSchema = z.enum(['high', 'medium', 'low'])
+
+// gloss cannot exist without statedTime: a gloss interprets the words the
+// person said, so a gloss with nothing to interpret is a fabricated time,
+// exactly what the model must never produce (see the prompt's "never
+// resolve a vague time into a specific date" instruction below). This is
+// the one invariant this schema exists to enforce; see the falsification
+// in reflection.test.ts that breaks it on purpose and confirms the
+// rejection test actually depends on it.
+function glossWithoutStatedTimeIssue(): { message: string; path: string[] } {
+  return {
+    message: 'a commitment gloss interprets stated words; it cannot be present without statedTime',
+    path: ['statedTime'],
+  }
+}
+
+const reflectionCommitmentSchema = z
+  .object({
+    label: z.string(),
+    flavor: z.enum(['errand', 'plan']),
+    statedTime: z.string().exactOptional(),
+    gloss: z.string().exactOptional(),
+    bracketFrom: commitmentBracketDateSchema.exactOptional(),
+    bracketTo: commitmentBracketDateSchema.exactOptional(),
+    confidence: commitmentConfidenceSchema.exactOptional(),
+  })
+  .refine((c) => c.gloss === undefined || c.statedTime !== undefined, glossWithoutStatedTimeIssue())
+
+const reflectionCommitmentRevisionSchema = z
+  .object({
+    commitmentId: z.string(),
+    label: z.string().exactOptional(),
+    flavor: z.enum(['errand', 'plan']).exactOptional(),
+    statedTime: z.string().exactOptional(),
+    gloss: z.string().exactOptional(),
+    bracketFrom: commitmentBracketDateSchema.exactOptional(),
+    bracketTo: commitmentBracketDateSchema.exactOptional(),
+    confidence: commitmentConfidenceSchema.exactOptional(),
+  })
+  .refine((c) => c.gloss === undefined || c.statedTime !== undefined, glossWithoutStatedTimeIssue())
 
 export const reflectionOutputSchema: z.ZodType<ReflectionOutput> = z.object({
   summary: z.string(),
@@ -214,6 +331,8 @@ export const reflectionOutputSchema: z.ZodType<ReflectionOutput> = z.object({
   ),
   arcUpdates: z.array(z.object({ arcId: z.string(), note: z.string() })),
   personUpdates: z.array(z.object({ personId: z.string(), note: z.string() })),
+  commitments: z.array(reflectionCommitmentSchema).exactOptional(),
+  commitmentRevisions: z.array(reflectionCommitmentRevisionSchema).exactOptional(),
   constitutionUpdate: z.string().nullable(),
   journalingUpdate: z.string().nullable(),
   profileUpdates: profileUpdatesSchema.exactOptional(),
@@ -277,6 +396,20 @@ function renderListingWithPageStatus(nodes: GraphNode[], truncated = false): str
   return lines.join('\n')
 }
 
+// Deliberately renders only id, label, flavor, and state: never a
+// commitment's bracket or gloss. Spec Section 7's "the bracket selects,
+// the gloss speaks" rule says the bracket and gloss are never shown or
+// spoken to the person; showing them here, inside a prompt the model
+// reads and could echo back into a summary or a reply, would defeat that
+// as surely as rendering them in the companion's own voice would.
+function renderCommitmentListing(commitments: Commitment[] | undefined): string {
+  const list = commitments ?? []
+  if (list.length === 0) {
+    return '(none yet)'
+  }
+  return list.map((c) => `- ${c.id}: ${c.label} (${c.flavor}, ${c.state})`).join('\n')
+}
+
 // Each line is prefixed with the wall-clock time it was written at, built
 // from that line's own ts and its own recorded offset. A line written
 // before offsets existed renders as a labeled UTC instant instead, and
@@ -302,6 +435,8 @@ const RESPONSE_SHAPE = `{
   "pagePromotions": [{"nodeId": string, "reason": string, "itemIndexes": number[], "narrative": string}],
   "arcUpdates": [{"arcId": string, "note": string}],
   "personUpdates": [{"personId": string, "note": string}],
+  "commitments": [{"label": string, "flavor": "errand" | "plan", "statedTime": string | undefined, "gloss": string | undefined, "bracketFrom": string | undefined, "bracketTo": string | undefined, "confidence": "high" | "medium" | "low" | undefined}],
+  "commitmentRevisions": [{"commitmentId": string, "label": string | undefined, "flavor": "errand" | "plan" | undefined, "statedTime": string | undefined, "gloss": string | undefined, "bracketFrom": string | undefined, "bracketTo": string | undefined, "confidence": "high" | "medium" | "low" | undefined}],
   "constitutionUpdate": string | null,
   "journalingUpdate": string | null,
   "profileUpdates": {"preferredName": string, "pronouns": string, "location": string, "timezone": string, "birthday": string, "occupation": string, "birthdayGreetings": boolean}
@@ -332,6 +467,9 @@ export function buildReflectionPrompt(
     'Known entities:',
     renderListing(context.entities, context.entitiesTruncated),
     '',
+    'Known commitments:',
+    renderCommitmentListing(context.commitments),
+    '',
     'Current journaling setup:',
     context.journalingProtocol ?? '(not set up yet: this person has never journaled before)',
     '',
@@ -357,6 +495,14 @@ export function buildReflectionPrompt(
     'For each entry in arcUpdates and personUpdates, note is a short line describing what this session added or changed about an arc or person that already exists. Do not write full narrative prose in note; a separate pass uses it to rewrite the document.',
     '',
     'Each transcript line above is prefixed with the time it was written. When an item describes something happening at a time the person actually stated ("tonight at 7.25", "last Tuesday", "next month"), put that stated time in eventTime, in the person\'s own words, and leave eventTime out entirely otherwise. eventTime is when the thing happens; it is separate from when the person told you about it, and the two are allowed to differ. Do not invent or resolve a time the person did not state.',
+    '',
+    'A commitment is different from an item: it is a bounded thing the person said they mean to do, an errand or a plan, that can later resolve as done, dropped, or quietly dropped from mention. Put one in commitments with a plain label ("See Nightfall with Arjun", never with a time folded into the label) and a flavor, errand or plan. This works whether or not a live tool already recorded the same commitment during the conversation; commitments here is the backstop that makes sure a commitment is captured even in a session where no tool was ever called.',
+    '',
+    "The person's exact wording for timing, when they gave one, always goes in statedTime, unchanged, the same discipline as eventTime above: never resolved, never invented.",
+    '',
+    'Write a gloss only when statedTime is not a single specific day named outright (today, tonight, tomorrow, a named weekday like "Friday", or "in three days" are specific days; a season, a holiday, "sometime", "next Friday" (genuinely ambiguous between two different Fridays), or any stretch of time longer than one day all need a gloss). The gloss is one or two sentences: what was said, when it was said, and what it plausibly means for this person, in the place they actually live, which you can read from Current profile above. Reason about their actual location, never from a fixed season table: summer in Bangalore runs roughly February to May, not June to August, so "come summer" said by someone who lives in Bangalore points at next February, not the middle of the calendar year. bracketFrom and bracketTo are a rough outer date range for the gloss, in YYYY-MM-DD, used only later to decide whether this commitment is worth mentioning again; they are never shown or spoken to the person, and must never be more specific than the gloss itself actually supports. Never resolve a vague or seasonal time into one specific date, and never invent a time the person did not state.',
+    '',
+    'Known commitments above lists what is already recorded. If a commitment there has changed (a firmer date, a different plan, a dropped errand becoming certain again), put the change in commitmentRevisions with its existing commitmentId from that list, not a new entry in commitments; a new entry for something already recorded there would duplicate it.',
     '',
     'Respond with only JSON matching this shape, no other text:',
     RESPONSE_SHAPE,
@@ -452,6 +598,72 @@ function mintItems(items: ReflectionOutput['items'], now: Date): ReflectionItem[
   })
 }
 
+// Shared by both ReflectionCommitment and ReflectionCommitmentRevision:
+// only the timing-relevant fields, structurally, so buildCommitmentTiming
+// below does not care which of the two it was handed.
+interface CommitmentTimingSource {
+  statedTime?: string
+  gloss?: string
+  bracketFrom?: string
+  bracketTo?: string
+  confidence?: 'high' | 'medium' | 'low'
+}
+
+// Builds the same CommitmentTiming shape commitments.ts writes to the
+// graph, from what reflection's model output actually said. Mirrors
+// engine.ts's buildCommitmentTiming for the live tool, plus the one thing
+// the live path cannot do: attach a gloss, because reflection has read
+// the whole transcript and a live tool call has only ever read one turn
+// of it.
+//
+// resolveStatedTime (Task 2) is tried first and, when it succeeds, wins
+// outright: a resolved window is more precise than any gloss could be,
+// and commitmentTimingSchema forbids carrying both resolved and
+// interpretation on the same record, so a model that wrote a gloss for
+// words the resolver actually recognizes (a plain "Friday", say) has that
+// gloss silently dropped in favor of the resolved window, not rejected.
+// This is deliberate, not a bug: the prompt already tells the model to
+// gloss anything that is not a single named day, so this only fires when
+// the model glossed a phrasing more cautiously than it needed to.
+function buildCommitmentTiming(
+  source: CommitmentTimingSource,
+  anchor: Date,
+  timezone: string,
+): CommitmentTiming | undefined {
+  if (source.statedTime === undefined) return undefined
+  const anchorIso = anchor.toISOString()
+
+  const resolved = resolveStatedTime(source.statedTime, anchor, timezone)
+  if (resolved !== undefined) {
+    return { words: source.statedTime, anchor: anchorIso, resolved }
+  }
+
+  if (source.gloss === undefined) {
+    return { words: source.statedTime, anchor: anchorIso }
+  }
+
+  // statedPrecision distinguishes a named span ('period', "come summer")
+  // from anything looser ('vague', "someday"); see the comment on
+  // CommitmentInterpretation in graph.ts. The prompt never asks the model
+  // for this taxonomy directly, so it is inferred here from whether the
+  // model gave a full bracket: a bracket this concrete is what a named
+  // span looks like, and its absence is what looseness looks like.
+  const statedPrecision =
+    source.bracketFrom !== undefined && source.bracketTo !== undefined ? 'period' : 'vague'
+
+  return {
+    words: source.statedTime,
+    anchor: anchorIso,
+    interpretation: {
+      statedPrecision,
+      gloss: source.gloss,
+      ...(source.bracketFrom !== undefined ? { bracketFrom: source.bracketFrom } : {}),
+      ...(source.bracketTo !== undefined ? { bracketTo: source.bracketTo } : {}),
+      interpretationConfidence: source.confidence ?? 'low',
+    },
+  }
+}
+
 function mergeLiveItems(minted: ReflectionItem[], liveItems: ReflectionItem[]): ReflectionItem[] {
   const seen = new Set(minted.map((item) => item.text.toLowerCase()))
   const merged = [...minted]
@@ -473,19 +685,30 @@ function mergeLiveItems(minted: ReflectionItem[], liveItems: ReflectionItem[]): 
 // no recorded offset there is no honest local date to compute, so the
 // directory's own prefix stands rather than a guess built from whatever
 // timezone the profile happens to hold today.
+// anchor is the commitment timing anchor (CommitmentTiming.anchor): the
+// session's own first line, when there is one, never `now`. `now` is when
+// reflection runs, not when the person spoke, and the two can be days
+// apart (runMaintenance sweeps sessions left unreflected by a crash, and
+// resolveStatedTime resolves a relative phrase like "tomorrow" against
+// whatever anchor it is given). Resolving against reflection time instead
+// of speech time would write a fabricated date, the same class of defect
+// AGENTS.md records for the empty-string eventTime anchor bug. Falls back
+// to `now` only when the transcript has no readable first line at all.
 async function resolveSession(
   paths: MemoryPaths,
   sessionId: string,
-): Promise<{ dir: string; date: string }> {
+  now: Date,
+): Promise<{ dir: string; date: string; anchor: string }> {
   const dir = await SessionStore.sessionDir(paths, sessionId)
   const prefixMatch = basename(dir).match(/^(\d{4}-\d{2}-\d{2})-/)
   const prefixDate = prefixMatch?.[1] ?? basename(dir)
 
   const first = await SessionStore.readFirstLine(paths, sessionId)
+  const anchor = first?.ts ?? now.toISOString()
   if (first !== undefined && typeof first.utcOffsetMinutes === 'number') {
-    return { dir, date: localDateFromStored(first.ts, first.utcOffsetMinutes) }
+    return { dir, date: localDateFromStored(first.ts, first.utcOffsetMinutes), anchor }
   }
-  return { dir, date: prefixDate }
+  return { dir, date: prefixDate, anchor }
 }
 
 export function resolveItemIds(indexes: number[], mintedItems: ReflectionItem[]): string[] {
@@ -712,6 +935,14 @@ export async function applyReflection(
   now: Date,
   narratives: Map<string, string>,
   materializeNew: (mintedItems: ReflectionItem[]) => Promise<void>,
+  // The person's own timezone, for resolving a commitment's statedTime
+  // (see buildCommitmentTiming). Optional, defaulting to the machine's
+  // own zone: every real caller (MemoryEngine._doEndSession) passes
+  // this.timezone(), the one place engine.ts documents as deciding the
+  // profile.md fallback; this default exists only so the many existing
+  // tests that call applyReflection directly, with no commitments in
+  // play, do not all need updating to supply one.
+  timezone: string = systemTimeZone(),
 ): Promise<{
   summaryDoc: Document
   autoAsserted: number
@@ -725,7 +956,7 @@ export async function applyReflection(
   const mintedItems = mintItems(out.items, now)
   const mergedItems = mergeLiveItems(mintedItems, liveItems)
 
-  const { dir, date } = await resolveSession(paths, sessionId)
+  const { dir, date, anchor } = await resolveSession(paths, sessionId, now)
   const summaryPath = join(dir, 'summary.md')
 
   const graphState = await readGraph(paths)
@@ -845,6 +1076,81 @@ export async function applyReflection(
   }
 
   await materializeNew(mintedItems)
+
+  // Commitments: recordCommitment and reviseCommitment (commitments.ts,
+  // Task 3) each append straight to graph.jsonl on their own call, the
+  // same as every other phase-2 write above, and for the same reason:
+  // they run before the summary write so a crash here leaves the session
+  // unreflected and this block retried in full, never lost. A retry can
+  // at worst re-append a commitment under a fresh id, visible in the
+  // graph and harmless, the same tradeoff the comment above phase 2
+  // already accepts for item nodes.
+  //
+  // Reflection wins over the live path for the SAME commitment (spec
+  // Section 7): a live commitment recorded earlier in THIS session,
+  // whose label matches (case-insensitively) one reflection now proposes
+  // as new, is treated as that same commitment and revised rather than
+  // duplicated. Reflection read the whole session; the live tool call
+  // that created it read only one turn. Scoped to this sessionId, not to
+  // every commitment ever recorded, so a same-labelled commitment from
+  // months ago is never silently overwritten by an unrelated new one.
+  const liveCommitmentIdByLabel = new Map<string, string>()
+  for (const node of graphState.nodes.values()) {
+    if (node.type === 'commitment' && node.commitment?.sessionId === sessionId) {
+      liveCommitmentIdByLabel.set(node.label.toLowerCase(), node.id)
+    }
+  }
+
+  for (const commitment of out.commitments ?? []) {
+    const timing = buildCommitmentTiming(commitment, new Date(anchor), timezone)
+    const matchId = liveCommitmentIdByLabel.get(commitment.label.toLowerCase())
+    try {
+      if (matchId !== undefined) {
+        await reviseCommitment(paths, matchId, {
+          label: commitment.label,
+          flavor: commitment.flavor,
+          ...(timing !== undefined ? { timing } : {}),
+        })
+      } else {
+        await recordCommitment(paths, {
+          label: commitment.label,
+          flavor: commitment.flavor,
+          sessionId,
+          ...(timing !== undefined ? { timing } : {}),
+        })
+      }
+    } catch {
+      // A malformed commitment must not abort the rest of reflection:
+      // dropped silently, the same posture materializeNew already takes
+      // for entries it cannot act on (an unresolved pagePromotions
+      // target, a promotion whose person already has a page). Nothing in
+      // this catch is expected to fire from a schema-valid ReflectionOutput
+      // (reflectionOutputSchema already enforces shape at the model
+      // boundary); it exists for the one case shape validation cannot
+      // catch, a hallucinated matchId is not possible here since matchId
+      // is derived from the graph, not from the model.
+    }
+  }
+
+  // commitmentRevisions references an id the model read off Known
+  // commitments in the prompt. That id can still fail to resolve: the
+  // model can hallucinate one, or the commitment could have been
+  // retracted since the prompt was built. reviseCommitment throws in
+  // that case (liveCommitment: "No live commitment with id ..."), caught
+  // here for the same reason as above, so one bad reference does not cost
+  // the rest of this session's reflection.
+  for (const revision of out.commitmentRevisions ?? []) {
+    const timing = buildCommitmentTiming(revision, new Date(anchor), timezone)
+    try {
+      await reviseCommitment(paths, revision.commitmentId, {
+        ...(revision.label !== undefined ? { label: revision.label } : {}),
+        ...(revision.flavor !== undefined ? { flavor: revision.flavor } : {}),
+        ...(timing !== undefined ? { timing } : {}),
+      })
+    } catch {
+      // See the comment above: dropped silently, session still reflects.
+    }
+  }
 
   await writeDocumentAtomic({
     path: summaryPath,
