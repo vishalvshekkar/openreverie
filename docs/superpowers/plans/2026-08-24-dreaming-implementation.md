@@ -1486,11 +1486,11 @@ git commit -m "feat(core): dreams prompt section and one-time opener mention"
 - Tool `dream_feedback`, args `{ insightId: string; verdict: 'right' | 'wrong' | 'do_not_bring_up'; note?: string }`, zod `z.strictObject` + `safeParse` like every other tool, dispatching to `engine.recordDreamFeedback({ ...args, source: 'tool' })`; returns `{"ok":true}` or an error JSON when the insight id is unknown.
 - `TOOL_NOTICES` gains `dream_feedback: 'noting your reaction'`.
 
-- [ ] **Step 1: Write the failing tests** (tools.test.ts, following its existing dispatch-test pattern with a stub engine): definition present in `toolDefinitions()` with required `insightId` and `verdict`; dispatch calls `recordDreamFeedback` with `source: 'tool'`; unknown insight returns error JSON; invalid verdict returns a zod error JSON. In the CLI package, extend the TOOL_NOTICES completeness test if one exists in this branch's base; otherwise assert `toolNotice('dream_feedback')` returns `'[noting your reaction]'`.
+- [x] **Step 1: Write the failing tests** (tools.test.ts, following its existing dispatch-test pattern with a stub engine): definition present in `toolDefinitions()` with required `insightId` and `verdict`; dispatch calls `recordDreamFeedback` with `source: 'tool'`; unknown insight returns error JSON; invalid verdict returns a zod error JSON. In the CLI package, extend the TOOL_NOTICES completeness test if one exists in this branch's base; otherwise assert `toolNotice('dream_feedback')` returns `'[noting your reaction]'`.
 
-- [ ] **Step 2: Run, verify failure.** **Step 3: Implement.** **Step 4: Run, verify pass.**
+- [x] **Step 2: Run, verify failure.** **Step 3: Implement.** **Step 4: Run, verify pass.**
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/core/src/tools.ts packages/core/src/tools.test.ts packages/cli/src/chat.ts
