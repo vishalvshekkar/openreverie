@@ -1285,7 +1285,7 @@ git commit -m "feat(memory): dream outputs, tone gate, and atomic dream writes"
   - `ReverieConfig.dreaming: { enabled: boolean; cadence: 'daily' | 'weekly'; triggers: { afterSession: boolean; onStart: boolean; serverTimer: boolean }; maxToolCalls: number }`
   - `ProfileMeta.dreams?: { voice?: 'first' | 'second' | 'third'; openerMention?: boolean; promptSection?: boolean }`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```ts
 // config.test.ts additions
@@ -1321,9 +1321,9 @@ it('round-trips dreams preferences and rejects an invalid voice', () => {
 })
 ```
 
-- [ ] **Step 2: Run, verify failure.**
+- [x] **Step 2: Run, verify failure.**
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `config.ts`: add `dreaming: z.string().optional()` to `modelsSchema`; add
 
@@ -1357,9 +1357,9 @@ dreams: z
   .optional(),
 ```
 
-- [ ] **Step 4: Run both packages' tests, verify pass.**
+- [x] **Step 4: Run both packages' tests, verify pass.**
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/core/src/config.ts packages/core/src/config.test.ts packages/memory/src/profile.ts packages/memory/src/profile.test.ts
