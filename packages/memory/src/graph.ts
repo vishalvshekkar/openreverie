@@ -13,8 +13,8 @@ import { appendFile, readFile } from 'node:fs/promises'
 import { z } from 'zod'
 import type { MemoryPaths } from './paths.js'
 
-export type NodeType = 'realm' | 'arc' | 'item' | 'session' | 'person' | 'entity'
-export type EdgeType = 'part_of' | 'in' | 'from' | 'involves' | 'relates_to'
+export type NodeType = 'realm' | 'arc' | 'item' | 'session' | 'person' | 'entity' | 'commitment'
+export type EdgeType = 'part_of' | 'in' | 'from' | 'involves' | 'relates_to' | 'waits_on'
 
 export interface NodeRecord {
   ts: string
@@ -50,7 +50,7 @@ export const nodeRecordSchema = z.object({
   ts: z.string(),
   op: z.enum(['assert', 'retract']),
   node: z.string(),
-  type: z.enum(['realm', 'arc', 'item', 'session', 'person', 'entity']),
+  type: z.enum(['realm', 'arc', 'item', 'session', 'person', 'entity', 'commitment']),
   label: z.string(),
   doc: z.string().optional(),
 })
@@ -58,7 +58,7 @@ export const nodeRecordSchema = z.object({
 export const edgeRecordSchema = z.object({
   ts: z.string(),
   op: z.enum(['assert', 'retract']),
-  edge: z.enum(['part_of', 'in', 'from', 'involves', 'relates_to']),
+  edge: z.enum(['part_of', 'in', 'from', 'involves', 'relates_to', 'waits_on']),
   from: z.string(),
   to: z.string(),
   confidence: z.number().min(0).max(1),
