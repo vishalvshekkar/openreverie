@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -238,5 +239,40 @@ describe('selectCommitments', () => {
   it('never surfaces a commitment waiting on something, whatever its timing', () => {
     const c = { ...base, waitsOn: 'entity_01WEDDING' }
     expect(selectCommitments([c], '2026-08-30', 5)).toHaveLength(0)
+  })
+})
+
+describe('no-overdue-state guarantee', () => {
+  it('has no state, field or helper expressing lateness', () => {
+    const source = readFileSync(new URL('./commitments.ts', import.meta.url), 'utf8')
+    // Spec section 6: if the data cannot express "you failed to do this",
+    // nothing downstream can render it. This test is a crude string scan,
+    // not a type system, and that is deliberate: it is a tripwire. If the
+    // scan ever fires on an innocent usage, the right fix is to rename that
+    // usage, not to weaken the scan. The correct state for a passed window
+    // with no recorded outcome is simply open (unknown).
+    for (const forbidden of ['overdue', 'isLate', 'missed', 'pastDue', 'failed']) {
+      expect(source.toLowerCase()).not.toContain(forbidden.toLowerCase())
+    }
+  })
+
+  it('leaves a passed window open rather than marking it anything', () => {
+    const c = {
+      id: 'c1',
+      label: 'x',
+      flavor: 'plan' as const,
+      state: 'open' as const,
+      sessionId: 's1',
+      timing: {
+        words: 'sunday',
+        anchor: '2026-08-22T00:00:00.000Z',
+        resolved: { from: '2026-08-23', to: '2026-08-23', statedPrecision: 'day' as const },
+      },
+    }
+    // A month later it is still simply open. Unresolved is an ordinary,
+    // unjudged condition. Once time-eligible, a commitment stays eligible
+    // to allow for the one follow-up question (spec Section 6).
+    expect(c.state).toBe('open')
+    expect(selectCommitments([c], '2026-09-23', 5)).toHaveLength(1)
   })
 })
