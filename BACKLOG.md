@@ -372,6 +372,28 @@ item ships, remove it from here and record it in `ROADMAP.md`'s Done narrative.
     candidate. It is easy to add later and awkward to remove." Trigger: "seeing that happen in
     real use, not deciding it in advance." Size: not stated. Where: section 10 and section 11.
 
+- **`waitsOn` is stored as free text, not the graph edge the spec calls for, and it is now
+  live-reachable.** Spec Section 5 says the honest representation is a graph edge: "the commitment
+  `waitsOn` another node, which usually already exists... It becomes eligible only once the thing
+  it waits on is recorded as having happened." Task 3 implemented `waitsOn` as a plain string on
+  `CommitmentPayload` instead (`packages/memory/src/commitments.ts`), and its own report already
+  flagged this: "waitsOn is stored as a payload string only; nothing yet emits the waits_on edge
+  Task 1 added to EdgeType. That wiring is not part of this task's brief." Until Task 6 extended
+  `remember`, nothing exposed `waitsOn` to a live write path, so the gap stayed latent. Now a live
+  conversation can set it, and `selectCommitments` excludes any commitment with `waitsOn` set from
+  time-based selection permanently, with no code anywhere that reactivates it: the spec's promised
+  "becomes eligible once the awaited thing happens" is not implemented, and neither
+  `reviseCommitment` nor the `remember` tool's `reviseCommitment` shape can clear `waitsOn` once
+  set. As things stand, a commitment marked `waitsOn` is not deferred, it is silently and
+  permanently unreachable through anything built so far.
+  - Why deferred: not stated (Task 3's brief scoped the graph-edge wiring out with no reason given
+    beyond it not being part of that task).
+  - Where the thinking lives: spec Section 5; `packages/memory/src/commitments.ts` (the `waitsOn`
+    field and `selectCommitments`); task-3-report.md's Concerns section.
+  - Trigger: implementing the `waits_on` graph edge and the reactivation check ("once the awaited
+    thing is recorded as having happened") that Section 5 specifies.
+  - Size: not stated.
+
 - **Proposals returning for arbitration, in a non-conversational surface.** Not permission to
   remember, but arbitration only the user can settle: merging two nodes that turn out to be the
   same human, closing an arc gone quiet, resolving a contradiction between what was said months

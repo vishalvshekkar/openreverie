@@ -8,6 +8,7 @@ import {
   MemoryEngine,
   memoryPaths,
   newId,
+  readCommitments,
   readDocument,
   writeDocumentAtomic,
 } from '@openreverie/memory'
@@ -95,10 +96,15 @@ describe('toolDefinitions', () => {
     expect(names).not.toContain('resolve_proposal')
   })
 
-  it('never uses an em dash in a tool description', () => {
+  it('never uses an em dash anywhere in a tool definition, including nested parameter descriptions', () => {
     const emDash = String.fromCharCode(0x2014)
     for (const def of toolDefinitions()) {
       expect(def.description).not.toContain(emDash)
+      // Whole-definition scan, not just the top-level description: remember's
+      // parameters carry substantial nested prose (the commitment,
+      // reviseCommitment and resolveCommitment property descriptions), and a
+      // check that only reads def.description would miss an em dash there.
+      expect(JSON.stringify(def.parameters)).not.toContain(emDash)
     }
   })
 
@@ -535,6 +541,221 @@ describe('dispatchTool', () => {
       await engine.close()
     },
   )
+
+  describe('remember: commitment shapes', () => {
+    it('still records a plain item exactly as before', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps())
+      const sessionId = await engine.startSession()
+
+      const result = await dispatchTool(
+        engine,
+        sessionId,
+        call('remember', { text: 'Today felt heavy.', kind: 'feeling' }),
+      )
+      expect(JSON.parse(result)).toEqual({ ok: true })
+
+      await engine.close()
+    })
+
+    // Guards against ever routing remember's validation back through a
+    // combined z.union: a union's safeParse collapses every branch's
+    // failure into one root-level message with no field name, which this
+    // task's own falsification caught (see task-6-report.md). The item
+    // shape's error message must keep naming the actual field, exactly as
+    // it did before this task added the other three shapes.
+    it('still names the actual field in a plain item validation error, not a generic union failure', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps())
+      const sessionId = await engine.startSession()
+
+      const result = await dispatchTool(engine, sessionId, call('remember', { text: 123 }))
+      expect(JSON.parse(result).error).toContain('text')
+      expect(JSON.parse(result).error).not.toContain('(root): Invalid input')
+
+      await engine.close()
+    })
+
+    it('records a commitment as a commitment, not as an item', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps())
+      const sessionId = await engine.startSession()
+
+      const result = await dispatchTool(
+        engine,
+        sessionId,
+        call('remember', {
+          commitment: { label: 'See Nightfall with Arjun', flavor: 'plan', statedTime: 'sunday' },
+        }),
+      )
+      expect(JSON.parse(result).ok).toBe(true)
+
+      const live = await readCommitments(memoryPaths(dir))
+      expect(live).toHaveLength(1)
+      expect(live[0]?.label).toBe('See Nightfall with Arjun')
+      expect(live[0]?.flavor).toBe('plan')
+      expect(live[0]?.state).toBe('open')
+      // The model's only reliable way to later revise or resolve this
+      // commitment is the id handed back here; it must be the real one.
+      expect(JSON.parse(result).commitmentId).toBe(live[0]?.id)
+
+      await engine.close()
+    })
+
+    it('resolves a stated time it understands into the resolved branch, with no interpretation', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps())
+      const sessionId = await engine.startSession()
+
+      await dispatchTool(
+        engine,
+        sessionId,
+        call('remember', {
+          commitment: {
+            label: 'Pick up the dry cleaning',
+            flavor: 'errand',
+            statedTime: 'tomorrow',
+          },
+        }),
+      )
+
+      const live = await readCommitments(memoryPaths(dir))
+      expect(live[0]?.timing?.resolved).toBeDefined()
+      expect(live[0]?.timing?.interpretation).toBeUndefined()
+
+      await engine.close()
+    })
+
+    it('carries a stated time it refuses to resolve as words and an anchor, with no interpretation invented', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps())
+      const sessionId = await engine.startSession()
+
+      await dispatchTool(
+        engine,
+        sessionId,
+        call('remember', {
+          commitment: { label: 'Call the dentist', flavor: 'errand', statedTime: 'next friday' },
+        }),
+      )
+
+      const live = await readCommitments(memoryPaths(dir))
+      expect(live[0]?.timing?.words).toBe('next friday')
+      expect(live[0]?.timing?.anchor).toBeDefined()
+      expect(live[0]?.timing?.resolved).toBeUndefined()
+      expect(live[0]?.timing?.interpretation).toBeUndefined()
+
+      await engine.close()
+    })
+
+    it('revises an existing commitment by referencing its id', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps())
+      const sessionId = await engine.startSession()
+
+      await dispatchTool(
+        engine,
+        sessionId,
+        call('remember', {
+          commitment: { label: 'See Nightfall with Arjun', flavor: 'plan', statedTime: 'sunday' },
+        }),
+      )
+      const [recorded] = await readCommitments(memoryPaths(dir))
+      if (!recorded) throw new Error('expected a recorded commitment')
+
+      const result = await dispatchTool(
+        engine,
+        sessionId,
+        call('remember', {
+          reviseCommitment: { commitmentId: recorded.id, statedTime: 'sunday the 23rd' },
+        }),
+      )
+      expect(JSON.parse(result).ok).toBe(true)
+
+      const live = await readCommitments(memoryPaths(dir))
+      expect(live).toHaveLength(1)
+      expect(live[0]?.id).toBe(recorded.id)
+      expect(live[0]?.timing?.words).toBe('sunday the 23rd')
+
+      await engine.close()
+    })
+
+    it('rejects a revision that does not say what it revises', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps())
+      const sessionId = await engine.startSession()
+
+      const result = await dispatchTool(
+        engine,
+        sessionId,
+        call('remember', { reviseCommitment: { statedTime: 'sunday the 23rd' } }),
+      )
+      // Asserts where the error came from, not just that one exists: the
+      // zod boundary must be what refuses this, naming the missing field,
+      // not a downstream "no live commitment" lookup failure that would
+      // pass just as well against a flattened, optional-everything schema.
+      expect(JSON.parse(result).error).toMatch(/invalid arguments for remember/)
+      expect(JSON.parse(result).error).toMatch(/reviseCommitment\.commitmentId/)
+
+      await engine.close()
+    })
+
+    it('resolves an existing commitment with a named outcome', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps())
+      const sessionId = await engine.startSession()
+
+      await dispatchTool(
+        engine,
+        sessionId,
+        call('remember', { commitment: { label: 'Return the library book', flavor: 'errand' } }),
+      )
+      const [recorded] = await readCommitments(memoryPaths(dir))
+      if (!recorded) throw new Error('expected a recorded commitment')
+
+      const result = await dispatchTool(
+        engine,
+        sessionId,
+        call('remember', {
+          resolveCommitment: { commitmentId: recorded.id, outcome: 'done' },
+        }),
+      )
+      expect(JSON.parse(result).ok).toBe(true)
+
+      const live = await readCommitments(memoryPaths(dir))
+      expect(live[0]?.state).toBe('done')
+
+      await engine.close()
+    })
+
+    it('rejects a resolution that does not name an outcome', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps())
+      const sessionId = await engine.startSession()
+
+      const result = await dispatchTool(
+        engine,
+        sessionId,
+        call('remember', { resolveCommitment: { commitmentId: 'commitment_01A' } }),
+      )
+      // Same reasoning as the revision test above: the missing field must
+      // be what the zod boundary names, not an unrelated "commitment not
+      // found" error that a lookup on a nonexistent id would produce even
+      // under a flattened schema.
+      expect(JSON.parse(result).error).toMatch(/invalid arguments for remember/)
+      expect(JSON.parse(result).error).toMatch(/resolveCommitment\.outcome/)
+
+      await engine.close()
+    })
+
+    it('rejects a call that mixes an item field with a commitment field', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps())
+      const sessionId = await engine.startSession()
+
+      const result = await dispatchTool(
+        engine,
+        sessionId,
+        call('remember', {
+          text: 'See Nightfall with Arjun',
+          commitment: { label: 'See Nightfall with Arjun', flavor: 'plan' },
+        }),
+      )
+      expect(JSON.parse(result).error).toBeDefined()
+
+      await engine.close()
+    })
+  })
 
   it('declare_journal_method records the method on the session', async () => {
     const engine = await MemoryEngine.open(dir, fakeDeps())

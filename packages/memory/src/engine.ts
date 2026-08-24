@@ -16,6 +16,18 @@ import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { ChatProvider, EmbeddingProvider } from '@openreverie/providers'
 import { decodeTime } from 'ulid'
+import type {
+  Commitment,
+  CommitmentFlavor,
+  CommitmentState,
+  CommitmentTiming,
+} from './commitments.js'
+import {
+  recordCommitment as recordCommitmentRecord,
+  resolveCommitment as resolveCommitmentRecord,
+  reviseCommitment as reviseCommitmentRecord,
+} from './commitments.js'
+import { resolveStatedTime } from './commitmentTime.js'
 import {
   type Document,
   listDocuments,
@@ -659,6 +671,62 @@ export class MemoryEngine {
       items.push(item)
     } else {
       this.liveItems.set(sessionId, [item])
+    }
+  }
+
+  // Records a brand new commitment: a bounded thing the person means to
+  // do, identity on the graph log rather than an append-only item. Unlike
+  // remember() above, this writes straight through to graph.jsonl: a
+  // commitment is a thing with a lifecycle, not a fact queued for
+  // end-of-session reflection.
+  async recordCommitment(
+    sessionId: string,
+    input: { label: string; flavor: CommitmentFlavor; statedTime?: string; waitsOn?: string },
+  ): Promise<Commitment> {
+    const timing = this.buildCommitmentTiming(input.statedTime)
+    return recordCommitmentRecord(this.paths, {
+      label: input.label,
+      flavor: input.flavor,
+      sessionId,
+      ...(timing !== undefined ? { timing } : {}),
+      ...(input.waitsOn !== undefined ? { waitsOn: input.waitsOn } : {}),
+    })
+  }
+
+  // Reasserts the same commitment id with the changed fields, per
+  // commitments.ts's reviseCommitment: whatever is not passed here carries
+  // forward from the current live version rather than being dropped.
+  async reviseCommitment(
+    id: string,
+    changes: { label?: string; statedTime?: string },
+  ): Promise<Commitment> {
+    const timing = this.buildCommitmentTiming(changes.statedTime)
+    return reviseCommitmentRecord(this.paths, id, {
+      ...(changes.label !== undefined ? { label: changes.label } : {}),
+      ...(timing !== undefined ? { timing } : {}),
+    })
+  }
+
+  // Records the outcome the caller already knows. Invents nothing: the
+  // caller (dispatchRemember) is the one that must have already gotten an
+  // explicit outcome out of the model, this only appends it.
+  async resolveCommitment(id: string, outcome: CommitmentState): Promise<Commitment> {
+    return resolveCommitmentRecord(this.paths, id, outcome)
+  }
+
+  // The stated time, resolved when the words are unambiguous enough to
+  // reduce to a calendar window, carried as bare words and an anchor when
+  // they are not. No interpretation is invented here on the refused
+  // branch: a live tool call has no reliable moment to ask a model for a
+  // gloss, so that gloss is written later, by reflection.
+  private buildCommitmentTiming(statedTime: string | undefined): CommitmentTiming | undefined {
+    if (statedTime === undefined) return undefined
+    const anchor = new Date()
+    const resolved = resolveStatedTime(statedTime, anchor, this.timezone())
+    return {
+      words: statedTime,
+      anchor: anchor.toISOString(),
+      ...(resolved !== undefined ? { resolved } : {}),
     }
   }
 
