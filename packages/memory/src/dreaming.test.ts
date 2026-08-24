@@ -213,6 +213,32 @@ describe('runExploration', () => {
     expect(chat.requests).toHaveLength(2)
     expect(messages.at(-1)?.content).toBe('ok')
   })
+
+  it('answers every tool call still requested on the final wrap-up round, without a second budget_exhausted event', async () => {
+    const chat = new FakeChatProvider([
+      { text: '', toolCalls: [searchCall('a')] }, // hits the cap
+      { text: 'wrap', toolCalls: [searchCall('b')] }, // wrap-up, model still asks for a tool
+    ])
+    const events: Record<string, unknown>[] = []
+    const messages = await runExploration({
+      chat,
+      model: 'fake',
+      persona: 'P',
+      lookup: fakeLookup([]),
+      maxToolCalls: 1,
+      packet: 'PACKET',
+      record: (e) => events.push(e),
+    })
+    const requestedIds = messages
+      .filter((m) => m.role === 'assistant')
+      .flatMap((m) => m.toolCalls ?? [])
+      .map((c) => c.id)
+    const answeredIds = new Set(messages.filter((m) => m.role === 'tool').map((m) => m.toolCallId))
+    for (const id of requestedIds) {
+      expect(answeredIds.has(id)).toBe(true)
+    }
+    expect(events.filter((e) => e.event === 'budget_exhausted')).toHaveLength(1)
+  })
 })
 
 const INSIGHTS_JSON = JSON.stringify({
@@ -350,38 +376,15 @@ describe('runDream', () => {
     expect(files.sort()).toEqual(['insight.md', 'process.jsonl'])
   })
 
-  it('strips a dangling tool call left by the exploration wrap-up before reusing the transcript', async () => {
-    // maxToolCalls: 1 exhausts the budget on round one; the wrap-up round
-    // still offers tools, and here the model asks for one anyway. That
-    // tool call is never dispatched or answered, so runExploration's
-    // returned transcript ends with an assistant message carrying a
-    // tool call with no matching tool result. A real provider rejects
-    // that shape on the next call (insights, then narrative), so it must
-    // be stripped before either call reuses the transcript.
+  it('aborts with nothing written when every insight fails evidence resolution', async () => {
     const chat = new FakeChatProvider([
-      { text: '', toolCalls: [searchCall('a')] }, // exploration round 1, hits the cap
-      { text: 'wrap', toolCalls: [searchCall('b')] }, // wrap-up, model still asks for a tool
+      { text: 'noted', toolCalls: [] },
       { text: INSIGHTS_JSON, toolCalls: [] },
-      { text: 'a narrative', toolCalls: [] },
-      { text: TONE_OK, toolCalls: [] },
     ])
     const args = runArgs(paths, chat)
-    args.maxToolCalls = 1
+    args.lookup = lookupResolving([]) // no doc id resolves, so every insight's evidence fails
     const result = await runDream(args)
-    expect(result.outcome).toBe('written')
-    const insightsRequest = chat.requests[2]
-    const narrativeRequest = chat.requests[3]
-    for (const request of [insightsRequest, narrativeRequest]) {
-      const messages = request?.messages ?? []
-      const answeredToolCallIds = new Set(
-        messages.filter((m) => m.role === 'tool').map((m) => m.toolCallId),
-      )
-      for (const message of messages) {
-        if (message.role !== 'assistant') continue
-        for (const call of message.toolCalls ?? []) {
-          expect(answeredToolCallIds.has(call.id)).toBe(true)
-        }
-      }
-    }
+    expect(result.outcome).toBe('aborted')
+    expect(await readdir(paths.dreamsDir)).toEqual([])
   })
 })

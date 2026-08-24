@@ -142,7 +142,27 @@ export async function runExploration(args: {
       content: result.text,
       ...(result.toolCalls.length > 0 ? { toolCalls: result.toolCalls } : {}),
     })
-    if (result.toolCalls.length === 0 || exhausted) return messages
+    if (result.toolCalls.length === 0 || exhausted) {
+      if (exhausted && result.toolCalls.length > 0) {
+        // The budget is already exhausted and the model still asked for
+        // tools on this final round. Task 6's own budget-refused path
+        // already keeps every round well formed by answering calls it
+        // refuses; the loop must hold that same invariant on the way out,
+        // not just while it is still running. Answer each one so no
+        // caller ever reuses a transcript that ends with an unanswered
+        // tool call. This does not count against the budget and does not
+        // repeat the budget_exhausted event, which fires exactly once
+        // per run.
+        for (const call of result.toolCalls) {
+          messages.push({
+            role: 'tool',
+            content: JSON.stringify({ error: 'tool budget exhausted' }),
+            toolCallId: call.id,
+          })
+        }
+      }
+      return messages
+    }
     let refused = 0
     for (const call of result.toolCalls) {
       if (used >= args.maxToolCalls) {
@@ -417,24 +437,6 @@ async function insightResolves(
   return false
 }
 
-// runExploration's wrap-up round can still end with an assistant message
-// carrying tool calls: the model is told to stop calling tools once the
-// budget is exhausted, but nothing enforces that, and the wrap-up round
-// still offers the tool definitions. If the model asks for a tool on that
-// last round anyway, the loop returns immediately without dispatching it
-// or recording a result, so the returned transcript can end with a
-// tool_use that has no matching tool_result. That is fine as a return
-// value, but every call built by appending a fresh instruction on top of
-// it (insights, narrative) starts a new turn, and a real provider rejects
-// a tool call left unanswered. Strip it before reusing the transcript.
-function withoutDanglingToolCalls(messages: ChatMessage[]): ChatMessage[] {
-  const last = messages.at(-1)
-  if (last === undefined || last.role !== 'assistant' || (last.toolCalls?.length ?? 0) === 0) {
-    return messages
-  }
-  return [...messages.slice(0, -1), { role: last.role, content: last.content }]
-}
-
 function dropFlagged(
   survivors: DreamInsight[],
   flaggedIndexes: number[],
@@ -477,7 +479,6 @@ export async function runDream(args: RunDreamArgs): Promise<DreamRunResult> {
     record,
   })
   record({ event: 'model_call', stage: 'exploration', durationMs: Date.now() - explorationStart })
-  const followupMessages = withoutDanglingToolCalls(explorationMessages)
 
   // 2. Insights. Structured output, one retry, abort on a second failure:
   // nothing is safe to write in place of insights that never parsed.
@@ -486,7 +487,7 @@ export async function runDream(args: RunDreamArgs): Promise<DreamRunResult> {
     chat: args.chat,
     model: args.model,
     system,
-    messages: [...followupMessages, { role: 'user', content: DREAM_INSIGHTS_INSTRUCTION }],
+    messages: [...explorationMessages, { role: 'user', content: DREAM_INSIGHTS_INSTRUCTION }],
     schema: dreamInsightsOutputSchema,
   })
   record({ event: 'model_call', stage: 'insights', durationMs: Date.now() - insightsStart })
@@ -524,7 +525,10 @@ export async function runDream(args: RunDreamArgs): Promise<DreamRunResult> {
     await args.chat.complete({
       model: args.model,
       system,
-      messages: [...followupMessages, { role: 'user', content: narrativeInstruction(args.voice) }],
+      messages: [
+        ...explorationMessages,
+        { role: 'user', content: narrativeInstruction(args.voice) },
+      ],
       temperature: 0.9,
     })
   ).text
@@ -571,7 +575,7 @@ export async function runDream(args: RunDreamArgs): Promise<DreamRunResult> {
         model: args.model,
         system,
         messages: [
-          ...followupMessages,
+          ...explorationMessages,
           { role: 'user', content: narrativeInstruction(args.voice) },
         ],
         temperature: 0.9,
