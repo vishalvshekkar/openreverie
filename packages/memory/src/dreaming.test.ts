@@ -110,6 +110,31 @@ describe('runExploration', () => {
     expect(messages.at(-1)?.content).toBe('wrap')
   })
 
+  it('records exactly one budget_exhausted event, with the right refused count', async () => {
+    const chat = new FakeChatProvider([
+      {
+        text: '',
+        toolCalls: [searchCall('a'), searchCall('b'), searchCall('c')],
+      },
+      { text: 'wrap', toolCalls: [] },
+    ])
+    const events: Record<string, unknown>[] = []
+    await runExploration({
+      chat,
+      model: 'fake',
+      persona: 'P',
+      lookup: fakeLookup([]),
+      maxToolCalls: 1,
+      packet: 'PACKET',
+      record: (e) => events.push(e),
+    })
+    const toolCallEvents = events.filter((e) => e.event === 'tool_call')
+    const budgetEvents = events.filter((e) => e.event === 'budget_exhausted')
+    expect(toolCallEvents).toHaveLength(1)
+    expect(budgetEvents).toHaveLength(1)
+    expect(budgetEvents[0]).toMatchObject({ maxToolCalls: 1, refused: 2 })
+  })
+
   it('a tool dispatch error becomes an error string result, not a crash', async () => {
     const chat = new FakeChatProvider([
       { text: '', toolCalls: [{ id: 't1', name: 'read_document', arguments: 'not json' }] },

@@ -136,8 +136,10 @@ export async function runExploration(args: {
       ...(result.toolCalls.length > 0 ? { toolCalls: result.toolCalls } : {}),
     })
     if (result.toolCalls.length === 0 || exhausted) return messages
+    let refused = 0
     for (const call of result.toolCalls) {
       if (used >= args.maxToolCalls) {
+        refused += 1
         messages.push({
           role: 'tool',
           content: JSON.stringify({ error: 'tool budget exhausted' }),
@@ -152,6 +154,7 @@ export async function runExploration(args: {
     }
     if (used >= args.maxToolCalls && !exhausted) {
       exhausted = true
+      args.record({ event: 'budget_exhausted', maxToolCalls: args.maxToolCalls, refused })
       messages.push({
         role: 'user',
         content:
