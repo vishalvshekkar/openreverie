@@ -1,5 +1,17 @@
-import { describe, expect, it } from 'vitest'
-import { dreamIsDue, MIN_REFLECTED_SESSIONS, periodCovered, periodFor } from './dreamSchedule.js'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import {
+  acquireDreamLock,
+  DREAM_LOCK_STALE_MS,
+  dreamIsDue,
+  MIN_REFLECTED_SESSIONS,
+  periodCovered,
+  periodFor,
+  releaseDreamLock,
+} from './dreamSchedule.js'
+import { ensureMemoryTree, type MemoryPaths, memoryPaths } from './paths.js'
 
 // 2026-08-24 is a Monday. 18:30 UTC on the 24th is already the 25th in Tokyo.
 const NOW = new Date('2026-08-24T18:30:00.000Z')
@@ -44,5 +56,35 @@ describe('dreamIsDue', () => {
   })
   it('a long gap leaves exactly the current period due, never the missed ones', () => {
     expect(dreamIsDue({ ...base, existingDreamDates: ['2026-06-01'] })).toBe(true)
+  })
+})
+
+describe('dream lock', () => {
+  let dir: string
+  let paths: MemoryPaths
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'openreverie-dreamschedule-'))
+    paths = memoryPaths(dir)
+    await ensureMemoryTree(paths)
+  })
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  it('first acquire wins, second loses, release frees it', async () => {
+    expect(await acquireDreamLock(paths, NOW)).toBe(true)
+    expect(await acquireDreamLock(paths, NOW)).toBe(false)
+    await releaseDreamLock(paths)
+    expect(await acquireDreamLock(paths, NOW)).toBe(true)
+  })
+  it('a stale lock is taken over', async () => {
+    expect(await acquireDreamLock(paths, NOW)).toBe(true)
+    const later = new Date(NOW.getTime() + DREAM_LOCK_STALE_MS + 1)
+    expect(await acquireDreamLock(paths, later)).toBe(true)
+  })
+  it('release is a no-op when no lock exists', async () => {
+    await expect(releaseDreamLock(paths)).resolves.toBeUndefined()
   })
 })
