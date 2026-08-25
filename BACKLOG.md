@@ -249,6 +249,43 @@ item ships, remove it from here and record it in `ROADMAP.md`'s Done narrative.
        log's format).
      - Size: not stated.
 
+- **`PROMPT_BUDGET_TOTAL` is a convention held up by a comment, not an invariant a test can
+  fail.** `packages/core/src/budget.test.ts` asserts `sum(SECTION_CAPS) <= PROMPT_BUDGET_TOTAL`
+  over the constants alone. Raising the total always satisfies it, so the ceiling cannot bind
+  anyone who does not want it to. It moved twice in two days: 28000 to 28800 when the commitments
+  section landed on 2026-08-24, then to 30600 when dreaming landed on 2026-08-25. Both raises were
+  deliberate and both are argued in comments, which is the most the current design allows.
+
+  Worth stating plainly, because it changes what a fix should do: the number that moved is the sum
+  of per-section caps (30400 today), a worst case in which every section simultaneously hits its
+  ceiling. That almost certainly never happens, since `CONSTITUTION_CAP` and
+  `RECENT_SUMMARIES_SECTION_CAP` are 6000 each and few memories fill either. So the raises are less
+  alarming than the percentage suggests, and at the same time nobody knows what a real assembled
+  prompt actually costs, because nothing has ever measured one. The system prompt sits in front of
+  every turn, so whatever that real number is, it is paid on every message of every session.
+
+  Three options, in the order they seem worth trying:
+
+  - **Measure a real prompt first.** Render `assembleSystemPrompt` against a realistic fixture
+    memory and report the assembled size. That turns an argument about a hypothetical maximum into
+    a number, and it may show that 30600 worst-case is nowhere near what anyone pays.
+  - **Assert against the rendered prompt rather than the constants**, once there is a fixture worth
+    asserting on. That makes the budget bind on reality instead of on arithmetic.
+  - **Freeze the total and force trimming.** The bluntest option, and the weakest of the three
+    until the first is done: it would make people trade away caps against a ceiling that may not
+    reflect any real prompt.
+  - Why deferred: raised between the two branches merging on 2026-08-25 rather than inside either.
+    The dreaming branch declined to pay for its section by trimming an established cap, on the
+    stated grounds that "trimming an established section is a judgment about the existing prompt
+    that did not belong in a merge", and both agents landed on that independently. Recorded here
+    rather than acted on because the fix is a measurement question, not a merge question.
+  - Where: `packages/core/src/budget.ts` (the `PROMPT_BUDGET_TOTAL` comment records the 28800 raise
+    as a decision and explicitly not a rule), `packages/core/src/budget.test.ts` (the spelled-out
+    literal exists to force someone to change it on purpose).
+  - Trigger: a third raise. Two is fine, five is a problem, and a comment asking the next person to
+    argue is weaker than a test that makes them.
+  - Size: small for the measurement, medium if the assertion moves onto a rendered prompt.
+
 ## 2. Retrieval and memory quality
 
 - **`DocumentHit.snippet` and `chunks[0]` can name different physical chunks of the same
