@@ -134,6 +134,17 @@ export const profileUpdatesSchema = z.strictObject({
 
 export type ProfileUpdates = z.infer<typeof updateProfileArgsSchema>
 
+// The dreams half of the settings patch, its own strict object for the
+// same reason styleMetaSchema is: the settings pane may set one dream
+// preference at a time (voice, openerMention, promptSection), and an
+// unrecognized nested key arriving over HTTP is rejected here rather than
+// passed through the way profile.md's own file schema allows.
+export const dreamsSettingsPatchSchema = z.strictObject({
+  voice: z.enum(['first', 'second', 'third']).optional(),
+  openerMention: z.boolean().optional(),
+  promptSection: z.boolean().optional(),
+})
+
 // The HTTP surface: the PATCH /api/v1/profile body. A third strict
 // object, distinct from both MODEL-WRITE schemas rather than a reuse of
 // either. It legitimately includes style and prose, because the settings
@@ -152,6 +163,7 @@ export const profileSettingsPatchSchema = z.strictObject({
   occupation: z.string().nullable().optional(),
   birthdayGreetings: z.boolean().nullable().optional(),
   style: styleMetaSchema.optional(),
+  dreams: dreamsSettingsPatchSchema.optional(),
   prose: z.string().optional(),
 })
 

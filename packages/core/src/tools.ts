@@ -487,8 +487,9 @@ export function toolDefinitions(): ToolDefinition[] {
         "Record the person's reaction to a dream insight they just heard, the moment they say it is wrong or " +
         'right, or ask you to stop bringing it up. Call this whenever a dream insight comes up in conversation and ' +
         'the person corrects or confirms it: right when they confirm it, wrong when they say it is mistaken, ' +
-        'do_not_bring_up when they want it left alone even if it might be true. A rejected or silenced insight is ' +
-        'excluded from future dreams once recorded here, so this is how a correction actually sticks.',
+        'do_not_bring_up when they want it left alone even if it might be true. Recording a verdict stops that ' +
+        'insight from being used in conversation, and future dreams are told about it so they are less likely to ' +
+        'raise the same framing again, so this is how a correction actually sticks.',
       parameters: {
         type: 'object',
         properties: {

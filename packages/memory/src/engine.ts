@@ -663,6 +663,13 @@ export class MemoryEngine implements DreamLookup {
     if (parsed.data.style !== undefined) {
       meta.style = { ...(meta.style ?? {}), ...parsed.data.style }
     }
+    // Shallow merge, not replace: the settings pane sends one dream field
+    // at a time (see Settings.tsx), so replacing the whole dreams object
+    // with a one-key patch would silently delete the other two saved
+    // preferences.
+    if (parsed.data.dreams !== undefined) {
+      mutableMeta.dreams = { ...(meta.dreams ?? {}), ...parsed.data.dreams }
+    }
     if (parsed.data.timezone !== undefined && parsed.data.timezone !== null) {
       meta.timezoneSource = 'user-confirmed'
     }
@@ -1237,7 +1244,20 @@ export class MemoryEngine implements DreamLookup {
     // function of what is on disk right now, exactly like every other
     // section this method builds.
     const dreamsMeta = this.profileCache.meta.dreams
-    const dreamLogState = foldDreamLog(await readDreamLog(this.paths))
+    // A torn append or a hand-edited dreams/log.jsonl must never stop a
+    // session from starting. readDreamLog's strict zod parsing is correct
+    // (see dreamLog.ts) and stays that way; the degrade-on-failure belongs
+    // here, the one caller of this read that has no fallback of its own.
+    // The CLI's feedbackVerdicts and the server's dreamFeedbackVerdicts
+    // already degrade the same way on this exact call; sessionContext was
+    // the odd one out, and unlike those two, letting it throw took the
+    // whole conversation down with it, not just a verdict annotation.
+    let dreamLogState: DreamLogState
+    try {
+      dreamLogState = foldDreamLog(await readDreamLog(this.paths))
+    } catch {
+      dreamLogState = { lastDreamt: new Map(), feedback: new Map(), mentioned: new Set() }
+    }
     const dreamSummaries = await listDreamSummaries(this.paths)
 
     const dreamInsights: SessionContext['dreamInsights'] = []
@@ -2575,12 +2595,24 @@ export class MemoryEngine implements DreamLookup {
   }
 
   // The on-demand path (CLI `dream` command, Task 12). Unlike maybeDream,
-  // this ignores the per-trigger switch and the once-per-period guard: a
-  // person asking for a dream right now is not a background trigger. force
-  // skips the dueness check (still requires dreaming to be configured at
-  // all, since there is no cadence or tool budget to run with otherwise).
-  // dryRun stops after selection, before the lock and before any model
-  // call, and returns the preview instead.
+  // this ignores the per-trigger switch (dreaming.triggers.*) and the
+  // in-process, once-per-process dreamAttemptedPeriods set: a person
+  // asking for a dream right now is not a background trigger.
+  //
+  // It does NOT ignore the on-disk once-per-period guard. An unforced
+  // manual run still checks `due` below and still rechecks period
+  // coverage under the lock, so it aborts with "period ... is already
+  // covered" exactly like a trigger would when the period is done.
+  // The spec's Scheduling section says manual runs are exempt from the
+  // once-per-period rule; the implementation does not provide that
+  // exemption, only `force` bypasses both checks. That gap is a
+  // recorded, deliberate deviation (see docs/dreaming.md's changelog),
+  // not something this comment should paper over.
+  //
+  // force also skips the dueness check (still requires dreaming to be
+  // configured at all, since there is no cadence or tool budget to run
+  // with otherwise). dryRun stops after selection, before the lock and
+  // before any model call, and returns the preview instead.
   async dreamNow(
     options: { force?: boolean; dryRun?: boolean } = {},
   ): Promise<DreamRunResult | DreamDryRun> {

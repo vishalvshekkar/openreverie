@@ -2738,6 +2738,26 @@ describe('MemoryEngine', () => {
 
       await engine.close()
     })
+
+    // Task 10's insights and opener both fold dreams/log.jsonl. readDreamLog
+    // zod-parses every line and throws on the first bad one, which is
+    // correct for that function (see dreamLog.ts). Before this fix,
+    // sessionContext called it with no try/catch, so a torn append or a
+    // hand-edited log line took the whole method down with it, and with it
+    // every session start (chat and CLI alike): a person must always be
+    // able to start a conversation, dreaming feature or not.
+    it('degrades to no dream insights and no fresh dream when dreams/log.jsonl has a garbage line, instead of throwing', async () => {
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      await mkdir(paths.dreamsDir, { recursive: true })
+      await writeFile(paths.dreamLog, 'not valid json\n', 'utf8')
+
+      const context = await engine.sessionContext()
+
+      expect(context.dreamInsights).toEqual([])
+      expect(context.freshDream).toBeUndefined()
+
+      await engine.close()
+    })
   })
 
   describe('sessionContext people, entities, and recent intentions', () => {
@@ -4207,6 +4227,25 @@ describe('profile writes', () => {
     await engine.updateProfile({ location: 'Bengaluru' })
     await engine.updateProfileSettings({ location: null })
     expect(engine.profile().meta.location).toBeUndefined()
+    await engine.close()
+  })
+
+  // The web Settings Dreams section patches one dream field at a time
+  // (voice, openerMention, promptSection each their own onChange). If
+  // updateProfileSettings ever replaced meta.dreams wholesale instead of
+  // merging it, a one-key patch would silently delete the person's other
+  // two saved dream preferences.
+  it('merges a dreams patch shallowly, leaving the other dream fields untouched', async () => {
+    const engine = await openEngine()
+    await engine.updateProfileSettings({
+      dreams: { voice: 'first', openerMention: false, promptSection: false },
+    })
+    await engine.updateProfileSettings({ dreams: { voice: 'second' } })
+    expect(engine.profile().meta.dreams).toEqual({
+      voice: 'second',
+      openerMention: false,
+      promptSection: false,
+    })
     await engine.close()
   })
 

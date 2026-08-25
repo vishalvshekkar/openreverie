@@ -692,6 +692,13 @@ const publicProfileSchema = z.strictObject({
     orientation: z.string(),
   }),
   prose: z.string(),
+  dreams: z
+    .strictObject({
+      voice: z.enum(['first', 'second', 'third']).optional(),
+      openerMention: z.boolean().optional(),
+      promptSection: z.boolean().optional(),
+    })
+    .optional(),
 })
 const publicSettingsSchema = z.strictObject({
   safetyMode: z.enum(['companion', 'firewall']),
@@ -764,6 +771,15 @@ function publicProfile(profile: Profile, style: StyleConfig): z.infer<typeof pub
       orientation: style.orientation,
     },
     prose: profile.body,
+    ...(meta.dreams
+      ? {
+          dreams: {
+            voice: meta.dreams.voice,
+            openerMention: meta.dreams.openerMention,
+            promptSection: meta.dreams.promptSection,
+          },
+        }
+      : {}),
   }
 }
 function publicDreamRow(dream: DreamSummary): z.infer<typeof publicDreamRowSchema> {

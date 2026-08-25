@@ -1500,6 +1500,25 @@ describe('profile and settings endpoints', () => {
       expect(data.style.tone).toBe('direct')
     })
 
+    // The web Settings Dreams section sends { dreams: { voice } },
+    // { dreams: { openerMention } }, and { dreams: { promptSection } }
+    // one field at a time. Before this fix, profileSettingsPatchSchema had
+    // no dreams key at all, so every one of those PATCHes came back 400.
+    it('accepts a dreams patch and returns it on the next GET', async () => {
+      const patchResponse = await request(
+        'PATCH',
+        '/api/v1/profile',
+        { dreams: { voice: 'second' } },
+        authenticated({ origin }),
+      )
+      expect(patchResponse.status).toBe(200)
+
+      const getResponse = await request('GET', '/api/v1/profile', undefined, authenticated())
+      expect(getResponse.status).toBe(200)
+      const data = (getResponse.json as { data: { dreams?: { voice?: string } } }).data
+      expect(data.dreams?.voice).toBe('second')
+    })
+
     it('marks a timezone typed into settings as confirmed', async () => {
       await request(
         'PATCH',
