@@ -517,6 +517,49 @@ describe('assembleSystemPrompt', () => {
     await engine.close()
   })
 
+  it('renders no parenthetical for a hand-written summary.md carrying eventTime: "" directly in frontmatter (Ruling 11): the read boundary, not a write site', async () => {
+    // Unlike the test above, this never goes through engine.remember() or
+    // reflection at all: it writes the frontmatter directly, the shape a
+    // summary.md from before the write-site fixes (commit 1f602e7), or a
+    // hand-edited one, has on a real disk. AGENTS.md: the memory folder is
+    // truth, so this is the untrusted-input case the write-site fixes
+    // alone cannot cover; assembleSystemPrompt reaches it through
+    // engine.sessionContext reading this file's frontmatter straight off
+    // disk, with no write site in between to have normalized it.
+    await pinTimezoneUtc(paths)
+    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)
+    const store = await SessionStore.start(paths, yesterday)
+    await store.appendLine({ ts: yesterday.toISOString(), role: 'user', content: 'Hi.' })
+    await writeDocumentAtomic({
+      path: join(store.dir, 'summary.md'),
+      meta: {
+        id: newId('doc'),
+        items: [
+          {
+            id: newId('item'),
+            text: 'Call the dentist, hand-written blank stated time',
+            kind: 'intention',
+            ts: '',
+            eventTime: '',
+          },
+        ],
+      },
+      body: 'A quiet day.\n',
+    })
+
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+    const prompt = await assembleSystemPrompt(engine, testConfig())
+
+    expect(prompt).toContain('## Recent intentions')
+    const lines = prompt.split('\n')
+    const line = lines.find((l) => l.includes('Call the dentist, hand-written blank stated time'))
+    expect(line).toBeDefined()
+    expect(line).not.toContain('eventTime')
+    expect(line?.endsWith('Call the dentist, hand-written blank stated time')).toBe(true)
+
+    await engine.close()
+  })
+
   it('states plainly in the recent intentions section that a recorded intention is not evidence it happened', async () => {
     await pinTimezoneUtc(paths)
     const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)

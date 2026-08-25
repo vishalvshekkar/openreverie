@@ -1190,11 +1190,22 @@ export class MemoryEngine {
             // recentSummaries and the daily rollup, and unlike ts (empty
             // on a hand-written summary.md in several tests) it is always
             // present.
-            const eventTime = (item as { eventTime?: unknown }).eventTime
+            //
+            // Ruling 11: this reads raw frontmatter off a summary.md on
+            // disk, the same untrusted-folder boundary as sqlite.ts's
+            // itemChunkText. A summary.md written before the write-site
+            // fixes, or hand-edited, can carry `eventTime: ""`; trimmed
+            // and treated as absent here too, so it never renders as a
+            // fabricated `(eventTime: "")` in the prompt.
+            const eventTimeRaw = (item as { eventTime?: unknown }).eventTime
+            const eventTime =
+              typeof eventTimeRaw === 'string' && eventTimeRaw.trim().length > 0
+                ? eventTimeRaw
+                : undefined
             recentIntentions.push({
               text: (item as { text: string }).text,
               date: session.date,
-              ...(typeof eventTime === 'string' ? { eventTime } : {}),
+              ...(eventTime !== undefined ? { eventTime } : {}),
             })
           }
         }

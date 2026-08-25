@@ -684,11 +684,26 @@ async function fileMtime(path: string): Promise<string> {
 // section 2) on why eventTime stays free text. An item with no eventTime,
 // or a document with no date of its own (a living document has none),
 // gets no anchor at all rather than a guessed one.
+//
+// Ruling 11: this reads raw frontmatter off a summary.md on disk, not a
+// schema-validated value. AGENTS.md says truth lives in the user's memory
+// folder and SQLite is a derived index that must always be rebuildable
+// from it, so this folder is untrusted input the same way LLM output is
+// untrusted at a schema boundary: a summary.md written before the four
+// write-site fixes (commit 1f602e7), or hand-edited by the person the
+// folder-is-truth design explicitly invites, can still carry
+// `eventTime: ""`. reindexAll() walks every such file straight into this
+// function. Trimmed and treated as absent here too, not only at the four
+// write sites, so `typeof eventTime === 'string'` alone is never enough
+// to admit it.
 function itemChunkText(item: unknown, docDate?: string): string {
   const record = item as { id?: unknown; text?: unknown; eventTime?: unknown }
   const id = typeof record.id === 'string' ? record.id : ''
   const text = typeof record.text === 'string' ? record.text : ''
-  const eventTime = typeof record.eventTime === 'string' ? record.eventTime : undefined
+  const eventTime =
+    typeof record.eventTime === 'string' && record.eventTime.trim().length > 0
+      ? record.eventTime
+      : undefined
   if (eventTime !== undefined && docDate !== undefined) {
     return `${id}: ${text} (eventTime: "${eventTime}", as stated on ${docDate})`
   }

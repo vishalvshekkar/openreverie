@@ -3083,6 +3083,55 @@ describe('MemoryEngine', () => {
       await engine.close()
     })
 
+    it("tolerates a hand-written summary.md carrying eventTime: '' at both read boundaries (Ruling 11): no anchor in the search index, no eventTime in recentIntentions", async () => {
+      // Unlike the write-site tests below, this never goes through
+      // engine.remember() at all: it writes the frontmatter directly,
+      // the same way a summary.md from before the write-site fixes
+      // (commit 1f602e7), or a hand-edited one, exists on a real disk.
+      // AGENTS.md: the memory folder is truth and SQLite is a derived
+      // index rebuildable from it, so this is the untrusted-input case
+      // the write-site fixes alone cannot cover.
+      const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)
+      const store = await SessionStore.start(paths, yesterday)
+      await store.appendLine({ ts: yesterday.toISOString(), role: 'user', content: 'Hi.' })
+      await writeDocumentAtomic({
+        path: join(store.dir, 'summary.md'),
+        meta: {
+          id: newId('doc'),
+          date: formatLocalDate(yesterday, 'UTC'),
+          items: [
+            {
+              id: newId('item'),
+              text: 'Watching Zephyrquest',
+              kind: 'intention',
+              ts: '',
+              eventTime: '',
+            },
+          ],
+        },
+        body: 'A quiet day.\n',
+      })
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      // reindexAll is the path that actually walks this file into the
+      // search index (sqlite.ts:itemChunkText); sessionContext reads the
+      // frontmatter directly and needs no reindex.
+      await engine.reindexAll()
+
+      const hits = (await engine.search('Zephyrquest')).documents
+      expect(hits.length).toBeGreaterThan(0)
+      const snippet = hits[0]?.snippet ?? ''
+      expect(snippet).not.toContain('eventTime')
+      expect(snippet).not.toContain('as stated on')
+
+      const context = await engine.sessionContext()
+      const intention = context.recentIntentions.find((i) => i.text === 'Watching Zephyrquest')
+      expect(intention).toBeDefined()
+      expect('eventTime' in (intention ?? {})).toBe(false)
+
+      await engine.close()
+    })
+
     it.each([
       ['empty string', ''],
       ['whitespace-only', '   '],
