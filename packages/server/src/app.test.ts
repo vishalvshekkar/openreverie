@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import {
   createServer,
   type IncomingHttpHeaders,
@@ -1011,6 +1011,30 @@ describe('dream detail merges feedback verdicts from the dream log', () => {
   })
 
   it('omits verdict rather than failing when the dream log has nothing for that insight', async () => {
+    const response = await dreamVerdictRequest(
+      host,
+      'GET',
+      '/api/v1/dreams/dream_full',
+      undefined,
+      {
+        cookie,
+      },
+    )
+    expect(response.status).toBe(200)
+    const insights = (
+      response.json as { data: { insights: { insightId: string; verdict?: string }[] } }
+    ).data.insights
+    expect(insights[0]?.verdict).toBeUndefined()
+  })
+
+  it('omits verdicts rather than 500ing when the dream log itself is corrupt', async () => {
+    // A crash mid-append, or a hand-edited file, can leave dreams/log.jsonl
+    // holding a line that is not valid JSON. Reading dream detail must still
+    // succeed for a person in that state, just without any verdicts.
+    const paths = memoryPaths(memoryDir)
+    await mkdir(paths.dreamsDir, { recursive: true })
+    await writeFile(paths.dreamLog, 'not valid json\n', 'utf8')
+
     const response = await dreamVerdictRequest(
       host,
       'GET',

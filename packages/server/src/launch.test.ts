@@ -302,4 +302,67 @@ describe('createServerLauncher', () => {
     expect(closeHttpServer).toHaveBeenCalledOnce()
     expect(engineClose).toHaveBeenCalledOnce()
   })
+
+  // The server-timer gate in launch.ts (config.dreaming.enabled &&
+  // config.dreaming.triggers.serverTimer) is the only place that enforces an
+  // operator's choice to keep unsolicited dreaming off. These three cases
+  // check the actual argument createRegistry was called with, not
+  // expect.objectContaining, since objectContaining ignores a key's absence
+  // and would pass whether or not the gate exists at all.
+  it('passes a dreamTrigger to createRegistry when dreaming is enabled and the server timer trigger is on', async () => {
+    deps.loadConfig = vi.fn(async () => ({
+      ...config(dir),
+      dreaming: {
+        enabled: true,
+        cadence: 'daily' as const,
+        triggers: { afterSession: true, onStart: true, serverTimer: true },
+        maxToolCalls: 10,
+      },
+    }))
+
+    await createServerLauncher(deps)({ write: () => {} })
+
+    const calls = (deps.createRegistry as ReturnType<typeof vi.fn>).mock.calls
+    expect(calls).toHaveLength(1)
+    const call = calls[0]?.[0] as { dreamTrigger?: () => Promise<unknown> }
+    expect(typeof call.dreamTrigger).toBe('function')
+  })
+
+  it('passes no dreamTrigger to createRegistry when dreaming is disabled entirely', async () => {
+    deps.loadConfig = vi.fn(async () => ({
+      ...config(dir),
+      dreaming: {
+        enabled: false,
+        cadence: 'daily' as const,
+        triggers: { afterSession: true, onStart: true, serverTimer: true },
+        maxToolCalls: 10,
+      },
+    }))
+
+    await createServerLauncher(deps)({ write: () => {} })
+
+    const calls = (deps.createRegistry as ReturnType<typeof vi.fn>).mock.calls
+    expect(calls).toHaveLength(1)
+    const call = calls[0]?.[0] as object
+    expect(Object.hasOwn(call, 'dreamTrigger')).toBe(false)
+  })
+
+  it('passes no dreamTrigger to createRegistry when dreaming is enabled but the server timer trigger is off', async () => {
+    deps.loadConfig = vi.fn(async () => ({
+      ...config(dir),
+      dreaming: {
+        enabled: true,
+        cadence: 'daily' as const,
+        triggers: { afterSession: true, onStart: true, serverTimer: false },
+        maxToolCalls: 10,
+      },
+    }))
+
+    await createServerLauncher(deps)({ write: () => {} })
+
+    const calls = (deps.createRegistry as ReturnType<typeof vi.fn>).mock.calls
+    expect(calls).toHaveLength(1)
+    const call = calls[0]?.[0] as object
+    expect(Object.hasOwn(call, 'dreamTrigger')).toBe(false)
+  })
 })
