@@ -12,6 +12,49 @@ item ships, remove it from here and record it in `ROADMAP.md`'s Done narrative.
 
 ## 1. Known defects and gaps
 
+- **`journaling.md` is being overwritten with a session summary every journal session, destroying
+  the person's actual journaling setup.** `journaling.md` is a maintained document: it is meant to
+  hold how this person journals, the format they settled on and the frame around it. Instead, each
+  journal-mode session rewrites the whole file with prose summarizing what happened in that
+  session. The real setup survived for one commit and has been gone since.
+  - Why deferred: not deferred by anyone's decision. Reported by the owner on 2026-08-25 ("my
+    journaling methodology choice I'd made about four or five days ago has gotten erased into like
+    a journal file markdown file with like just boilerplate text"), asked to be recorded and
+    investigated rather than fixed on the spot, with the explicit instruction that it must not be
+    called a non-issue without investigation.
+  - Evidence, from `git log --follow -- journaling.md` in the owner's own memory folder, which
+    makes this recurring rather than a one-time loss. The correct content appears once, at
+    `942cc40` (2026-08-20 13:49): "Journaling is set up as an open-format practice with a very
+    light frame: one or two simple openers, responsive follow-ups, gentle nudging, and backing off
+    when Vishal shows resistance. The target is most evenings for about 5-10 minutes, adjustable as
+    needed." Every commit after that replaces it with a session narrative instead:
+    `aecce52` (08-21 21:00) "This conversation was recorded as Vishal's journal entry for the
+    evening..."; `7b1e04c` (08-22 16:33) "Corrected the movie timeline: Halcyon was the Ashford
+    family outing..."; `9c3ab27` (08-25 16:55) "Nightfall with Arjun took place on Sunday..."; and
+    finally `59f2d15` (08-25 22:30) "Vishal selected journal mode for this session." Eight rewrites
+    in five days, none of which describe a journaling method.
+  - Where the thinking already lives: the `update_journaling_protocol` tool in
+    `packages/core/src/tools.ts`, whose own description says to call it "with the complete new
+    document body, full prose, a whole rewrite, never a diff", which is exactly the shape that
+    turns one wrong call into total loss; `buildJournalModeParagraph` and
+    `JOURNALING_PROTOCOL_ABSENT` in `packages/core/src/journaling.ts`; the journal-mode branch of
+    `_doEndSession` in `packages/memory/src/engine.ts`, which writes a journal entry on session
+    end; and `docs/superpowers/specs/2026-08-17-modes-profile-settings-plan.md` for the original
+    design of what this document is for.
+  - Two things to establish before fixing. First, whether the bad write comes from the model
+    calling `update_journaling_protocol` with a session summary (a prompt problem) or from
+    reflection writing session prose into this path (a code problem); the transcripts and
+    `graph.jsonl` for the sessions named above will say which. Second, whether a whole-document
+    rewrite tool is the right shape at all for a document whose whole value is that it persists:
+    every other maintained document in this project is revised, not replaced wholesale, and the
+    same class of "one bad call erases everything" risk applies to `update_profile` and to arc
+    narratives.
+  - Trigger to pick up: already triggered. The owner's setup is currently lost and the next journal
+    session will overwrite the file again.
+  - Rough size: small to medium to diagnose and fix once the cause above is known. Recovering the
+    owner's own lost setup is separate and trivial, since `git show 942cc40:journaling.md` in the
+    memory folder still has it.
+
 - **A newer chat model can quietly stop using memory, and nothing in openreverie notices.**
   Observed on 2026-08-20 against v0.6.0 by changing `models.chat` in `config.toml` from `gpt-5`
   to `gpt-5.1` and back, with no code change in between. On `gpt-5.1` the companion answered
