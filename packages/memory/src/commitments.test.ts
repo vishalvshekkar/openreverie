@@ -237,8 +237,78 @@ describe('selectCommitments', () => {
   })
 
   it('never surfaces a commitment waiting on something, whatever its timing', () => {
-    const c = { ...base, waitsOn: 'entity_01WEDDING' }
+    // Carries an otherwise-eligible timing so this test actually exercises
+    // the waitsOn check: with no timing at all the commitment would be
+    // excluded anyway (untimed commitments are never time-eligible, see
+    // the untimed tests below), which would make this pass for the wrong
+    // reason.
+    const c = {
+      ...base,
+      waitsOn: 'entity_01WEDDING',
+      timing: {
+        words: 'sunday',
+        anchor: '2026-08-22T00:00:00.000Z',
+        resolved: { from: '2026-08-30', to: '2026-08-30', statedPrecision: 'day' as const },
+      },
+    }
     expect(selectCommitments([c], '2026-08-30', 5)).toHaveLength(0)
+  })
+
+  it('never surfaces a resolved commitment, done or dropped, whatever its timing', () => {
+    // Critical 1: selectCommitments must allow-list 'open' rather than
+    // deny-list a fixed set of excluded states, so a commitment the model
+    // has already resolved does not keep loading into the prompt forever.
+    const timing = {
+      words: 'sunday',
+      anchor: '2026-08-22T00:00:00.000Z',
+      resolved: { from: '2026-08-23', to: '2026-08-23', statedPrecision: 'day' as const },
+    }
+    const done = { ...base, state: 'done' as const, timing }
+    const dropped = { ...base, state: 'dropped' as const, timing }
+    const unknown = { ...base, state: 'unknown' as const, timing }
+    expect(selectCommitments([done], '2026-08-23', 5)).toHaveLength(0)
+    expect(selectCommitments([dropped], '2026-08-23', 5)).toHaveLength(0)
+    expect(selectCommitments([unknown], '2026-08-23', 5)).toHaveLength(0)
+  })
+
+  it('never surfaces a commitment with no timing at all, or an interpretation with no bracket', () => {
+    // Important 8 / spec Section 4: eligibility is defined positively as
+    // "today falls within its bracket, or within a lead time before it".
+    // An untimed commitment has no bracket and can never satisfy that, so
+    // it never reaches this always-on standing section. It still reaches
+    // the model through search, which is unaffected by selectCommitments.
+    const untimed = { ...base }
+    const noBracket = {
+      ...base,
+      timing: {
+        words: 'someday',
+        anchor: '2026-08-22T00:00:00.000Z',
+        interpretation: {
+          statedPrecision: 'vague' as const,
+          gloss: 'No particular time given.',
+          interpretationConfidence: 'low' as const,
+        },
+      },
+    }
+    expect(selectCommitments([untimed], '2026-08-30', 5)).toHaveLength(0)
+    expect(selectCommitments([noBracket], '2026-08-30', 5)).toHaveLength(0)
+  })
+
+  it('goes quiet on its own after the grace period, and stays eligible up to its last day', () => {
+    // Ruling 10: the interim bound standing in for askedAt/unknown. The
+    // window closes 2026-08-23; ASK_GRACE_DAYS (14) makes 2026-09-06 the
+    // last eligible day and 2026-09-07 the first day it is no longer
+    // surfaced through this section, with no outcome ever recorded.
+    const c = {
+      ...base,
+      timing: {
+        words: 'sunday',
+        anchor: '2026-08-22T00:00:00.000Z',
+        resolved: { from: '2026-08-23', to: '2026-08-23', statedPrecision: 'day' as const },
+      },
+    }
+    expect(selectCommitments([c], '2026-09-06', 5)).toHaveLength(1)
+    expect(selectCommitments([c], '2026-09-07', 5)).toHaveLength(0)
   })
 })
 
@@ -256,9 +326,28 @@ function stripComments(source: string): string {
   )
 }
 
+// Important 7: the original scan opened only commitments.ts, which does
+// not hold the schema it was meant to guard. CommitmentState,
+// CommitmentPayload and the two commitment zod schemas all live in
+// graph.ts, so an `overdue` field added there sailed through with the
+// whole suite green. Add it here.
+//
+// engine.ts and reflection.ts were considered too (the review names both
+// as places that could render a lateness phrase) and deliberately left
+// out: both contain the plain English word "failed" in code strings that
+// have nothing to do with commitment lateness (a materialization-failed
+// proposal message, a reflection retry-validation message), so scanning
+// them whole turns this tripwire into permanent noise rather than a
+// sharper guard. Narrowing the scan to only the commitment-touching
+// regions of those two large, shared files would be more surgical but
+// also more fragile than a file-level scan is meant to be; this is a
+// crude tripwire by design (see the comment on the test below), and
+// crude tools should stay scoped to files that are actually about the
+// thing they guard.
+const COMMITMENT_OWNING_FILES = ['./commitments.ts', './graph.ts']
+
 describe('no-overdue-state guarantee', () => {
-  it('has no state, field or helper expressing lateness', () => {
-    const source = readFileSync(new URL('./commitments.ts', import.meta.url), 'utf8')
+  it('has no state, field or helper expressing lateness, across every file that owns or renders the commitment shape', () => {
     // Spec section 6: if the data cannot express "you failed to do this",
     // nothing downstream can render it. This test is a crude string scan
     // of the code with comments stripped out, not a type system, and that
@@ -268,13 +357,19 @@ describe('no-overdue-state guarantee', () => {
     // an innocent usage, the right fix is to rename that usage, not to
     // weaken the scan. The correct state for a passed window with no
     // recorded outcome is simply open (unknown).
-    const code = stripComments(source)
-    for (const forbidden of ['overdue', 'isLate', 'missed', 'pastDue', 'failed']) {
-      expect(code.toLowerCase()).not.toContain(forbidden.toLowerCase())
+    for (const relativePath of COMMITMENT_OWNING_FILES) {
+      const source = readFileSync(new URL(relativePath, import.meta.url), 'utf8')
+      const code = stripComments(source)
+      for (const forbidden of ['overdue', 'isLate', 'missed', 'pastDue', 'failed']) {
+        expect(
+          code.toLowerCase(),
+          `${relativePath} contains forbidden word "${forbidden}"`,
+        ).not.toContain(forbidden.toLowerCase())
+      }
     }
   })
 
-  it('leaves a passed window open rather than marking it anything', () => {
+  it('leaves a passed window open rather than marking it anything, until the interim grace bound (Ruling 10) closes it', () => {
     const c = {
       id: 'c1',
       label: 'x',
@@ -287,10 +382,11 @@ describe('no-overdue-state guarantee', () => {
         resolved: { from: '2026-08-23', to: '2026-08-23', statedPrecision: 'day' as const },
       },
     }
-    // A month later it is still simply open. Unresolved is an ordinary,
-    // unjudged condition. Once time-eligible, a commitment stays eligible
-    // to allow for the one follow-up question (spec Section 6).
-    expect(c.state).toBe('open')
-    expect(selectCommitments([c], '2026-09-23', 5)).toHaveLength(1)
+    // Unresolved is an ordinary, unjudged condition: state stays 'open'.
+    // What changes is standing-prompt eligibility, which is bounded by
+    // the interim grace period (see ASK_GRACE_DAYS in commitments.ts)
+    // rather than left open forever.
+    expect(selectCommitments([c], '2026-08-24', 5)).toHaveLength(1)
+    expect(selectCommitments([c], '2026-09-23', 5)).toHaveLength(0)
   })
 })

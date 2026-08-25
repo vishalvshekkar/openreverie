@@ -3231,7 +3231,16 @@ describe('MemoryEngine', () => {
         label: 'Call the dentist',
         flavor: 'errand',
         sessionId: 'session_test',
-        timing: { words: 'tomorrow', anchor: '2026-08-13T20:30:00.000Z' },
+        // A resolved window is required for eligibility (Important 8): an
+        // unresolved, unglossed timing has no bracket to be eligible
+        // through. 2026-08-14 is the local day the commitment is said on
+        // (the property this test is actually about), and also the local
+        // "today" of the sessionContext call below, so the window is open.
+        timing: {
+          words: 'tomorrow',
+          anchor: '2026-08-13T20:30:00.000Z',
+          resolved: { from: '2026-08-14', to: '2026-08-14', statedPrecision: 'day' },
+        },
       })
 
       const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
@@ -3244,7 +3253,12 @@ describe('MemoryEngine', () => {
       await engine.close()
     })
 
-    it('carries a commitment with no timing at all as its label only, nothing trailing', async () => {
+    it('excludes a commitment with no timing at all: spec Section 4 defines eligibility only in terms of a bracket', async () => {
+      // Important 8: an untimed ("someday") commitment has no bracket and
+      // can never fall within one, or within a lead time before one, so it
+      // is never eligible through this standing, always-rendered section.
+      // It still reaches the model through search, unaffected by
+      // selectCommitments.
       await recordCommitment(paths, {
         label: 'Do something, someday',
         flavor: 'errand',
@@ -3254,7 +3268,7 @@ describe('MemoryEngine', () => {
       const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
       const context = await engine.sessionContext()
 
-      expect(context.commitments).toEqual([{ label: 'Do something, someday' }])
+      expect(context.commitments).toEqual([])
 
       await engine.close()
     })
@@ -3286,15 +3300,48 @@ describe('MemoryEngine', () => {
     })
 
     it('excludes a quiet commitment even when its window is eligible', async () => {
+      // Carries a real, currently-eligible timing so this test actually
+      // exercises the quiet filter: an untimed commitment would be
+      // excluded anyway (see the untimed test above), which would make
+      // this pass for the wrong reason.
       const recorded = await recordCommitment(paths, {
         label: 'Call the dentist',
         flavor: 'errand',
         sessionId: 'session_test',
+        timing: {
+          words: 'today',
+          anchor: '2026-08-14T09:00:00.000Z',
+          resolved: { from: '2026-08-14', to: '2026-08-14', statedPrecision: 'day' },
+        },
       })
       await resolveCommitment(paths, recorded.id, 'quiet')
 
       const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
-      const context = await engine.sessionContext()
+      const context = await engine.sessionContext(new Date('2026-08-14T00:00:00.000Z'))
+
+      expect(context.commitments).toEqual([])
+
+      await engine.close()
+    })
+
+    it('excludes a resolved commitment (done or dropped) even when its window is eligible', async () => {
+      // Critical 1: the allow-list fix. A resolved commitment must not
+      // keep loading into the prompt after the model has recorded an
+      // outcome for it.
+      const recorded = await recordCommitment(paths, {
+        label: 'Call the dentist',
+        flavor: 'errand',
+        sessionId: 'session_test',
+        timing: {
+          words: 'today',
+          anchor: '2026-08-14T09:00:00.000Z',
+          resolved: { from: '2026-08-14', to: '2026-08-14', statedPrecision: 'day' },
+        },
+      })
+      await resolveCommitment(paths, recorded.id, 'done')
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const context = await engine.sessionContext(new Date('2026-08-14T00:00:00.000Z'))
 
       expect(context.commitments).toEqual([])
 

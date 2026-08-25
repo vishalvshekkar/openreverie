@@ -604,7 +604,11 @@ describe('assembleSystemPrompt', () => {
       await engine.close()
     })
 
-    it('renders a commitment with no timing at all as its label alone', async () => {
+    it('never renders a commitment with no timing at all: it has no bracket to ever fall inside', async () => {
+      // Important 8 / spec Section 4: eligibility is "today falls within
+      // its bracket, or within a lead time before it". An untimed
+      // ("someday") commitment has no bracket, so it can never satisfy
+      // that and never reaches this standing, always-rendered section.
       await pinTimezoneUtc(paths)
       await markNotFirstSession()
       await recordCommitment(paths, {
@@ -616,10 +620,8 @@ describe('assembleSystemPrompt', () => {
       const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
       const prompt = await assembleSystemPrompt(engine, testConfig())
 
-      expect(prompt).toContain('## Commitments')
-      const lines = prompt.split('\n')
-      const line = lines.find((l) => l.includes('Do something, someday'))
-      expect(line).toBe('- Do something, someday')
+      expect(prompt).not.toContain('## Commitments')
+      expect(prompt).not.toContain('Do something, someday')
 
       await engine.close()
     })
@@ -631,10 +633,20 @@ describe('assembleSystemPrompt', () => {
         label: 'Call the dentist',
         flavor: 'errand',
         sessionId: 'session_test',
+        timing: {
+          words: 'today',
+          anchor: '2026-08-14T09:00:00.000Z',
+          resolved: { from: '2026-08-14', to: '2026-08-14', statedPrecision: 'day' },
+        },
       })
 
       const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
-      const prompt = await assembleSystemPrompt(engine, testConfig())
+      const prompt = await assembleSystemPrompt(
+        engine,
+        testConfig(),
+        'general',
+        () => new Date('2026-08-14T00:00:00.000Z'),
+      )
 
       expect(prompt).toContain('## Commitments')
       expect(prompt).toContain('is evidence the person said they meant to do something')

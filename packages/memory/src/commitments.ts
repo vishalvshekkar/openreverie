@@ -264,40 +264,90 @@ function windowStart(
   return undefined
 }
 
+// The window's far edge, read off whichever timing branch is present.
+// resolved.to is always there alongside resolved.from. On the
+// interpretation branch bracketTo is optional even when bracketFrom is
+// present (a model can gloss a start without a stop), so a bracket with
+// no end falls back to treating its start as a single-day point window
+// rather than leaving the window open-ended, which is exactly the
+// unbounded shape the grace period below exists to close off. Returns
+// undefined only when windowStart itself would: nothing to bound at all.
+function windowEnd(timing: CommitmentTiming): string | undefined {
+  if (timing.resolved !== undefined) {
+    return timing.resolved.to
+  }
+  if (timing.interpretation?.bracketFrom !== undefined) {
+    return timing.interpretation.bracketTo ?? timing.interpretation.bracketFrom
+  }
+  return undefined
+}
+
+// Days a commitment stays eligible after its window closes with no
+// recorded outcome, before it goes quiet on its own. This is an interim
+// anti-nag guard standing in for spec Section 6's own mechanism ("Asking
+// it sets askedAt. It is never raised again and resolves to unknown."):
+// nothing in this codebase yet lets a live session signal that the
+// companion actually raised a commitment, so there is no honest way to
+// set askedAt today (see BACKLOG.md for the real mechanism, deferred).
+// Bounding time eligibility is not the spec's design, it is a stand-in
+// that gets most of the same anti-taskmaster effect (a passed-window
+// commitment stops surfacing on its own) without inventing a fake
+// askedAt. Chosen to cover roughly one to two sessions of calendar time
+// for someone who talks weekly, no more: long enough that a person who
+// checks in every week or two still gets the one natural follow-up, short
+// enough that it cannot read as nagging months later.
+const ASK_GRACE_DAYS = 14
+
 // Whether a commitment's own timing puts it in the eligible window, given
-// its lead time. A commitment with no computable window (timing absent
-// entirely, or an interpretation with no bracket at all) has nothing for
-// the calendar to gate on, so this returns true rather than false: spec
-// Section 3's "never by the calendar" for open-ended commitments is
-// honored by never inventing a bracket for them, not by hiding them here.
+// its lead time before the window opens and its grace period after the
+// window closes. A commitment with no computable window at all (timing
+// absent entirely, or an interpretation with no bracket at all) has
+// nothing for the calendar to gate on, so it is never eligible through
+// this standing, always-rendered section: spec Section 4 defines
+// eligibility positively ("today falls within its bracket, or within a
+// lead time before it"), which an unbounded commitment can never satisfy,
+// and spec Section 3's "surfaced only when the conversation touches the
+// subject, never by the calendar" for that case describes retrieval
+// (search), not this always-on prompt section. A live-tool commitment
+// with an unresolvable stated time and no gloss yet (buildCommitmentTiming
+// in engine.ts, the refused branch) is therefore not eligible until
+// reflection glosses it at session end; that is correct, not a gap, since
+// reflection is what attaches the bracket this function reads.
 // The event-anchored case (waitsOn set, no timing at all, per spec Section
 // 5) is excluded by the dedicated waitsOn check in selectCommitments, not
 // by this function.
-//
-// Deliberately no upper bound: once eligible, a commitment stays eligible
-// past its window closing. Spec Section 6 requires exactly this ("did you
-// end up going" is a valid one-time follow-up after the date has passed
-// with no outcome recorded), and there is no overdue state anywhere in
-// this feature to compute an upper bound from in the first place.
 function isTimeEligible(timing: CommitmentTiming | undefined, today: string): boolean {
-  if (timing === undefined) return true
+  if (timing === undefined) return false
   const start = windowStart(timing)
-  if (start === undefined) return true
+  if (start === undefined) return false
   const lead = LEAD_DAYS_BY_STATED_PRECISION[start.statedPrecision]
   const eligibleFrom = shiftDate(start.from, -lead)
-  return today >= eligibleFrom
+  const end = windowEnd(timing) ?? start.from
+  const eligibleUntil = shiftDate(end, ASK_GRACE_DAYS)
+  return today >= eligibleFrom && today <= eligibleUntil
 }
 
 // Selects which commitments are worth surfacing today, capped like every
-// other prompt section in this codebase (spec Section 4). Three checks
-// here are not implementation detail, they are the anti-taskmaster
-// guarantees from spec Section 6 and each is load-bearing on its own:
-// askedAt (one ask, then permanent silence), quiet (honored permanently,
-// no exceptions for timing), and waitsOn (never surfaced by time at all,
-// only once the awaited thing is recorded as having happened).
+// other prompt section in this codebase (spec Section 4). The state check
+// is an ALLOW-LIST, not a deny-list, and that is deliberate, not
+// stylistic: a deny-list here (excluding only 'quiet') is exactly the bug
+// that shipped. It excluded the one state someone thought to name at the
+// time and silently admitted every state added since, including 'done'
+// and 'dropped', so a commitment the model had already resolved kept
+// loading into the prompt forever, under a header saying it is never
+// evidence the person did it. Only 'open' is ever eligible. Do not
+// convert this back to a deny-list: a sixth state added later must
+// default to not-surfaced, not surfaced.
+//
+// The other two checks are also not implementation detail: they are the
+// remaining anti-taskmaster guarantees from spec Section 6, each
+// load-bearing on its own: askedAt (one ask, then permanent silence,
+// though nothing yet writes askedAt in production, see BACKLOG.md) and
+// waitsOn (never surfaced by time at all, only once the awaited thing is
+// recorded as having happened).
 export function selectCommitments(all: Commitment[], today: string, cap: number): Commitment[] {
   const eligible = all.filter((commitment) => {
-    if (commitment.state === 'quiet') return false
+    if (commitment.state !== 'open') return false
     if (commitment.askedAt !== undefined) return false
     if (commitment.waitsOn !== undefined) return false
     return isTimeEligible(commitment.timing, today)
