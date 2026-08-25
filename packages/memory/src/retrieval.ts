@@ -240,17 +240,28 @@ export function fuseByReciprocalRank(lists: SearchHit[][]): DocumentHit[] {
 // Orders two equally-scored document hits by recency, more recent first.
 // Compares dateEnd, the later edge of the span (documentDateSpan), as the
 // closest reading of "how recent is this content"; a weekly rollup's
-// dateEnd is its Sunday, not its Monday. A hit missing a span on either
-// side (a living document: constitution, realm, arc, person, journaling)
-// is not compared at all and returns 0, the "no preference" result: an
-// absent date must not be read as very old, which would bury living
-// documents under every dated tie, or very recent, which would falsely
-// promote them above a genuinely more relevant dated document. Two equal
-// dates also return 0, for the same reason a tie is a tie.
+// dateEnd is its Sunday, not its Monday. Two equal dates return 0, a tie
+// staying a tie.
+//
+// A hit missing a span (a living document: constitution, realm, arc,
+// person, journaling) sorts after every dated hit, never before. This is
+// a change from the original "return 0, no preference" rule for that
+// case, made because that rule broke the comparator's own contract:
+// returning 0 for "not comparable" is not the same as returning 0 for
+// "equal", and Array.prototype.sort requires a genuine total order.
+// With the old rule, three hits tied on score (one dated and old, one
+// undated, one dated and much newer) could sort the old dated hit ABOVE
+// the newer one, backwards from "more recent first", purely because an
+// unrelated undated hit joined the same tie and the outcome depended on
+// V8's sort implementation and the hits' arrival order, not on any rule
+// stated here. Giving the undated case an explicit, fixed position (last)
+// restores transitivity and keeps the original intent for the two-hit
+// case: an absent date is never read as very recent, so it can never
+// falsely promote a living document above a genuinely tied dated one.
 function recencyTiebreak(a: DocumentHit, b: DocumentHit): number {
-  if (a.dateEnd === undefined || b.dateEnd === undefined || a.dateEnd === b.dateEnd) {
-    return 0
-  }
+  if (a.dateEnd === b.dateEnd) return 0
+  if (a.dateEnd === undefined) return 1
+  if (b.dateEnd === undefined) return -1
   return a.dateEnd > b.dateEnd ? -1 : 1
 }
 

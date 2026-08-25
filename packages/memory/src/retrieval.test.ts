@@ -463,18 +463,53 @@ describe('fuseByReciprocalRank recency tiebreak (A6)', () => {
     expect(fused.map((h) => h.docId)).toEqual(['doc_new', 'doc_old'])
   })
 
-  it('does not penalize or promote a document with no date span when scores tie', () => {
+  it('sorts a document with no date span after a dated one when scores tie, regardless of input order (Important 2 / 7)', () => {
+    // The original version of this test only ran with the undated hit
+    // first in the input, which cannot distinguish "declined to compare,
+    // arrival order preserved" from "the undated hit was actually sorted
+    // to the front": both produce the same output on a single ordering.
+    // Running both orderings and asserting the SAME output order is what
+    // actually pins the comparator's decision, and closes the gap the
+    // review named: this test used to pass even with the promote bug
+    // (undated always winning ties) in place, because it only ever
+    // exercised the ordering that bug agrees with.
     const living = chunkHit({ docId: 'doc_living', kind: 'arc' })
     const dated = chunkHit({ docId: 'doc_dated', dateStart: '2026-08-01', dateEnd: '2026-08-01' })
 
-    // living is processed first (list index 0), so it is the first entry
-    // scoreByDocId records; a tiebreak that correctly declines to compare
-    // (rather than reading the missing date as very old, or very new)
-    // leaves that pre-existing order alone, in either direction.
-    const fused = fuseByReciprocalRank([[living], [dated]])
+    const livingFirst = fuseByReciprocalRank([[living], [dated]])
+    expect(livingFirst[0]?.score).toBe(livingFirst[1]?.score)
+    expect(livingFirst.map((h) => h.docId)).toEqual(['doc_dated', 'doc_living'])
 
-    expect(fused[0]?.score).toBe(fused[1]?.score)
-    expect(fused.map((h) => h.docId)).toEqual(['doc_living', 'doc_dated'])
+    const datedFirst = fuseByReciprocalRank([[dated], [living]])
+    expect(datedFirst.map((h) => h.docId)).toEqual(['doc_dated', 'doc_living'])
+  })
+
+  it('keeps a total order across a three-way tie: an undated hit joining the tie never reorders two dated hits (Important 2)', () => {
+    // Before the fix, recencyTiebreak returned 0 ("no preference") for
+    // ANY comparison involving an undated hit, which is not the same as
+    // 0 meaning "equal": Array.prototype.sort requires a genuine total
+    // order, and this broke it. doc_old could rank ABOVE doc_new, despite
+    // an identical score and an eight-month-older date, purely because
+    // doc_living happened to sit between them in the arrival order that
+    // fuseByReciprocalRank's Map iteration produced. Every one of the six
+    // orderings below must now produce the same output: most recent
+    // first, undated last.
+    const older = chunkHit({ docId: 'doc_old', dateStart: '2026-01-05', dateEnd: '2026-01-05' })
+    const living = chunkHit({ docId: 'doc_living', kind: 'arc' })
+    const newer = chunkHit({ docId: 'doc_new', dateStart: '2026-08-23', dateEnd: '2026-08-23' })
+
+    const orderings = [
+      [older, living, newer],
+      [newer, living, older],
+      [living, older, newer],
+      [older, newer, living],
+      [newer, older, living],
+      [living, newer, older],
+    ]
+    for (const ordering of orderings) {
+      const fused = fuseByReciprocalRank(ordering.map((hit) => [hit]))
+      expect(fused.map((h) => h.docId)).toEqual(['doc_new', 'doc_old', 'doc_living'])
+    }
   })
 
   it('does not let recency override a genuine score difference', () => {

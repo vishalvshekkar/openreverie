@@ -201,21 +201,19 @@ export class AgentSession {
     options: AgentSessionOptions = {},
   ): Promise<AgentSession> {
     const mode = options.mode ?? 'general'
-    const system = await assembleSystemPrompt(engine, config, mode)
+    // Important 4 (part one): assembleSystemPrompt's own injectable clock
+    // is only useful if AgentSession actually passes its clock to it.
+    // Computed once here, ahead of the call, rather than passing
+    // options.now directly, so a caller that omits options.now keeps
+    // reading the real wall clock unchanged, the same default
+    // assembleSystemPrompt itself falls back to.
+    const now = options.now ?? (() => new Date())
+    const system = await assembleSystemPrompt(engine, config, mode, now)
     const sessionId = await engine.startSession()
     // Recorded from the session's first moment, so a process that dies
     // before /bye still leaves the mode where reflection can find it.
     await engine.setSessionMode(sessionId, mode)
-    return new AgentSession(
-      engine,
-      chat,
-      config.models.chat,
-      system,
-      sessionId,
-      config,
-      options.now ?? (() => new Date()),
-      mode,
-    )
+    return new AgentSession(engine, chat, config.models.chat, system, sessionId, config, now, mode)
   }
 
   // The one place a session's mode changes, from all three callers. Each
@@ -244,7 +242,7 @@ export class AgentSession {
   // the codebase is buried inside runTurn, and a /style change would apply
   // no earlier than the next session.
   async refreshSystemPrompt(): Promise<void> {
-    this.system = await assembleSystemPrompt(this.engine, this.config, this.activeMode)
+    this.system = await assembleSystemPrompt(this.engine, this.config, this.activeMode, this.now)
   }
 
   async *send(userText: string): AsyncIterable<AgentEvent> {
@@ -420,7 +418,12 @@ export class AgentSession {
         // during the first conversation. Messages already stamped keep the
         // stamp they were written with and are never re-rendered.
         if (toolCall.name === 'update_profile' && !this.resultHasError(result)) {
-          this.system = await assembleSystemPrompt(this.engine, this.config, this.activeMode)
+          this.system = await assembleSystemPrompt(
+            this.engine,
+            this.config,
+            this.activeMode,
+            this.now,
+          )
         }
 
         // Same reasoning as update_profile above: journaling.md feeds

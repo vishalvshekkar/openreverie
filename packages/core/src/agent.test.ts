@@ -9,6 +9,9 @@ import {
   MemoryEngine,
   type MemoryPaths,
   memoryPaths,
+  newId,
+  SessionStore,
+  writeDocumentAtomic,
   writeProfile,
 } from '@openreverie/memory'
 import {
@@ -598,6 +601,50 @@ describe('AgentSession', () => {
       'The current local time is Mon 2026-08-17 01:30 Asia/Kolkata.',
     )
     expect(chat.requests[0]?.system).toContain('## Speak first')
+
+    await engine.close()
+  })
+
+  it("actually reads AgentSession's injected clock for prompt assembly, not the wall clock (Important 4, part one)", async () => {
+    // A session dated in 2020: under the real wall clock it is years
+    // outside the seven-day recent-sessions window no matter when this
+    // suite runs, so it can only appear in the rendered system prompt if
+    // AgentSession.start actually threads its own `now` (also pinned in
+    // 2020 here) into assembleSystemPrompt, rather than letting that call
+    // fall back to reading the real wall clock internally. Mirrors
+    // context.test.ts's "actually reads the injected clock" test one
+    // layer up, at the AgentSession boundary that test cannot reach.
+    const startedAt = new Date('2020-01-01T09:00:00.000Z')
+    const store = await SessionStore.start(memoryPaths(dir), startedAt, 'UTC')
+    await store.appendLine({ ts: startedAt.toISOString(), role: 'user', content: 'Hello.' })
+    await writeDocumentAtomic({
+      path: join(store.dir, 'summary.md'),
+      meta: {
+        id: newId('doc'),
+        kind: 'summary',
+        session: store.sessionId,
+        date: '2020-01-01',
+        items: [],
+      },
+      body: 'A session from 2020, only recent to a clock pinned near it.\n',
+    })
+
+    const chat = new FakeChatProvider([{ text: 'Hello again.', toolCalls: [] }])
+    // maintenance: false, so opening the engine does not itself consume
+    // this FakeChatProvider's queued response reflecting or rolling up
+    // the 2020 session (it is old enough to be stale by any real clock).
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat), { maintenance: false })
+    const session = await AgentSession.start(engine, testConfig(), chat, {
+      // Two days after the 2020 session, well inside the seven-day recent
+      // window, but only when the prompt is assembled against THIS clock.
+      now: () => new Date('2020-01-03T09:00:00.000Z'),
+    })
+
+    await collect(session.greet())
+
+    const system = chat.requests[0]?.system ?? ''
+    expect(system).toContain('## Recent sessions')
+    expect(system).toContain('A session from 2020, only recent to a clock pinned near it.')
 
     await engine.close()
   })
