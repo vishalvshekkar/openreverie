@@ -1565,11 +1565,11 @@ git commit -m "feat(server): dream timer trigger and dreams endpoints"
 - Dreams view: list of dreams newest first (date, insight count, narrative badge); selecting one shows the narrative (Markdown component) and, separately below it, the insights, each with its kind, claim, confidence, and three buttons (Right / Wrong / Don't bring this up) that call `sendDreamFeedback` and reflect the recorded verdict; the process log behind a `<details>` disclosure rendered as preformatted lines. Narrative and insights are visually distinct sections, matching the two-file split.
 - Settings view: a Dreams block editing `dreams.voice` (select), `dreams.openerMention`, `dreams.promptSection` (checkboxes) through the profile PATCH; display-only note that enabling dreaming itself and its cadence live in config.toml.
 
-- [ ] **Step 1: Write the failing tests** (render with a stub AppApi: list renders rows; feedback button calls the api with the right verdict; empty state says dreaming has not run yet, without pretending it is on).
+- [x] **Step 1: Write the failing tests** (render with a stub AppApi: list renders rows; feedback button calls the api with the right verdict; empty state says dreaming has not run yet, without pretending it is on).
 
-- [ ] **Step 2: Run, verify failure.** **Step 3: Implement.** **Step 4: Run `pnpm vitest run packages/web` and `pnpm build` (vite build must pass), verify.**
+- [x] **Step 2: Run, verify failure.** **Step 3: Implement.** **Step 4: Run `pnpm vitest run packages/web` and `pnpm build` (vite build must pass), verify.**
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/web/src/api.ts packages/web/src/App.tsx packages/web/src/views/Dreams.tsx packages/web/src/views/dreams.css packages/web/src/views/Settings.tsx packages/web/src/views/Dreams.test.tsx
