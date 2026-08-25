@@ -10,6 +10,7 @@ import { stat } from 'node:fs/promises'
 import { createServer, type Server } from 'node:http'
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { loadConfig, resolveApiKey } from '@openreverie/core'
 import { MemoryEngine } from '@openreverie/memory'
 import { createChatProvider, createEmbeddingProvider } from '@openreverie/providers'
@@ -18,10 +19,46 @@ import { createBootstrapAuth } from './auth.js'
 import { createServerLauncher } from './launch.js'
 import { createLiveSessionRegistry } from './registry.js'
 
-const require = createRequire(import.meta.url)
+// Named nodeRequire, not require: the bundle produced by
+// packages/cli/scripts/bundle.mjs injects its own top-level `require`
+// binding (via a banner calling createRequire), which esbuild's runtime
+// shim for other bundled CommonJS dependencies' own require() calls looks
+// up by that exact global name. A second top-level `const require` here
+// would collide with it in the bundled output.
+const nodeRequire = createRequire(import.meta.url)
 
-async function resolveStaticDir(): Promise<string> {
-  const webPackage = require.resolve('@openreverie/web/package.json')
+async function isFile(path: string): Promise<boolean> {
+  try {
+    const info = await stat(path)
+    return info.isFile()
+  } catch {
+    return false
+  }
+}
+
+// Finds the web interface's built assets. There are two layouts to find
+// them in, and only a positive check on the first tells them apart:
+//
+// - The published, bundled `openreverie` CLI: `packages/cli/scripts/
+//   bundle.mjs` copies the built web assets to a `web` directory sitting
+//   right next to the running bundle (`dist/index.js`, so `dist/web`).
+//   There is no `@openreverie/web` npm package in this layout at all, so
+//   resolving it would throw, not just miss.
+// - The monorepo, running from source or from `tsc -b` output: web/'s dist
+//   is not copied anywhere, but `@openreverie/web` is a real workspace
+//   dependency of `@openreverie/server` and resolves through node_modules.
+//
+// moduleDir defaults to this file's own directory and is only overridden
+// by tests, which need to point it at a temporary directory instead of
+// wherever this compiled file happens to live during a test run.
+export async function resolveStaticDir(
+  moduleDir: string = dirname(fileURLToPath(import.meta.url)),
+): Promise<string> {
+  const bundledAssets = join(moduleDir, 'web')
+  if (await isFile(join(bundledAssets, 'index.html'))) {
+    return bundledAssets
+  }
+  const webPackage = nodeRequire.resolve('@openreverie/web/package.json')
   return join(dirname(webPackage), 'dist')
 }
 
