@@ -350,7 +350,8 @@ item ships, remove it from here and record it in `ROADMAP.md`'s Done narrative.
 
 - **Six deferred pieces of the commitments design**, a new first-class entity for a bounded thing
   the person means to do (`docs/superpowers/specs/2026-08-24-commitments-design.md`, itself "Not
-  yet planned or implemented" as of 2026-08-24):
+  yet planned or implemented" as of 2026-08-24). See [docs/commitments.md](docs/commitments.md)
+  for how the shipped part of this design works and its own honest account of these gaps:
   - *Projects as a distinct entity type.* Not introduced; the cheap alternative is an optional
     completion condition on arcs. Why deferred: "Adding a project type means every reflection call
     must first answer 'is this an arc or a project', and that answer will be inconsistent across
