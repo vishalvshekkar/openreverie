@@ -207,7 +207,7 @@ item ships, remove it from here and record it in `ROADMAP.md`'s Done narrative.
   there is no stemming. Verified directly: `MATCH '"flight"'` returns zero rows against a document
   containing "Flights". A query resting on a single mismatched word form still fails.
   - Why deferred: not stated.
-  - Where: `packages/memory/src/sqlite.ts` (`toFtsQuery`, line 715).
+  - Where: `packages/memory/src/sqlite.ts` (`toFtsQuery`, line 741).
   - Trigger: not stated.
   - Size: small.
 

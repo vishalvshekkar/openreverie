@@ -202,8 +202,9 @@ export function toolDefinitions(): ToolDefinition[] {
         'a snippet (its single best-matching passage) and chunks, a list of every matching passage from that same ' +
         'document, most relevant first: a summary can hold both a vague early mention and a later, precise, dated ' +
         'version of the same fact, and chunks is how both reach you instead of only whichever ranked best. ' +
-        'chunksTotal is the true count before any cap trims the list, so a document whose chunks does not equal ' +
-        'chunksTotal has more passages than shown; read_document with its docId gets the rest. dateStart and ' +
+        'chunksTotal is the count of matching passages found, before any cap trims the list, so a document whose ' +
+        'chunks does not equal chunksTotal has more passages than shown; read_document with its docId gets the ' +
+        'rest. dateStart and ' +
         'dateEnd give the date, or date range, this content is about, read from the document, not guessed. ' +
         'Session summaries, daily rollups, weekly rollups and journal entries carry one. Living documents that are ' +
         'rewritten over time (the constitution, and realm, arc and person pages) have no single date and dateStart ' +

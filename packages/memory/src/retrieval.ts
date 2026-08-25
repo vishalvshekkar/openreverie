@@ -113,8 +113,13 @@ export interface DocumentHit {
   // Matched chunks from this document, best first, capped at
   // CHUNKS_PER_DOC_CAP. Always includes at least the chunk `snippet` names.
   chunks: string[]
-  // The true count of distinct matched chunks found for this document,
-  // before the cap. Equal to chunks.length when nothing was dropped.
+  // The count of distinct matched chunks seen for this document within the
+  // candidate window (CANDIDATE_LIMIT per lane, searchMemory below), before
+  // CHUNKS_PER_DOC_CAP trims the list. Equal to chunks.length when nothing
+  // was dropped. Not the document's true total: a document with more
+  // matching chunks than fit in the candidate window can still report at
+  // most CANDIDATE_LIMIT here, since fusion never sees candidates beyond
+  // that window in the first place.
   chunksTotal: number
 }
 
