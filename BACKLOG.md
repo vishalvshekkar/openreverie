@@ -975,9 +975,12 @@ help welcome" section. Read [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](A
 
 - **`selectCommitments`'s cap and sort are exercised by no test.** Every one of the
   `selectCommitments` tests in `packages/memory/src/commitments.test.ts` (as of the 2026-08-24
-  commitments engine work) passed a single-element array, so `.slice(0, cap)` and the whole sort
-  comparator (soonest-window-first, with three undefined-handling branches) went uncovered.
-  Deleting the entire `.sort(...)` call left the suite green.
+  commitments engine work) passed a single-element array, so `.slice(0, cap)` and the soonest-
+  window-first comparator went uncovered. Deleting the entire `.sort(...)` call left the suite
+  green. As of the 2026-08-25 review's Important 8 fix, the comparator's three undefined-handling
+  branches are also now defensive rather than reachable through production data (`isTimeEligible`
+  already requires a computable window to pass the filter above the sort), which a test covering
+  the comparator's ordering, not those branches specifically, should still confirm.
   - Why deferred: "Ledger-flagged as the controller's own omission" (2026-08-25 final review,
     part two, Minor 10); not picked up in that review's fix pass, which was scoped to Critical and
     Important findings only.

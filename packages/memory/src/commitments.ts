@@ -365,8 +365,15 @@ export function selectCommitments(all: Commitment[], today: string, cap: number)
   })
 
   // Soonest window first, so a cap that trims the list keeps the
-  // commitments closest to needing a mention. Commitments with no
-  // computable window sort last: there is no date to rank them by.
+  // commitments closest to needing a mention. The undefined-handling
+  // branches below are defensive, not reachable through this function
+  // today: isTimeEligible (Important 8) already requires a computable
+  // windowStart to pass the filter above, so every commitment reaching
+  // this comparator has one. Left in rather than removed, both because a
+  // sort comparator that silently assumes its input shape is exactly the
+  // kind of implicit invariant this codebase avoids, and because a future
+  // change to the filter above should not have to remember to restore
+  // this handling.
   const sorted = [...eligible].sort((a, b) => {
     const aStart = a.timing !== undefined ? windowStart(a.timing)?.from : undefined
     const bStart = b.timing !== undefined ? windowStart(b.timing)?.from : undefined

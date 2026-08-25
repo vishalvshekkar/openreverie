@@ -340,9 +340,14 @@ function commitmentsSection(context: SessionContext): string | undefined {
   if (context.commitments.length === 0) return undefined
   const lines = context.commitments.map((commitment) => {
     // words and date come from the same timing block and are only ever
-    // present together; a commitment with no timing at all (an open-ended
-    // "someday") renders its label alone, with nothing trailing it, not
-    // even an empty parenthetical.
+    // present together. The label-alone branch below is defensive, not
+    // reachable today: an open-ended "someday" commitment has no
+    // computable window, so selectCommitments (Important 8, 2026-08-25)
+    // never selects it into this section at all; it reaches the model
+    // through search instead. Left in rather than removed for the same
+    // reason as the sort's own defensive branches in commitments.ts: this
+    // function should not silently assume a shape its caller happens to
+    // provide today.
     const said =
       commitment.words !== undefined && commitment.date !== undefined
         ? ` (said ${commitment.date}: "${commitment.words}")`

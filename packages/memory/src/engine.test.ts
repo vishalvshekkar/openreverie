@@ -3214,6 +3214,50 @@ describe('MemoryEngine', () => {
     })
   })
 
+  describe('MemoryEngine.recordCommitment: the live-tool timing write site', () => {
+    let dir: string
+    let paths: MemoryPaths
+
+    beforeEach(async () => {
+      dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-commitment-timing-'))
+      paths = memoryPaths(dir)
+      await ensureMemoryTree(paths)
+      await pinTimezoneUtc(paths)
+    })
+
+    afterEach(async () => {
+      await rmWithRetry(dir)
+    })
+
+    it.each([
+      ['empty string', ''],
+      ['whitespace-only', '   '],
+    ])(
+      'never fabricates a timing block from a %s statedTime, called directly (Important 4, second site)',
+      async (_label, statedTime) => {
+        // Calls engine.recordCommitment directly, bypassing tools.ts's
+        // statedTimeField schema entirely, so this proves the write-site
+        // normalization inside MemoryEngine's own private
+        // buildCommitmentTiming, not just the schema layer in front of it.
+        // Before this normalization existed, this call wrote a timing
+        // block with no words in it (`{ words: '', anchor: <now> }`),
+        // which context.ts would render as `(said <today>: "")`.
+        const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+        const sessionId = await engine.startSession()
+
+        const recorded = await engine.recordCommitment(sessionId, {
+          label: 'Start swimming',
+          flavor: 'plan',
+          statedTime,
+        })
+
+        expect(recorded.timing).toBeUndefined()
+
+        await engine.close()
+      },
+    )
+  })
+
   describe('sessionContext commitments', () => {
     let dir: string
     let paths: MemoryPaths

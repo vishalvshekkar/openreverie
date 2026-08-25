@@ -1224,6 +1224,11 @@ export class MemoryEngine {
     const eligibleCommitments = selectCommitments(allCommitments, today, COMMITMENTS_CAP)
     const commitments: SessionContext['commitments'] = eligibleCommitments.map((commitment) => {
       const timing = commitment.timing
+      // The `timing === undefined` branch below is defensive, not
+      // reachable today: selectCommitments' Important 8 fix already
+      // requires a computable window (and therefore a defined timing) to
+      // be eligible through this section at all, so every commitment
+      // reaching this map has one.
       const said =
         timing !== undefined
           ? { words: timing.words, date: formatLocalDate(new Date(timing.anchor), this.timezone()) }

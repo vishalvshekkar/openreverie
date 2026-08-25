@@ -369,7 +369,15 @@ describe('no-overdue-state guarantee', () => {
     }
   })
 
-  it('leaves a passed window open rather than marking it anything, until the interim grace bound (Ruling 10) closes it', () => {
+  it('stays eligible through the interim grace period after its window closes, then stops surfacing on its own (Ruling 10)', () => {
+    // A passed window with no recorded outcome is never marked anything:
+    // the "no state, field or helper expressing lateness" test above
+    // guards that at the schema level, this test's own job is only the
+    // eligibility window's shape. The commitment's own `state` never
+    // enters this test, and never should: asserting `c.state).toBe('open')`
+    // here would be tautological (nothing between the fixture and the
+    // assertion could change it), which is exactly the weakness a prior
+    // review found in this test and removed.
     const c = {
       id: 'c1',
       label: 'x',
@@ -382,10 +390,6 @@ describe('no-overdue-state guarantee', () => {
         resolved: { from: '2026-08-23', to: '2026-08-23', statedPrecision: 'day' as const },
       },
     }
-    // Unresolved is an ordinary, unjudged condition: state stays 'open'.
-    // What changes is standing-prompt eligibility, which is bounded by
-    // the interim grace period (see ASK_GRACE_DAYS in commitments.ts)
-    // rather than left open forever.
     expect(selectCommitments([c], '2026-08-24', 5)).toHaveLength(1)
     expect(selectCommitments([c], '2026-09-23', 5)).toHaveLength(0)
   })

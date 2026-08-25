@@ -28,7 +28,7 @@ The commitments engine (`docs/superpowers/specs/2026-08-24-commitments-design.md
 
 ## Current direction
 
-The commitments engine above is built and dogfooded through the terminal and server API; nothing is currently being designed or planned for the next round. See [BACKLOG.md](BACKLOG.md) for what is not started, including the commitments engine's own deferred pieces (the real one-ask/permanent-silence mechanism, event-anchored `waitsOn` reactivation, the browser Record-section view, recurring commitments, and the rest) and the retrieval and documentation gaps recorded from the 2026-08-25 review.
+The commitments engine above is built and reachable through the terminal, changing what the companion knows and therefore what it says, per spec Section 8: that is the entire intended surface this round. It has no CLI command and no HTTP route of its own; nothing is currently being designed or planned for the next round. See [BACKLOG.md](BACKLOG.md) for what is not started, including the commitments engine's own deferred pieces (the real one-ask/permanent-silence mechanism, event-anchored `waitsOn` reactivation, the browser Record-section view, recurring commitments, and the rest) and the retrieval and documentation gaps recorded from the 2026-08-25 review.
 
 ## How work happens here
 
