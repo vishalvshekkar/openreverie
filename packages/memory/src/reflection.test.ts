@@ -213,6 +213,55 @@ describe('reflectionOutputSchema', () => {
     const out = emptyReflectionOutput('A session with no commitments.')
     expect(reflectionOutputSchema.safeParse(out).success).toBe(true)
   })
+
+  it('accepts statedPrecision on a commitment and on a revision (Important 5)', () => {
+    const out: ReflectionOutput = {
+      ...emptyReflectionOutput('A session.'),
+      commitments: [
+        {
+          label: 'Start swimming',
+          flavor: 'plan',
+          statedTime: 'come summer',
+          gloss: 'Points at next February.',
+          confidence: 'medium',
+          statedPrecision: 'period',
+        },
+      ],
+      commitmentRevisions: [
+        {
+          commitmentId: 'commitment_1',
+          statedTime: 'someday',
+          gloss: 'No shape to it.',
+          statedPrecision: 'vague',
+        },
+      ],
+    }
+    expect(reflectionOutputSchema.safeParse(out).success).toBe(true)
+  })
+
+  it('accepts clearTiming on a commitmentRevisions entry (Important 6)', () => {
+    const out: ReflectionOutput = {
+      ...emptyReflectionOutput('A session.'),
+      commitmentRevisions: [{ commitmentId: 'commitment_1', clearTiming: true }],
+    }
+    expect(reflectionOutputSchema.safeParse(out).success).toBe(true)
+  })
+
+  it('accepts commitmentResolutions with a valid outcome and rejects unknown as an outcome (Important 3)', () => {
+    const accepted: ReflectionOutput = {
+      ...emptyReflectionOutput('A session.'),
+      commitmentResolutions: [{ commitmentId: 'commitment_1', outcome: 'done' }],
+    }
+    expect(reflectionOutputSchema.safeParse(accepted).success).toBe(true)
+
+    // 'unknown' is reserved for the real askedAt/one-ask mechanism
+    // (BACKLOG.md), which reflection has no live-session signal for.
+    const rejected = {
+      ...emptyReflectionOutput('A session.'),
+      commitmentResolutions: [{ commitmentId: 'commitment_1', outcome: 'unknown' }],
+    }
+    expect(reflectionOutputSchema.safeParse(rejected).success).toBe(false)
+  })
 })
 
 describe('reflection', () => {
@@ -1443,6 +1492,108 @@ describe('reflection', () => {
       const graph = await readGraph(paths)
       const commitmentNode = [...graph.nodes.values()].find((node) => node.type === 'commitment')
       expect(commitmentNode?.commitment?.timing?.resolved?.from).toBe('2026-08-11')
+    })
+
+    it('resolves a commitment through commitmentResolutions, the reflection-side backstop for resolution (Important 3)', async () => {
+      const live = await recordCommitment(paths, {
+        label: 'File the tax paperwork',
+        flavor: 'errand',
+        sessionId,
+      })
+
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('They filed the paperwork today.'),
+        commitmentResolutions: [{ commitmentId: live.id, outcome: 'done' }],
+      }
+
+      await applyReflection(paths, out, sessionId, [], now, new Map(), noopMaterialize)
+
+      const graph = await readGraph(paths)
+      const commitmentNode = [...graph.nodes.values()].find((node) => node.type === 'commitment')
+      expect(commitmentNode?.commitment?.state).toBe('done')
+    })
+
+    it('drops a commitmentResolutions entry that references an unknown id without aborting the rest of reflection', async () => {
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('A session that misremembered an id.'),
+        commitmentResolutions: [{ commitmentId: 'commitment_does_not_exist', outcome: 'done' }],
+      }
+
+      const result = await applyReflection(
+        paths,
+        out,
+        sessionId,
+        [],
+        now,
+        new Map(),
+        noopMaterialize,
+      )
+
+      expect(result.summaryDoc.body).toBe('A session that misremembered an id.\n')
+    })
+
+    it('never fabricates a timing block from an empty-string statedTime (Important 4)', async () => {
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('A session.'),
+        commitments: [{ label: 'Start swimming', flavor: 'plan', statedTime: '' }],
+      }
+
+      await applyReflection(paths, out, sessionId, [], now, new Map(), noopMaterialize)
+
+      const graph = await readGraph(paths)
+      const commitmentNode = [...graph.nodes.values()].find((node) => node.type === 'commitment')
+      if (!commitmentNode?.commitment) throw new Error('expected a commitment node to be written')
+      expect(commitmentNode.commitment.timing).toBeUndefined()
+    })
+
+    it('reads statedPrecision straight from the model instead of inferring it from the bracket shape (Important 5)', async () => {
+      // Only bracketFrom is given (no bracketTo), which the old inference
+      // would read as 'vague'. The model states 'period' directly and
+      // that must win.
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('A session.'),
+        commitments: [
+          {
+            label: 'Start swimming',
+            flavor: 'plan',
+            statedTime: 'come summer',
+            gloss: 'Points at next February.',
+            bracketFrom: '2027-02-01',
+            confidence: 'medium',
+            statedPrecision: 'period',
+          },
+        ],
+      }
+
+      await applyReflection(paths, out, sessionId, [], now, new Map(), noopMaterialize)
+
+      const graph = await readGraph(paths)
+      const commitmentNode = [...graph.nodes.values()].find((node) => node.type === 'commitment')
+      expect(commitmentNode?.commitment?.timing?.interpretation?.statedPrecision).toBe('period')
+    })
+
+    it('clears a stale timing on revision when clearTiming is set and no fresh statedTime replaces it (Important 6)', async () => {
+      const live = await recordCommitment(paths, {
+        label: 'See Nightfall with Arjun',
+        flavor: 'plan',
+        sessionId,
+        timing: {
+          words: 'friday',
+          anchor: '2026-08-13T09:00:00.000Z',
+          resolved: { from: '2026-08-14', to: '2026-08-14', statedPrecision: 'day' },
+        },
+      })
+
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('They are no longer sure when.'),
+        commitmentRevisions: [{ commitmentId: live.id, clearTiming: true }],
+      }
+
+      await applyReflection(paths, out, sessionId, [], now, new Map(), noopMaterialize)
+
+      const graph = await readGraph(paths)
+      const commitmentNode = [...graph.nodes.values()].find((node) => node.type === 'commitment')
+      expect(commitmentNode?.commitment?.timing).toBeUndefined()
     })
   })
 

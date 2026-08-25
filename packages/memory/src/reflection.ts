@@ -31,6 +31,7 @@ import {
   type Commitment,
   type CommitmentFlavor,
   recordCommitment,
+  resolveCommitment,
   reviseCommitment,
 } from './commitments.js'
 import { resolveStatedTime } from './commitmentTime.js'
@@ -101,6 +102,15 @@ export interface ReflectionCommitment {
   // spoke (that distinction lives in commitmentTimingSchema's
   // statedPrecision, in graph.ts). Only meaningful alongside gloss.
   confidence?: 'high' | 'medium' | 'low'
+  // How precisely the PERSON spoke, asked for directly (see graph.ts's
+  // CommitmentInterpretation doc comment for the period/vague taxonomy
+  // and why it is kept separate from confidence above). Optional: when
+  // the model leaves it out, buildCommitmentTiming below falls back to
+  // inferring it from whether a full bracket was given, the same
+  // inference this field replaces as the primary source. Important 5:
+  // that inference reads OUR bracket shape, not the person's words, so
+  // asking directly is preferred whenever the model actually answers.
+  statedPrecision?: 'period' | 'vague'
 }
 
 // The same shape as ReflectionCommitment, plus the id of the commitment
@@ -110,6 +120,38 @@ export interface ReflectionCommitment {
 // commitments.ts).
 export interface ReflectionCommitmentRevision extends Partial<ReflectionCommitment> {
   commitmentId: string
+  // Important 6: reviseCommitment (commitments.ts) has no way to clear a
+  // stale timing, because omitting statedTime there means "unchanged",
+  // not "gone". A revision that wants to withdraw a stated time with
+  // nothing to replace it ("forget Friday, we'll sort out a day at some
+  // point") sets this instead of statedTime. Deliberately a boolean, not
+  // statedTime: null: exactOptionalPropertyTypes forbids a field typed
+  // `string | undefined` for a key that's meant to be entirely absent
+  // sometimes, and this needs to mean something statedTime's own type
+  // cannot express. Ignored when statedTime is also present on the same
+  // revision; a stated time is what it is being revised to, not cleared.
+  clearTiming?: boolean
+}
+
+// A resolution reflection proposes for a commitment already recorded,
+// captured whether or not the live remember tool's resolveCommitment
+// shape was ever called this session. Important 3: without this,
+// resolution was live-tool-only, so a chat model that declines tools
+// (the documented finding in BACKLOG.md) could create commitments
+// through reflection and never close a single one. Kept as its own array
+// rather than an outcome field folded into commitmentRevisions: spec
+// Section 7 requires recording, revising and resolving to "stay three
+// distinguishable operations at the boundary", and tools.ts's live shapes
+// already keep resolveCommitment separate from reviseCommitment for the
+// same reason.
+export interface ReflectionCommitmentResolution {
+  commitmentId: string
+  // 'unknown' is deliberately not offered here: that state is reserved
+  // for the real askedAt/one-ask mechanism (spec Section 6, tracked in
+  // BACKLOG.md), which needs a live-session signal reflection does not
+  // have. Reflection can only report an outcome the transcript actually
+  // states.
+  outcome: 'done' | 'dropped' | 'quiet'
 }
 
 export interface ReflectionOutput {
@@ -154,6 +196,11 @@ export interface ReflectionOutput {
   // id from the Known commitments listing rather than creating a
   // duplicate entry in commitments above.
   commitmentRevisions?: ReflectionCommitmentRevision[]
+  // An outcome for a commitment already recorded: the backstop half of
+  // resolution (Important 3), the same relationship commitments above has
+  // to the live remember tool's commitment shape. Absent reads as an
+  // empty list, same as commitments and commitmentRevisions.
+  commitmentResolutions?: ReflectionCommitmentResolution[]
   constitutionUpdate: string | null
   // The backstop half of the journaling.md rewrite mechanism (spec
   // section 4.5): null when nothing about the person's journaling setup
@@ -232,6 +279,8 @@ function glossWithoutStatedTimeIssue(): { message: string; path: string[] } {
   }
 }
 
+const statedPrecisionSchema = z.enum(['period', 'vague'])
+
 const reflectionCommitmentSchema = z
   .object({
     label: z.string(),
@@ -241,6 +290,7 @@ const reflectionCommitmentSchema = z
     bracketFrom: commitmentBracketDateSchema.exactOptional(),
     bracketTo: commitmentBracketDateSchema.exactOptional(),
     confidence: commitmentConfidenceSchema.exactOptional(),
+    statedPrecision: statedPrecisionSchema.exactOptional(),
   })
   .refine((c) => c.gloss === undefined || c.statedTime !== undefined, glossWithoutStatedTimeIssue())
 
@@ -254,8 +304,20 @@ const reflectionCommitmentRevisionSchema = z
     bracketFrom: commitmentBracketDateSchema.exactOptional(),
     bracketTo: commitmentBracketDateSchema.exactOptional(),
     confidence: commitmentConfidenceSchema.exactOptional(),
+    statedPrecision: statedPrecisionSchema.exactOptional(),
+    // Important 6. See ReflectionCommitmentRevision's own comment for why
+    // this exists rather than a null statedTime.
+    clearTiming: z.boolean().exactOptional(),
   })
   .refine((c) => c.gloss === undefined || c.statedTime !== undefined, glossWithoutStatedTimeIssue())
+
+// Important 3. Deliberately its own small schema rather than folded into
+// the revision schema above, matching ReflectionCommitmentResolution's own
+// comment on why resolution stays a separate, distinguishable operation.
+const reflectionCommitmentResolutionSchema = z.object({
+  commitmentId: z.string(),
+  outcome: z.enum(['done', 'dropped', 'quiet']),
+})
 
 export const reflectionOutputSchema: z.ZodType<ReflectionOutput> = z.object({
   summary: z.string(),
@@ -333,6 +395,7 @@ export const reflectionOutputSchema: z.ZodType<ReflectionOutput> = z.object({
   personUpdates: z.array(z.object({ personId: z.string(), note: z.string() })),
   commitments: z.array(reflectionCommitmentSchema).exactOptional(),
   commitmentRevisions: z.array(reflectionCommitmentRevisionSchema).exactOptional(),
+  commitmentResolutions: z.array(reflectionCommitmentResolutionSchema).exactOptional(),
   constitutionUpdate: z.string().nullable(),
   journalingUpdate: z.string().nullable(),
   profileUpdates: profileUpdatesSchema.exactOptional(),
@@ -435,8 +498,9 @@ const RESPONSE_SHAPE = `{
   "pagePromotions": [{"nodeId": string, "reason": string, "itemIndexes": number[], "narrative": string}],
   "arcUpdates": [{"arcId": string, "note": string}],
   "personUpdates": [{"personId": string, "note": string}],
-  "commitments": [{"label": string, "flavor": "errand" | "plan", "statedTime": string | undefined, "gloss": string | undefined, "bracketFrom": string | undefined, "bracketTo": string | undefined, "confidence": "high" | "medium" | "low" | undefined}],
-  "commitmentRevisions": [{"commitmentId": string, "label": string | undefined, "flavor": "errand" | "plan" | undefined, "statedTime": string | undefined, "gloss": string | undefined, "bracketFrom": string | undefined, "bracketTo": string | undefined, "confidence": "high" | "medium" | "low" | undefined}],
+  "commitments": [{"label": string, "flavor": "errand" | "plan", "statedTime": string | undefined, "gloss": string | undefined, "bracketFrom": string | undefined, "bracketTo": string | undefined, "confidence": "high" | "medium" | "low" | undefined, "statedPrecision": "period" | "vague" | undefined}],
+  "commitmentRevisions": [{"commitmentId": string, "label": string | undefined, "flavor": "errand" | "plan" | undefined, "statedTime": string | undefined, "gloss": string | undefined, "bracketFrom": string | undefined, "bracketTo": string | undefined, "confidence": "high" | "medium" | "low" | undefined, "statedPrecision": "period" | "vague" | undefined, "clearTiming": boolean | undefined}],
+  "commitmentResolutions": [{"commitmentId": string, "outcome": "done" | "dropped" | "quiet"}],
   "constitutionUpdate": string | null,
   "journalingUpdate": string | null,
   "profileUpdates": {"preferredName": string, "pronouns": string, "location": string, "timezone": string, "birthday": string, "occupation": string, "birthdayGreetings": boolean}
@@ -502,7 +566,11 @@ export function buildReflectionPrompt(
     '',
     'Write a gloss only when statedTime is not a single specific day named outright (today, tonight, tomorrow, a named weekday like "Friday", or "in three days" are specific days; a season, a holiday, "sometime", "next Friday" (genuinely ambiguous between two different Fridays), or any stretch of time longer than one day all need a gloss). The gloss is one or two sentences: what was said, when it was said, and what it plausibly means for this person, in the place they actually live, which you can read from Current profile above. Reason about their actual location, never from a fixed season table: summer in Bangalore runs roughly February to May, not June to August, so "come summer" said by someone who lives in Bangalore points at next February, not the middle of the calendar year. bracketFrom and bracketTo are a rough outer date range for the gloss, in YYYY-MM-DD, used only later to decide whether this commitment is worth mentioning again; they are never shown or spoken to the person, and must never be more specific than the gloss itself actually supports. Never resolve a vague or seasonal time into one specific date, and never invent a time the person did not state.',
     '',
-    'Known commitments above lists what is already recorded. If a commitment there has changed (a firmer date, a different plan, a dropped errand becoming certain again), put the change in commitmentRevisions with its existing commitmentId from that list, not a new entry in commitments; a new entry for something already recorded there would duplicate it.',
+    'When you write a gloss, also set statedPrecision to describe how precisely the PERSON spoke, not how sure you are of your own reading: "period" for a named span such as a season ("come summer", "after the holidays"), "vague" for anything looser ("someday", "at some point", "sometime"). This is a different question from confidence, which is about your gloss, not their words.',
+    '',
+    'Known commitments above lists what is already recorded. If a commitment there has changed (a firmer date, a different plan, a dropped errand becoming certain again), put the change in commitmentRevisions with its existing commitmentId from that list, not a new entry in commitments; a new entry for something already recorded there would duplicate it. If the person withdrew a stated time with nothing yet to replace it ("forget Friday, we will sort out a day at some point"), set clearTiming to true on that revision instead of statedTime.',
+    '',
+    'If the person reports an outcome for a commitment already listed under Known commitments, put it in commitmentResolutions with that commitment\'s id and an outcome: "done" when they did the thing, "dropped" when they say they are not doing it after all, "quiet" when they ask you to stop tracking or mentioning it. Do not guess an outcome from silence; only record one the person actually stated.',
     '',
     'Respond with only JSON matching this shape, no other text:',
     RESPONSE_SHAPE,
@@ -607,6 +675,7 @@ interface CommitmentTimingSource {
   bracketFrom?: string
   bracketTo?: string
   confidence?: 'high' | 'medium' | 'low'
+  statedPrecision?: 'period' | 'vague'
 }
 
 // Builds the same CommitmentTiming shape commitments.ts writes to the
@@ -630,29 +699,41 @@ function buildCommitmentTiming(
   anchor: Date,
   timezone: string,
 ): CommitmentTiming | undefined {
-  if (source.statedTime === undefined) return undefined
+  // Important 4: blank or whitespace-only is never a stated time, the
+  // same discipline mintItems above and tools.ts's statedTimeField apply
+  // to eventTime. Without this, a model emitting `"statedTime": ""`
+  // instead of omitting the key produced a timing block with no words in
+  // it at all, `(said <today>: "")`, the same class of fabricated anchor
+  // AGENTS.md already records for the empty-string eventTime bug.
+  const statedTime =
+    source.statedTime !== undefined && source.statedTime.trim().length > 0
+      ? source.statedTime
+      : undefined
+  if (statedTime === undefined) return undefined
   const anchorIso = anchor.toISOString()
 
-  const resolved = resolveStatedTime(source.statedTime, anchor, timezone)
+  const resolved = resolveStatedTime(statedTime, anchor, timezone)
   if (resolved !== undefined) {
-    return { words: source.statedTime, anchor: anchorIso, resolved }
+    return { words: statedTime, anchor: anchorIso, resolved }
   }
 
   if (source.gloss === undefined) {
-    return { words: source.statedTime, anchor: anchorIso }
+    return { words: statedTime, anchor: anchorIso }
   }
 
-  // statedPrecision distinguishes a named span ('period', "come summer")
-  // from anything looser ('vague', "someday"); see the comment on
-  // CommitmentInterpretation in graph.ts. The prompt never asks the model
-  // for this taxonomy directly, so it is inferred here from whether the
-  // model gave a full bracket: a bracket this concrete is what a named
-  // span looks like, and its absence is what looseness looks like.
+  // Important 5: statedPrecision is how precisely the PERSON spoke (see
+  // CommitmentInterpretation in graph.ts), not a property of our own
+  // bracket. Preferred straight from the model when it answers; the
+  // bracket-shape inference (a full bracket reads as a named span,
+  // 'period'; anything looser reads as 'vague') is kept only as a
+  // fallback for a model that leaves the field out, not as the primary
+  // source.
   const statedPrecision =
-    source.bracketFrom !== undefined && source.bracketTo !== undefined ? 'period' : 'vague'
+    source.statedPrecision ??
+    (source.bracketFrom !== undefined && source.bracketTo !== undefined ? 'period' : 'vague')
 
   return {
-    words: source.statedTime,
+    words: statedTime,
     anchor: anchorIso,
     interpretation: {
       statedPrecision,
@@ -1140,13 +1221,33 @@ export async function applyReflection(
   // here for the same reason as above, so one bad reference does not cost
   // the rest of this session's reflection.
   for (const revision of out.commitmentRevisions ?? []) {
+    // Important 6: clearTiming withdraws a stale stated time with nothing
+    // to replace it. Ignored when the model also gave a fresh statedTime
+    // on the same revision, since that is a real replacement, not a
+    // clearing (buildCommitmentTiming returning a timing already implies
+    // there is something to carry forward).
     const timing = buildCommitmentTiming(revision, new Date(anchor), timezone)
+    const clearTiming = revision.clearTiming === true && timing === undefined
     try {
       await reviseCommitment(paths, revision.commitmentId, {
         ...(revision.label !== undefined ? { label: revision.label } : {}),
         ...(revision.flavor !== undefined ? { flavor: revision.flavor } : {}),
         ...(timing !== undefined ? { timing } : {}),
+        ...(clearTiming ? { clearTiming: true as const } : {}),
       })
+    } catch {
+      // See the comment above: dropped silently, session still reflects.
+    }
+  }
+
+  // Important 3: the backstop half of resolution. Same reasoning as the
+  // two loops above: an outcome referencing a hallucinated or since-
+  // retracted commitmentId throws inside resolveCommitment's own
+  // liveCommitment lookup, caught here so one bad reference does not cost
+  // the rest of this session's reflection.
+  for (const resolution of out.commitmentResolutions ?? []) {
+    try {
+      await resolveCommitment(paths, resolution.commitmentId, resolution.outcome)
     } catch {
       // See the comment above: dropped silently, session still reflects.
     }

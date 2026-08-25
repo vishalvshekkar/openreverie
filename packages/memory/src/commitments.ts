@@ -52,6 +52,12 @@ export interface ReviseCommitmentInput {
   label?: string
   flavor?: CommitmentFlavor
   timing?: CommitmentTiming
+  // Important 6: omitting `timing` here means "carry the current one
+  // forward" (see resolveField below), so there was previously no way to
+  // clear a stale stated time with nothing to replace it. Setting this
+  // instead of `timing` drops it. Ignored if `timing` is also set: a
+  // fresh timing is a replacement, not a clearing.
+  clearTiming?: boolean
   waitsOn?: string
   askedAt?: string
 }
@@ -122,11 +128,16 @@ export async function reviseCommitment(
 ): Promise<Commitment> {
   const current = await liveCommitment(paths, id)
   const label = changes.label ?? current.label
+  // Important 6: clearTiming is the one explicit way to drop timing
+  // instead of carrying the current one forward. It only takes effect
+  // when no fresh timing was given on the same call; a fresh timing is a
+  // replacement, and wins.
+  const dropTiming = changes.clearTiming === true && changes.timing === undefined
   const payload: CommitmentPayload = {
     flavor: changes.flavor ?? current.flavor,
     state: current.state,
     sessionId: current.sessionId,
-    ...resolveField(changes.timing, current.timing, 'timing'),
+    ...(dropTiming ? {} : resolveField(changes.timing, current.timing, 'timing')),
     ...resolveField(changes.waitsOn, current.waitsOn, 'waitsOn'),
     ...resolveField(changes.askedAt, current.askedAt, 'askedAt'),
   }

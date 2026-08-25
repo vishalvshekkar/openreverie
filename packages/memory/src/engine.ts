@@ -745,11 +745,19 @@ export class MemoryEngine {
   // branch: a live tool call has no reliable moment to ask a model for a
   // gloss, so that gloss is written later, by reflection.
   private buildCommitmentTiming(statedTime: string | undefined): CommitmentTiming | undefined {
-    if (statedTime === undefined) return undefined
+    // Important 4, second site: normalized here too, not only at
+    // tools.ts's statedTimeField, for the same reason MemoryEngine.remember
+    // (above) does not trust its caller already stripped a blank
+    // eventTime. This method is reached from recordCommitment and
+    // reviseCommitment, both public, so a direct caller (tests among them)
+    // bypassing tools.ts must not be able to write a fabricated
+    // `(said <today>: "")` anchor either.
+    const stated = statedTime !== undefined && statedTime.trim().length > 0 ? statedTime : undefined
+    if (stated === undefined) return undefined
     const anchor = new Date()
-    const resolved = resolveStatedTime(statedTime, anchor, this.timezone())
+    const resolved = resolveStatedTime(stated, anchor, this.timezone())
     return {
-      words: statedTime,
+      words: stated,
       anchor: anchor.toISOString(),
       ...(resolved !== undefined ? { resolved } : {}),
     }
