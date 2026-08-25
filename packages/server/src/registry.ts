@@ -9,6 +9,7 @@ const MAX_NDJSON_EVENT_BYTES = 256 * 1024
 const ENDED_TOMBSTONE_CAP = 64
 const THIRTY_MINUTES = 30 * 60 * 1000
 const SWEEP_INTERVAL = 60 * 1000
+export const DREAM_SWEEP_INTERVAL = 30 * 60 * 1000
 
 export const DEFAULT_REGISTRY_LIMITS = {
   maxLiveSessions: 8,
@@ -60,6 +61,7 @@ export interface LiveSessionRegistryOptions {
   maxReplayEvents?: number
   maxReplayBytes?: number
   scheduler?: RegistryScheduler
+  dreamTrigger?: () => Promise<unknown>
 }
 
 export interface RegistryScheduler {
@@ -107,6 +109,8 @@ export class LiveSessionRegistry {
   private readonly maxReplayEvents: number
   private readonly maxReplayBytes: number
   private readonly cancelSweep: () => void
+  private readonly cancelDreamTrigger: () => void
+  private readonly dreamTrigger: (() => Promise<unknown>) | undefined
   private readonly live = new Map<string, LiveSession>()
   private readonly tombstones = new Map<string, Tombstone>()
   private closed = false
@@ -122,16 +126,21 @@ export class LiveSessionRegistry {
     this.maxTurns = options.maxTurns ?? DEFAULT_REGISTRY_LIMITS.maxTurns
     this.maxReplayEvents = options.maxReplayEvents ?? DEFAULT_REGISTRY_LIMITS.maxReplayEvents
     this.maxReplayBytes = options.maxReplayBytes ?? DEFAULT_REGISTRY_LIMITS.maxReplayBytes
+    this.dreamTrigger = options.dreamTrigger
     const scheduler = options.scheduler ?? nodeIntervalScheduler
     this.cancelSweep = scheduler.schedule(() => {
       if (!this.closed) this.sweep()
     }, SWEEP_INTERVAL)
+    this.cancelDreamTrigger = scheduler.schedule(() => {
+      if (!this.closed) this.runDreamTrigger()
+    }, DREAM_SWEEP_INTERVAL)
   }
 
   async close(): Promise<void> {
     if (this.closePromise) return this.closePromise
     this.closed = true
     this.cancelSweep()
+    this.cancelDreamTrigger()
     const sessions = [...this.live.values()]
     this.live.clear()
     for (const live of sessions) this.notify(live)
@@ -296,6 +305,17 @@ export class LiveSessionRegistry {
       this.addTombstone({ sessionId, public: publicSession })
       void live.agent.end().catch(() => {})
       this.notify(live)
+    }
+  }
+
+  // Fire-and-forget: a dream that fails, whether by a rejected promise or a
+  // synchronous throw, must never reach the timer loop and take the sweep
+  // down with it.
+  private runDreamTrigger(): void {
+    try {
+      void this.dreamTrigger?.()?.catch(() => {})
+    } catch {
+      // Contained, on purpose. See the comment above.
     }
   }
 

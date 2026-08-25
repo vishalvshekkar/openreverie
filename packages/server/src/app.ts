@@ -5,6 +5,11 @@ import type { IncomingMessage, RequestListener, ServerResponse } from 'node:http
 import { extname, isAbsolute, relative, resolve, sep } from 'node:path'
 import type { ReverieConfig } from '@openreverie/core'
 import {
+  type Document,
+  type DreamSummary,
+  type DreamVerdict,
+  foldDreamLog,
+  memoryPaths,
   type Profile,
   type ProfileSettingsPatch,
   type Proposal,
@@ -15,6 +20,7 @@ import {
   type PublicSession,
   type PublicTranscriptLine,
   profileSettingsPatchSchema,
+  readDreamLog,
   type SequencedGraphRecord,
   type StyleConfig,
 } from '@openreverie/memory'
@@ -47,6 +53,19 @@ export interface RecordEngine {
   profile(): Profile
   currentStyle(): StyleConfig
   updateProfileSettings(patch: ProfileSettingsPatch): Promise<Profile>
+  listDreams(): Promise<DreamSummary[]>
+  readDream(dreamId: string): Promise<{
+    summary: DreamSummary
+    narrative?: Document
+    insights: Document
+    processLog: string
+  } | null>
+  recordDreamFeedback(args: {
+    insightId: string
+    verdict: DreamVerdict
+    note?: string
+    source: 'ui' | 'tool'
+  }): Promise<boolean>
 }
 
 export interface CreateAppDeps {
@@ -416,6 +435,43 @@ async function handle(
     return
   }
 
+  if (method === 'GET' && path.length === 3 && path[2] === 'dreams') {
+    const dreams = await engine.listDreams()
+    const rows = dreams.map(publicDreamRow)
+    writePublicJson(res, 200, publicDreamRowsSchema, rows, null)
+    return
+  }
+
+  if (method === 'GET' && path.length === 4 && path[2] === 'dreams') {
+    const dreamId = requiredId(path[3])
+    const dream = await engine.readDream(dreamId)
+    if (!dream) throw new ApiError(404, 'not_found', 'The requested resource was not found.')
+    const verdicts = await dreamFeedbackVerdicts(config)
+    writePublicJson(res, 200, publicDreamDetailSchema, publicDreamDetail(dream, verdicts), null)
+    return
+  }
+
+  if (method === 'POST' && path.length === 5 && path[2] === 'dreams' && path[4] === 'feedback') {
+    requiredId(path[3])
+    const body = dreamFeedbackRequestSchema.safeParse(await readJson(req))
+    if (!body.success) throw new ApiError(400, 'invalid_request', 'The request is invalid.')
+    const recorded = await engine.recordDreamFeedback({
+      insightId: body.data.insightId,
+      verdict: body.data.verdict,
+      ...(body.data.note !== undefined ? { note: body.data.note } : {}),
+      source: 'ui',
+    })
+    if (!recorded) throw new ApiError(404, 'not_found', 'The requested resource was not found.')
+    writePublicJson(
+      res,
+      200,
+      dreamFeedbackResponseSchema,
+      { insightId: body.data.insightId, verdict: body.data.verdict },
+      null,
+    )
+    return
+  }
+
   throw new ApiError(404, 'not_found', 'The requested resource was not found.')
 }
 
@@ -640,6 +696,51 @@ const publicProfileSchema = z.strictObject({
 const publicSettingsSchema = z.strictObject({
   safetyMode: z.enum(['companion', 'firewall']),
 })
+const dreamVerdictSchema = z.enum(['right', 'wrong', 'do_not_bring_up'])
+const publicDreamRowSchema = z.strictObject({
+  dreamId: z.string(),
+  date: z.string(),
+  period: z.string(),
+  hasNarrative: z.boolean(),
+  insightCount: z.number().int().nonnegative(),
+})
+const publicDreamRowsSchema = z.array(publicDreamRowSchema)
+const dreamInsightKindSchema = z.enum([
+  'pattern',
+  'change_over_time',
+  'connection',
+  'open_question',
+  'strength',
+])
+const publicDreamInsightSchema = z.strictObject({
+  insightId: z.string(),
+  kind: dreamInsightKindSchema,
+  headline: z.string(),
+  claim: z.string(),
+  confidence: z.number().min(0).max(1),
+  verdict: dreamVerdictSchema.optional(),
+})
+const publicDreamDetailSchema = z.strictObject({
+  dreamId: z.string(),
+  date: z.string(),
+  period: z.string(),
+  narrative: z.string().optional(),
+  insights: z.array(publicDreamInsightSchema),
+  processLog: z.string(),
+})
+const dreamFeedbackRequestSchema = z.strictObject({
+  insightId: z.string(),
+  verdict: dreamVerdictSchema,
+  note: z.string().optional(),
+})
+// The feedback endpoint's own response body is not part of the shared HTTP
+// contract (only its request body is), so this mirrors the established
+// resolve-and-echo-back convention already used for proposal resolution
+// rather than inventing a new shape.
+const dreamFeedbackResponseSchema = z.strictObject({
+  insightId: z.string(),
+  verdict: dreamVerdictSchema,
+})
 
 // Built from the whitelist, key by key, never by serializing the loaded
 // object. profile.md's own schema passes unknown keys through, so a
@@ -665,6 +766,81 @@ function publicProfile(profile: Profile, style: StyleConfig): z.infer<typeof pub
     prose: profile.body,
   }
 }
+function publicDreamRow(dream: DreamSummary): z.infer<typeof publicDreamRowSchema> {
+  return {
+    dreamId: dream.dreamId,
+    date: dream.date,
+    period: dream.period,
+    hasNarrative: dream.hasNarrative,
+    insightCount: dream.insightCount,
+  }
+}
+
+// insight.md's frontmatter carries whatever a dream run wrote, and a dream
+// directory can be partial (see engineDreams.ts's own comments on this): a
+// malformed or missing entry inside meta.insights is dropped rather than
+// thrown, the same tolerance readDreamById already applies one level up at
+// the file level.
+function publicDreamInsights(
+  insightsDoc: Document,
+  verdicts: Map<string, DreamVerdict>,
+): z.infer<typeof publicDreamInsightSchema>[] {
+  const raw = insightsDoc.meta.insights
+  if (!Array.isArray(raw)) return []
+  const insights: z.infer<typeof publicDreamInsightSchema>[] = []
+  for (const entry of raw) {
+    const candidate = entry as Record<string, unknown>
+    const parsed = publicDreamInsightSchema.omit({ verdict: true }).safeParse({
+      insightId: candidate.id,
+      kind: candidate.kind,
+      headline: candidate.headline,
+      claim: candidate.claim,
+      confidence: candidate.confidence,
+    })
+    if (!parsed.success) continue
+    const verdict = verdicts.get(parsed.data.insightId)
+    insights.push({ ...parsed.data, ...(verdict !== undefined ? { verdict } : {}) })
+  }
+  return insights
+}
+
+function publicDreamDetail(
+  dream: { summary: DreamSummary; narrative?: Document; insights: Document; processLog: string },
+  verdicts: Map<string, DreamVerdict>,
+): z.infer<typeof publicDreamDetailSchema> {
+  return {
+    dreamId: dream.summary.dreamId,
+    date: dream.summary.date,
+    period: dream.summary.period,
+    ...(dream.narrative ? { narrative: dream.narrative.body } : {}),
+    insights: publicDreamInsights(dream.insights, verdicts),
+    processLog: dream.processLog,
+  }
+}
+
+// Feedback verdicts live only in the append-only dream log, not in
+// insight.md itself: a written insight is a record, feedback on it is a
+// separate, later event. engine.readDream does not carry them, so this
+// reads the log directly the same way the CLI's `reverie dream --show`
+// already does. A missing config, or a log that fails to read or parse,
+// means verdicts are simply not shown: the dream detail response must
+// still succeed, just without that annotation.
+async function dreamFeedbackVerdicts(
+  config: ReverieConfig | undefined,
+): Promise<Map<string, DreamVerdict>> {
+  if (!config) return new Map()
+  try {
+    const paths = memoryPaths(config.memoryDir)
+    const records = await readDreamLog(paths)
+    const state = foldDreamLog(records)
+    const verdicts = new Map<string, DreamVerdict>()
+    for (const [insightId, record] of state.feedback) verdicts.set(insightId, record.verdict)
+    return verdicts
+  } catch {
+    return new Map()
+  }
+}
+
 const responseMetaSchema = z.strictObject({ nextCursor: z.string().nullable() })
 
 function responseSchema<T extends z.ZodType>(data: T) {

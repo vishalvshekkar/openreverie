@@ -13,7 +13,12 @@ import {
   ProviderUnavailableError,
 } from '@openreverie/providers'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { DEFAULT_REGISTRY_LIMITS, LiveSessionRegistry, type StreamEvent } from './registry.js'
+import {
+  DEFAULT_REGISTRY_LIMITS,
+  DREAM_SWEEP_INTERVAL,
+  LiveSessionRegistry,
+  type StreamEvent,
+} from './registry.js'
 
 const THIRTY_MINUTES = 30 * 60 * 1000
 
@@ -173,6 +178,62 @@ describe('LiveSessionRegistry', () => {
     expect(scheduler.runAll()).toBe(0)
   })
 
+  it('schedules the dream trigger on its own thirty-minute interval, fires it a specific number of times, then fires zero more after close', async () => {
+    const scheduler = new FakeScheduler()
+    let calls = 0
+    const dreamTrigger = async (): Promise<void> => {
+      calls += 1
+    }
+    const registry = createRegistry({ providerAvailable: false, scheduler, dreamTrigger })
+
+    expect(scheduler.intervals().filter((ms) => ms === DREAM_SWEEP_INTERVAL)).toHaveLength(1)
+
+    scheduler.runAll()
+    await flushMicrotasks()
+    expect(calls).toBe(1)
+
+    scheduler.runAll()
+    await flushMicrotasks()
+    expect(calls).toBe(2)
+
+    await registry.close()
+
+    expect(scheduler.runAll()).toBe(0)
+    expect(calls).toBe(2)
+  })
+
+  it('contains a dream trigger that rejects or throws synchronously, without breaking the sweep beside it', async () => {
+    let now = 0
+    const scheduler = new FakeScheduler()
+    let mode: 'reject' | 'throw' = 'reject'
+    const dreamTrigger = (): Promise<void> => {
+      if (mode === 'throw') throw new Error('dream failed synchronously')
+      return Promise.reject(new Error('dream failed'))
+    }
+    const registry = createRegistry({
+      providerAvailable: false,
+      now: () => now,
+      scheduler,
+      dreamTrigger,
+    })
+    const session = await registry.create()
+
+    expect(() => scheduler.runAll()).not.toThrow()
+    await flushMicrotasks()
+
+    mode = 'throw'
+    expect(() => scheduler.runAll()).not.toThrow()
+    await flushMicrotasks()
+
+    // The sweep scheduled beside the failing dream trigger must still run
+    // normally: expiring the session proves the timer loop is intact.
+    now = THIRTY_MINUTES + 1
+    scheduler.runAll()
+    await expect(
+      collect(registry.message(session.sessionId, 'turn-after-failure', { message: 'again' })),
+    ).rejects.toMatchObject({ status: 409, code: 'session_expired' })
+  })
+
   it('keeps only recent expired sessions in the tombstone cache', async () => {
     let now = 0
     const scheduler = new FakeScheduler()
@@ -255,6 +316,7 @@ function createRegistry(
     maxTurns: number
     maxReplayEvents: number
     maxReplayBytes: number
+    dreamTrigger: () => Promise<unknown>
   }> = {},
 ): LiveSessionRegistry {
   const { chat = fakeChat, ...registryOptions } = options
@@ -378,18 +440,26 @@ class RuntimeUnavailableChatProvider implements ChatProvider {
 }
 
 class FakeScheduler {
-  private readonly callbacks = new Set<() => void>()
+  private readonly callbacks = new Map<() => void, number>()
 
-  schedule(callback: () => void, _intervalMs: number): () => void {
-    this.callbacks.add(callback)
+  schedule(callback: () => void, intervalMs: number): () => void {
+    this.callbacks.set(callback, intervalMs)
     return () => this.callbacks.delete(callback)
   }
 
   runAll(): number {
-    const callbacks = [...this.callbacks]
+    const callbacks = [...this.callbacks.keys()]
     for (const callback of callbacks) callback()
     return callbacks.length
   }
+
+  intervals(): number[] {
+    return [...this.callbacks.values()]
+  }
+}
+
+async function flushMicrotasks(): Promise<void> {
+  await new Promise<void>((resolve) => setImmediate(resolve))
 }
 
 async function* scriptedText(text: string): AsyncIterable<ChatEvent> {

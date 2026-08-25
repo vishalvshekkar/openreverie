@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
 import {
   createServer,
   type IncomingHttpHeaders,
@@ -10,6 +10,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { defaultCrisisResources, type ReverieConfig } from '@openreverie/core'
 import type {
+  Document,
+  DreamSummary,
+  DreamVerdict,
   GraphRecord,
   Profile,
   ProfileSettingsPatch,
@@ -23,6 +26,7 @@ import type {
   TranscriptLine,
 } from '@openreverie/memory'
 import {
+  appendDreamLog,
   type EngineDeps,
   MemoryEngine,
   memoryPaths,
@@ -238,6 +242,114 @@ class FakeEngine implements RecordEngine {
     if (patch.timezone !== undefined) meta.timezoneSource = 'user-confirmed'
     this.profileState = { meta, body: patch.prose ?? this.profileState.body }
     return this.profileState
+  }
+
+  dreams: DreamSummary[] = [
+    {
+      dreamId: 'dream_full',
+      date: '2026-08-20',
+      period: '2026-08-20',
+      hasNarrative: true,
+      insightCount: 2,
+      dir: '/fake/dreams/dream_full',
+    },
+    {
+      dreamId: 'dream_partial',
+      date: '2026-08-21',
+      period: '2026-08-21',
+      hasNarrative: false,
+      insightCount: 0,
+      dir: '/fake/dreams/dream_partial',
+    },
+  ]
+  dreamDetails = new Map<
+    string,
+    { summary: DreamSummary; narrative?: Document; insights: Document; processLog: string }
+  >([
+    [
+      'dream_full',
+      {
+        summary: this.dreams[0] as DreamSummary,
+        narrative: {
+          path: '/fake/dreams/dream_full/dream.md',
+          meta: { id: 'dream_full' },
+          body: 'A narrative about the week.',
+        },
+        insights: {
+          path: '/fake/dreams/dream_full/insight.md',
+          meta: {
+            id: 'ins_doc',
+            insights: [
+              {
+                id: 'ins_1',
+                kind: 'pattern',
+                headline: 'A recurring pattern',
+                claim: 'Something happened more than once.',
+                confidence: 0.7,
+                evidence: [{ doc: 'doc_one' }],
+              },
+              // Malformed on purpose: no headline. This is the tolerance
+              // case for an interrupted or hand-edited insight.md; it must
+              // be dropped, not turned into a 500.
+              {
+                id: 'ins_broken',
+                kind: 'pattern',
+                claim: 'Missing a headline.',
+                confidence: 0.5,
+                evidence: [],
+              },
+            ],
+          },
+          body: '## A recurring pattern (ins_1)\n\nSomething happened more than once.',
+        },
+        processLog: '{"event":"dream_started"}\n{"event":"dream_finished"}\n',
+      },
+    ],
+    [
+      'dream_partial',
+      {
+        // A tone-withheld or interrupted dream: insight.md exists, no
+        // dream.md, and no insights survived. narrative is legitimately
+        // absent, not a bug.
+        summary: this.dreams[1] as DreamSummary,
+        insights: {
+          path: '/fake/dreams/dream_partial/insight.md',
+          meta: { id: 'ins_doc_partial', insights: [] },
+          body: '',
+        },
+        processLog: '',
+      },
+    ],
+  ])
+  feedbackCalls: {
+    insightId: string
+    verdict: DreamVerdict
+    note?: string
+    source: 'ui' | 'tool'
+  }[] = []
+  feedbackKnownInsightIds = new Set(['ins_1'])
+
+  async listDreams(): Promise<DreamSummary[]> {
+    return this.dreams
+  }
+
+  async readDream(dreamId: string): Promise<{
+    summary: DreamSummary
+    narrative?: Document
+    insights: Document
+    processLog: string
+  } | null> {
+    return this.dreamDetails.get(dreamId) ?? null
+  }
+
+  async recordDreamFeedback(args: {
+    insightId: string
+    verdict: DreamVerdict
+    note?: string
+    source: 'ui' | 'tool'
+  }): Promise<boolean> {
+    this.feedbackCalls.push(args)
+    return this.feedbackKnownInsightIds.has(args.insightId)
   }
 }
 
@@ -669,6 +781,131 @@ describe('record browsing app', () => {
     expect(oneResponse.json.data.excerpt).toBe('Grateful for the quiet morning.')
   })
 
+  it('lists dreams as dreamId, date, period, hasNarrative, insightCount rows', async () => {
+    const response = (await getJson('/api/v1/dreams')) as Response & {
+      json: {
+        data: {
+          dreamId: string
+          date: string
+          period: string
+          hasNarrative: boolean
+          insightCount: number
+        }[]
+      }
+    }
+    expect(response.status).toBe(200)
+    expect(response.json.data).toEqual([
+      {
+        dreamId: 'dream_full',
+        date: '2026-08-20',
+        period: '2026-08-20',
+        hasNarrative: true,
+        insightCount: 2,
+      },
+      {
+        dreamId: 'dream_partial',
+        date: '2026-08-21',
+        period: '2026-08-21',
+        hasNarrative: false,
+        insightCount: 0,
+      },
+    ])
+  })
+
+  it('reads back a full dream with narrative, insights, and process log, dropping a malformed insight', async () => {
+    const response = (await getJson('/api/v1/dreams/dream_full')) as Response & {
+      json: {
+        data: {
+          dreamId: string
+          date: string
+          period: string
+          narrative?: string
+          insights: {
+            insightId: string
+            kind: string
+            headline: string
+            claim: string
+            confidence: number
+          }[]
+          processLog: string
+        }
+      }
+    }
+    expect(response.status).toBe(200)
+    expect(response.json.data.dreamId).toBe('dream_full')
+    expect(response.json.data.narrative).toBe('A narrative about the week.')
+    expect(response.json.data.processLog).toBe(
+      '{"event":"dream_started"}\n{"event":"dream_finished"}\n',
+    )
+    // Two insights were written to insight.md; only the well-formed one
+    // survives. This is the tolerance the endpoint owes a partial or
+    // hand-edited insight.md, not a 500.
+    expect(response.json.data.insights).toEqual([
+      {
+        insightId: 'ins_1',
+        kind: 'pattern',
+        headline: 'A recurring pattern',
+        claim: 'Something happened more than once.',
+        confidence: 0.7,
+      },
+    ])
+  })
+
+  it('reads back a partial dream (no narrative) without a 500', async () => {
+    const response = (await getJson('/api/v1/dreams/dream_partial')) as Response & {
+      json: { data: { narrative?: string; insights: unknown[] } }
+    }
+    expect(response.status).toBe(200)
+    expect(response.json.data.narrative).toBeUndefined()
+    expect(response.json.data.insights).toEqual([])
+  })
+
+  it('answers 404 for a dream id engine.readDream does not know', async () => {
+    const response = await getJson('/api/v1/dreams/dream_missing')
+    expect(response.status).toBe(404)
+  })
+
+  it('records feedback with source ui and echoes it back, 404 for an unknown insight', async () => {
+    const ok = (await request(
+      'POST',
+      '/api/v1/dreams/dream_full/feedback',
+      { insightId: 'ins_1', verdict: 'right', note: 'yes, that tracks' },
+      authenticated({ origin }),
+    )) as Response & { json: { data: { insightId: string; verdict: string } } }
+    expect(ok.status).toBe(200)
+    expect(ok.json.data).toEqual({ insightId: 'ins_1', verdict: 'right' })
+    expect(engine.feedbackCalls).toEqual([
+      { insightId: 'ins_1', verdict: 'right', note: 'yes, that tracks', source: 'ui' },
+    ])
+
+    const missing = await request(
+      'POST',
+      '/api/v1/dreams/dream_full/feedback',
+      { insightId: 'ins_unknown', verdict: 'wrong' },
+      authenticated({ origin }),
+    )
+    expect(missing.status).toBe(404)
+  })
+
+  it('rejects a feedback body with a bad verdict or a missing insightId before calling the engine', async () => {
+    const badVerdict = await request(
+      'POST',
+      '/api/v1/dreams/dream_full/feedback',
+      { insightId: 'ins_1', verdict: 'maybe' },
+      authenticated({ origin }),
+    )
+    expect(badVerdict.status).toBe(400)
+
+    const missingId = await request(
+      'POST',
+      '/api/v1/dreams/dream_full/feedback',
+      { verdict: 'right' },
+      authenticated({ origin }),
+    )
+    expect(missingId.status).toBe(400)
+    expect(engine.feedbackCalls).toEqual([])
+  })
+
   async function requestWithAuth(
     method: string,
     path: string,
@@ -685,6 +922,152 @@ describe('record browsing app', () => {
     while (engine.resolveCalls === 0) {
       await new Promise<void>((resolve) => setImmediate(resolve))
     }
+  }
+})
+
+describe('dream detail merges feedback verdicts from the dream log', () => {
+  // engine.readDream never carries feedback (it lives only in the
+  // append-only dream log, recorded later than the insight itself), so the
+  // dream detail route reads the log directly through config.memoryDir,
+  // the same way `reverie dream --show` already does on the CLI side. This
+  // exercises that merge against a real dream log file, not a stub.
+  let server: Server
+  let memoryDir: string
+  let engine: FakeEngine
+  let host: string
+  let cookie: string
+
+  beforeEach(async () => {
+    memoryDir = await mkdtemp(join(tmpdir(), 'openreverie-dream-verdict-'))
+    engine = new FakeEngine()
+    const config: ReverieConfig = liveConfig(memoryDir)
+    server = createServer()
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address() as AddressInfo
+    host = `127.0.0.1:${address.port}`
+    const origin = `http://${host}`
+    const { token, auth } = createBootstrapAuth({
+      origin,
+      now: () => 0,
+      randomBytes: () => Buffer.alloc(32, 5),
+    })
+    server.on('request', createApp({ engine, auth, canonicalOrigin: origin, config }))
+    const bootstrap = await dreamVerdictRequest(
+      host,
+      'POST',
+      '/api/v1/auth/bootstrap',
+      { token },
+      {},
+    )
+    cookie = bootstrap.headers['set-cookie']?.[0]?.split(';', 1)[0] ?? ''
+  })
+
+  afterEach(async () => {
+    server.closeAllConnections()
+    if (server.listening) {
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      )
+    }
+    await rm(memoryDir, { recursive: true, force: true })
+  })
+
+  it('attaches a verdict to the insight it belongs to, and no verdict to one never given feedback', async () => {
+    const paths = memoryPaths(memoryDir)
+    await mkdir(paths.dreamsDir, { recursive: true })
+    await appendDreamLog(paths, [
+      {
+        ts: '2026-08-22T00:00:00.000Z',
+        type: 'feedback',
+        insight: 'ins_1',
+        dream: 'dream_full',
+        verdict: 'right',
+        source: 'ui',
+      },
+    ])
+    const response = await dreamVerdictRequest(
+      host,
+      'GET',
+      '/api/v1/dreams/dream_full',
+      undefined,
+      {
+        cookie,
+      },
+    )
+    expect(response.status).toBe(200)
+    const insights = (
+      response.json as { data: { insights: { insightId: string; verdict?: string }[] } }
+    ).data.insights
+    expect(insights).toEqual([
+      {
+        insightId: 'ins_1',
+        kind: 'pattern',
+        headline: 'A recurring pattern',
+        claim: 'Something happened more than once.',
+        confidence: 0.7,
+        verdict: 'right',
+      },
+    ])
+  })
+
+  it('omits verdict rather than failing when the dream log has nothing for that insight', async () => {
+    const response = await dreamVerdictRequest(
+      host,
+      'GET',
+      '/api/v1/dreams/dream_full',
+      undefined,
+      {
+        cookie,
+      },
+    )
+    expect(response.status).toBe(200)
+    const insights = (
+      response.json as { data: { insights: { insightId: string; verdict?: string }[] } }
+    ).data.insights
+    expect(insights[0]?.verdict).toBeUndefined()
+  })
+
+  function dreamVerdictRequest(
+    reqHost: string,
+    method: string,
+    path: string,
+    body: unknown,
+    headers: Record<string, string>,
+  ): Promise<Response> {
+    const text = body === undefined ? undefined : JSON.stringify(body)
+    return new Promise((resolve, reject) => {
+      const req = nodeRequest(
+        {
+          hostname: '127.0.0.1',
+          port: Number(reqHost.split(':')[1]),
+          method,
+          path,
+          agent: false,
+          headers: {
+            host: reqHost,
+            connection: 'close',
+            ...(text === undefined
+              ? {}
+              : { 'content-type': 'application/json', 'content-length': Buffer.byteLength(text) }),
+            ...headers,
+          },
+        },
+        (response) => {
+          const chunks: Buffer[] = []
+          response.on('data', (chunk: Buffer) => chunks.push(chunk))
+          response.on('end', () => {
+            const responseBody = Buffer.concat(chunks).toString('utf8')
+            resolve({
+              status: response.statusCode ?? 0,
+              headers: response.headers,
+              json: responseBody === '' ? null : JSON.parse(responseBody),
+            })
+          })
+        },
+      )
+      req.on('error', reject)
+      req.end(text)
+    })
   }
 })
 

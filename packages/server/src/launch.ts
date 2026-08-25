@@ -1,5 +1,5 @@
 import type { RequestListener, Server } from 'node:http'
-import type { ReverieConfig } from '@openreverie/core'
+import { buildPersona, type ReverieConfig } from '@openreverie/core'
 import type { EngineDeps, MemoryEngine } from '@openreverie/memory'
 import {
   type ChatEvent,
@@ -111,6 +111,9 @@ export function createServerLauncher(deps: ServerLaunchDeps) {
         embeddings: providers.embeddings,
         reflectionModel: config.models.reflection,
         embeddingModel: config.models.embeddings,
+        dreamingModel: config.models.dreaming ?? config.models.reflection,
+        dreaming: config.dreaming,
+        dreamPersona: (style) => buildPersona(config.safety.mode, config.safety.resources, style),
       },
       { maintenance: false },
     )
@@ -134,6 +137,9 @@ export function createServerLauncher(deps: ServerLaunchDeps) {
         chat: providers.chat,
         providerAvailable: providers.available,
         ...(options.now ? { now: options.now } : {}),
+        ...(config.dreaming.enabled && config.dreaming.triggers.serverTimer
+          ? { dreamTrigger: () => engine.maybeDream('serverTimer') }
+          : {}),
       })
       listener = deps.createApp({ engine, config, auth, registry, staticDir, origin })
       const bootstrapUrl = `${origin}/?token=${token}`
