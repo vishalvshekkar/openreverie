@@ -985,6 +985,27 @@ design conversation first.
   - Trigger: not stated.
   - Size: large (architectural).
 
+- **Migrate the SQLite index off `better-sqlite3` to Node's built-in `node:sqlite`.** Would
+  remove the only native dependency in the published `openreverie` npm package, so a global
+  install no longer needs a prebuilt binary or a C++ toolchain for anyone. Verified on
+  2026-08-25 against Node 22.22.0 while building the npm packaging: `node:sqlite` is already
+  present, `DatabaseSync` is a function, but importing it prints `ExperimentalWarning: SQLite is
+  an experimental feature and might change at any time`.
+  - Why deferred: not stated as an explicit decision anywhere; the concrete blocker found while
+    verifying is that `node:sqlite` is still marked experimental by Node itself, which is reason
+    enough not to make it the load-bearing storage engine for a published CLI's only mandatory
+    native dependency today.
+  - Where: `docs/superpowers/handoffs/2026-08-25-npm-packaging.md`; the current native-dependency
+    constraint is in `packages/memory/src/sqlite.ts` and the `better-sqlite3` entry in
+    `packages/memory/package.json`; the rule that makes a future swap safe, that SQLite is a
+    derived index and must always be rebuildable from the memory folder, is in `AGENTS.md` under
+    "Architecture rules".
+  - Trigger: `node:sqlite` losing its experimental flag.
+  - Size: medium (swap the binding used in `packages/memory/src/sqlite.ts` and confirm
+    `node:sqlite`'s query surface actually covers everything the indexer needs; no data
+    migration is required, since the memory folder and `graph.jsonl` are the only truth and the
+    index is disposable).
+
 ## 5. Smaller improvements, help welcome
 
 Good first contributions, carried across unchanged from ROADMAP.md's prior "Smaller improvements,
