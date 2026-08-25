@@ -1510,11 +1510,11 @@ git commit -m "feat(core): dream_feedback tool with CLI notice"
 - `runDreamCommand(engine: MemoryEngine, config: ReverieConfig, args: string[], write: (line: string) => void): Promise<void>` handling: no flags (run now: `dreamNow()`, honoring dueness; prints outcome or why it did not run, including "dreaming is off" with the config path and "fewer than 5 reflected sessions"), `--force`, `--dry-run` (prints period, dueness, seeds with weights, walk), `--list` (one line per dream: date, period, insight count, narrative present), `--show <dreamId>` (prints dream.md body, then insight headlines with ids and any feedback verdicts, then a final line naming the process log path).
 - index.ts: add `'dream'` to `KNOWN_SUBCOMMANDS` and an `else if (subcommand === 'dream')` branch calling `runDreamCommand` with the already-opened engine (the same branch shape as `reflect`). Engine construction must now pass the new deps: `dreamingModel: config.models.dreaming ?? config.models.reflection`, `dreaming: config.dreaming`, `dreamPersona: (style) => buildPersona(config.safety.mode, config.safety.resources, style)` (imported from `@openreverie/core`), wherever the CLI builds `EngineDeps` today (find the one site constructing `{ chat, embeddings, reflectionModel, embeddingModel }` and extend it; the server's equivalent site is Task 13).
 
-- [ ] **Step 1: Write the failing tests** (stub engine object with vitest `vi.fn()` methods; assert each flag calls the right engine method and writes the expected lines; `--show` with an unknown id writes an error line and does not throw).
+- [x] **Step 1: Write the failing tests** (stub engine object with vitest `vi.fn()` methods; assert each flag calls the right engine method and writes the expected lines; `--show` with an unknown id writes an error line and does not throw).
 
-- [ ] **Step 2: Run, verify failure.** **Step 3: Implement.** **Step 4: Run `pnpm vitest run packages/cli`, verify pass.**
+- [x] **Step 2: Run, verify failure.** **Step 3: Implement.** **Step 4: Run `pnpm vitest run packages/cli`, verify pass.**
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/cli/src/index.ts packages/cli/src/dream.ts packages/cli/src/dream.test.ts
