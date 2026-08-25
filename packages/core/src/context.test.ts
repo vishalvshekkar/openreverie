@@ -10,6 +10,7 @@ import {
   type MemoryPaths,
   memoryPaths,
   newId,
+  recordCommitment,
   SessionStore,
   writeDocumentAtomic,
   writeProfile,
@@ -255,6 +256,7 @@ describe('assembleSystemPrompt', () => {
     expect(prompt).not.toContain('## People')
     expect(prompt).not.toContain('## Entities')
     expect(prompt).not.toContain('## Recent intentions')
+    expect(prompt).not.toContain('## Commitments')
     expect(prompt).not.toContain('## Latest daily rollup')
     expect(prompt).not.toContain('## Recent sessions')
 
@@ -539,6 +541,167 @@ describe('assembleSystemPrompt', () => {
     expect(prompt).toContain('never evidence that they did it')
 
     await engine.close()
+  })
+
+  describe('commitments section', () => {
+    // A reflected session with no items of its own, present in every test
+    // below, so this memory is never treated as a first conversation (which
+    // would replace every normal section, including Commitments, with the
+    // guided onboarding flow instead).
+    async function markNotFirstSession(): Promise<void> {
+      const store = await SessionStore.start(paths, new Date('2026-08-01T00:00:00.000Z'))
+      await store.appendLine({
+        ts: '2026-08-01T00:00:00.000Z',
+        role: 'user',
+        content: 'An earlier session.',
+      })
+      await writeDocumentAtomic({
+        path: join(store.dir, 'summary.md'),
+        meta: { id: newId('doc') },
+        body: 'A quiet day.\n',
+      })
+    }
+
+    it("renders a commitment with the person's own words, never the bracket", async () => {
+      await pinTimezoneUtc(paths)
+      await markNotFirstSession()
+      await recordCommitment(paths, {
+        label: 'Start swimming again',
+        flavor: 'plan',
+        sessionId: 'session_test',
+        timing: {
+          words: 'come summer',
+          anchor: '2026-08-13T09:00:00.000Z',
+          interpretation: {
+            statedPrecision: 'period',
+            gloss:
+              'Summer where they live, Bangalore, runs roughly February to May, so this points at early 2027.',
+            bracketFrom: '2027-02-01',
+            bracketTo: '2027-05-31',
+            interpretationConfidence: 'medium',
+          },
+        },
+      })
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      // 2027-01-10 sits inside the period lead window (eligible from
+      // 2027-01-02, 30 days before the 2027-02-01 bracket opens).
+      const prompt = await assembleSystemPrompt(
+        engine,
+        testConfig(),
+        'general',
+        () => new Date('2027-01-10T00:00:00.000Z'),
+      )
+
+      expect(prompt).toContain('## Commitments')
+      expect(prompt).toContain('come summer')
+      expect(prompt).toContain('Summer where they live')
+      // Spec Section 3: the bracket selects, the gloss speaks. It must
+      // never reach the prompt at all.
+      expect(prompt).not.toContain('2027-02-01')
+      expect(prompt).not.toContain('2027-05-31')
+
+      await engine.close()
+    })
+
+    it('renders a commitment with no timing at all as its label alone', async () => {
+      await pinTimezoneUtc(paths)
+      await markNotFirstSession()
+      await recordCommitment(paths, {
+        label: 'Do something, someday',
+        flavor: 'errand',
+        sessionId: 'session_test',
+      })
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const prompt = await assembleSystemPrompt(engine, testConfig())
+
+      expect(prompt).toContain('## Commitments')
+      const lines = prompt.split('\n')
+      const line = lines.find((l) => l.includes('Do something, someday'))
+      expect(line).toBe('- Do something, someday')
+
+      await engine.close()
+    })
+
+    it('states that a recorded commitment is not evidence the thing happened', async () => {
+      await pinTimezoneUtc(paths)
+      await markNotFirstSession()
+      await recordCommitment(paths, {
+        label: 'Call the dentist',
+        flavor: 'errand',
+        sessionId: 'session_test',
+      })
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const prompt = await assembleSystemPrompt(engine, testConfig())
+
+      expect(prompt).toContain('## Commitments')
+      expect(prompt).toContain('is evidence the person said they meant to do something')
+      expect(prompt).toContain('never evidence that they did it')
+
+      await engine.close()
+    })
+
+    it('is left out entirely, no empty header, when there are no eligible commitments', async () => {
+      await pinTimezoneUtc(paths)
+      await markNotFirstSession()
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const prompt = await assembleSystemPrompt(engine, testConfig())
+
+      expect(prompt).not.toContain('## Commitments')
+
+      await engine.close()
+    })
+
+    it('renders byte-identical across two different clock reads that both keep the same commitment eligible', async () => {
+      await pinTimezoneUtc(paths)
+      await markNotFirstSession()
+      await recordCommitment(paths, {
+        label: 'Start swimming again',
+        flavor: 'plan',
+        sessionId: 'session_test',
+        timing: {
+          words: 'come summer',
+          anchor: '2026-08-13T09:00:00.000Z',
+          interpretation: {
+            statedPrecision: 'period',
+            gloss: 'Summer where they live runs roughly February to May.',
+            bracketFrom: '2027-02-01',
+            bracketTo: '2027-05-31',
+            interpretationConfidence: 'medium',
+          },
+        },
+      })
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      // Both dates fall inside the same eligible window (2027-01-02 onward);
+      // only `now` moves. The rendered section must not move with it: `now`
+      // selects what is in range, it is never printed.
+      const first = await assembleSystemPrompt(
+        engine,
+        testConfig(),
+        'general',
+        () => new Date('2027-01-10T00:00:00.000Z'),
+      )
+      const second = await assembleSystemPrompt(
+        engine,
+        testConfig(),
+        'general',
+        () => new Date('2027-03-15T00:00:00.000Z'),
+      )
+
+      const section = (prompt: string): string => {
+        const start = prompt.indexOf('## Commitments')
+        const end = prompt.indexOf('\n\n## ', start + 1)
+        return end === -1 ? prompt.slice(start) : prompt.slice(start, end)
+      }
+
+      expect(section(first)).toBe(section(second))
+
+      await engine.close()
+    })
   })
 
   it('marks the people section as truncated once there are more people than the cap, and still shows each remaining line with its id', async () => {

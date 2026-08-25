@@ -27,6 +27,7 @@ import {
   recordCommitment as recordCommitmentRecord,
   resolveCommitment as resolveCommitmentRecord,
   reviseCommitment as reviseCommitmentRecord,
+  selectCommitments,
 } from './commitments.js'
 import { resolveStatedTime } from './commitmentTime.js'
 import {
@@ -304,6 +305,20 @@ export interface SessionContext {
   // ReflectionItem.eventTime (reflection.ts) and the time spec's section 2.
   // It is relative to date above, not to whenever the model reads it.
   recentIntentions: { text: string; date: string; eventTime?: string }[]
+  // Commitments already inside their eligible window (commitments.ts,
+  // selectCommitments), up to COMMITMENTS_CAP, soonest window first. Spec
+  // Section 3: "the bracket selects, the gloss speaks." selectCommitments
+  // uses the bracket only to decide whether an entry belongs in this array
+  // at all; once it is in, this shape has no field to carry the bracket, a
+  // resolved window, or any derived date forward, so context.ts has
+  // nothing to render even if it tried. words and date come from the same
+  // timing block and are only present together (absent together on a
+  // commitment with no timing at all, such as "someday"): words is the
+  // person's own wording, never resolved, and date is the local calendar
+  // day they said it, read off timing.anchor, not off `now`. gloss is
+  // present only when reflection wrote one for a stated time it could not
+  // resolve to a window.
+  commitments: { label: string; words?: string; date?: string; gloss?: string }[]
   latestDailyRollup?: { date: string; body: string; docId: string }
   recentSummaries: { sessionId: string; date: string; body: string; docId: string }[]
   // The newest WEEKLY_INDEX_CAP weekly rollups, newest first, each with the
@@ -369,6 +384,11 @@ const ARC_STARTER_BODY = 'This arc is new. It grows as we talk.\n'
 const RECENT_SUMMARIES_WINDOW_DAYS = 7
 const RECENT_SUMMARIES_CAP = 3
 const RECENT_INTENTIONS_CAP = 5
+// The cap selectCommitments (commitments.ts) is called with: how many
+// eligible commitments sessionContext carries into the prompt, soonest
+// window first. Matches RECENT_INTENTIONS_CAP: both are short, capped
+// listings of a handful of recent or upcoming things, not a full roster.
+const COMMITMENTS_CAP = 5
 // People and entity nodes are created generously and never forgotten, so
 // both lists only ever grow. Every sibling prompt section is bounded
 // (active-only for arcs, a window and a cap for recentSummaries, a cap for
@@ -1173,6 +1193,27 @@ export class MemoryEngine {
       }
     }
 
+    // The bracket that decides eligibility never leaves selectCommitments:
+    // this map only ever reads label, words, anchor, and interpretation.gloss
+    // off the commitments it returns. today is computed the same way every
+    // other local-day selection in this method is (formatLocalDate against
+    // this.timezone()), not off `now` directly, so a commitment recorded
+    // late at night and one recorded just after midnight the same local day
+    // select the same way.
+    const today = formatLocalDate(now, this.timezone())
+    const allCommitments = await readCommitments(this.paths)
+    const eligibleCommitments = selectCommitments(allCommitments, today, COMMITMENTS_CAP)
+    const commitments: SessionContext['commitments'] = eligibleCommitments.map((commitment) => {
+      const timing = commitment.timing
+      const said =
+        timing !== undefined
+          ? { words: timing.words, date: formatLocalDate(new Date(timing.anchor), this.timezone()) }
+          : {}
+      const gloss =
+        timing?.interpretation !== undefined ? { gloss: timing.interpretation.gloss } : {}
+      return { label: commitment.label, ...said, ...gloss }
+    })
+
     const personNodes: GraphNode[] = []
     const entityNodes: GraphNode[] = []
     for (const node of this.graphState.nodes.values()) {
@@ -1223,6 +1264,7 @@ export class MemoryEngine {
       entitiesTruncated: cappedEntities.truncated,
       entitiesTotal: entityNodes.length,
       recentIntentions: recentIntentions.slice(0, RECENT_INTENTIONS_CAP),
+      commitments,
       ...(latestDailyRollup ? { latestDailyRollup } : {}),
       recentSummaries,
       weeklyRollups: weeklyRollups.slice(0, WEEKLY_INDEX_CAP),

@@ -10,6 +10,7 @@ import {
 } from '@openreverie/providers'
 import Database from 'better-sqlite3'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { recordCommitment, resolveCommitment } from './commitments.js'
 import { listDocuments, newId, readDocument, writeDocumentAtomic } from './documents.js'
 import { type EngineDeps, MemoryEngine } from './engine.js'
 import { appendGraph, readGraph } from './graph.js'
@@ -3159,6 +3160,143 @@ describe('MemoryEngine', () => {
       const context = await engine.sessionContext()
 
       expect(context.recentIntentions).toEqual([])
+
+      await engine.close()
+    })
+  })
+
+  describe('sessionContext commitments', () => {
+    let dir: string
+    let paths: MemoryPaths
+
+    beforeEach(async () => {
+      dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-commitments-context-'))
+      paths = memoryPaths(dir)
+      await ensureMemoryTree(paths)
+      await pinTimezoneUtc(paths)
+    })
+
+    afterEach(async () => {
+      await rmWithRetry(dir)
+    })
+
+    it('carries an eligible commitment with its own words, the local date it was said, and its gloss, with no field to carry a bracket', async () => {
+      await recordCommitment(paths, {
+        label: 'Start swimming again',
+        flavor: 'plan',
+        sessionId: 'session_test',
+        timing: {
+          words: 'come summer',
+          anchor: '2026-08-13T09:00:00.000Z',
+          interpretation: {
+            statedPrecision: 'period',
+            gloss: 'Summer where they live runs roughly February to May.',
+            bracketFrom: '2027-02-01',
+            bracketTo: '2027-05-31',
+            interpretationConfidence: 'medium',
+          },
+        },
+      })
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      // 2027-01-10 is inside the period lead window (30 days before the
+      // 2027-02-01 bracket opens, i.e. eligible from 2027-01-02).
+      const context = await engine.sessionContext(new Date('2027-01-10T00:00:00.000Z'))
+
+      expect(context.commitments).toEqual([
+        {
+          label: 'Start swimming again',
+          words: 'come summer',
+          date: '2026-08-13',
+          gloss: 'Summer where they live runs roughly February to May.',
+        },
+      ])
+
+      await engine.close()
+    })
+
+    it("reads the date said in the person's own local timezone, not the UTC date the anchor's ISO string starts with", async () => {
+      // 2026-08-13T20:30:00.000Z is already 2026-08-14 local time in
+      // Asia/Kolkata (UTC+5:30). A test pinned to UTC cannot distinguish
+      // "converted to local time" from "read the ISO date prefix off the
+      // anchor directly": both would print 2026-08-13. Pinning a non-UTC
+      // zone and crossing the local day boundary is the only way to make
+      // the two implementations disagree.
+      const profile = await loadProfile(paths)
+      await writeProfile(paths, {
+        meta: { ...profile.meta, timezone: 'Asia/Kolkata', timezoneSource: 'user-confirmed' },
+        body: profile.body,
+      })
+      await recordCommitment(paths, {
+        label: 'Call the dentist',
+        flavor: 'errand',
+        sessionId: 'session_test',
+        timing: { words: 'tomorrow', anchor: '2026-08-13T20:30:00.000Z' },
+      })
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const context = await engine.sessionContext(new Date('2026-08-14T00:00:00.000Z'))
+
+      expect(context.commitments).toEqual([
+        { label: 'Call the dentist', words: 'tomorrow', date: '2026-08-14' },
+      ])
+
+      await engine.close()
+    })
+
+    it('carries a commitment with no timing at all as its label only, nothing trailing', async () => {
+      await recordCommitment(paths, {
+        label: 'Do something, someday',
+        flavor: 'errand',
+        sessionId: 'session_test',
+      })
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const context = await engine.sessionContext()
+
+      expect(context.commitments).toEqual([{ label: 'Do something, someday' }])
+
+      await engine.close()
+    })
+
+    it('excludes a commitment not yet inside its eligible window', async () => {
+      await recordCommitment(paths, {
+        label: 'Start swimming again',
+        flavor: 'plan',
+        sessionId: 'session_test',
+        timing: {
+          words: 'come summer',
+          anchor: '2026-08-13T09:00:00.000Z',
+          interpretation: {
+            statedPrecision: 'period',
+            gloss: 'Summer where they live runs roughly February to May.',
+            bracketFrom: '2027-02-01',
+            bracketTo: '2027-05-31',
+            interpretationConfidence: 'medium',
+          },
+        },
+      })
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const context = await engine.sessionContext(new Date('2026-09-01T00:00:00.000Z'))
+
+      expect(context.commitments).toEqual([])
+
+      await engine.close()
+    })
+
+    it('excludes a quiet commitment even when its window is eligible', async () => {
+      const recorded = await recordCommitment(paths, {
+        label: 'Call the dentist',
+        flavor: 'errand',
+        sessionId: 'session_test',
+      })
+      await resolveCommitment(paths, recorded.id, 'quiet')
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const context = await engine.sessionContext()
+
+      expect(context.commitments).toEqual([])
 
       await engine.close()
     })

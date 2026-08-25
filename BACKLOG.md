@@ -372,6 +372,23 @@ item ships, remove it from here and record it in `ROADMAP.md`'s Done narrative.
     candidate. It is easy to add later and awkward to remove." Trigger: "seeing that happen in
     real use, not deciding it in advance." Size: not stated. Where: section 10 and section 11.
 
+- **The browser's dedicated commitments view (spec Section 8) is not built.** Section 8 says
+  "The browser's Record section gains a commitments view: what is open, what resolved, what is
+  quiet," read-only. That view does not exist yet: `packages/web/src/atlas.tsx` added
+  `'commitment'` as a node type so the graph atlas renders commitment nodes like any other node
+  (its own comment there says this is "a minimal, functional default, not a considered design"),
+  but nothing lists commitments the way the Record section's other tabs list their own kind. This
+  is distinct from the already-recorded "editing commitments from the browser" deferral above,
+  which assumes a read-only view exists and only editing is missing; the view itself is what is
+  missing here.
+  - Why deferred: not stated (the commitments design scoped the browser view to "a separate plan"
+    per `atlas.tsx`'s own comment; no reason is given beyond that).
+  - Where the thinking lives: spec Section 8; `packages/web/src/atlas.tsx` lines 20 to 29 (the
+    `NODE_TYPES` comment); task-8-report.md (this task, which surfaced commitments in the chat
+    prompt only, not the browser).
+  - Trigger: the separate plan atlas.tsx's comment refers to, once it exists.
+  - Size: not stated.
+
 - **`waitsOn` is stored as free text, not the graph edge the spec calls for, and the
   reactivation half of the mechanism does not exist.** Spec Section 5 says the honest
   representation is a graph edge: "the commitment `waitsOn` another node, which usually already

@@ -26,6 +26,7 @@ import type { MemoryEngine, Profile, SessionContext } from '@openreverie/memory'
 import { PROFILE_STARTER_BODY } from '@openreverie/memory'
 import {
   ARCS_SECTION_CAP,
+  COMMITMENTS_SECTION_CAP,
   CONSTITUTION_CAP,
   capBody,
   capRows,
@@ -81,6 +82,7 @@ export async function assembleSystemPrompt(
     peopleSection(context),
     entitiesSection(context),
     recentIntentionsSection(context),
+    commitmentsSection(context),
     latestDailyRollupSection(context),
     rollupsAvailableSection(context),
     recentSummariesSection(context),
@@ -325,4 +327,40 @@ function recentIntentionsSection(context: SessionContext): string | undefined {
     rows.push(`(showing ${capped.shown} of ${lines.length} recent intentions.)`)
   }
   return `## Recent intentions\n\nA recorded intention is evidence the person said they meant to do something. It is never evidence that they did it.\n\n${rows.join('\n')}`
+}
+
+// Spec section 3, "the bracket selects, the gloss speaks": a derived time
+// bracket only ever decides whether a commitment made it into
+// context.commitments in the first place (engine.ts, sessionContext,
+// selectCommitments). That shape carries no field for a bracket, a resolved
+// window, or any count of anything unresolved, so there is nothing here to
+// leak even by mistake. Only what the person actually said, and the gloss
+// when reflection wrote one, ever reaches this string.
+function commitmentsSection(context: SessionContext): string | undefined {
+  if (context.commitments.length === 0) return undefined
+  const lines = context.commitments.map((commitment) => {
+    // words and date come from the same timing block and are only ever
+    // present together; a commitment with no timing at all (an open-ended
+    // "someday") renders its label alone, with nothing trailing it, not
+    // even an empty parenthetical.
+    const said =
+      commitment.words !== undefined && commitment.date !== undefined
+        ? ` (said ${commitment.date}: "${commitment.words}")`
+        : ''
+    const gloss = commitment.gloss !== undefined ? ` ${commitment.gloss}` : ''
+    return `- ${commitment.label}${said}${gloss}`
+  })
+  const capped = capRows(lines, COMMITMENTS_SECTION_CAP)
+  // A single gloss is model prose with no length limit of its own, so the
+  // very first row can already exceed the section cap on its own; capRows
+  // then returns no rows at all. A header with nothing under it is exactly
+  // the defect the rest of this file exists to avoid, so this section
+  // follows the same rule as every sibling: nothing to say, left out
+  // entirely, rather than an empty listing under a marker.
+  if (capped.rows.length === 0) return undefined
+  const rows = capped.rows
+  if (capped.shown < lines.length) {
+    rows.push(`(showing ${capped.shown} of ${lines.length} commitments.)`)
+  }
+  return `## Commitments\n\nA recorded commitment is evidence the person said they meant to do something. It is never evidence that they did it. This informs what you say. It is never read out to the person as a list, a status report, or a checklist.\n\n${rows.join('\n')}`
 }
