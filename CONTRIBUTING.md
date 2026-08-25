@@ -31,4 +31,4 @@ Node 22 or newer, pnpm 10.
 
 ## Scope honesty
 
-The core has shipped and stabilized: the memory engine, agent loop, both safety modes, a terminal app, and a browser interface all work today (see the README's Status section for the full list). Large feature PRs still need a direction discussion first (see Ground rules above). [ROADMAP.md](ROADMAP.md) lists what is next, from project-sized work like provider adapters down to small, specific fixes; start there.
+The core has shipped and stabilized: the memory engine, agent loop, both safety modes, a terminal app, and a browser interface all work today (see the README's Status section for the full list). Large feature PRs still need a direction discussion first (see Ground rules above). [BACKLOG.md](BACKLOG.md) is canonical for what is not yet started, from project-sized work like provider adapters down to small, specific fixes; start there. [ROADMAP.md](ROADMAP.md) covers the honest Done narrative and current direction, and points back at BACKLOG.md rather than keeping its own list.
