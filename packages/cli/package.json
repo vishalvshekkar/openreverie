@@ -1,6 +1,6 @@
 {
   "name": "openreverie",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "A self-hosted companion agent with a memory that does not forget. Terminal chat interface.",
   "homepage": "https://reverie.my",
   "repository": {
