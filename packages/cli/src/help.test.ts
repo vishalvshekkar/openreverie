@@ -15,6 +15,7 @@ Commands:
   read [target]   Print part of your memory record from disk. No network call.
   reindex         Rebuild the SQLite search index from the memory folder.
   reflect         Run maintenance now (reflect stale sessions, build rollups).
+  dream           Run, preview, list, or read dreams.
   doctor          Check config, provider, and memory folder health.
   version         Print the installed version.
   help [command]  Show this message, or help for one command.
@@ -40,6 +41,26 @@ daily or weekly rollups that are due, instead of waiting for it to happen automa
 on next chat start. Requires a working config and a reachable model provider.
 
 Usage: reverie reflect [--config <path>]
+`,
+    )
+  })
+
+  it('returns the exact dream help block', () => {
+    expect(subcommandHelp('dream')).toBe(
+      `reverie dream
+
+Runs a dream now, honoring your dreaming settings, if one is due: at least 5 reflected
+sessions, dreaming turned on, and the current period not already covered. Prints the
+outcome, or a plain reason why it did not run.
+
+Usage: reverie dream [--force | --dry-run | --list | --show <dreamId>] [--config <path>]
+
+  --force             Run even when dreaming is off or the current period is already covered.
+  --dry-run           Print the period, dueness, seeds with their weights, and the walk.
+                      Makes no model calls and spends nothing.
+  --list              List past dreams: date, period, insight count, narrative present.
+  --show <dreamId>    Print one dream's narrative, its insight headlines with any feedback,
+                      and the path to its process log.
 `,
     )
   })
@@ -81,7 +102,17 @@ Usage: reverie read [constitution | arc <name> | realm <name> | person <name>] [
   })
 
   it('has a help block for every command listed in the top-level Commands section', () => {
-    const names = ['setup', 'web', 'read', 'reindex', 'reflect', 'doctor', 'version', 'help']
+    const names = [
+      'setup',
+      'web',
+      'read',
+      'reindex',
+      'reflect',
+      'dream',
+      'doctor',
+      'version',
+      'help',
+    ]
     for (const name of names) {
       expect(subcommandHelp(name)).toBeDefined()
     }

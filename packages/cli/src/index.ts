@@ -30,6 +30,7 @@ import { launchServer } from '@openreverie/server'
 import type { ChatIo } from './chat.js'
 import { countMemoryDocuments, openCliContext, printWarnings, runChat } from './chat.js'
 import { buildRealDoctorDeps, type DoctorDeps, runDoctor } from './doctor.js'
+import { runDreamCommand } from './dream.js'
 import { subcommandHelp, TOP_LEVEL_HELP } from './help.js'
 import { runMigrate } from './migrate.js'
 import { runRead } from './read.js'
@@ -44,6 +45,7 @@ const KNOWN_SUBCOMMANDS = new Set([
   'migrate',
   'reindex',
   'reflect',
+  'dream',
   'doctor',
 ])
 
@@ -52,6 +54,7 @@ const KNOWN_SUBCOMMANDS = new Set([
 // before they ever reach the subcommand's own handler.
 const SUBCOMMAND_FLAGS: Record<string, Set<string>> = {
   migrate: new Set(['--dry-run', '--list']),
+  dream: new Set(['--force', '--dry-run', '--list', '--show']),
 }
 
 // Colors are read from real process state exactly once, here at the edge:
@@ -140,6 +143,7 @@ export interface CliMainDeps {
   openEngine: typeof MemoryEngine.open
   countMemoryDocuments: typeof countMemoryDocuments
   runChat: typeof runChat
+  runDreamCommand: typeof runDreamCommand
   loadConfig: (path: string) => Promise<ReverieConfig>
   readConfigMemoryDir: (path: string) => Promise<string>
   configPath: string
@@ -315,6 +319,9 @@ export async function mainWith(args: string[], deps: CliMainDeps): Promise<void>
       await engine.runMaintenance()
       printWarnings({ write: deps.write }, engine, colorEnabled)
       deps.write('Reflection is up to date.\n')
+    } else if (subcommand === 'dream') {
+      await deps.runDreamCommand(engine, config, rest.slice(1), deps.write)
+      printWarnings({ write: deps.write }, engine, colorEnabled)
     } else {
       const io = readlineChatIo()
       try {
@@ -353,6 +360,7 @@ const defaultDeps: CliMainDeps = {
   openEngine: MemoryEngine.open,
   countMemoryDocuments,
   runChat,
+  runDreamCommand,
   loadConfig,
   readConfigMemoryDir,
   configPath: defaultConfigPath(),

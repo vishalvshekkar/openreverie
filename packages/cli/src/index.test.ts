@@ -41,6 +41,9 @@ function testDeps(overrides: Partial<CliMainDeps> = {}): {
       throw new Error('countMemoryDocuments should not be called')
     },
     runChat: async () => ({ interrupted: false }),
+    runDreamCommand: async () => {
+      throw new Error('runDreamCommand should not be called')
+    },
     loadConfig: async () => {
       throw new Error('loadConfig should not be called')
     },

@@ -7,7 +7,7 @@
 import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { ReverieConfig } from '@openreverie/core'
-import { AgentSession } from '@openreverie/core'
+import { AgentSession, buildPersona } from '@openreverie/core'
 import type { EngineDeps, MemoryEngine } from '@openreverie/memory'
 import { listDocuments, memoryPaths, readDocument } from '@openreverie/memory'
 import type { ChatProvider, EmbeddingProvider } from '@openreverie/providers'
@@ -412,6 +412,9 @@ export async function openCliContext(deps: CliEngineDeps): Promise<CliContextRes
       embeddings,
       reflectionModel: config.models.reflection,
       embeddingModel: config.models.embeddings,
+      dreamingModel: config.models.dreaming ?? config.models.reflection,
+      dreaming: config.dreaming,
+      dreamPersona: (style) => buildPersona(config.safety.mode, config.safety.resources, style),
     })
     return { ok: true, engine, config, chat }
   } catch (err) {
