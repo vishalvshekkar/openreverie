@@ -315,7 +315,12 @@ Two paths, one record:
 
 1. **On the artifact**: the web Dreams view (and `reverie dream --show`) offers right / wrong /
    do not bring this up per insight. The web posts to the feedback endpoint; the CLI appends
-   directly through the engine. Both append `feedback` records to `log.jsonl`.
+   directly through the engine. Both append `feedback` records to `log.jsonl`. (Corrected
+   2026-08-25: v1 ships `reverie dream --show` read-only, displaying verdicts recorded through
+   the web view or the `dream_feedback` tool rather than appending its own. A CLI write path
+   needs either a third value on the `feedback` record's `source: 'ui' | 'tool'` field or a
+   dishonest `'ui'` label for a terminal-issued verdict, a log-format decision left to the human
+   rather than resolved during implementation; the working record has the full reasoning.)
 2. **In conversation**: a new `dream_feedback` tool in the companion's roster, args
    `{ insightId, verdict, note? }`, zod-validated, appending the same record with
    `source: 'tool'`. The prompt section's preamble licenses its use when the person reacts to
