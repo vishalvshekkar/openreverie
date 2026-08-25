@@ -1,8 +1,9 @@
+import { readFileSync } from 'node:fs'
 import { act, render, screen, waitFor, within } from '@testing-library/react'
 import { userEvent } from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AppApi, PublicProfile, Session, StreamEvent, TranscriptLine } from '../api.js'
-import { Conversations } from './Conversations.js'
+import { Conversations, MODE_OPTIONS, TOOL_LABELS } from './Conversations.js'
 
 const liveSessionId = 'session_01M052PA5A1MXY8JFHXTVVXAE'
 const endedSessionId = 'session_01M052PA5A1MXY8JFHXTVVXAF'
@@ -151,6 +152,15 @@ async function renderReady() {
   return screen.getByLabelText('Message')
 }
 
+function modePillButton() {
+  return screen.getByRole('button', { name: /^Mode: /i })
+}
+
+async function openModeMenu() {
+  await userEvent.click(modePillButton())
+  return screen.getByRole('listbox', { name: 'Mode' })
+}
+
 describe('Conversations', () => {
   it('keeps earlier messages visible after sending another one (the headline bug)', async () => {
     api.message.mockResolvedValueOnce([text(1, 'First reply'), done(2)])
@@ -181,7 +191,15 @@ describe('Conversations', () => {
     expect(assistantMessages).toHaveLength(1)
   })
 
-  it('disables the composer for a read-only session and explains why', async () => {
+  it('shows the composer, Send, End conversation, and the mode pill for a live session', async () => {
+    await renderReady()
+    expect(screen.getByLabelText('Message')).not.toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Send' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'End conversation' })).toBeInTheDocument()
+    expect(modePillButton()).toBeInTheDocument()
+  })
+
+  it('shows only the ended notice for a read-only session: no textarea, no Send, no End conversation, no mode control', async () => {
     await renderReady()
     const pastEntry = await screen.findByTitle(endedSessionId)
     await userEvent.click(pastEntry)
@@ -190,8 +208,17 @@ describe('Conversations', () => {
     expect(
       screen.getByText('This conversation has ended. Start a new one to keep talking.'),
     ).toBeVisible()
-    expect(screen.getByLabelText('Message')).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled()
+    expect(screen.queryByLabelText('Message')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Send' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'End conversation' })).toBeNull()
+    expect(screen.queryByRole('button', { name: /^Mode: /i })).toBeNull()
+  })
+
+  it('gives the send control an accessible name without visible text', async () => {
+    await renderReady()
+    const sendButton = screen.getByRole('button', { name: 'Send' })
+    expect(sendButton).toHaveAttribute('aria-label', 'Send')
+    expect(sendButton.textContent).toBe('')
   })
 
   it('loads and displays the transcript of a past session on click', async () => {
@@ -231,6 +258,16 @@ describe('Conversations', () => {
       expect.any(String),
       'line one\nline two',
     )
+  })
+
+  it('ends the conversation from the thread header and shows the read-only view', async () => {
+    await renderReady()
+    await userEvent.click(screen.getByRole('button', { name: 'End conversation' }))
+
+    await waitFor(() => expect(api.end).toHaveBeenCalledWith(liveSessionId))
+    expect(
+      await screen.findByText('This conversation has ended. Start a new one to keep talking.'),
+    ).toBeVisible()
   })
 
   it('groups sessions under readable date headings, not raw ids as the primary label', async () => {
@@ -380,21 +417,98 @@ describe('Conversations', () => {
   })
 })
 
-describe('mode picker', () => {
-  it('lists ten modes and starts on general', async () => {
-    await renderReady()
-    const picker = screen.getByLabelText('Mode')
-    expect(picker).toHaveValue('general')
-    expect(picker.querySelectorAll('option')).toHaveLength(10)
+describe('mount bootstrap ordering (the reload-to-see-sessions bug)', () => {
+  it('does not list sessions until the token bootstrap has resolved', async () => {
+    window.history.replaceState({}, '', '/?token=abc123')
+    let resolveBootstrap: (() => void) | undefined
+    const bootstrapGate = new Promise<{ authenticated: true }>((resolve) => {
+      resolveBootstrap = () => resolve({ authenticated: true })
+    })
+    api.bootstrap.mockReturnValueOnce(bootstrapGate)
+
+    render(<Conversations api={api as unknown as AppApi} />)
+
+    await waitFor(() => expect(api.bootstrap).toHaveBeenCalledWith('abc123'))
+    // The regression: listSessions used to fire in the same synchronous pass
+    // as the fire-and-forget bootstrap call, racing ahead of the auth cookie
+    // bootstrap sets and coming back 401 (swallowed silently by a blanket
+    // catch). Asserting a call count of 0 here, before resolving the gate,
+    // is what a "was eventually called" assertion would miss.
+    expect(api.listSessions).not.toHaveBeenCalled()
+
+    await act(async () => {
+      resolveBootstrap?.()
+      await bootstrapGate
+    })
+
+    await waitFor(() => expect(api.listSessions).toHaveBeenCalledTimes(1))
   })
 
-  it('calls the session mode endpoint when the picker changes', async () => {
+  it('scrubs the token from the URL before bootstrap resolves, not after', async () => {
+    window.history.replaceState({}, '', '/?token=abc123')
+    let resolveBootstrap: (() => void) | undefined
+    const bootstrapGate = new Promise<{ authenticated: true }>((resolve) => {
+      resolveBootstrap = () => resolve({ authenticated: true })
+    })
+    api.bootstrap.mockReturnValueOnce(bootstrapGate)
+
+    render(<Conversations api={api as unknown as AppApi} />)
+
+    await waitFor(() => expect(api.bootstrap).toHaveBeenCalled())
+    expect(window.location.search).toBe('')
+
+    await act(async () => {
+      resolveBootstrap?.()
+      await bootstrapGate
+    })
+  })
+})
+
+describe('session list failure', () => {
+  it('shows a retry control when the session list fails to load, and recovers on retry', async () => {
+    api.listSessions.mockReset()
+    api.listSessions.mockRejectedValueOnce(new Error('network down'))
+
+    render(<Conversations api={api as unknown as AppApi} />)
+
+    const retry = await screen.findByRole('button', { name: 'Retry' })
+    expect(screen.getByRole('alert')).toHaveTextContent('Conversations could not load.')
+
+    api.listSessions.mockResolvedValueOnce({ data: [liveSession, endedSession], nextCursor: null })
+    await userEvent.click(retry)
+
+    await waitFor(() => expect(api.listSessions).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull())
+  })
+})
+
+describe('mode picker', () => {
+  it('shows the current mode name on the closed pill, not its description', async () => {
+    await renderReady()
+    const generalSummary = MODE_OPTIONS.find(([value]) => value === 'general')?.[1] ?? ''
+
+    expect(modePillButton()).toHaveTextContent('general')
+    expect(modePillButton()).not.toHaveTextContent(generalSummary)
+  })
+
+  it('lists all ten modes, with their descriptions, once opened', async () => {
+    await renderReady()
+    const listbox = await openModeMenu()
+    const options = within(listbox).getAllByRole('option')
+    expect(options).toHaveLength(10)
+    expect(
+      within(listbox).getByText('A concrete problem, worked toward real options and a decision.'),
+    ).toBeVisible()
+  })
+
+  it('calls the session mode endpoint when a menu option is chosen', async () => {
     api.setSessionMode.mockResolvedValueOnce({ mode: 'listen' })
     await renderReady()
-    const picker = screen.getByLabelText('Mode')
-    await userEvent.selectOptions(picker, 'listen')
+    const listbox = await openModeMenu()
+    await userEvent.click(within(listbox).getByRole('option', { name: /^listen\b/i }))
+
     await waitFor(() => expect(api.setSessionMode).toHaveBeenCalledWith(liveSessionId, 'listen'))
-    expect(picker).toHaveValue('listen')
+    expect(modePillButton()).toHaveTextContent('listen')
   })
 
   it('follows the model without a refetch when a mode event arrives', async () => {
@@ -406,26 +520,54 @@ describe('mode picker', () => {
     api.events.mockResolvedValueOnce(controllable.stream)
 
     await renderReady()
-    const picker = screen.getByLabelText('Mode')
-    expect(picker).toHaveValue('general')
+    expect(modePillButton()).toHaveTextContent('general')
 
     controllable.push({ schemaVersion: '1', seq: 1, type: 'mode', mode: 'solve' })
-    await waitFor(() => expect(screen.getByLabelText('Mode')).toHaveValue('solve'))
+    await waitFor(() => expect(modePillButton()).toHaveTextContent('solve'))
     expect(api.setSessionMode).not.toHaveBeenCalled()
   })
 
-  it('leaves the picker where it was when the endpoint fails', async () => {
+  it('leaves the pill showing the old mode when the endpoint fails', async () => {
     api.setSessionMode.mockRejectedValueOnce(new Error('offline'))
     await renderReady()
-    const picker = screen.getByLabelText('Mode')
-    await userEvent.selectOptions(picker, 'listen')
+    const listbox = await openModeMenu()
+    await userEvent.click(within(listbox).getByRole('option', { name: /^listen\b/i }))
+
     await waitFor(() => expect(api.setSessionMode).toHaveBeenCalled())
-    expect(screen.getByLabelText('Mode')).toHaveValue('general')
+    expect(modePillButton()).toHaveTextContent('general')
   })
 
-  it('renders the status strip next to the composer', async () => {
+  it('renders the status strip next to the mode pill in the thread header', async () => {
     await renderReady()
     expect(await screen.findByTestId('status-strip')).toHaveTextContent('warm')
+  })
+
+  it('opens with the current mode highlighted; Escape closes it and returns focus to the pill', async () => {
+    await renderReady()
+    const listbox = await openModeMenu()
+    expect(listbox).toHaveFocus()
+
+    await userEvent.keyboard('{Escape}')
+    expect(screen.queryByRole('listbox', { name: 'Mode' })).toBeNull()
+    expect(modePillButton()).toHaveFocus()
+  })
+
+  it('selects an option by keyboard: ArrowDown then Enter', async () => {
+    api.setSessionMode.mockResolvedValueOnce({ mode: 'listen' })
+    await renderReady()
+    await openModeMenu()
+
+    await userEvent.keyboard('{ArrowDown}{Enter}')
+    await waitFor(() => expect(api.setSessionMode).toHaveBeenCalledWith(liveSessionId, 'listen'))
+  })
+
+  it('closes when clicking outside the popover', async () => {
+    await renderReady()
+    await openModeMenu()
+    expect(screen.getByRole('listbox', { name: 'Mode' })).toBeInTheDocument()
+
+    await userEvent.click(document.body)
+    expect(screen.queryByRole('listbox', { name: 'Mode' })).toBeNull()
   })
 })
 
@@ -469,6 +611,277 @@ describe('the new-chat mode-card picker', () => {
     const solveCard = await screen.findByRole('button', { name: /^solve\b/i })
     await userEvent.click(solveCard)
 
-    await waitFor(() => expect(screen.getByLabelText('Mode')).toHaveValue('solve'))
+    await waitFor(() => expect(modePillButton()).toHaveTextContent('solve'))
+  })
+})
+
+describe('tool activity presentation', () => {
+  it('shows a human label for a running tool, not the raw tool name', async () => {
+    const controllable = makeControllableStream()
+    api.message.mockResolvedValueOnce(controllable.stream)
+
+    const input = await renderReady()
+    await userEvent.type(input, 'Hi{enter}')
+    controllable.push({ schemaVersion: '1', seq: 1, type: 'tool', name: 'remember' })
+
+    expect(await screen.findByText('Remembering')).toBeVisible()
+    expect(screen.queryByText('Using remember')).toBeNull()
+    expect(screen.queryByText('remember', { exact: true })).toBeNull()
+  })
+
+  it('degrades an unrecognized tool name to a readable label instead of showing it raw', async () => {
+    const controllable = makeControllableStream()
+    api.message.mockResolvedValueOnce(controllable.stream)
+
+    const input = await renderReady()
+    await userEvent.type(input, 'Hi{enter}')
+    controllable.push({ schemaVersion: '1', seq: 1, type: 'tool', name: 'some_unmapped_tool' })
+
+    expect(await screen.findByText('Using some unmapped tool')).toBeVisible()
+  })
+
+  it('flips the chip to its done label and keeps it in the thread once the reply starts, instead of deleting it', async () => {
+    const controllable = makeControllableStream()
+    api.message.mockResolvedValueOnce(controllable.stream)
+
+    const input = await renderReady()
+    await userEvent.type(input, 'Hi{enter}')
+    controllable.push({ schemaVersion: '1', seq: 1, type: 'tool', name: 'remember' })
+    expect(await screen.findByText('Remembering')).toBeVisible()
+
+    controllable.push({ schemaVersion: '1', seq: 2, type: 'text', text: 'Done.' })
+
+    // The running label is gone, replaced in place by the done label, not
+    // vanished the way the old "Using X" status line used to the instant
+    // the first token of the reply arrived.
+    await waitFor(() => expect(screen.queryByText('Remembering')).toBeNull())
+    expect(screen.getByText('Remembered')).toBeVisible()
+    expect(await screen.findByText('Done.')).toBeVisible()
+  })
+
+  it('shows the completed tool label collapsed, with the raw JSON payload hidden behind a disclosure', async () => {
+    await renderReady()
+    const pastEntry = await screen.findByTitle(endedSessionId)
+    api.transcript.mockResolvedValueOnce({
+      data: [
+        ...endedTranscript,
+        {
+          lineSequence: 3,
+          ts: yesterdayAt(9, 32),
+          role: 'tool',
+          content: '{"ok":true,"commitmentId":"commitment_01M0WDE8WSK20MDZFJHZPKHWHC"}',
+        },
+      ],
+      nextCursor: null,
+    })
+    await userEvent.click(pastEntry)
+
+    const summary = await screen.findByText('Tool result')
+    const payload = screen.getByText(/"ok":true/)
+    expect(payload).not.toBeVisible()
+
+    await userEvent.click(summary)
+    expect(payload).toBeVisible()
+  })
+
+  it('resolves a reopened tool result to its tool name (not the generic placeholder) from the preceding request line', async () => {
+    await renderReady()
+    const pastEntry = await screen.findByTitle(endedSessionId)
+    api.transcript.mockResolvedValueOnce({
+      data: [
+        ...endedTranscript,
+        {
+          lineSequence: 3,
+          ts: yesterdayAt(9, 32),
+          role: 'assistant',
+          content: 'Let me check.',
+          toolCalls: [{ id: 'call_1', name: 'search_memory', arguments: '{}' }],
+        },
+        {
+          lineSequence: 4,
+          ts: yesterdayAt(9, 33),
+          role: 'tool',
+          content: '{"ok":true}',
+          toolCallId: 'call_1',
+        },
+      ],
+      nextCursor: null,
+    })
+    await userEvent.click(pastEntry)
+
+    expect(await screen.findByText('Searched memory')).toBeVisible()
+    expect(screen.queryByText('Tool result')).toBeNull()
+  })
+
+  it('suppresses an empty assistant announcement line that only carries a tool call, in a reopened session', async () => {
+    await renderReady()
+    const pastEntry = await screen.findByTitle(endedSessionId)
+    api.transcript.mockResolvedValueOnce({
+      data: [
+        ...endedTranscript,
+        {
+          lineSequence: 3,
+          ts: yesterdayAt(9, 32),
+          role: 'assistant',
+          content: '',
+          toolCalls: [{ id: 'call_1', name: 'remember', arguments: '{}' }],
+        },
+        {
+          lineSequence: 4,
+          ts: yesterdayAt(9, 33),
+          role: 'tool',
+          content: '{"ok":true}',
+          toolCallId: 'call_1',
+        },
+      ],
+      nextCursor: null,
+    })
+    await userEvent.click(pastEntry)
+
+    expect(await screen.findByText('Remembered')).toBeVisible()
+    // No blank "reverie" bubble for the empty announcement line: exactly
+    // the two persisted prose messages remain (the original transcript's
+    // user line and assistant reply), plus the one tool chip above.
+    expect(document.querySelectorAll('.message-assistant')).toHaveLength(1)
+  })
+})
+
+// Hand mirrored the same way MODE_OPTIONS is (see Conversations.tsx's own
+// comment above MODE_OPTIONS, and above TOOL_LABELS itself): web never
+// imports a runtime engine package, so TOOL_LABELS cannot import
+// packages/core/src/tools.ts's toolDefinitions() to compare against. This
+// only catches TOOL_LABELS drifting from what is written here; it cannot
+// detect toolDefinitions() adding or removing a tool on its own. Whoever
+// changes toolDefinitions() must update TOOL_LABELS AND this list by hand,
+// in the same change (the same discipline graph-vocabulary-parity.test.ts
+// applies to NodeType/EdgeType).
+const EXPECTED_TOOL_NAMES = [
+  'remember',
+  'search_memory',
+  'graph_query',
+  'read_document',
+  'read_transcript',
+  'list_arcs',
+  'list_realms',
+  'list_people',
+  'list_entities',
+  'set_mode',
+  'update_profile',
+  'declare_journal_method',
+  'update_journaling_protocol',
+  'dream_feedback',
+]
+
+describe('tool label catalogue parity with packages/core/src/tools.ts', () => {
+  it('has exactly the fourteen tools in toolDefinitions(), each with a running and a done label', () => {
+    expect(Object.keys(TOOL_LABELS).sort()).toEqual([...EXPECTED_TOOL_NAMES].sort())
+    for (const name of EXPECTED_TOOL_NAMES) {
+      expect(TOOL_LABELS[name]?.running).toBeTruthy()
+      expect(TOOL_LABELS[name]?.done).toBeTruthy()
+    }
+  })
+
+  // The test above compares this package's table against EXPECTED_TOOL_NAMES,
+  // which is another hand-written list in this same file. That catches a table
+  // edited without its own list, and nothing else: both halves live here, so
+  // the pair can agree with each other while having drifted from core, which is
+  // the only place the wording is actually decided. That is the "passes for a
+  // reason unrelated to what it is named" shape AGENTS.md warns about.
+  //
+  // So this test reads packages/core/src/tool-labels.ts off disk and compares
+  // the real strings. web cannot import @openreverie/core (it talks to server
+  // over HTTP only and never imports a runtime engine package), so reading the
+  // source text is the only way to assert against the actual canonical table
+  // rather than against a copy of it. atlas.test.tsx does the same thing
+  // against tokens.css for the same reason.
+  it('matches the canonical table in packages/core/src/tool-labels.ts word for word', () => {
+    const corePath = `${import.meta.dirname}/../../../core/src/tool-labels.ts`
+    const source = readFileSync(corePath, 'utf8')
+
+    const open = source.indexOf('const TOOL_LABELS')
+    expect(open).toBeGreaterThan(-1)
+    const braceStart = source.indexOf('{', open)
+    let depth = 0
+    let braceEnd = -1
+    for (let index = braceStart; index < source.length; index++) {
+      const char = source[index]
+      if (char === '{') depth += 1
+      if (char === '}') {
+        depth -= 1
+        if (depth === 0) {
+          braceEnd = index
+          break
+        }
+      }
+    }
+    expect(braceEnd).toBeGreaterThan(braceStart)
+
+    // Collapsed to one line first: core formats short entries inline and long
+    // ones across three lines, so a line-oriented match would silently skip
+    // every multi-line entry and pass on a partial table.
+    const body = source.slice(braceStart + 1, braceEnd).replace(/\s+/g, ' ')
+    const entry = /(\w+):\s*\{\s*running:\s*'([^']*)',\s*done:\s*'([^']*)',?\s*\}/g
+    const canonical: Record<string, { running: string; done: string }> = {}
+    for (const match of body.matchAll(entry)) {
+      const [, name, running, done] = match
+      if (name !== undefined && running !== undefined && done !== undefined) {
+        canonical[name] = { running, done }
+      }
+    }
+
+    expect(Object.keys(canonical).sort()).toEqual([...EXPECTED_TOOL_NAMES].sort())
+    expect(TOOL_LABELS).toEqual(canonical)
+  })
+})
+
+// The two accent tokens the tool chips are painted with. Every other colour in
+// this view is monochrome ink on paper, so these are the only two that a theme
+// block could drop without anything else looking wrong: a chip would fall back
+// to an invalid custom property and inherit, in dark mode only, silently.
+describe('tool accent tokens', () => {
+  const tokens = readFileSync(`${import.meta.dirname}/../tokens.css`, 'utf8')
+
+  // Brace counting rather than one regex over the whole file, for the same
+  // reason atlas.test.tsx does it: tokens.css has two :root blocks (the light
+  // one, and the one nested in @media (prefers-color-scheme: dark)), and a
+  // single regex would match each variable's FIRST occurrence only, passing
+  // even if the dark block had drifted or gone missing entirely.
+  const blockAfter = (searchFrom: number): string => {
+    const braceStart = tokens.indexOf('{', searchFrom)
+    let depth = 0
+    for (let index = braceStart; index < tokens.length; index++) {
+      const char = tokens[index]
+      if (char === '{') depth += 1
+      if (char === '}') {
+        depth -= 1
+        if (depth === 0) return tokens.slice(braceStart + 1, index)
+      }
+    }
+    throw new Error('unterminated block in tokens.css')
+  }
+
+  const lightBlock = blockAfter(tokens.indexOf(':root'))
+  const darkBlock = blockAfter(
+    tokens.indexOf(':root', tokens.indexOf('@media (prefers-color-scheme: dark)')),
+  )
+
+  const names = ['--tool-ink', '--tool-edge', '--tool-wash']
+
+  it.each(names)('defines %s in the light theme', (name) => {
+    const match = new RegExp(`${name}:\\s*(#[0-9a-f]{6})`, 'i').exec(lightBlock)
+    expect(match?.[1]).toMatch(/^#[0-9a-f]{6}$/i)
+  })
+
+  it.each(names)('defines %s in the dark theme', (name) => {
+    const match = new RegExp(`${name}:\\s*(#[0-9a-f]{6})`, 'i').exec(darkBlock)
+    expect(match?.[1]).toMatch(/^#[0-9a-f]{6}$/i)
+  })
+
+  it('gives the dark theme its own step for every accent, never the light hex', () => {
+    for (const name of names) {
+      const light = new RegExp(`${name}:\\s*(#[0-9a-f]{6})`, 'i').exec(lightBlock)?.[1]
+      const dark = new RegExp(`${name}:\\s*(#[0-9a-f]{6})`, 'i').exec(darkBlock)?.[1]
+      expect(dark).not.toBe(light)
+    }
   })
 })

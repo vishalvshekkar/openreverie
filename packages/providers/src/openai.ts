@@ -101,7 +101,15 @@ function toOpenAiTools(tools: ToolDefinition[] | undefined) {
   }))
 }
 
-function buildRequestBody(req: ChatRequest, stream: boolean): Record<string, unknown> {
+// dropTemperature exists only for the retry path in complete() below: the
+// stream() path never needs it, since nothing in this codebase streams
+// with a temperature set (grep confirms dreaming.ts's narrative call,
+// which is complete()-only, is the sole caller that ever sets one).
+function buildRequestBody(
+  req: ChatRequest,
+  stream: boolean,
+  dropTemperature = false,
+): Record<string, unknown> {
   const body: Record<string, unknown> = {
     model: req.model,
     messages: toOpenAiMessages(req),
@@ -109,17 +117,58 @@ function buildRequestBody(req: ChatRequest, stream: boolean): Record<string, unk
   }
   const tools = toOpenAiTools(req.tools)
   if (tools) body.tools = tools
-  if (req.temperature !== undefined) body.temperature = req.temperature
+  if (req.temperature !== undefined && !dropTemperature) body.temperature = req.temperature
   if (req.maxTokens !== undefined) body.max_tokens = req.maxTokens
   return body
+}
+
+function throwForStatus(status: number, bodyText: string): never {
+  const message = `openai: HTTP ${status}: ${bodyText.slice(0, 200)}`
+  if (status === 429 || status >= 500) throw new ProviderUnavailableError(message)
+  throw new Error(message)
 }
 
 async function requireOk(res: Response): Promise<void> {
   if (res.ok) return
   const text = await res.text()
-  const message = `openai: HTTP ${res.status}: ${text.slice(0, 200)}`
-  if (res.status === 429 || res.status >= 500) throw new ProviderUnavailableError(message)
-  throw new Error(message)
+  throwForStatus(res.status, text)
+}
+
+interface OpenAiErrorBody {
+  error?: { message?: string; param?: string; code?: string; type?: string }
+}
+
+// OpenAI's own structured error contract for a request parameter it will
+// not accept for the given model: {"error":{"param":"temperature", ...}}.
+// Detected from the response body itself, never from a list of model
+// names or families: model naming is provider trivia, and AGENTS.md is
+// explicit that nothing above the provider boundary may reach around the
+// provider interfaces, which cuts both ways here, inside this file, too.
+// This stays a fact about one HTTP response, not an assumption about which
+// models exist.
+function isUnsupportedTemperatureError(status: number, bodyText: string): boolean {
+  if (status !== 400) return false
+  let parsed: OpenAiErrorBody
+  try {
+    parsed = JSON.parse(bodyText) as OpenAiErrorBody
+  } catch {
+    return false
+  }
+  return parsed.error?.param === 'temperature'
+}
+
+async function parseCompletion(res: Response): Promise<ChatResult> {
+  const data = (await res.json()) as OpenAiCompletionResponse
+  const message = data.choices?.[0]?.message
+  if (!message) {
+    throw new Error('openai: response missing choices[0].message')
+  }
+  const toolCalls: ToolCall[] = (message.tool_calls ?? []).map((tc) => ({
+    id: tc.id,
+    name: tc.function.name,
+    arguments: tc.function.arguments,
+  }))
+  return { text: message.content ?? '', toolCalls }
 }
 
 const NETWORK_ERROR_CODES = new Set([
@@ -177,18 +226,37 @@ export class OpenAiChatProvider implements ChatProvider {
       headers: authHeaders(this.apiKey),
       body: JSON.stringify(buildRequestBody(req, false)),
     })
-    await requireOk(res)
-    const data = (await res.json()) as OpenAiCompletionResponse
-    const message = data.choices?.[0]?.message
-    if (!message) {
-      throw new Error('openai: response missing choices[0].message')
+    if (res.ok) return parseCompletion(res)
+
+    const bodyText = await res.text()
+
+    // temperature is a preference, not a hard requirement of the caller's
+    // request: a caller that asked for one (only dreaming's narrative
+    // call does, deliberately, for a looser register; see
+    // docs/dreaming.md) still gets a real answer when this model will not
+    // accept it, rather than a hard failure. The retry is marked on the
+    // result via ChatResult.warnings so the decision to drop it stays
+    // visible to whatever the caller does with it (dreaming records it
+    // into the dream's own process.jsonl), instead of silently vanishing,
+    // which is the exact class of bug the model-fallback defect this fix
+    // sits next to already was.
+    if (req.temperature !== undefined && isUnsupportedTemperatureError(res.status, bodyText)) {
+      const retryRes = await requestOpenAi(this.fetchImpl, `${this.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: authHeaders(this.apiKey),
+        body: JSON.stringify(buildRequestBody(req, false, true)),
+      })
+      await requireOk(retryRes)
+      const result = await parseCompletion(retryRes)
+      return {
+        ...result,
+        warnings: [
+          `temperature ${req.temperature} was not accepted for model ${req.model} and was dropped; retried without it`,
+        ],
+      }
     }
-    const toolCalls: ToolCall[] = (message.tool_calls ?? []).map((tc) => ({
-      id: tc.id,
-      name: tc.function.name,
-      arguments: tc.function.arguments,
-    }))
-    return { text: message.content ?? '', toolCalls }
+
+    throwForStatus(res.status, bodyText)
   }
 
   async *stream(req: ChatRequest): AsyncIterable<ChatEvent> {

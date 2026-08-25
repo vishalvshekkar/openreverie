@@ -40,54 +40,75 @@ const PLURAL: Record<NodeType, string> = {
   commitment: 'commitments',
 }
 
-// A monochrome ramp: one of the few places a raw colour literal may appear
-// in this module, alongside DARK_TYPE_COLORS just below and dimColor's two
-// literals further down. Everything else that produces a colour here
-// (borderColorForType, edgeColor, edgeEmphasisColor) derives from one of
-// those, never adding a new literal of its own. There are two full fill
-// ramps (this one and DARK_TYPE_COLORS), not one shared set of greys,
-// because a grey that reads clearly against dark
-// paper reads as barely-there against light paper and vice versa: contrast
-// runs in opposite directions on the two grounds. Both ramps use the same
-// 0x20 (32) step between adjacent types, so the darkest and lightest type are
-// obviously different at a glance even at the smallest size band. Visual
-// weight runs realm (strongest) to item (weakest); "strongest" means darkest
-// on light paper but lightest on dark paper, since that is what reads as
-// more prominent against each ground.
+// Visual weight order, strongest (realm) to weakest (commitment): realm,
+// arc, person, entity, session, item, commitment. Drives node size
+// (TYPE_SIZE_BAND) and ring thickness (TYPE_BORDER_WIDTH) below, and is
+// also the order the seven accent hues in tokens.css are assigned in (see
+// TYPE_COLOR_VAR just below) -- not because hue needs a "strength" ordering
+// the way the old monochrome ramp did, but so the visual-weight channels
+// (size, ring width) and the identity channel (hue) are indexed by the same
+// order rather than three orders that could silently drift apart. Not kept
+// as a runtime array (an earlier version of this file had one,
+// TYPE_PRIORITY, purely so borderColorForType could look up "the next-
+// stronger type"; that lookup is gone now that the ring is a flat neutral
+// colour, see borderColorForType below, so nothing here still needs the
+// order at runtime, only in the three Records below agreeing on it).
 // 'commitment' is appended after 'item' rather than inserted at its
 // considered place in the weight order, so the five original entries keep
-// their existing colours (renumbering them would recolour every node type
-// already shipped, not just add one). It continues the same 0x20 step,
-// making it the faintest entry in both ramps: a placeholder weight, not a
-// judgment that commitments matter least.
-const TYPE_PRIORITY: NodeType[] = [
-  'realm',
-  'arc',
-  'person',
-  'entity',
-  'session',
-  'item',
-  'commitment',
-]
+// their existing size bands, ring widths, and hues (renumbering them would
+// change every node type's visual weight and colour already shipped, not
+// just add one). It continues the same downward trend, making it the
+// smallest, thinnest-ringed entry with the last hue slot: a placeholder
+// weight, not a judgment that commitments matter least.
 
+// Type -> CSS custom property name. tokens.css defines each of these once,
+// with a light value in :root and a dark override in the
+// `@media (prefers-color-scheme: dark)` block (the same single-name pattern
+// every other token in that file already uses), so the browser resolves the
+// right value on its own; readCSSVar below just asks for whichever one is
+// live. See tokens.css's own comment on these seven for the full palette
+// rationale (which hue per type, and why) and the measured contrast/CVD
+// numbers; the short version: the visual-weight order above maps onto the
+// dataviz skill's fixed 7-slot categorical order (blue, orange, aqua,
+// yellow, magenta, green, violet), so realm is always blue and commitment
+// is always violet, in both themes.
+const TYPE_COLOR_VAR: Record<NodeType, string> = {
+  realm: '--type-realm',
+  arc: '--type-arc',
+  person: '--type-person',
+  entity: '--type-entity',
+  session: '--type-session',
+  item: '--type-item',
+  commitment: '--type-commitment',
+}
+
+// Literal mirror of tokens.css's --type-* values, used only where a live
+// stylesheet cannot be read: this package's own jsdom test suite (vite.config.ts
+// leaves vitest's `test.css` at its default of false, so `import './atlas.css'`
+// -- and transitively tokens.css -- is a no-op under test), and the brief
+// window before a real browser has parsed the stylesheet at all. tokens.css
+// stays the single source of truth for what actually ships; atlas.test.tsx's
+// node-type-colour-coverage test parses tokens.css's own text and fails the
+// moment these two drift from it, so this is a documented, guarded mirror,
+// not a second hand-eyeballed palette.
 const LIGHT_TYPE_COLORS: Record<NodeType, string> = {
-  realm: '#1a1a1a',
-  arc: '#3a3a3a',
-  person: '#5a5a5a',
-  entity: '#7a7a7a',
-  session: '#9a9a9a',
-  item: '#bababa',
-  commitment: '#dadada',
+  realm: '#2a78d6',
+  arc: '#e76530',
+  person: '#00a06e',
+  entity: '#bd8110',
+  session: '#d56a93',
+  item: '#008300',
+  commitment: '#4a3aa7',
 }
 
 const DARK_TYPE_COLORS: Record<NodeType, string> = {
-  realm: '#f2f2f2',
-  arc: '#d2d2d2',
-  person: '#b2b2b2',
-  entity: '#929292',
-  session: '#727272',
-  item: '#525252',
-  commitment: '#323232',
+  realm: '#3987e5',
+  arc: '#d95926',
+  person: '#199e70',
+  entity: '#c98500',
+  session: '#d55181',
+  item: '#008300',
+  commitment: '#9085e9',
 }
 
 function prefersDarkGround(): boolean {
@@ -97,12 +118,34 @@ function prefersDarkGround(): boolean {
   )
 }
 
+// Reads a CSS custom property from the live document, falling back to a
+// literal when that is not possible. A single custom property name (the
+// pattern every token in tokens.css uses) only ever resolves to whichever
+// theme's `@media` block actually matches the browser's live
+// prefers-color-scheme state -- it cannot answer "what would this look like
+// in the OTHER theme", there is no such thing as asking getComputedStyle for
+// a counterfactual. So the live read is only trustworthy when the caller is
+// asking about the theme actually in effect (`dark === prefersDarkGround()`);
+// anything else -- an explicit request for the other ramp (tests probing
+// both branches, or borderColorForType-style callers wanting a specific
+// ground regardless of the OS setting), or an environment with no
+// resolvable stylesheet at all -- falls back to the literal instead of
+// silently mislabelling the live theme's colour as the other one.
+function readCSSVar(varName: string, dark: boolean, fallback: string): string {
+  if (typeof document === 'undefined' || dark !== prefersDarkGround()) return fallback
+  const value = getComputedStyle(document.documentElement).getPropertyValue(varName).trim()
+  return value === '' ? fallback : value
+}
+
 // `dark` defaults to a live read of the media query so call sites in
 // component code never have to know which ground is active, while tests
 // (and the legend, which recomputes per render anyway) can pass it
-// explicitly to check either ramp.
+// explicitly to check either ramp. The live path re-reads the stylesheet on
+// every call rather than caching, so a caller that re-invokes this after a
+// prefers-color-scheme change (see the Atlas component's matchMedia
+// listener) gets the current theme's colour, not a frozen one.
 export function colorForType(type: NodeType, dark: boolean = prefersDarkGround()): string {
-  return (dark ? DARK_TYPE_COLORS : LIGHT_TYPE_COLORS)[type]
+  return readCSSVar(TYPE_COLOR_VAR[type], dark, (dark ? DARK_TYPE_COLORS : LIGHT_TYPE_COLORS)[type])
 }
 
 // Splits a 6-digit hex colour into its three channel bytes. Local to this
@@ -188,19 +231,26 @@ export function edgeSize(confidence: number): number {
   return EDGE_SIZE_BASE + confidence * EDGE_SIZE_CONFIDENCE_RANGE
 }
 
-// The ring @sigma/node-border draws around every node. The palette is
-// monochrome by project spec, so a ring buys real separation the same way
-// the fill ramp does: by reusing an already-established shade rather than
-// inventing a new one, ordered by the same priority as everything else here.
-// Each type's ring borrows the fill of the next-stronger type in
-// TYPE_PRIORITY, so a ring is always visibly different from its own node's
-// fill; realm, which has no stronger neighbour, wraps around to item's fill
-// instead of an off-ramp literal like pure black or white, which would have
-// been the one ring that differed in kind rather than degree.
-export function borderColorForType(type: NodeType, dark: boolean = prefersDarkGround()): string {
-  const index = TYPE_PRIORITY.indexOf(type)
-  const strongerType = TYPE_PRIORITY[(index - 1 + TYPE_PRIORITY.length) % TYPE_PRIORITY.length]
-  return colorForType(strongerType ?? type, dark)
+// The ring @sigma/node-border draws around every node, in the graph
+// canvas's own surface colour (--panel; see the dataviz skill's "surface
+// ring" mark spec: a ring in the SURFACE colour, not a contrasting stroke,
+// is what keeps overlapping marks legible without adding ink that isn't
+// data). Deliberately the same colour for every type, `type` is accepted
+// only to keep this function's shape matching colorForType's: an earlier
+// version borrowed the next-stronger type's FILL colour from the visual-weight order,
+// which worked when the fill ramp was monochrome (any two adjacent shades
+// were clearly different, so a ring never looked like it belonged to
+// another type) but stopped working the moment fills became per-type hues:
+// an entity node (yellow fill) would have worn a person-hued (aqua) ring,
+// putting a second type's identity colour on every single node. A neutral
+// surface ring separates nodes from each other and from the canvas
+// background without impersonating any type, so identity now comes from
+// exactly one channel (fill hue) instead of two that could disagree.
+// TYPE_BORDER_WIDTH just below still varies by type: ring THICKNESS is a
+// size-family cue, not a hue one, and keeping it lets a colour-blind reader
+// use ring weight the same way a sighted reader uses node size.
+export function borderColorForType(_type: NodeType, dark: boolean = prefersDarkGround()): string {
+  return readCSSVar('--panel', dark, dark ? '#1b1915' : '#f7f5f1')
 }
 
 // Ring thickness as a fraction of each node's own radius (the node-border
@@ -216,7 +266,8 @@ const TYPE_BORDER_WIDTH: Record<NodeType, number> = {
   session: 0.11,
   item: 0.09,
   // Appended, continuing the downward trend, rather than inserted at a
-  // considered rank: see the comment on TYPE_PRIORITY above.
+  // considered rank: see the visual-weight order comment near the top of
+  // this file.
   commitment: 0.07,
 }
 
@@ -241,7 +292,8 @@ export const TYPE_SIZE_BAND: Record<NodeType, { min: number; max: number }> = {
   session: { min: 5.5, max: 7 },
   item: { min: 3, max: 5 },
   // Appended, continuing the shrinking-band trend, rather than inserted at
-  // a considered rank: see the comment on TYPE_PRIORITY above.
+  // a considered rank: see the visual-weight order comment near the top of
+  // this file.
   commitment: { min: 2, max: 3.5 },
 }
 
@@ -288,6 +340,104 @@ function truncateLabel(label: string): string {
   return label.length > LABEL_MAX_LENGTH ? `${label.slice(0, LABEL_MAX_LENGTH - 1)}…` : label
 }
 
+// The subset of sigma's NodeDisplayData and Settings that drawThemedNodeHover
+// actually reads, typed loosely on purpose (matching this file's existing
+// nodeReducer/edgeReducer style) rather than importing sigma's own
+// NodeHoverDrawingFunction/Settings generics: this is a themed colour
+// parametrisation of stock sigma code, not new rendering logic, so it only
+// needs to promise it reads what drawDiscNodeHover itself reads.
+interface HoverLabelData {
+  x: number
+  y: number
+  size: number
+  // Not read by drawThemedNodeHover itself, but required so this type stays
+  // structurally assignable to sigma's own NodeDisplayData: it is what
+  // `settings.defaultDrawNodeLabel` (sigma's real label renderer, called at
+  // the end of drawThemedNodeHover) actually expects its `data` argument to
+  // carry, and TypeScript's exactOptionalPropertyTypes checks that all the
+  // way through this file's `defaultDrawNodeHover` setting, not just this
+  // function's own body.
+  color: string
+  label: string | null
+}
+
+interface HoverLabelSettings {
+  labelSize: number
+  labelFont: string
+  labelWeight: string
+  // Loosely typed (settings: unknown), not sigma's own Settings<...>, and
+  // cast into rather than structurally matched at this function's one call
+  // site (in the Atlas component's sigma-construction effect): sigma's real
+  // Settings type is 50-odd properties wide, and asking TypeScript to prove
+  // a small local interface is bidirectionally compatible with it (once
+  // through NodeHoverDrawingFunction's contravariant parameter check, once
+  // through this field calling back into it) fights the type checker for no
+  // real safety gain over the cast, since this is a straight pass-through:
+  // sigma is handed back the exact `settings` object it gave this function
+  // in the first place, unexamined.
+  defaultDrawNodeLabel: (
+    context: CanvasRenderingContext2D,
+    data: HoverLabelData,
+    settings: unknown,
+  ) => void
+}
+
+// A mechanical port of sigma 3.0.3's own drawDiscNodeHover (installed at
+// node_modules/sigma/dist/index-fad77a13.esm.js), parametrised on the pill's
+// fill colour instead of the stock hardcoded "#FFF". See the
+// defaultDrawNodeHover comment at its call site (in the Atlas component's
+// sigma-construction effect) for why this exists: the stock function's
+// white pill is right on light paper (identical to --panel-raised there)
+// and wrong on dark paper, and now that this app also themes labelColor,
+// shipping the label fix without this one would make dark-mode hover
+// text LESS readable than before, not more. Every measurement below
+// (padding, box radius, the flag-shaped path wrapping the node) is copied
+// from the installed source as-is; only `context.fillStyle` and the final
+// label draw (calling the passed-in settings.defaultDrawNodeLabel, rather
+// than importing sigma's own unexported drawDiscNodeLabel) differ from it.
+function drawThemedNodeHover(
+  context: CanvasRenderingContext2D,
+  data: HoverLabelData,
+  settings: HoverLabelSettings,
+  fill: string,
+): void {
+  const size = settings.labelSize
+  const font = settings.labelFont
+  const weight = settings.labelWeight
+  context.font = `${weight} ${size}px ${font}`
+  context.fillStyle = fill
+  context.shadowOffsetX = 0
+  context.shadowOffsetY = 0
+  context.shadowBlur = 8
+  context.shadowColor = '#000'
+  const PADDING = 2
+  if (typeof data.label === 'string') {
+    const textWidth = context.measureText(data.label).width
+    const boxWidth = Math.round(textWidth + 5)
+    const boxHeight = Math.round(size + 2 * PADDING)
+    const radius = Math.max(data.size, size / 2) + PADDING
+    const angleRadian = Math.asin(boxHeight / 2 / radius)
+    const xDeltaCoord = Math.sqrt(Math.abs(radius ** 2 - (boxHeight / 2) ** 2))
+    context.beginPath()
+    context.moveTo(data.x + xDeltaCoord, data.y + boxHeight / 2)
+    context.lineTo(data.x + radius + boxWidth, data.y + boxHeight / 2)
+    context.lineTo(data.x + radius + boxWidth, data.y - boxHeight / 2)
+    context.lineTo(data.x + xDeltaCoord, data.y - boxHeight / 2)
+    context.arc(data.x, data.y, radius, angleRadian, -angleRadian)
+    context.closePath()
+    context.fill()
+  } else {
+    context.beginPath()
+    context.arc(data.x, data.y, data.size + PADDING, 0, Math.PI * 2)
+    context.closePath()
+    context.fill()
+  }
+  context.shadowOffsetX = 0
+  context.shadowOffsetY = 0
+  context.shadowBlur = 0
+  settings.defaultDrawNodeLabel(context, data, settings)
+}
+
 function computeDegrees(snapshot: GraphSnapshot): Map<string, number> {
   const degrees = new Map<string, number>()
   for (const node of snapshot.nodes) degrees.set(node.id, 0)
@@ -325,17 +475,22 @@ export interface AtlasModel {
 // trivially testable without it. A node missing from `positions` (should not
 // happen once a real layout has run, but defends against an incomplete
 // stub) falls back to the origin rather than throwing.
+//
+// `dark` defaults to a live read of the media query (as every other ground-
+// dependent function in this module does) but the Atlas component below
+// passes its own `dark` state explicitly instead of relying on the default:
+// that state is kept in sync with a live prefers-color-scheme change
+// listener, so a mid-session theme flip rebuilds this model with the new
+// ramp instead of the build silently re-reading a preference that already
+// changed underneath it.
 export function buildAtlasModel(
   snapshot: GraphSnapshot,
   enabled: ReadonlySet<NodeType>,
   positions: Positions,
+  dark: boolean = prefersDarkGround(),
 ): AtlasModel {
   const degrees = computeDegrees(snapshot)
   const maxDegree = Math.max(0, ...degrees.values())
-  // Read the media query once per build rather than once per node/edge: the
-  // preference cannot change mid-synchronous-call, so this keeps every
-  // colour in a single build consistent without repeating the lookup.
-  const dark = prefersDarkGround()
 
   const semanticNodes = snapshot.nodes
     .filter((node) => enabled.has(node.type))
@@ -498,17 +653,34 @@ export function Atlas({
   // full layout pass.
   const positionsRef = useRef<Positions>({})
 
-  // Known limitation: the ramp is picked once per rebuild (matchMedia is
-  // read inside buildAtlasModel, and separately, once per sigma-construction
-  // effect run, for the hover-dim colour the nodeReducer/edgeReducer below
-  // close over), not re-read on a live OS theme change. A mid-session
-  // light/dark flip leaves already-drawn node and edge fills on the stale
-  // fill ramp until the next rebuild (a filter toggle or a new snapshot),
-  // and leaves the hover-dim colour stale until the renderer itself is torn
-  // down and rebuilt (a snapshot.revision change), which can lag the fill
-  // ramp's own refresh. Not fixed here: doing so needs a matchMedia change
-  // listener wired to a forced re-render, which is more machinery than this
-  // fix's scope covers.
+  // Live theme state, not just a one-time matchMedia read: colorForType,
+  // borderColorForType, and buildAtlasModel all default to reading the
+  // media query fresh on every call, so nothing here needs to cache a
+  // colour ramp, only the boolean that says which ramp is live. Subscribing
+  // to the query's own 'change' event (guarded the same way
+  // prefersDarkGround guards its initial read) is what turns "the ramp was
+  // picked once per rebuild" into "the ramp is re-picked when the OS theme
+  // actually changes": a mid-session light/dark flip now updates `dark`,
+  // which both deps below (`model`, and the renderer-construction effect)
+  // react to, instead of leaving already-drawn fills on a stale ramp until
+  // some unrelated rebuild (a filter toggle or a new snapshot) happened to
+  // come along and re-read the preference. The renderer-construction effect
+  // rebuilding on a theme flip is a real, accepted cost, not a free win: it
+  // tears the whole Sigma instance down and recreates it (the same thing a
+  // new snapshot.revision already does), so a theme flip resets camera
+  // zoom/pan and drops any drag position not yet folded into
+  // layoutResult.positions. That trade is judged worth it here: a stale
+  // colour ramp is a correctness bug, a reset camera on a rare, deliberate
+  // user action (flipping the OS theme) is not.
+  const [dark, setDark] = useState<boolean>(() => prefersDarkGround())
+
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return
+    const query = window.matchMedia('(prefers-color-scheme: dark)')
+    const handleChange = (event: MediaQueryListEvent) => setDark(event.matches)
+    query.addEventListener('change', handleChange)
+    return () => query.removeEventListener('change', handleChange)
+  }, [])
 
   // Layout is computed once per snapshot, independent of the type filter:
   // ForceAtlas2 and noverlap both run here, on the full unfiltered graph, so
@@ -526,8 +698,8 @@ export function Atlas({
   }, [layoutResult])
 
   const model = useMemo(
-    () => buildAtlasModel(snapshot, enabled, layoutResult.positions),
-    [snapshot, enabled, layoutResult],
+    () => buildAtlasModel(snapshot, enabled, layoutResult.positions, dark),
+    [snapshot, enabled, layoutResult, dark],
   )
   const modelRef = useRef(model)
   modelRef.current = model
@@ -558,19 +730,22 @@ export function Atlas({
     [snapshot, selectedId],
   )
 
-  // Construct the Sigma renderer once per snapshot and keep it alive across
-  // filter toggles: the effect below swaps the underlying graph in place
-  // instead of destroying and rebuilding the renderer.
+  // Construct the Sigma renderer once per snapshot (or on a live theme
+  // flip, see the `dark` state above) and keep it alive across filter
+  // toggles: the effect below swaps the underlying graph in place instead
+  // of destroying and rebuilding the renderer.
   useEffect(() => {
-    // Keying this effect to the snapshot revision (and nothing else) is what
-    // keeps the renderer alive across filter toggles: it is read here only
-    // to make that dependency explicit to the linter.
+    // Keying this effect to the snapshot revision and the live theme (and
+    // nothing else) is what keeps the renderer alive across filter toggles
+    // while still rebuilding on a real light/dark flip: snapshot.revision is
+    // read here only to make that dependency explicit to the linter, and
+    // `dark` (component state, not a fresh prefersDarkGround() read) is what
+    // every colour literal in this effect's settings closes over below.
     void snapshot.revision
     const container = containerRef.current
     if (!container || !webglAvailable()) return
 
     const reducedMotion = prefersReducedMotion()
-    const dark = prefersDarkGround()
     // Mutable, not React state: hover fires far more often than a re-render
     // should, so the hovered node lives in a plain variable the reducers
     // close over, and a hover change asks sigma to re-run those reducers
@@ -590,6 +765,50 @@ export function Atlas({
       // default: BORDERED_NODE_TYPE is both the default node type and the
       // explicit per-node `type` attribute set in buildAtlasModel.
       defaultNodeType: BORDERED_NODE_TYPE,
+      // Sigma's own default (sigma/settings/dist/sigma-settings.esm.js) is
+      // `labelColor: { color: "#000" }`, unconditionally: this app never
+      // overrode it before now, so every node label has always been rendered
+      // in plain black regardless of theme. That was invisible in practice
+      // on light paper (black ink is this app's own --ink token, near
+      // enough) but on dark paper it is black text on --panel's near-black
+      // #1b1915, roughly 1.1:1 contrast: unreadable. Pointing this at the
+      // themed ink colour (falling back to the same literals readCSSVar
+      // falls back to everywhere else in this module) fixes rest-state
+      // labels in dark mode. See defaultDrawNodeHover just below for why
+      // this one setting cannot ship alone.
+      labelColor: { color: readCSSVar('--ink', dark, dark ? '#edeae2' : '#191713') },
+      // Sigma's stock hover renderer (drawDiscNodeHover, same settings file
+      // as above) hardcodes `context.fillStyle = "#FFF"` for the pill drawn
+      // behind a hovered node's label, then calls the (now themed, see
+      // labelColor above) label renderer on top of it. On light paper that
+      // pill is indistinguishable from --panel-raised (#ffffff): no visible
+      // change. On dark paper it stays a full-brightness white flag no
+      // matter the theme, and once labelColor points ink at the DARK ramp's
+      // light-on-dark ink colour, hovering a node in dark mode would draw
+      // light text on that still-white pill: lower contrast than the
+      // original bug, not a fix. drawThemedNodeHover below is a mechanical
+      // port of sigma 3.0.3's drawDiscNodeHover (installed at
+      // sigma/dist/index-fad77a13.esm.js), parametrised on fill colour only;
+      // every measurement (padding, box radius, the flag-shaped path
+      // wrapping the node) is copied as-is, not reimplemented.
+      defaultDrawNodeHover: (
+        context: CanvasRenderingContext2D,
+        // Loosely typed, matching this file's existing nodeReducer/
+        // edgeReducer convention just below (Record<string, unknown> in,
+        // cast at the point drawThemedNodeHover actually reads the fields
+        // it needs), rather than sigma's own PartialButFor<NodeDisplayData,
+        // ...>/Settings<...> types: see the HoverLabelSettings comment above
+        // for why matching those precisely fights the type checker for no
+        // real safety gain here.
+        data: Record<string, unknown>,
+        hoverSettings: unknown,
+      ) =>
+        drawThemedNodeHover(
+          context,
+          data as unknown as HoverLabelData,
+          hoverSettings as HoverLabelSettings,
+          readCSSVar('--panel-raised', dark, dark ? '#201e19' : '#ffffff'),
+        ),
       // Label collision control.
       //
       // What actually causes two nearby nodes' labels to overprint: read
@@ -853,7 +1072,7 @@ export function Atlas({
       rendererRef.current?.kill()
       rendererRef.current = null
     }
-  }, [snapshot.revision])
+  }, [snapshot.revision, dark])
 
   useEffect(() => {
     rendererRef.current?.setGraph(model.graph)

@@ -299,6 +299,11 @@ export async function mainWith(args: string[], deps: CliMainDeps): Promise<void>
     openEngine: (config, engineDeps) => deps.openEngine(config.memoryDir, engineDeps),
     write: deps.write,
     colorEnabled,
+    // `reverie dream` is itself an explicit, foreground request to dream:
+    // see the CliEngineDeps.suppressDreamOnStart doc comment in chat.ts
+    // for why the background onStart trigger must be suppressed only for
+    // this one engine open, not disabled globally.
+    ...(subcommand === 'dream' ? { suppressDreamOnStart: true } : {}),
   })
 
   if (!context.ok) {

@@ -1,8 +1,10 @@
+import { readFileSync } from 'node:fs'
 import { render, screen, within } from '@testing-library/react'
 import { userEvent } from '@testing-library/user-event'
 import graphology from 'graphology'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { AppApi, Document, GraphEdge, GraphNode, GraphSnapshot } from './api.js'
+import { graphNodeSchema } from './api.js'
 import {
   Atlas,
   AtlasView,
@@ -273,19 +275,35 @@ describe('buildAtlasModel', () => {
 describe('colorForType', () => {
   const types = ['realm', 'arc', 'item', 'session', 'person', 'entity'] as const
 
-  it('returns a distinct monochrome shade for every node type on the light ramp', () => {
+  it('returns a distinct accent hue for every node type on the light ramp', () => {
     const colors = types.map((type) => colorForType(type, false))
     expect(new Set(colors).size).toBe(types.length)
     for (const color of colors) expect(color).toMatch(/^#[0-9a-f]{6}$/i)
   })
 
-  it('returns a distinct monochrome shade for every node type on the dark ramp, different from the light one', () => {
+  // Each type's dark-ramp hue is independently validated to clear the
+  // lightness band and the contrast floor on the dark surface (see
+  // tokens.css's own comment on --type-*), and for six of the seven that
+  // means a genuinely different hex from the light ramp. Item is the
+  // documented exception: its slot in the dataviz skill's reference palette
+  // is green #008300, unchanged between light and dark, because that one
+  // hex already clears both surfaces' lightness bands and contrast floors
+  // without needing a separate step (see palette.md's categorical table).
+  // Asserting strict light/dark inequality for every type, as this test did
+  // under the old monochrome ramp (where every step differed by
+  // construction), would make that legitimate reuse look like a bug.
+  it('returns a distinct accent hue for every node type on the dark ramp, matching tokens.css even where it reuses the light hex', () => {
     const lightColors = types.map((type) => colorForType(type, false))
     const darkColors = types.map((type) => colorForType(type, true))
     expect(new Set(darkColors).size).toBe(types.length)
     for (const color of darkColors) expect(color).toMatch(/^#[0-9a-f]{6}$/i)
     for (let index = 0; index < types.length; index++) {
-      expect(darkColors[index]).not.toBe(lightColors[index])
+      const type = types[index]
+      if (type === 'item') {
+        expect(darkColors[index]).toBe(lightColors[index])
+      } else {
+        expect(darkColors[index]).not.toBe(lightColors[index])
+      }
     }
   })
 
@@ -305,9 +323,94 @@ describe('borderColorForType', () => {
     }
   })
 
-  it('returns a distinct ring shade for every type on the light ramp', () => {
-    const colors = types.map((type) => borderColorForType(type, false))
-    expect(new Set(colors).size).toBe(types.length)
+  // The ring is deliberately the SAME neutral surface shade for every type,
+  // not a per-type identity colour: an earlier design borrowed the next-
+  // stronger type's fill (safe when the fill ramp was monochrome shades of
+  // grey, since any two adjacent greys were obviously distinct), but once
+  // fills became per-type accent hues that would put a second type's
+  // identity colour on every node's ring (see the comment on
+  // borderColorForType in atlas.tsx). One neutral ring, distinct from every
+  // fill, still separates overlapping nodes (the dataviz skill's "surface
+  // ring" spec) without impersonating another type.
+  it('returns the same neutral ring shade for every type on a given ground, and a different one between grounds', () => {
+    const lightColors = types.map((type) => borderColorForType(type, false))
+    const darkColors = types.map((type) => borderColorForType(type, true))
+    expect(new Set(lightColors).size).toBe(1)
+    expect(new Set(darkColors).size).toBe(1)
+    expect(lightColors[0]).not.toBe(darkColors[0])
+  })
+})
+
+describe('node type colour coverage', () => {
+  // The REAL vocabulary (graphNodeSchema's own zod options), not a hand
+  // copied array: this is what makes the test catch a node type that gets
+  // added to the schema without a matching --type-* colour, rather than
+  // only checking whatever list a person remembered to update by hand (the
+  // exact failure mode graph-vocabulary-parity.test.ts's own top comment
+  // describes for api.ts's schemas).
+  const realNodeTypes = [...graphNodeSchema.shape.type.options] as NodeType[]
+
+  // Parses a `:root { ... }` block out of tokens.css's own text by brace
+  // counting from the first `{` after `searchFrom`, rather than a single
+  // regex over the whole file: tokens.css has TWO `:root` blocks (the
+  // top-level light one, and the one nested inside
+  // `@media (prefers-color-scheme: dark)`), and a regex that does not
+  // separate them would match each `--type-*` variable's FIRST occurrence
+  // only. That would pass this test even if the dark block's values drifted
+  // from the light block's (or went missing entirely), which is exactly the
+  // "passes for a reason unrelated to what it is named" shape AGENTS.md
+  // warns about for this codebase.
+  function extractBlock(css: string, searchFrom: number): string {
+    const openIndex = css.indexOf('{', searchFrom)
+    if (openIndex === -1) throw new Error('no block found')
+    let depth = 0
+    for (let i = openIndex; i < css.length; i++) {
+      if (css[i] === '{') depth++
+      else if (css[i] === '}') {
+        depth--
+        if (depth === 0) return css.slice(openIndex + 1, i)
+      }
+    }
+    throw new Error('unterminated block')
+  }
+
+  function parseTypeColors(block: string): Map<string, string> {
+    const colors = new Map<string, string>()
+    for (const match of block.matchAll(/--type-([a-z]+):\s*(#[0-9a-fA-F]{6})/g)) {
+      const [, type, hex] = match
+      if (type !== undefined && hex !== undefined) colors.set(type, hex)
+    }
+    return colors
+  }
+
+  const tokensCssPath = `${import.meta.dirname}/tokens.css`
+  const tokensCss = readFileSync(tokensCssPath, 'utf8')
+  const lightBlock = extractBlock(tokensCss, tokensCss.indexOf(':root'))
+  const darkMediaIndex = tokensCss.indexOf('@media (prefers-color-scheme: dark)')
+  const darkBlock = extractBlock(tokensCss, tokensCss.indexOf(':root', darkMediaIndex))
+  const lightTokenColors = parseTypeColors(lightBlock)
+  const darkTokenColors = parseTypeColors(darkBlock)
+
+  it('defines a --type-* colour in both the light :root block and the dark media block for every real node type', () => {
+    for (const type of realNodeTypes) {
+      expect(lightTokenColors.get(type), `light --type-${type}`).toMatch(/^#[0-9a-fA-F]{6}$/)
+      expect(darkTokenColors.get(type), `dark --type-${type}`).toMatch(/^#[0-9a-fA-F]{6}$/)
+    }
+  })
+
+  // Under jsdom (no live stylesheet: see readCSSVar's own comment in
+  // atlas.tsx), colorForType always falls back to its literal LIGHT_TYPE_
+  // COLORS/DARK_TYPE_COLORS mirror. Comparing that fallback directly against
+  // tokens.css's own parsed text, for every real node type, is what keeps
+  // the mirror from silently drifting out of sync with the file it is
+  // supposed to mirror -- and incidentally re-proves the coverage claim
+  // above (a missing tokens.css entry reads back as `undefined`, which a
+  // real hex string can never equal).
+  it("matches atlas.tsx's fallback colour to tokens.css exactly, for every real node type", () => {
+    for (const type of realNodeTypes) {
+      expect(colorForType(type, false)).toBe(lightTokenColors.get(type))
+      expect(colorForType(type, true)).toBe(darkTokenColors.get(type))
+    }
   })
 })
 

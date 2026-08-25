@@ -55,6 +55,7 @@ import type { MemoryPaths } from './paths.js'
 import { type ProfileMeta, type ProfileUpdates, profileUpdatesSchema } from './profile.js'
 import { localDateFromStored, renderStoredStamp, systemTimeZone } from './time.js'
 import { SessionStore, type TranscriptLine } from './transcripts.js'
+import { PROSE_VOICE_RULE } from './voice.js'
 
 export type ReflectionItemKind = 'observation' | 'feeling' | 'event' | 'intention'
 
@@ -572,6 +573,10 @@ export function buildReflectionPrompt(
     '',
     'If the person reports an outcome for a commitment already listed under Known commitments, put it in commitmentResolutions with that commitment\'s id and an outcome: "done" when they did the thing, "dropped" when they say they are not doing it after all, "quiet" when they ask you to stop tracking or mentioning it. Do not guess an outcome from silence; only record one the person actually stated.',
     '',
+    PROSE_VOICE_RULE,
+    '',
+    'This applies to every prose field you write: summary, item text, arc and person narrative, arcUpdates and personUpdates note, commitment gloss, and constitutionUpdate. It says nothing about the JSON structure itself, only about the sentences inside the string values.',
+    '',
     'Respond with only JSON matching this shape, no other text:',
     RESPONSE_SHAPE,
   ].join('\n')
@@ -860,6 +865,10 @@ function buildNarrativeRewritePrompt(input: {
     input.note,
     '',
     'Rewrite the body so it carries forward everything in the current body that still matters, changing only what this session actually changed. The body you return replaces the file entirely, so do not drop anything that still matters just because this session did not mention it again.',
+    '',
+    PROSE_VOICE_RULE,
+    '',
+    'This applies to the body you write.',
     '',
     'Respond with only JSON matching this shape, no other text:',
     '{"body": string}',

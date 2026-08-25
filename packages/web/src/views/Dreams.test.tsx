@@ -1,12 +1,25 @@
 import { render, screen, waitFor, within } from '@testing-library/react'
 import { userEvent } from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
-import type { AppApi, DreamDetail, DreamRow, DreamVerdict } from '../api.js'
-import { Dreams } from './Dreams.js'
+import type { AppApi, DreamDetail, DreamRow, DreamStatus, DreamVerdict } from '../api.js'
+import { Dreams, dreamStatusSummary } from './Dreams.js'
+
+const notConfiguredStatus: DreamStatus = {
+  configured: false,
+  enabled: false,
+  cadence: 'daily',
+  period: '2026-08-25',
+  periodCovered: false,
+  reflectedSessionCount: 0,
+  minReflectedSessions: 5,
+  reflectedFloorMet: false,
+  due: false,
+}
 
 function createApi(
   rows: DreamRow[],
   details: Record<string, DreamDetail> = {},
+  status: DreamStatus = notConfiguredStatus,
 ): AppApi & {
   sendDreamFeedback: ReturnType<typeof vi.fn>
 } {
@@ -34,6 +47,7 @@ function createApi(
       return found
     }),
     sendDreamFeedback: vi.fn(async () => undefined),
+    getDreamStatus: vi.fn(async () => status),
   } as unknown as AppApi & { sendDreamFeedback: ReturnType<typeof vi.fn> }
 }
 
@@ -212,5 +226,114 @@ describe('Dreams tab', () => {
     expect(screen.queryByRole('button', { name: /edit/i })).toBeNull()
     expect(screen.queryByRole('button', { name: /delete/i })).toBeNull()
     expect(screen.queryByRole('button', { name: /new dream|compose|write/i })).toBeNull()
+  })
+})
+
+// Defect 4 (Dreams tab): the web previously had no honest interface for
+// dreaming at all, so a person had no way to see whether it was on,
+// whether it could run right now, or why the last attempt did not produce
+// anything.
+describe('Dreams tab status panel', () => {
+  it('says plainly that dreaming is not configured at all, rather than showing nothing', async () => {
+    const api = createApi([], {}, notConfiguredStatus)
+    render(<Dreams api={api} />)
+    const panel = await screen.findByLabelText('Dreaming status')
+    expect(panel).toHaveTextContent('not configured')
+  })
+
+  it('reports disabled dreaming plainly, without implying it is on', async () => {
+    const disabled: DreamStatus = { ...notConfiguredStatus, configured: true, enabled: false }
+    const api = createApi([], {}, disabled)
+    render(<Dreams api={api} />)
+    const panel = await screen.findByLabelText('Dreaming status')
+    expect(panel).toHaveTextContent('Dreaming is off')
+    expect(panel).toHaveTextContent('enabled = true')
+    expect(panel.textContent ?? '').not.toMatch(/is on\b/i)
+  })
+
+  it('reports enabled dreaming with the model, reflected sessions, and period coverage', async () => {
+    const enabled: DreamStatus = {
+      configured: true,
+      enabled: true,
+      cadence: 'daily',
+      model: 'gpt-5',
+      period: '2026-08-25',
+      periodCovered: false,
+      reflectedSessionCount: 46,
+      minReflectedSessions: 5,
+      reflectedFloorMet: true,
+      due: true,
+    }
+    const api = createApi([], {}, enabled)
+    render(<Dreams api={api} />)
+    const panel = await screen.findByLabelText('Dreaming status')
+    expect(panel).toHaveTextContent('Dreaming is on, daily')
+    expect(panel).toHaveTextContent('gpt-5')
+    expect(panel).toHaveTextContent('46/5')
+    expect(panel).toHaveTextContent('due')
+  })
+
+  it('surfaces the last failed attempt, with its reason, distinctly from the rest of the panel', async () => {
+    const enabled: DreamStatus = {
+      configured: true,
+      enabled: true,
+      cadence: 'daily',
+      model: 'gpt-5.6-luna',
+      period: '2026-08-25',
+      periodCovered: false,
+      reflectedSessionCount: 46,
+      minReflectedSessions: 5,
+      reflectedFloorMet: true,
+      due: true,
+      lastAttempt: {
+        ts: '2026-08-25T02:00:00.000Z',
+        trigger: 'onStart',
+        outcome: 'failed',
+        reason: 'openai: HTTP 400: Function tools with reasoning_effort are not supported',
+      },
+    }
+    const api = createApi([], {}, enabled)
+    render(<Dreams api={api} />)
+    const panel = await screen.findByLabelText('Dreaming status')
+    const attempt = within(panel).getByRole('note')
+    expect(attempt).toHaveTextContent('onStart')
+    expect(attempt).toHaveTextContent('failed')
+    expect(attempt).toHaveTextContent('Function tools with reasoning_effort are not supported')
+  })
+
+  it('does not break the dreams list when the status fetch itself fails', async () => {
+    const api = createApi([dreamRow1])
+    api.getDreamStatus = vi.fn(async () => {
+      throw new Error('network error')
+    })
+    render(<Dreams api={api} />)
+    await screen.findByRole('button', { name: /20 August 2026/ })
+    expect(screen.queryByLabelText('Dreaming status')).toBeNull()
+  })
+})
+
+describe('dreamStatusSummary', () => {
+  it('is a single line saying dreaming is not configured, when it is not', () => {
+    expect(dreamStatusSummary(notConfiguredStatus)).toEqual([
+      'Dreaming is not configured on this server.',
+    ])
+  })
+
+  it('names the reflected-session floor as the reason nothing has run when below it', () => {
+    const belowFloor: DreamStatus = {
+      configured: true,
+      enabled: true,
+      cadence: 'daily',
+      model: 'gpt-5',
+      period: '2026-08-25',
+      periodCovered: false,
+      reflectedSessionCount: 2,
+      minReflectedSessions: 5,
+      reflectedFloorMet: false,
+      due: false,
+    }
+    const lines = dreamStatusSummary(belowFloor).join(' ')
+    expect(lines).toContain('2/5')
+    expect(lines).toContain('below the floor')
   })
 })

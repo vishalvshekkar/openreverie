@@ -76,10 +76,56 @@ function groupSessionsByDate(sessions: Session[], now: Date): SessionGroup[] {
   return groups
 }
 
-function roleLabel(role: ChatMessage['role']): string {
-  if (role === 'user') return 'You'
-  if (role === 'assistant') return 'reverie'
-  return 'Tool'
+/*
+ * Human labels for tool activity, one line per tool so a wording change
+ * stays a one-line edit. Each entry carries a present-tense form for while
+ * the tool is running and a past-tense form for once it has finished.
+ * Wording and the fourteen tool names both come from packages/core's tool
+ * catalogue (packages/core/src/tools.ts, toolDefinitions()); duplicated
+ * here for the same reason MODE_OPTIONS is duplicated below: web talks to
+ * server over HTTP only and never imports a runtime engine package, so this
+ * cannot import that catalogue to stay in sync automatically. The parity
+ * test in conversations.test.tsx is what notices this list drifting from
+ * the fourteen tools that exist; it cannot detect tools.ts adding or
+ * removing one on its own, so whoever changes toolDefinitions() must update
+ * this table AND that test's hardcoded name list by hand, in the same
+ * change (the same discipline graph-vocabulary-parity.test.ts documents for
+ * NodeType/EdgeType).
+ */
+export const TOOL_LABELS: Record<string, { running: string; done: string }> = {
+  remember: { running: 'Remembering', done: 'Remembered' },
+  search_memory: { running: 'Searching memory', done: 'Searched memory' },
+  graph_query: { running: 'Tracing connections', done: 'Traced connections' },
+  read_document: { running: 'Reading back', done: 'Read that back' },
+  read_transcript: { running: 'Reading a past conversation', done: 'Read a past conversation' },
+  list_arcs: { running: 'Reviewing your storylines', done: 'Reviewed your storylines' },
+  list_realms: { running: 'Reviewing your life areas', done: 'Reviewed your life areas' },
+  list_people: { running: 'Looking over people', done: 'Looked over people' },
+  list_entities: { running: 'Looking over things', done: 'Looked over things' },
+  set_mode: { running: 'Switching mode', done: 'Switched mode' },
+  update_profile: { running: 'Updating your profile', done: 'Updated your profile' },
+  declare_journal_method: { running: 'Setting the journal format', done: 'Set the journal format' },
+  update_journaling_protocol: {
+    running: 'Updating your journal setup',
+    done: 'Updated your journal setup',
+  },
+  dream_feedback: { running: 'Noting your reaction', done: 'Noted your reaction' },
+}
+
+// An unmapped tool name degrades to its own words (underscores to spaces)
+// rather than a raw identifier, a blank line, or a crash.
+function humanizeToolName(name: string): string {
+  const words = name.split('_').filter(Boolean)
+  return words.length === 0 ? 'a tool' : words.join(' ')
+}
+
+function toolRunningLabel(name: string): string {
+  return TOOL_LABELS[name]?.running ?? `Using ${humanizeToolName(name)}`
+}
+
+function toolDoneLabel(name: string | undefined): string {
+  if (name === undefined) return 'Tool result'
+  return TOOL_LABELS[name]?.done ?? `Used ${humanizeToolName(name)}`
 }
 
 async function consumeEvents(
@@ -131,27 +177,67 @@ async function streamGreeting(
   }
 }
 
+/*
+ * Speaker attribution used to be a visible, absolutely positioned label in a
+ * fixed-width left gutter, which overflowed for "reverie" (7 uppercase
+ * characters plus tracking did not fit a 5rem box) and collided with
+ * adjacent content. The redesign leans on layout instead: your messages are
+ * right-aligned bubbles, reverie's replies are unlabelled full-width prose,
+ * the way Claude and ChatGPT read. This label still exists, but only for
+ * screen reader users, since the visual cue (alignment, bubble fill) is not
+ * available to them.
+ */
+function speakerLabel(role: 'user' | 'assistant'): string {
+  return role === 'user' ? 'You: ' : 'reverie: '
+}
+
 function renderMessage(message: ChatMessage) {
   if (message.role === 'user') {
     return (
       <div className="message message-user" key={message.id}>
-        <span className="message-meta">{roleLabel(message.role)}</span>
-        <p className="message-said">{message.content}</p>
+        <p className="message-said">
+          <span className="sr-only">{speakerLabel('user')}</span>
+          {message.content}
+        </p>
       </div>
     )
   }
   if (message.role === 'tool') {
+    // Still in flight: nothing to disclose yet, so this renders as a plain,
+    // non-interactive status chip rather than a <details> that would open
+    // onto an empty payload. session.ts flips toolStatus to 'done' in place
+    // (never deletes the message) the moment the call is known to have
+    // finished, which is what turns this into the interactive chip below.
+    if (message.toolStatus === 'running') {
+      return (
+        <div className="message message-tool" key={message.id}>
+          <span className="tool-chip tool-chip-running">
+            <span className="tool-chip-dot" aria-hidden="true" />
+            <span aria-live="polite">{toolRunningLabel(message.toolName ?? '')}</span>
+          </span>
+        </div>
+      )
+    }
+    // A completed tool call reads as a small, clearly interactive chip
+    // (border, fill, caret, hover state), collapsed by default: the human
+    // label only, never the raw JSON payload, which sits one click away.
     return (
       <div className="message message-tool" key={message.id}>
-        <span className="message-meta">{roleLabel(message.role)}</span>
-        <p className="message-tool-line">{message.content}</p>
+        <details className="tool-chip">
+          <summary>
+            <span aria-live="polite">{toolDoneLabel(message.toolName)}</span>
+          </summary>
+          <pre className="tool-chip-payload">{message.content}</pre>
+        </details>
       </div>
     )
   }
   return (
     <div className="message message-assistant" key={message.id}>
-      <span className="message-meta">{roleLabel(message.role)}</span>
-      <p className="message-prose">{message.content}</p>
+      <p className="message-prose">
+        <span className="sr-only">{speakerLabel('assistant')}</span>
+        {message.content}
+      </p>
     </div>
   )
 }
@@ -182,13 +268,18 @@ export const MODE_OPTIONS: readonly (readonly [string, string])[] = [
 export function Conversations({ api }: { api: AppApi }): JSX.Element {
   const [state, dispatch] = useReducer(sessionReducer, initialChatState)
   const [sessions, setSessions] = useState<Session[]>([])
+  const [sessionsError, setSessionsError] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
   const [profile, setProfile] = useState<PublicProfile | null>(null)
   const [nowMs, setNowMs] = useState(() => Date.now())
+  const [modeMenuOpen, setModeMenuOpen] = useState(false)
+  const [highlightedMode, setHighlightedMode] = useState('general')
   const lastSequenceRef = useRef(0)
   const threadRef = useRef<HTMLDivElement>(null)
   const stickToBottomRef = useRef(true)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const modeButtonRef = useRef<HTMLButtonElement>(null)
+  const modeListRef = useRef<HTMLDivElement>(null)
   // Tracks which session the thread currently belongs to, independent of
   // React state timing, so a greeting stream started for a session that has
   // since been replaced (new conversation, opened a past one) can notice and
@@ -199,8 +290,13 @@ export function Conversations({ api }: { api: AppApi }): JSX.Element {
     try {
       const page = await api.listSessions()
       setSessions(page.data)
+      setSessionsError(null)
     } catch {
-      // A failed session list must not block the live thread.
+      // The live thread must keep working even when the list cannot load.
+      // The failure used to be swallowed silently here, which is exactly
+      // what hid the mount-time race this replaced: surface it instead, with
+      // a way to try again.
+      setSessionsError('Conversations could not load.')
     }
   }, [api])
 
@@ -224,13 +320,26 @@ export function Conversations({ api }: { api: AppApi }): JSX.Element {
     [api],
   )
 
+  // Bootstrap (exchanging the URL token for the auth cookie) must finish
+  // before the session list is fetched, or the fetch races ahead of the
+  // cookie being set and comes back unauthenticated. The token is scrubbed
+  // from the URL immediately, before the await, rather than after: a slow or
+  // hung bootstrap should not leave a credential sitting in the address bar.
   useEffect(() => {
-    const token = new URLSearchParams(window.location.search).get('token')
-    if (token) {
-      void api.bootstrap(token)
-      window.history.replaceState({}, '', window.location.pathname)
-    }
-    void refreshSessions()
+    void (async () => {
+      const token = new URLSearchParams(window.location.search).get('token')
+      if (token) {
+        window.history.replaceState({}, '', window.location.pathname)
+        try {
+          await api.bootstrap(token)
+        } catch {
+          // Bootstrap is best effort at the token-exchange step itself. A
+          // failure here still falls through to refreshSessions below, whose
+          // own error state (and retry control) is what the person sees.
+        }
+      }
+      await refreshSessions()
+    })()
   }, [api, refreshSessions])
 
   useEffect(() => {
@@ -276,7 +385,7 @@ export function Conversations({ api }: { api: AppApi }): JSX.Element {
     const el = threadRef.current
     if (!el) return
     el.scrollTop = el.scrollHeight
-  }, [state.messages, state.thinking, state.activeTool])
+  }, [state.messages, state.thinking])
 
   // Resizes the textarea's own DOM node, but must re-run on every keystroke
   // (draft change), not just when the ref identity changes.
@@ -287,6 +396,74 @@ export function Conversations({ api }: { api: AppApi }): JSX.Element {
     el.style.height = 'auto'
     el.style.height = `${el.scrollHeight}px`
   }, [draft])
+
+  function closeModeMenu(refocus: boolean) {
+    setModeMenuOpen(false)
+    if (refocus) modeButtonRef.current?.focus()
+  }
+
+  function openModeMenu() {
+    setHighlightedMode(state.mode)
+    setModeMenuOpen(true)
+  }
+
+  // Focuses the open listbox and closes it on a click outside either the
+  // button or the listbox itself. Scoped to modeMenuOpen only: closeModeMenu
+  // is a plain function (not a stable useCallback), and re-running this on
+  // every render would be wasteful for what is a straightforward open/close
+  // lifecycle effect.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: intentionally scoped to modeMenuOpen only
+  useEffect(() => {
+    if (!modeMenuOpen) return
+    modeListRef.current?.focus()
+    function handlePointerDown(event: MouseEvent) {
+      const target = event.target as Node
+      if (modeListRef.current?.contains(target)) return
+      if (modeButtonRef.current?.contains(target)) return
+      closeModeMenu(false)
+    }
+    document.addEventListener('mousedown', handlePointerDown)
+    return () => document.removeEventListener('mousedown', handlePointerDown)
+  }, [modeMenuOpen])
+
+  async function selectMode(mode: string) {
+    closeModeMenu(true)
+    if (mode !== state.mode) await changeMode(mode)
+  }
+
+  function handleModeMenuKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    const values = MODE_OPTIONS.map(([value]) => value)
+    const index = values.indexOf(highlightedMode)
+    switch (event.key) {
+      case 'ArrowDown':
+        event.preventDefault()
+        setHighlightedMode(values[(index + 1) % values.length] ?? highlightedMode)
+        break
+      case 'ArrowUp':
+        event.preventDefault()
+        setHighlightedMode(values[(index - 1 + values.length) % values.length] ?? highlightedMode)
+        break
+      case 'Home':
+        event.preventDefault()
+        setHighlightedMode(values[0] ?? highlightedMode)
+        break
+      case 'End':
+        event.preventDefault()
+        setHighlightedMode(values[values.length - 1] ?? highlightedMode)
+        break
+      case 'Enter':
+      case ' ':
+        event.preventDefault()
+        void selectMode(highlightedMode)
+        break
+      case 'Escape':
+        event.preventDefault()
+        closeModeMenu(true)
+        break
+      default:
+        break
+    }
+  }
 
   async function resync(sessionId: string) {
     const page = await api.transcript(sessionId)
@@ -405,8 +582,7 @@ export function Conversations({ api }: { api: AppApi }): JSX.Element {
 
   const groups = groupSessionsByDate(sessions, new Date())
   const readOnly = state.session?.readOnly ?? false
-  const composerDisabled = !state.session || state.sending || readOnly
-  const sendDisabled = composerDisabled || draft.trim() === ''
+  const sendDisabled = state.sending || draft.trim() === ''
 
   return (
     <div className="conversations">
@@ -416,6 +592,14 @@ export function Conversations({ api }: { api: AppApi }): JSX.Element {
             New conversation
           </button>
         </div>
+        {sessionsError && (
+          <div className="session-rail-error" role="alert">
+            <p>{sessionsError}</p>
+            <button type="button" onClick={() => void refreshSessions()}>
+              Retry
+            </button>
+          </div>
+        )}
         <div className="session-groups">
           {groups.map((group) => (
             <div className="session-group" key={group.heading}>
@@ -450,31 +634,84 @@ export function Conversations({ api }: { api: AppApi }): JSX.Element {
         {state.session ? (
           <>
             <div className="thread-header">
-              <span className="thread-session-id" title={state.session.sessionId}>
-                {state.session.sessionId}
-              </span>
+              <div className="thread-header-primary">
+                {!readOnly && (
+                  <div className="mode-pill-wrap">
+                    <button
+                      type="button"
+                      ref={modeButtonRef}
+                      className="mode-pill"
+                      aria-haspopup="listbox"
+                      aria-expanded={modeMenuOpen}
+                      onClick={() => (modeMenuOpen ? closeModeMenu(false) : openModeMenu())}
+                    >
+                      <span className="sr-only">Mode: </span>
+                      {state.mode}
+                    </button>
+                    {modeMenuOpen && (
+                      <div
+                        className="mode-menu"
+                        role="listbox"
+                        aria-label="Mode"
+                        tabIndex={-1}
+                        ref={modeListRef}
+                        aria-activedescendant={`mode-option-${highlightedMode}`}
+                        onKeyDown={handleModeMenuKeyDown}
+                      >
+                        {MODE_OPTIONS.map(([value, summary]) => (
+                          // biome-ignore lint/a11y/useKeyWithClickEvents: keyboard activation is handled by the listbox's own onKeyDown above
+                          // biome-ignore lint/a11y/useFocusableInteractive: focus stays on the listbox; aria-activedescendant tracks the active option, the standard ARIA APG pattern for this widget
+                          <div
+                            key={value}
+                            id={`mode-option-${value}`}
+                            role="option"
+                            aria-selected={value === state.mode}
+                            className={
+                              value === highlightedMode
+                                ? 'mode-option mode-option-highlighted'
+                                : 'mode-option'
+                            }
+                            onMouseEnter={() => setHighlightedMode(value)}
+                            onClick={() => void selectMode(value)}
+                          >
+                            <span className="mode-option-name">{value}</span>
+                            <span className="mode-option-summary">{summary}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+                {!readOnly && (
+                  <span className="status-strip" data-testid="status-strip">
+                    {webStatusStrip(profile, state.session.createdAt, nowMs)}
+                  </span>
+                )}
+              </div>
+              <div className="thread-header-secondary">
+                <span className="thread-session-id" title={state.session.sessionId}>
+                  {state.session.sessionId}
+                </span>
+                {!readOnly && (
+                  <button type="button" className="end-conversation" onClick={() => void endChat()}>
+                    End conversation
+                  </button>
+                )}
+              </div>
             </div>
             <div className="thread" ref={threadRef} onScroll={handleThreadScroll}>
               <div className="thread-inner">
                 {state.messages.map(renderMessage)}
-                {state.messages.length === 0 &&
-                  !state.thinking &&
-                  !state.activeTool &&
-                  !state.error && (
-                    <p className="thread-empty">
-                      {readOnly
-                        ? 'This conversation ended before anything was said.'
-                        : 'Nothing here yet. Say what is on your mind.'}
-                    </p>
-                  )}
+                {state.messages.length === 0 && !state.thinking && !state.error && (
+                  <p className="thread-empty">
+                    {readOnly
+                      ? 'This conversation ended before anything was said.'
+                      : 'Nothing here yet. Say what is on your mind.'}
+                  </p>
+                )}
                 {state.thinking && (
                   <p className="turn-status" aria-live="polite">
                     Thinking
-                  </p>
-                )}
-                {state.activeTool && (
-                  <p className="turn-status" aria-live="polite">
-                    Using {state.activeTool}
                   </p>
                 )}
                 {state.error && (
@@ -487,56 +724,44 @@ export function Conversations({ api }: { api: AppApi }): JSX.Element {
 
             <div className="composer-area">
               <div className="composer-area-inner">
-                <div className="composer-status">
-                  <label className="mode-picker" htmlFor="mode-picker">
-                    <span className="mode-picker-label">Mode</span>
-                    <select
-                      id="mode-picker"
-                      value={state.mode}
-                      disabled={!state.session || readOnly}
-                      onChange={(event) => void changeMode(event.target.value)}
-                    >
-                      {MODE_OPTIONS.map(([value, summary]) => (
-                        <option key={value} value={value}>
-                          {value}: {summary}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <span className="status-strip" data-testid="status-strip">
-                    {webStatusStrip(profile, state.session?.createdAt, nowMs)}
-                  </span>
-                </div>
-                {readOnly && (
-                  <p className="composer-note">
+                {readOnly ? (
+                  <p className="composer-ended">
                     This conversation has ended. Start a new one to keep talking.
                   </p>
+                ) : (
+                  <form className="composer" onSubmit={handleSubmit}>
+                    <div className="composer-surface">
+                      <textarea
+                        ref={textareaRef}
+                        className="composer-input"
+                        aria-label="Message"
+                        placeholder="Say what is on your mind."
+                        value={draft}
+                        onChange={handleDraftChange}
+                        onKeyDown={handleComposerKeyDown}
+                        disabled={state.sending}
+                        rows={3}
+                      />
+                      <button
+                        type="submit"
+                        className="send-button"
+                        aria-label="Send"
+                        disabled={sendDisabled}
+                      >
+                        <svg aria-hidden="true" viewBox="0 0 20 20" width="18" height="18">
+                          <path
+                            d="M10 15.5V4.5M10 4.5L4.75 9.75M10 4.5L15.25 9.75"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="1.8"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          />
+                        </svg>
+                      </button>
+                    </div>
+                  </form>
                 )}
-                <form className="composer" onSubmit={handleSubmit}>
-                  <textarea
-                    ref={textareaRef}
-                    className="composer-input"
-                    aria-label="Message"
-                    value={draft}
-                    onChange={handleDraftChange}
-                    onKeyDown={handleComposerKeyDown}
-                    disabled={composerDisabled}
-                    rows={1}
-                  />
-                  <div className="composer-controls">
-                    <button
-                      type="button"
-                      className="end-conversation"
-                      onClick={() => void endChat()}
-                      disabled={!state.session || readOnly}
-                    >
-                      End conversation
-                    </button>
-                    <button type="submit" className="send-button" disabled={sendDisabled}>
-                      Send
-                    </button>
-                  </div>
-                </form>
               </div>
             </div>
           </>

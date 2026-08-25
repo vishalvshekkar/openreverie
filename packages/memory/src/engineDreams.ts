@@ -15,7 +15,21 @@ import { readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { type Document, readDocument } from './documents.js'
 import type { DreamInsight } from './dreaming.js'
-import { appendDreamLog, type DreamLogState, type DreamVerdict } from './dreamLog.js'
+import {
+  appendDreamLog,
+  type DreamAttemptRecord,
+  type DreamLogState,
+  type DreamVerdict,
+  foldDreamLog,
+  readDreamLog,
+} from './dreamLog.js'
+import {
+  type DreamCadence,
+  dreamIsDue,
+  MIN_REFLECTED_SESSIONS,
+  periodCovered,
+  periodFor,
+} from './dreamSchedule.js'
 import { type DreamCandidate, randomWalk } from './dreamSelection.js'
 import type { DreamSummary, PublicDocumentRow } from './engine.js'
 import type { GraphState } from './graph.js'
@@ -272,4 +286,80 @@ export function walkSeeds(
     }
   }
   return combined
+}
+
+// The subset of config.toml's [dreaming] table that dueness and status
+// reporting need. Defined here rather than imported from EngineDeps in
+// engine.ts, so this module keeps depending only on paths and graph state
+// (see this file's own header), not on the engine's own dependency shape.
+export interface DreamingSettings {
+  enabled: boolean
+  cadence: DreamCadence
+  triggers: { afterSession: boolean; onStart: boolean; serverTimer: boolean }
+  maxToolCalls: number
+}
+
+// Everything a person or `reverie doctor` needs to answer "why hasn't
+// dreaming produced anything": whether it is configured and on, which
+// model it will run on, whether today's (or this week's) period is
+// already covered, whether the floor of reflected sessions is met, and
+// the reason the last real attempt did not produce a dream, if there was
+// one. Pure over paths and the caller's own resolved model string, so
+// `reverie doctor` (which deliberately never opens a MemoryEngine) can
+// call this directly, and MemoryEngine.dreamStatus() is a thin wrapper
+// around it.
+export interface DreamStatus {
+  configured: boolean
+  enabled: boolean
+  cadence: DreamCadence
+  triggers: { afterSession: boolean; onStart: boolean; serverTimer: boolean }
+  model: string | undefined
+  timezone: string
+  period: string
+  periodCovered: boolean
+  reflectedSessionCount: number
+  minReflectedSessions: number
+  reflectedFloorMet: boolean
+  due: boolean
+  lastAttempt?: DreamAttemptRecord
+}
+
+export async function computeDreamStatus(
+  paths: MemoryPaths,
+  dreaming: DreamingSettings | undefined,
+  model: string | undefined,
+  timezone: string,
+  now: Date,
+): Promise<DreamStatus> {
+  const cadence = dreaming?.cadence ?? 'daily'
+  const period = periodFor(now, cadence, timezone)
+  const reflected = await reflectedSessionCount(paths)
+  const dreamDates = await existingDreamDates(paths)
+  const covered = periodCovered(dreamDates, now, cadence, timezone)
+  const logState = foldDreamLog(await readDreamLog(paths))
+  const due =
+    dreaming !== undefined &&
+    dreamIsDue({
+      enabled: dreaming.enabled,
+      cadence,
+      timezone,
+      reflectedSessionCount: reflected,
+      existingDreamDates: dreamDates,
+      now,
+    })
+  return {
+    configured: dreaming !== undefined,
+    enabled: dreaming?.enabled ?? false,
+    cadence,
+    triggers: dreaming?.triggers ?? { afterSession: false, onStart: false, serverTimer: false },
+    model,
+    timezone,
+    period,
+    periodCovered: covered,
+    reflectedSessionCount: reflected,
+    minReflectedSessions: MIN_REFLECTED_SESSIONS,
+    reflectedFloorMet: reflected >= MIN_REFLECTED_SESSIONS,
+    due,
+    ...(logState.lastAttempt ? { lastAttempt: logState.lastAttempt } : {}),
+  }
 }

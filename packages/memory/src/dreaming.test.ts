@@ -8,6 +8,7 @@ import type { DreamInsight, DreamLookup, RunDreamArgs } from './dreaming.js'
 import { dreamInsightsOutputSchema, runDream, runExploration } from './dreaming.js'
 import { readDreamLog } from './dreamLog.js'
 import { ensureMemoryTree, type MemoryPaths, memoryPaths } from './paths.js'
+import { PROSE_VOICE_RULE } from './voice.js'
 
 function fakeLookup(calls: string[]): DreamLookup {
   return {
@@ -465,6 +466,109 @@ describe('runDream', () => {
     }
   })
 
+  it('carries the shared prose voice rule in the insights call and the narrative call, scoped to not flatten the dream register', async () => {
+    const chat = new FakeChatProvider([
+      { text: 'noted', toolCalls: [] },
+      { text: INSIGHTS_JSON, toolCalls: [] },
+      { text: 'a narrative', toolCalls: [] },
+      { text: TONE_OK, toolCalls: [] },
+    ])
+    const args = runArgs(paths, chat)
+    const result = await runDream(args)
+    expect(result.outcome).toBe('written')
+
+    const insightsPrompt = chat.requests[1]?.messages.at(-1)?.content ?? ''
+    expect(insightsPrompt).toContain(PROSE_VOICE_RULE)
+
+    const narrativePrompt = chat.requests[2]?.messages.at(-1)?.content ?? ''
+    expect(narrativePrompt).toContain(PROSE_VOICE_RULE)
+    // The dream's own register (non-literal recombination, gently positive)
+    // must survive next to the mechanics rule, not be displaced by it.
+    expect(narrativePrompt).toContain('gently positive')
+    expect(narrativePrompt.toLowerCase()).toContain('mechanics only')
+  })
+
+  // docs/dreaming.md's Creative recombination section names higher
+  // temperature for the narrative as deliberate: it is meant to be looser
+  // and more associative than the hedged, structured insights. 0.9 must
+  // still be sent as the caller's preference; a model that cannot honor it
+  // is the provider's problem to solve (OpenAiChatProvider.complete's own
+  // retry-and-warn behavior, tested in packages/providers), not a reason
+  // for dreaming to stop asking for it.
+  it('asks for temperature 0.9 on the narrative call, and on the narrative retry call', async () => {
+    const toneRejectsOnce = JSON.stringify({
+      narrativeOk: false,
+      reason: 'too literal',
+      flaggedInsightIndexes: [],
+    })
+    const chat = new FakeChatProvider([
+      { text: 'noted', toolCalls: [] },
+      { text: INSIGHTS_JSON, toolCalls: [] },
+      { text: 'a narrative', toolCalls: [] },
+      { text: toneRejectsOnce, toolCalls: [] },
+      { text: 'a second narrative', toolCalls: [] },
+      { text: TONE_OK, toolCalls: [] },
+    ])
+    const args = runArgs(paths, chat)
+    const result = await runDream(args)
+    expect(result.outcome).toBe('written')
+
+    // requests: [exploration, insights, narrative, tone_check, narrative_retry, tone_check_retry]
+    expect(chat.requests[2]?.temperature).toBe(0.9)
+    expect(chat.requests[4]?.temperature).toBe(0.9)
+  })
+
+  // Found live on 2026-08-25: when the provider had to drop temperature
+  // because the model rejected it, that decision must not vanish. Dreams
+  // are append-only and everything is meant to be inspectable (see this
+  // file's own DREAM_EXPLORATION_INSTRUCTIONS-adjacent guardrails and
+  // docs/dreaming.md's "Silent rewriting" failure mode), so a provider
+  // warning belongs in the dream's own process.jsonl, the same as every
+  // other pipeline decision.
+  it('records a provider warning about a dropped temperature into process.jsonl', async () => {
+    const chat = new FakeChatProvider([
+      { text: 'noted', toolCalls: [] },
+      { text: INSIGHTS_JSON, toolCalls: [] },
+      {
+        text: 'a narrative',
+        toolCalls: [],
+        warnings: ['temperature 0.9 was not accepted for model fake and was dropped'],
+      },
+      { text: TONE_OK, toolCalls: [] },
+    ])
+    const args = runArgs(paths, chat)
+    const result = await runDream(args)
+    expect(result.outcome).toBe('written')
+
+    const dirName = await dreamDirName(paths.dreamsDir)
+    const processLog = await readFile(join(paths.dreamsDir, dirName, 'process.jsonl'), 'utf8')
+    const events = processLog
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+    const warningEvent = events.find((e) => e.event === 'provider_warning')
+    expect(warningEvent).toMatchObject({
+      stage: 'narrative',
+      warnings: ['temperature 0.9 was not accepted for model fake and was dropped'],
+    })
+  })
+
+  it('does not record a provider_warning event when the provider result carries none', async () => {
+    const chat = new FakeChatProvider([
+      { text: 'noted', toolCalls: [] },
+      { text: INSIGHTS_JSON, toolCalls: [] },
+      { text: 'a narrative', toolCalls: [] },
+      { text: TONE_OK, toolCalls: [] },
+    ])
+    const args = runArgs(paths, chat)
+    const result = await runDream(args)
+    expect(result.outcome).toBe('written')
+
+    const dirName = await dreamDirName(paths.dreamsDir)
+    const processLog = await readFile(join(paths.dreamsDir, dirName, 'process.jsonl'), 'utf8')
+    expect(processLog).not.toContain('provider_warning')
+  })
+
   it('grounds insights via session and node evidence pointers, not just doc pointers', async () => {
     const chat = new FakeChatProvider([
       { text: 'noted', toolCalls: [] },
@@ -481,6 +585,51 @@ describe('runDream', () => {
     const insightDoc = await readDocument(join(paths.dreamsDir, dirName, 'insight.md'))
     const insights = insightDoc.meta.insights as DreamInsight[]
     expect(insights).toHaveLength(2)
+  })
+
+  // Defect 5 from the 2026-08-25 dreaming investigation: the insights
+  // instruction's own example showed only {"doc": "doc_id"}, which pushed
+  // real models toward wrapping every evidence id (including node ids like
+  // item_/person_/session_) under "doc" regardless of which space the id
+  // actually came from. A node id wrapped under "doc" must still resolve,
+  // because it names something real (verifiable via resolveNode), just
+  // filed under the wrong key; a genuinely unresolvable id must still be
+  // dropped, so this also proves that half still fails.
+  it('resolves an evidence pointer whose real node id was wrapped under the wrong field, without admitting an id that resolves nowhere', async () => {
+    const insightsJson = JSON.stringify({
+      insights: [
+        {
+          kind: 'connection',
+          headline: 'Mislabeled but real',
+          claim: 'It looks like this connects to something seen while exploring.',
+          confidence: 0.5,
+          evidence: [{ doc: 'node_ok' }], // a real node id, wrapped under "doc"
+        },
+        {
+          kind: 'open_question',
+          headline: 'Genuinely unresolvable',
+          claim: 'Whatever happened to this thread?',
+          confidence: 0.4,
+          evidence: [{ doc: 'nothing_matches_anywhere' }],
+        },
+      ],
+    })
+    const chat = new FakeChatProvider([
+      { text: 'noted', toolCalls: [] },
+      { text: insightsJson, toolCalls: [] },
+      { text: 'a narrative', toolCalls: [] },
+      { text: TONE_OK, toolCalls: [] },
+    ])
+    const args = runArgs(paths, chat)
+    args.lookup = lookupResolving([]) // no doc id resolves for anything
+    args.resolveNode = (id) => id === 'node_ok'
+    const result = await runDream(args)
+    expect(result.outcome).toBe('written')
+    const dirName = await dreamDirName(paths.dreamsDir)
+    const insightDoc = await readDocument(join(paths.dreamsDir, dirName, 'insight.md'))
+    const insights = insightDoc.meta.insights as DreamInsight[]
+    expect(insights).toHaveLength(1)
+    expect(insights[0]?.headline).toBe('Mislabeled but real')
   })
 })
 

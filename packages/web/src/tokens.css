@@ -4,8 +4,12 @@
  * Direction: ink on paper. openreverie keeps a written record of a life, so the
  * interface borrows the materials of a kept journal: a warm paper ground, a warm
  * ink foreground, and a hairline margin rule that threads through every screen.
- * The spec requires a monochrome system, so there is no accent hue. Emphasis is
- * carried by weight, rule strength, and the paper/ink contrast alone.
+ * The spec requires a monochrome system, so there is no accent hue, except in
+ * two places, each argued for where it is defined below. Hue tells node types
+ * apart in the Atlas graph view (the --type-* custom properties near the end of
+ * this file), and it marks tool activity apart from speech in a conversation
+ * thread (the --tool-* properties). Everywhere else, emphasis is carried by
+ * weight, rule strength, and the paper/ink contrast alone.
  *
  * Type roles are deliberately inverted from the usual arrangement. The serif is
  * the reading face, used for prose the user actually reads: reverie's replies,
@@ -58,7 +62,87 @@
   --ink-faint: #8b867a;
   --ink-invert: #fbfaf7;
   --said: #ece8e0;
+
+  /*
+   * Tool activity accent. The second deliberate exception to the monochrome
+   * rule above, and a narrow one: it colours the tool chips in the
+   * conversation thread and nothing else. A tool chip is the one thing in a
+   * thread that is not somebody talking, so it needs to read as a different
+   * kind of object from reverie's prose rather than as a quieter shade of
+   * it, which weight and rule strength alone could not carry. The hue is
+   * chosen to stay inside the "ink on paper" direction: annotation ink in
+   * the margin of a journal, not a product accent. Measured against the
+   * surface each one actually sits on: --tool-ink on --tool-wash is 6.2:1
+   * light and 8.0:1 dark, both well clear of the 4.5:1 text floor.
+   */
+  --tool-ink: #3f5b8c;
+  --tool-edge: #c3cfe2;
+  --tool-wash: #f0f4fa;
   --shadow: 0 1px 2px rgba(25, 23, 19, 0.06), 0 8px 24px rgba(25, 23, 19, 0.06);
+
+  /*
+   * Atlas graph node-type colours. One accent hue per GraphNode['type']
+   * (packages/memory/src/graph.ts, hand mirrored in api.ts and
+   * graph-vocabulary-parity.test.ts). This is the one deliberate exception to
+   * "the spec requires a monochrome system" above: with 400+ items and a few
+   * dozen sessions, people, and entities sharing a force-directed layout, hue
+   * is the only channel left that can tell type apart at a glance, since node
+   * size already encodes degree within a type's own band.
+   *
+   * Seven of the eight hues from the dataviz skill's validated categorical
+   * palette (its references/palette.md), kept in the skill's own fixed slot
+   * order (blue, orange, aqua, yellow, magenta, green, violet); slot 8 (red)
+   * is left unused rather than reassigned, so an eighth node type can take it
+   * later without re-numbering the other seven. Mapped onto TYPE_PRIORITY,
+   * the same realm -> commitment visual-weight order atlas.tsx already uses
+   * for node size and ring width (see TYPE_COLOR_VAR there), so the pairs the
+   * palette's own validator checks (adjacent slots) are exactly the pairs
+   * node size does NOT already separate; the pairs size does separate are the
+   * ones the validator's all-pairs check fails on. Full reasoning and the
+   * measured numbers are in atlas.tsx's TYPE_COLOR_VAR comment.
+   *
+   * Re-validated 2026-08-25 against THIS view's real surface, --panel (not
+   * --paper: .atlas-canvas-cell, where the graph canvas sits, is painted
+   * --panel), with dataviz/scripts/validate_palette.js:
+   *   light, surface #f7f5f1 (adjacent pairs): lightness band, chroma floor,
+   *     CVD separation (worst adjacent #bd8110<->#00a06e, DeltaE 8.6 protan),
+   *     and the normal-vision floor (worst adjacent DeltaE 17.3) all PASS,
+   *     and contrast now PASSES outright too (all seven >= 3:1: realm 4.06,
+   *     arc 3.06, person 3.08, entity 3.06, session 3.06, item 4.54,
+   *     commitment 7.86). The four light steps that first shipped here
+   *     (arc #eb6834 2.94:1, person #1baf7a 2.59:1, entity #eda100 1.99:1,
+   *     session #e87ba4 2.47:1) were WARN-band, not FAIL, and the sidebar
+   *     node list plus the legend's type-name text were a legitimate relief
+   *     channel for that WARN under the dataviz skill's own rule -- but a
+   *     filled node's colour is the primary encoding here, not a label, and
+   *     the human who asked for this view explicitly asked for hues that
+   *     "stand out against both light and dark backgrounds". So those four
+   *     were darkened in OKLCH space (same hue angle, lower L, chroma
+   *     trimmed only as far as sRGB gamut clipping forced) until each
+   *     cleared 3:1 against --panel with a small margin, re-validated after
+   *     every change rather than assumed: arc, person, and session moved
+   *     roughly one step down the same hue; entity (the worst offender, a
+   *     yellow that only reads dark enough to see once it is closer to an
+   *     amber/ochre) moved the furthest. Realm, item, and commitment already
+   *     cleared 3:1 unchanged and were left alone.
+   *   dark, surface #1b1915 (adjacent pairs): every check PASSES outright,
+   *     including contrast (all seven >= 3:1: realm 4.82, arc 4.52,
+   *     person 5.15, entity 5.72, session 4.45, item 3.55, commitment 5.61),
+   *     unchanged by the light-mode fix above.
+   * atlas.tsx reads these at render time via getComputedStyle instead of
+   * hardcoding a second copy, because Sigma paints to a WebGL canvas and
+   * cannot consume a CSS custom property directly; see readCSSVar() there.
+   * Its own literal fallback ramp (used only where no live stylesheet is
+   * available, e.g. this package's jsdom test suite) is guarded against
+   * drifting from these values by the coverage test in atlas.test.tsx.
+   */
+  --type-realm: #2a78d6;
+  --type-arc: #e76530;
+  --type-person: #00a06e;
+  --type-entity: #bd8110;
+  --type-session: #d56a93;
+  --type-item: #008300;
+  --type-commitment: #4a3aa7;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -74,6 +158,21 @@
     --ink-faint: #746e62;
     --ink-invert: #14130f;
     --said: #26241e;
+
+    /* Dark-surface step of the tool activity accent. See the light block. */
+    --tool-ink: #9db4dd;
+    --tool-edge: #3a4356;
+    --tool-wash: #1c2029;
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.35);
+
+    /* Dark-surface steps of the same seven hues, same slot order. See the
+       light block above for the full rationale and the validator numbers. */
+    --type-realm: #3987e5;
+    --type-arc: #d95926;
+    --type-person: #199e70;
+    --type-entity: #c98500;
+    --type-session: #d55181;
+    --type-item: #008300;
+    --type-commitment: #9085e9;
   }
 }

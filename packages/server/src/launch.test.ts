@@ -3,7 +3,13 @@ import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ReverieConfig } from '@openreverie/core'
-import type { MemoryEngine, Profile, ProfileSettingsPatch, StyleConfig } from '@openreverie/memory'
+import type {
+  DreamStatus,
+  MemoryEngine,
+  Profile,
+  ProfileSettingsPatch,
+  StyleConfig,
+} from '@openreverie/memory'
 import { DEFAULT_STYLE } from '@openreverie/memory'
 import type { ChatProvider, EmbeddingProvider } from '@openreverie/providers'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -68,6 +74,25 @@ class FakeEngine implements RecordEngine {
   async recordDreamFeedback() {
     return false
   }
+
+  async dreamStatus(): Promise<DreamStatus> {
+    return {
+      configured: false,
+      enabled: false,
+      cadence: 'daily',
+      triggers: { afterSession: false, onStart: false, serverTimer: false },
+      model: undefined,
+      timezone: 'UTC',
+      period: '2026-08-25',
+      periodCovered: false,
+      reflectedSessionCount: 0,
+      minReflectedSessions: 5,
+      reflectedFloorMet: false,
+      due: false,
+    }
+  }
+
+  maybeDream = vi.fn(async (_trigger: string) => undefined)
 }
 
 function config(memoryDir: string): ReverieConfig {
@@ -364,5 +389,82 @@ describe('createServerLauncher', () => {
     expect(calls).toHaveLength(1)
     const call = calls[0]?.[0] as object
     expect(Object.hasOwn(call, 'dreamTrigger')).toBe(false)
+  })
+
+  // Defect 4, 2026-08-25 dreaming investigation: `reverie web` opens its
+  // engine with { maintenance: false }, which also skips MemoryEngine's
+  // own onStart dream trigger, so the web server used to have no early
+  // dream attempt at all: only the registry's 30-minute sweep, which a
+  // person who starts and stops the server repeatedly may never reach.
+  // launchServer must fire one maybeDream('serverTimer') itself, right
+  // after the engine opens, gated by the same enabled && serverTimer
+  // condition as the registry's own dreamTrigger wiring.
+  it('fires one maybeDream immediately on launch when dreaming is enabled and the server timer trigger is on', async () => {
+    deps.loadConfig = vi.fn(async () => ({
+      ...config(dir),
+      dreaming: {
+        enabled: true,
+        cadence: 'daily' as const,
+        triggers: { afterSession: true, onStart: true, serverTimer: true },
+        maxToolCalls: 10,
+      },
+    }))
+
+    await createServerLauncher(deps)({ write: () => {} })
+
+    expect(engine.maybeDream).toHaveBeenCalledWith('serverTimer')
+  })
+
+  it('does not fire an immediate maybeDream when dreaming is disabled entirely', async () => {
+    deps.loadConfig = vi.fn(async () => ({
+      ...config(dir),
+      dreaming: {
+        enabled: false,
+        cadence: 'daily' as const,
+        triggers: { afterSession: true, onStart: true, serverTimer: true },
+        maxToolCalls: 10,
+      },
+    }))
+
+    await createServerLauncher(deps)({ write: () => {} })
+
+    expect(engine.maybeDream).not.toHaveBeenCalled()
+  })
+
+  // Defect 1, 2026-08-25 dreaming investigation: dreamingModel used to fall
+  // back to config.models.reflection, which is exactly how one real user's
+  // dreaming broke permanently (dreaming runs a tool loop; a reasoning-
+  // effort reflection model rejects function tools with an HTTP 400). It
+  // must resolve through resolveDreamingModel, which falls back to
+  // models.chat instead.
+  it('resolves dreamingModel via resolveDreamingModel, never falling back to models.reflection', async () => {
+    deps.loadConfig = vi.fn(async () => ({
+      ...config(dir),
+      models: { chat: 'chat-model', reflection: 'reflection-model', embeddings: 'embeddings' },
+    }))
+
+    await createServerLauncher(deps)({ write: () => {} })
+
+    const calls = (deps.openEngine as ReturnType<typeof vi.fn>).mock.calls
+    expect(calls).toHaveLength(1)
+    const engineDeps = calls[0]?.[1] as { dreamingModel?: string }
+    expect(engineDeps.dreamingModel).toBe('chat-model')
+    expect(engineDeps.dreamingModel).not.toBe('reflection-model')
+  })
+
+  it('does not fire an immediate maybeDream when the server timer trigger is off, even though dreaming is enabled', async () => {
+    deps.loadConfig = vi.fn(async () => ({
+      ...config(dir),
+      dreaming: {
+        enabled: true,
+        cadence: 'daily' as const,
+        triggers: { afterSession: true, onStart: true, serverTimer: false },
+        maxToolCalls: 10,
+      },
+    }))
+
+    await createServerLauncher(deps)({ write: () => {} })
+
+    expect(engine.maybeDream).not.toHaveBeenCalled()
   })
 })

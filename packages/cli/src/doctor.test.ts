@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ReverieConfig } from '@openreverie/core'
 import { ensureMemoryTree, MemoryIndex, memoryPaths } from '@openreverie/memory'
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { type DoctorDeps, formatCheckLine, runDoctor } from './doctor.js'
 
 describe('formatCheckLine', () => {
@@ -68,6 +68,9 @@ function allOkDeps(
     gitStatusPorcelain: async () => '',
     gitCommitCount: async () => 3,
     openIndex: () => ({ close: () => {} }),
+    dreamStatus: async () => {
+      throw new Error('dreamStatus should not be called when dreaming is disabled')
+    },
     write: (text: string) => {
       output += text
     },
@@ -76,7 +79,7 @@ function allOkDeps(
 }
 
 describe('runDoctor', () => {
-  it('reports all five checks ok and exits 0', async () => {
+  it('reports all six checks ok and exits 0', async () => {
     const originalEnv = process.env.OPENAI_API_KEY
     process.env.OPENAI_API_KEY = 'sk-test-dummy'
     try {
@@ -94,6 +97,7 @@ api key ............. ok   (resolved via OPENAI_API_KEY)
 memory folder ....... ok   (/fake/memory, writable)
 memory folder git ... ok   (clean, 3 commits)
 sqlite index ........ ok   (present, rebuildable)
+dreaming ............ ok   (disabled; opt in with [dreaming] enabled = true in your config file)
 
 All checks passed.
 `,
@@ -136,7 +140,10 @@ All checks passed.
     expect(text).toContain(
       'sqlite index ........ skip config failed to load; cannot check the index',
     )
-    expect(text).toContain('1 of 5 checks failed.')
+    expect(text).toContain(
+      'dreaming ............ skip config failed to load; cannot check dreaming',
+    )
+    expect(text).toContain('1 of 6 checks failed.')
   })
 
   it('reports the real resolveApiKey message and exits 1 when no key resolves, without printing it as ok', async () => {
@@ -259,7 +266,7 @@ All checks passed.
     expect(output()).not.toContain(secret)
   })
 
-  it("reproduces the spec's 2-of-5 failure summary arithmetic: api key and sqlite index fail, git absent is ok", async () => {
+  it("reproduces the spec's 2-of-6 failure summary arithmetic: api key and sqlite index fail, git absent is ok", async () => {
     delete process.env.OPENAI_API_KEY
     const config = baseConfig('/fake/memory')
     const { deps, output } = allOkDeps(config, {
@@ -270,7 +277,166 @@ All checks passed.
     const exitCode = await runDoctor(deps)
 
     expect(exitCode).toBe(1)
-    expect(output()).toContain('2 of 5 checks failed.')
+    expect(output()).toContain('2 of 6 checks failed.')
+  })
+})
+
+describe('runDoctor dreaming check', () => {
+  let originalEnv: string | undefined
+  beforeEach(() => {
+    originalEnv = process.env.OPENAI_API_KEY
+    process.env.OPENAI_API_KEY = 'sk-test-dummy'
+  })
+  afterEach(() => {
+    if (originalEnv === undefined) delete process.env.OPENAI_API_KEY
+    else process.env.OPENAI_API_KEY = originalEnv
+  })
+
+  function dreamingConfig(memoryDir: string): ReverieConfig {
+    return {
+      ...baseConfig(memoryDir),
+      dreaming: {
+        enabled: true,
+        cadence: 'daily',
+        triggers: { afterSession: true, onStart: true, serverTimer: true },
+        maxToolCalls: 10,
+      },
+    }
+  }
+
+  it('reports enabled dreaming honestly: cadence, model, reflected floor, and period coverage', async () => {
+    const config = dreamingConfig('/fake/memory')
+    const { deps, output } = allOkDeps(config, {
+      dreamStatus: async () => ({
+        configured: true,
+        enabled: true,
+        cadence: 'daily',
+        triggers: { afterSession: true, onStart: true, serverTimer: true },
+        model: 'gpt-5',
+        timezone: 'UTC',
+        period: '2026-08-25',
+        periodCovered: false,
+        reflectedSessionCount: 5,
+        minReflectedSessions: 5,
+        reflectedFloorMet: true,
+        due: true,
+      }),
+    })
+
+    const exitCode = await runDoctor(deps)
+
+    expect(exitCode).toBe(0)
+    expect(output()).toContain(
+      'dreaming ............ ok   (cadence daily; model gpt-5; 5/5 reflected sessions; period 2026-08-25 not yet covered)',
+    )
+  })
+
+  it('marks dreaming a failed check and includes the last failure reason when a real attempt is stuck failing', async () => {
+    const config = dreamingConfig('/fake/memory')
+    const { deps, output } = allOkDeps(config, {
+      dreamStatus: async () => ({
+        configured: true,
+        enabled: true,
+        cadence: 'daily',
+        triggers: { afterSession: true, onStart: true, serverTimer: true },
+        model: 'gpt-5.6-luna',
+        timezone: 'UTC',
+        period: '2026-08-25',
+        periodCovered: false,
+        reflectedSessionCount: 46,
+        minReflectedSessions: 5,
+        reflectedFloorMet: true,
+        due: true,
+        lastAttempt: {
+          ts: '2026-08-25T02:00:00.000Z',
+          type: 'attempt',
+          period: '2026-08-25',
+          trigger: 'onStart',
+          outcome: 'failed',
+          reason: 'openai: HTTP 400: Function tools with reasoning_effort are not supported',
+        },
+      }),
+    })
+
+    const exitCode = await runDoctor(deps)
+
+    expect(exitCode).toBe(1)
+    const text = output()
+    expect(text).toContain('dreaming ............ fail')
+    expect(text).toContain(
+      'last attempt (onStart, failed): openai: HTTP 400: Function tools with reasoning_effort are not supported',
+    )
+    expect(text).toContain('1 of 6 checks failed.')
+  })
+
+  it('does not treat an aborted (not failed) last attempt as a broken dreaming check', async () => {
+    const config = dreamingConfig('/fake/memory')
+    const { deps, output } = allOkDeps(config, {
+      dreamStatus: async () => ({
+        configured: true,
+        enabled: true,
+        cadence: 'daily',
+        triggers: { afterSession: true, onStart: true, serverTimer: true },
+        model: 'gpt-5',
+        timezone: 'UTC',
+        period: '2026-08-25',
+        periodCovered: false,
+        reflectedSessionCount: 46,
+        minReflectedSessions: 5,
+        reflectedFloorMet: true,
+        due: true,
+        lastAttempt: {
+          ts: '2026-08-25T02:00:00.000Z',
+          type: 'attempt',
+          period: '2026-08-25',
+          trigger: 'onStart',
+          outcome: 'aborted',
+          reason: 'no insight survived evidence resolution',
+        },
+      }),
+    })
+
+    const exitCode = await runDoctor(deps)
+
+    expect(exitCode).toBe(0)
+    expect(output()).toContain('dreaming ............ ok')
+  })
+
+  // A failed attempt from a period that is already covered (today's dream
+  // has since succeeded, or the period simply is not due right now) is
+  // history, not an active problem: `due` false means nothing is currently
+  // blocked, so this must not be flagged as a broken check.
+  it('does not treat a historical failed attempt as broken when nothing is currently due', async () => {
+    const config = dreamingConfig('/fake/memory')
+    const { deps, output } = allOkDeps(config, {
+      dreamStatus: async () => ({
+        configured: true,
+        enabled: true,
+        cadence: 'daily',
+        triggers: { afterSession: true, onStart: true, serverTimer: true },
+        model: 'gpt-5',
+        timezone: 'UTC',
+        period: '2026-08-25',
+        periodCovered: true,
+        reflectedSessionCount: 46,
+        minReflectedSessions: 5,
+        reflectedFloorMet: true,
+        due: false,
+        lastAttempt: {
+          ts: '2026-08-24T02:00:00.000Z',
+          type: 'attempt',
+          period: '2026-08-24',
+          trigger: 'onStart',
+          outcome: 'failed',
+          reason: 'a since-fixed failure from an earlier period',
+        },
+      }),
+    })
+
+    const exitCode = await runDoctor(deps)
+
+    expect(exitCode).toBe(0)
+    expect(output()).toContain('dreaming ............ ok')
   })
 })
 
@@ -306,6 +472,9 @@ describe('runDoctor against a real filesystem', () => {
         gitStatusPorcelain: async () => '',
         gitCommitCount: async () => undefined,
         openIndex: (p: string) => MemoryIndex.open(p),
+        dreamStatus: async () => {
+          throw new Error('dreamStatus should not be called when dreaming is disabled')
+        },
         write: (text: string) => {
           output += text
         },

@@ -6,6 +6,7 @@ import { extname, isAbsolute, relative, resolve, sep } from 'node:path'
 import type { ReverieConfig } from '@openreverie/core'
 import {
   type Document,
+  type DreamStatus,
   type DreamSummary,
   type DreamVerdict,
   EDGE_TYPES,
@@ -68,6 +69,7 @@ export interface RecordEngine {
     note?: string
     source: 'ui' | 'tool'
   }): Promise<boolean>
+  dreamStatus(): Promise<DreamStatus>
 }
 
 export interface CreateAppDeps {
@@ -444,6 +446,15 @@ async function handle(
     return
   }
 
+  // Ordered before the generic dream-detail route below: without the
+  // path[3] === 'status' check, that route's own path.length === 4 match
+  // would treat "status" as a dreamId and 404 it via requiredId/readDream.
+  if (method === 'GET' && path.length === 4 && path[2] === 'dreams' && path[3] === 'status') {
+    const status = await engine.dreamStatus()
+    writePublicJson(res, 200, dreamStatusSchema, publicDreamStatus(status), null)
+    return
+  }
+
   if (method === 'GET' && path.length === 4 && path[2] === 'dreams') {
     const dreamId = requiredId(path[3])
     const dream = await engine.readDream(dreamId)
@@ -759,6 +770,55 @@ const dreamFeedbackResponseSchema = z.strictObject({
   insightId: z.string(),
   verdict: dreamVerdictSchema,
 })
+
+// Backs the web Dreams tab's status panel and answers the question the
+// 2026-08-25 dreaming investigation found had no answer anywhere: whether
+// dreaming is on, whether it can run right now, and why the last real
+// attempt did not produce a dream, if there was one.
+const dreamAttemptOutcomeSchema = z.enum(['aborted', 'failed'])
+const publicDreamAttemptSchema = z.strictObject({
+  ts: z.string(),
+  trigger: z.string(),
+  outcome: dreamAttemptOutcomeSchema,
+  reason: z.string(),
+})
+const dreamStatusSchema = z.strictObject({
+  configured: z.boolean(),
+  enabled: z.boolean(),
+  cadence: z.enum(['daily', 'weekly']),
+  model: z.string().optional(),
+  period: z.string(),
+  periodCovered: z.boolean(),
+  reflectedSessionCount: z.number().int().nonnegative(),
+  minReflectedSessions: z.number().int().nonnegative(),
+  reflectedFloorMet: z.boolean(),
+  due: z.boolean(),
+  lastAttempt: publicDreamAttemptSchema.optional(),
+})
+function publicDreamStatus(status: DreamStatus): z.infer<typeof dreamStatusSchema> {
+  return {
+    configured: status.configured,
+    enabled: status.enabled,
+    cadence: status.cadence,
+    ...(status.model !== undefined ? { model: status.model } : {}),
+    period: status.period,
+    periodCovered: status.periodCovered,
+    reflectedSessionCount: status.reflectedSessionCount,
+    minReflectedSessions: status.minReflectedSessions,
+    reflectedFloorMet: status.reflectedFloorMet,
+    due: status.due,
+    ...(status.lastAttempt
+      ? {
+          lastAttempt: {
+            ts: status.lastAttempt.ts,
+            trigger: status.lastAttempt.trigger,
+            outcome: status.lastAttempt.outcome,
+            reason: status.lastAttempt.reason,
+          },
+        }
+      : {}),
+  }
+}
 
 // Built from the whitelist, key by key, never by serializing the loaded
 // object. profile.md's own schema passes unknown keys through, so a

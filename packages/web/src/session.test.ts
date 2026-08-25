@@ -61,7 +61,6 @@ describe('sessionReducer', () => {
     expect(state.messages[2]).toMatchObject({ role: 'user', content: 'second' })
     expect(state.sending).toBe(true)
     expect(state.thinking).toBe(false)
-    expect(state.activeTool).toBeNull()
     expect(state.error).toBeNull()
   })
 
@@ -97,22 +96,87 @@ describe('sessionReducer', () => {
     expect(state.messages).toHaveLength(1)
   })
 
-  it('tool event sets activeTool and creates no message; a following text event clears activeTool and thinking', () => {
-    let state = sessionReducer(initialChatState, { type: 'turn-start', text: 'hi' })
-    state = sessionReducer(state, { type: 'stream', event: thinking(1) })
-    state = sessionReducer(state, { type: 'stream', event: tool(2, 'search_memory') })
+  describe('tool chips: appended running, flipped to done in place, never deleted', () => {
+    it('a tool event appends a running chip; a following text event flips it to done and starts the reply', () => {
+      let state = sessionReducer(initialChatState, { type: 'turn-start', text: 'hi' })
+      state = sessionReducer(state, { type: 'stream', event: thinking(1) })
+      state = sessionReducer(state, { type: 'stream', event: tool(2, 'search_memory') })
 
-    expect(state.activeTool).toBe('search_memory')
-    expect(state.messages).toHaveLength(1)
+      expect(state.messages).toHaveLength(2)
+      expect(state.messages[1]).toMatchObject({
+        role: 'tool',
+        toolName: 'search_memory',
+        toolStatus: 'running',
+      })
 
-    state = sessionReducer(state, { type: 'stream', event: text(3, 'found it') })
+      state = sessionReducer(state, { type: 'stream', event: text(3, 'found it') })
 
-    expect(state.activeTool).toBeNull()
-    expect(state.thinking).toBe(false)
-    expect(state.messages).toHaveLength(2)
+      expect(state.thinking).toBe(false)
+      // The chip is still there, just flipped: this is the fix for the
+      // vanishing-tool-line bug (packages/web/src/session.ts used to null
+      // out a separate activeTool field the instant text arrived, with the
+      // chip never having been a persistent message at all).
+      expect(state.messages).toHaveLength(3)
+      expect(state.messages[1]).toMatchObject({
+        role: 'tool',
+        toolName: 'search_memory',
+        toolStatus: 'done',
+      })
+      expect(state.messages[2]).toMatchObject({
+        role: 'assistant',
+        content: 'found it',
+        pending: true,
+      })
+    })
+
+    it('a second tool event settles the first chip to done before appending its own running chip', () => {
+      let state = sessionReducer(initialChatState, { type: 'turn-start', text: 'hi' })
+      state = sessionReducer(state, { type: 'stream', event: tool(1, 'search_memory') })
+      state = sessionReducer(state, { type: 'stream', event: tool(2, 'remember') })
+
+      expect(state.messages).toHaveLength(3)
+      expect(state.messages[1]).toMatchObject({
+        role: 'tool',
+        toolName: 'search_memory',
+        toolStatus: 'done',
+      })
+      expect(state.messages[2]).toMatchObject({
+        role: 'tool',
+        toolName: 'remember',
+        toolStatus: 'running',
+      })
+    })
+
+    it('done flips a still-running chip to done even with no text in between (a tool-only turn)', () => {
+      let state = sessionReducer(initialChatState, { type: 'turn-start', text: 'hi' })
+      state = sessionReducer(state, { type: 'stream', event: tool(1, 'set_mode') })
+      state = sessionReducer(state, { type: 'stream', event: done(2) })
+
+      expect(state.messages).toHaveLength(2)
+      expect(state.messages[1]).toMatchObject({
+        role: 'tool',
+        toolName: 'set_mode',
+        toolStatus: 'done',
+      })
+    })
+
+    it('error flips a still-running chip to done even when the stream drops mid-call', () => {
+      let state = sessionReducer(initialChatState, { type: 'turn-start', text: 'hi' })
+      state = sessionReducer(state, { type: 'stream', event: tool(1, 'read_document') })
+      state = sessionReducer(state, {
+        type: 'stream',
+        event: error(2, 'Chat could not finish. Please try again.'),
+      })
+
+      expect(state.messages[1]).toMatchObject({
+        role: 'tool',
+        toolName: 'read_document',
+        toolStatus: 'done',
+      })
+    })
   })
 
-  it('done finalises the trailing assistant message and clears transient flags', () => {
+  it('done finalises the trailing assistant message, flips a still-running tool chip, and clears transient flags', () => {
     let state = sessionReducer(initialChatState, { type: 'turn-start', text: 'hi' })
     state = sessionReducer(state, { type: 'stream', event: tool(1, 'search_memory') })
     state = sessionReducer(state, { type: 'stream', event: text(2, 'answer') })
@@ -120,9 +184,10 @@ describe('sessionReducer', () => {
 
     const assistantMessage = state.messages.find((message) => message.role === 'assistant')
     expect(assistantMessage?.pending).toBe(false)
+    const toolMessage = state.messages.find((message) => message.role === 'tool')
+    expect(toolMessage?.toolStatus).toBe('done')
     expect(state.sending).toBe(false)
     expect(state.thinking).toBe(false)
-    expect(state.activeTool).toBeNull()
   })
 
   it('error sets the error message, clears transient flags, and finalises a pending assistant message', () => {
@@ -136,7 +201,6 @@ describe('sessionReducer', () => {
     expect(state.error).toBe('The stream broke.')
     expect(state.sending).toBe(false)
     expect(state.thinking).toBe(false)
-    expect(state.activeTool).toBeNull()
   })
 
   it('ignores a stream event whose sequence is not after the last sequence, returning the identical state', () => {
@@ -163,7 +227,6 @@ describe('sessionReducer', () => {
     expect(state.messages).toEqual(messagesFromTranscript([helloLine, userLine]))
     expect(state.sending).toBe(false)
     expect(state.thinking).toBe(false)
-    expect(state.activeTool).toBeNull()
     expect(state.error).toBeNull()
     expect(state.session).toEqual(session)
   })
@@ -181,7 +244,6 @@ describe('sessionReducer', () => {
     expect(state.lastSequence).toBe(0)
     expect(state.sending).toBe(false)
     expect(state.thinking).toBe(false)
-    expect(state.activeTool).toBeNull()
     expect(state.error).toBeNull()
   })
 
@@ -259,5 +321,87 @@ describe('messagesFromTranscript', () => {
     const again = messagesFromTranscript([helloLine, userLine])
     expect(again[0]?.id).toBe(messages[0]?.id)
     expect(again[1]?.id).toBe(messages[1]?.id)
+  })
+
+  it('resolves a tool result line to the name of the tool call that produced it', () => {
+    const requestLine: TranscriptLine = {
+      lineSequence: 1,
+      ts: '2026-08-15T12:00:00.000Z',
+      role: 'assistant',
+      content: 'Let me check.',
+      toolCalls: [{ id: 'call_1', name: 'search_memory', arguments: '{}' }],
+    }
+    const resultLine: TranscriptLine = {
+      lineSequence: 2,
+      ts: '2026-08-15T12:00:01.000Z',
+      role: 'tool',
+      content: '{"ok":true}',
+      toolCallId: 'call_1',
+    }
+
+    const messages = messagesFromTranscript([requestLine, resultLine])
+
+    expect(messages).toHaveLength(2)
+    expect(messages[1]).toMatchObject({
+      role: 'tool',
+      content: '{"ok":true}',
+      toolName: 'search_memory',
+      toolStatus: 'done',
+    })
+  })
+
+  it('leaves toolName undefined when the result carries a toolCallId with no matching request', () => {
+    const resultLine: TranscriptLine = {
+      lineSequence: 1,
+      ts: '2026-08-15T12:00:00.000Z',
+      role: 'tool',
+      content: '{"ok":true}',
+      toolCallId: 'call_missing',
+    }
+
+    const messages = messagesFromTranscript([resultLine])
+
+    expect(messages[0]).toMatchObject({ role: 'tool', toolStatus: 'done' })
+    expect(messages[0]?.toolName).toBeUndefined()
+  })
+
+  it('drops an empty assistant announcement line that only carries a tool call, rather than rendering a blank bubble', () => {
+    const firstRequest: TranscriptLine = {
+      lineSequence: 1,
+      ts: '2026-08-15T12:00:00.000Z',
+      role: 'assistant',
+      content: 'Let me check a couple of things.',
+      toolCalls: [{ id: 'call_1', name: 'search_memory', arguments: '{}' }],
+    }
+    const secondRequest: TranscriptLine = {
+      lineSequence: 2,
+      ts: '2026-08-15T12:00:01.000Z',
+      role: 'assistant',
+      content: '',
+      toolCalls: [{ id: 'call_2', name: 'remember', arguments: '{}' }],
+    }
+
+    const messages = messagesFromTranscript([firstRequest, secondRequest])
+
+    expect(messages).toHaveLength(1)
+    expect(messages[0]).toMatchObject({
+      role: 'assistant',
+      content: 'Let me check a couple of things.',
+    })
+  })
+
+  it('keeps a non-empty assistant line even when it also carries a tool call', () => {
+    const requestLine: TranscriptLine = {
+      lineSequence: 1,
+      ts: '2026-08-15T12:00:00.000Z',
+      role: 'assistant',
+      content: 'One moment.',
+      toolCalls: [{ id: 'call_1', name: 'search_memory', arguments: '{}' }],
+    }
+
+    const messages = messagesFromTranscript([requestLine])
+
+    expect(messages).toHaveLength(1)
+    expect(messages[0]).toMatchObject({ role: 'assistant', content: 'One moment.' })
   })
 })

@@ -158,4 +158,9 @@ describe('buildJournalModeParagraph', () => {
     expect(JOURNAL_MODE_ENGAGEMENT_CLAUSE.length).toBeGreaterThan(0)
     expect(JOURNAL_MODE_ORIENTATION_CLAUSE.length).toBeGreaterThan(0)
   })
+
+  it("gives the orientation clause a cadence note keeping the model's own asides plain, without displacing the method's own structure", () => {
+    expect(JOURNAL_MODE_ORIENTATION_CLAUSE).toContain("the method's structure is doing the shaping")
+    expect(JOURNAL_MODE_ORIENTATION_CLAUSE).toContain('plain and short')
+  })
 })

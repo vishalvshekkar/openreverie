@@ -8,6 +8,7 @@ import {
   type ReverieConfig,
   readConfigMemoryDir,
   resolveApiKey,
+  resolveDreamingModel,
   saveConfig,
 } from './config.js'
 
@@ -374,5 +375,28 @@ describe('resolveApiKey', () => {
 
     expect(() => resolveApiKey(config)).toThrow(/provider\.apiKey\b/)
     expect(() => resolveApiKey(config)).toThrow(/provider\.apiKeyEnv\b/)
+  })
+})
+
+describe('resolveDreamingModel', () => {
+  it('uses the configured dreaming model when one is set', () => {
+    const config = fullConfig({
+      models: { chat: 'gpt-5', reflection: 'gpt-5-mini', embeddings: 'e', dreaming: 'gpt-5.6' },
+    })
+
+    expect(resolveDreamingModel(config)).toBe('gpt-5.6')
+  })
+
+  // Dreaming runs a tool loop, and the reflection model is picked for cheap
+  // structured, non-tool output, so it is never the fallback: falling back
+  // to it is the exact defect that left dreaming permanently broken for one
+  // real user (a reflection model that rejects function tools outright).
+  it('falls back to the chat model, never the reflection model, when no dreaming model is set', () => {
+    const config = fullConfig({
+      models: { chat: 'gpt-5', reflection: 'gpt-5-mini', embeddings: 'e' },
+    })
+
+    expect(resolveDreamingModel(config)).toBe('gpt-5')
+    expect(resolveDreamingModel(config)).not.toBe(config.models.reflection)
   })
 })

@@ -1,18 +1,35 @@
-// `reverie doctor`: five independent, read-only checks of whether reverie
+// `reverie doctor`: six independent, read-only checks of whether reverie
 // is set up correctly. Never opens a MemoryEngine, never calls
 // runMaintenance (so it is never itself a source of git-subprocess side
 // effects), never constructs a ChatProvider, never makes a network call,
 // and never prints a secret value. See
 // docs/superpowers/specs/2026-08-16-cli-polish-and-ci-fix-design.md
 // section 1.4.
+//
+// The dreaming check (added 2026-08-25) reads computeDreamStatus, a pure
+// function over paths in @openreverie/memory: it does not open a
+// MemoryEngine either, just the same handful of file reads (dreamsDir,
+// sessionsDir, the dream log) an engine would make internally.
 
 import { execFile } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { stat, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
-import { loadConfig, type ReverieConfig, resolveApiKey } from '@openreverie/core'
-import { MemoryIndex, memoryPaths } from '@openreverie/memory'
+import {
+  loadConfig,
+  type ReverieConfig,
+  resolveApiKey,
+  resolveDreamingModel,
+} from '@openreverie/core'
+import {
+  computeDreamStatus,
+  type DreamStatus,
+  loadProfile,
+  MemoryIndex,
+  memoryPaths,
+  systemTimeZone,
+} from '@openreverie/memory'
 
 const run = promisify(execFile)
 
@@ -39,6 +56,7 @@ export interface DoctorDeps {
   gitStatusPorcelain: (root: string) => Promise<string>
   gitCommitCount: (root: string) => Promise<number | undefined>
   openIndex: (path: string) => { close(): void }
+  dreamStatus: (config: ReverieConfig) => Promise<DreamStatus>
   write: (text: string) => void
 }
 
@@ -165,10 +183,49 @@ export async function runDoctor(deps: DoctorDeps): Promise<number> {
     }
   }
 
+  if (config === undefined) {
+    lines.push(formatCheckLine('dreaming', 'skip', 'config failed to load; cannot check dreaming'))
+  } else if (!config.dreaming.enabled) {
+    lines.push(
+      formatCheckLine(
+        'dreaming',
+        'ok',
+        '(disabled; opt in with [dreaming] enabled = true in your config file)',
+      ),
+    )
+  } else {
+    const status = await deps.dreamStatus(config)
+    const detailParts = [
+      `cadence ${status.cadence}`,
+      `model ${status.model ?? 'none configured'}`,
+      `${status.reflectedSessionCount}/${status.minReflectedSessions} reflected sessions`,
+      `period ${status.period} ${status.periodCovered ? 'covered' : 'not yet covered'}`,
+    ]
+    if (status.lastAttempt !== undefined) {
+      detailParts.push(
+        `last attempt (${status.lastAttempt.trigger}, ${status.lastAttempt.outcome}): ${status.lastAttempt.reason}`,
+      )
+    }
+    // Dreaming is due right now (enabled, floor met, period uncovered) and
+    // the last real attempt was a hard failure, with nothing having
+    // succeeded since: this is the state the 2026-08-25 investigation
+    // found a real user stuck in indefinitely (a model that rejects
+    // function tools, silently, forever). An aborted attempt (a pipeline
+    // decision, like zero insights surviving evidence resolution) is not
+    // treated as broken the same way: it is a real, working run that
+    // simply produced nothing that one time.
+    const stuck = status.due && status.lastAttempt?.outcome === 'failed'
+    lines.push(formatCheckLine('dreaming', stuck ? 'fail' : 'ok', `(${detailParts.join('; ')})`))
+    if (stuck) failCount += 1
+  }
+
+  const totalChecks = 6
   deps.write('reverie doctor\n\n')
   for (const line of lines) deps.write(`${line}\n`)
   deps.write('\n')
-  deps.write(failCount === 0 ? 'All checks passed.\n' : `${failCount} of 5 checks failed.\n`)
+  deps.write(
+    failCount === 0 ? 'All checks passed.\n' : `${failCount} of ${totalChecks} checks failed.\n`,
+  )
 
   return failCount === 0 ? 0 : 1
 }
@@ -219,5 +276,27 @@ export function buildRealDoctorDeps(configPath: string, write: (text: string) =>
       }
     },
     openIndex: (path: string) => MemoryIndex.open(path),
+    dreamStatus: async (config: ReverieConfig) => {
+      const paths = memoryPaths(config.memoryDir)
+      // Mirrors MemoryEngine.timezone()'s own fallback, without opening an
+      // engine: profile.md's confirmed timezone when there is one, the
+      // system zone otherwise.
+      let timezone = systemTimeZone()
+      try {
+        const profile = await loadProfile(paths)
+        if (typeof profile.meta.timezone === 'string' && profile.meta.timezone.length > 0) {
+          timezone = profile.meta.timezone
+        }
+      } catch {
+        // No profile.md yet, or it does not parse: system zone stands.
+      }
+      return computeDreamStatus(
+        paths,
+        config.dreaming,
+        resolveDreamingModel(config),
+        timezone,
+        new Date(),
+      )
+    },
   }
 }

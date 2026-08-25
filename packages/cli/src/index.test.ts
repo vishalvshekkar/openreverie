@@ -336,6 +336,45 @@ describe('mainWith dream dispatch', () => {
 
     expect(runDreamCommand).toHaveBeenCalledWith(engine, config, ['--force'], deps.write)
   })
+
+  // Defect 3, 2026-08-25 dreaming investigation: `reverie dream` opens its
+  // engine with suppressDreamOnStart so it does not race its own
+  // background onStart trigger for the dream lock (see the doc comment on
+  // CliEngineDeps.suppressDreamOnStart in chat.ts). No other subcommand
+  // should ask for that suppression.
+  it('opens the CLI context with suppressDreamOnStart for the dream subcommand', async () => {
+    const engine = { warnings: [], close: async () => {} } as never
+    const config = { memoryDir: '/fake/memory' } as never
+    let seenSuppress: boolean | undefined
+    const { deps } = testDeps({
+      openCliContext: async (contextDeps) => {
+        seenSuppress = (contextDeps as { suppressDreamOnStart?: boolean }).suppressDreamOnStart
+        return { ok: true, engine, config, chat: {} as never }
+      },
+      runDreamCommand: async () => {},
+    })
+
+    await mainWith(['dream', '--force'], deps)
+
+    expect(seenSuppress).toBe(true)
+  })
+
+  it('does not suppress onStart for the default chat subcommand', async () => {
+    const engine = { warnings: [], close: async () => {} } as never
+    const config = { memoryDir: '/fake/memory' } as never
+    let seenSuppress: boolean | undefined
+    const { deps } = testDeps({
+      openCliContext: async (contextDeps) => {
+        seenSuppress = (contextDeps as { suppressDreamOnStart?: boolean }).suppressDreamOnStart
+        return { ok: true, engine, config, chat: {} as never }
+      },
+      runChat: async () => ({ interrupted: false }),
+    })
+
+    await mainWith([], deps)
+
+    expect(seenSuppress).toBeUndefined()
+  })
 })
 
 describe('mainWith migrate', () => {

@@ -11,6 +11,7 @@ import { join } from 'node:path'
 import { defaultCrisisResources, type ReverieConfig } from '@openreverie/core'
 import type {
   Document,
+  DreamStatus,
   DreamSummary,
   DreamVerdict,
   GraphRecord,
@@ -350,6 +351,25 @@ class FakeEngine implements RecordEngine {
   }): Promise<boolean> {
     this.feedbackCalls.push(args)
     return this.feedbackKnownInsightIds.has(args.insightId)
+  }
+
+  dreamStatusValue: DreamStatus = {
+    configured: false,
+    enabled: false,
+    cadence: 'daily',
+    triggers: { afterSession: false, onStart: false, serverTimer: false },
+    model: undefined,
+    timezone: 'UTC',
+    period: '2026-08-25',
+    periodCovered: false,
+    reflectedSessionCount: 0,
+    minReflectedSessions: 5,
+    reflectedFloorMet: false,
+    due: false,
+  }
+
+  async dreamStatus(): Promise<DreamStatus> {
+    return this.dreamStatusValue
   }
 }
 
@@ -902,6 +922,107 @@ describe('record browsing app', () => {
   it('answers 404 for a dream id engine.readDream does not know', async () => {
     const response = await getJson('/api/v1/dreams/dream_missing')
     expect(response.status).toBe(404)
+  })
+
+  // The dream status route is registered ahead of the generic
+  // /dreams/:dreamId route specifically so "status" is never mistaken for
+  // a dream id (Defect 2, 2026-08-25 dreaming investigation: this is what
+  // the web Dreams tab reads to show why the last attempt did not produce
+  // a dream).
+  it('reports dream status: enabled, cadence, model, period coverage, and the last failure reason', async () => {
+    engine.dreamStatusValue = {
+      configured: true,
+      enabled: true,
+      cadence: 'daily',
+      triggers: { afterSession: true, onStart: true, serverTimer: true },
+      model: 'gpt-5.6-luna',
+      timezone: 'UTC',
+      period: '2026-08-25',
+      periodCovered: false,
+      reflectedSessionCount: 46,
+      minReflectedSessions: 5,
+      reflectedFloorMet: true,
+      due: true,
+      lastAttempt: {
+        ts: '2026-08-25T02:00:00.000Z',
+        type: 'attempt',
+        period: '2026-08-25',
+        trigger: 'onStart',
+        outcome: 'failed',
+        reason: 'openai: HTTP 400: Function tools with reasoning_effort are not supported',
+      },
+    }
+
+    const response = (await getJson('/api/v1/dreams/status')) as Response & {
+      json: {
+        data: {
+          configured: boolean
+          enabled: boolean
+          cadence: string
+          model?: string
+          periodCovered: boolean
+          reflectedSessionCount: number
+          minReflectedSessions: number
+          due: boolean
+          lastAttempt?: { trigger: string; outcome: string; reason: string }
+        }
+      }
+    }
+
+    expect(response.status).toBe(200)
+    expect(response.json.data.configured).toBe(true)
+    expect(response.json.data.enabled).toBe(true)
+    expect(response.json.data.model).toBe('gpt-5.6-luna')
+    expect(response.json.data.periodCovered).toBe(false)
+    expect(response.json.data.reflectedSessionCount).toBe(46)
+    expect(response.json.data.due).toBe(true)
+    expect(response.json.data.lastAttempt).toEqual({
+      ts: '2026-08-25T02:00:00.000Z',
+      trigger: 'onStart',
+      outcome: 'failed',
+      reason: 'openai: HTTP 400: Function tools with reasoning_effort are not supported',
+    })
+  })
+
+  it('reports dream status with no lastAttempt field at all when there has never been one', async () => {
+    engine.dreamStatusValue = {
+      configured: true,
+      enabled: false,
+      cadence: 'daily',
+      triggers: { afterSession: true, onStart: true, serverTimer: true },
+      model: undefined,
+      timezone: 'UTC',
+      period: '2026-08-25',
+      periodCovered: false,
+      reflectedSessionCount: 0,
+      minReflectedSessions: 5,
+      reflectedFloorMet: false,
+      due: false,
+    }
+
+    const response = (await getJson('/api/v1/dreams/status')) as Response & {
+      json: { data: Record<string, unknown> }
+    }
+
+    expect(response.status).toBe(200)
+    expect(Object.hasOwn(response.json.data, 'lastAttempt')).toBe(false)
+    expect(Object.hasOwn(response.json.data, 'model')).toBe(false)
+  })
+
+  it("does not confuse the literal dream id 'status' with the status route", async () => {
+    // The generic dream-detail route is method GET, path length 4; the
+    // status route matches that same shape when path[3] === 'status'. A
+    // real dream whose id happened to be literally "status" would be
+    // unreachable through GET /dreams/:id, but that id shape (dream_<ulid>)
+    // never occurs in practice, and the alternative (checking path[3] only
+    // after failing to parse a dream) would make the status route's own
+    // behavior depend on engine.readDream's failure mode. This test pins
+    // the deliberate choice: the status route always wins the ambiguity.
+    engine.dreamStatusValue = { ...engine.dreamStatusValue, enabled: true }
+    const response = (await getJson('/api/v1/dreams/status')) as Response & {
+      json: { data: { enabled: boolean } }
+    }
+    expect(response.json.data.enabled).toBe(true)
   })
 
   it('records feedback with source ui and echoes it back, 404 for an unknown insight', async () => {

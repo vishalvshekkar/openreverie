@@ -1,6 +1,6 @@
 {
   "name": "@openreverie/core",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "description": "The openreverie agent core: conversation loop, context assembly, tool dispatch, and safety mode enforcement.",
   "homepage": "https://reverie.my",
   "license": "FSL-1.1-ALv2",

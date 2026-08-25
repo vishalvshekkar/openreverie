@@ -7,7 +7,7 @@
 import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { ReverieConfig } from '@openreverie/core'
-import { AgentSession, buildPersona } from '@openreverie/core'
+import { AgentSession, buildPersona, resolveDreamingModel, toolLabel } from '@openreverie/core'
 import type { EngineDeps, MemoryEngine } from '@openreverie/memory'
 import { listDocuments, memoryPaths, readDocument } from '@openreverie/memory'
 import type { ChatProvider, EmbeddingProvider } from '@openreverie/providers'
@@ -30,39 +30,62 @@ export interface ChatIo {
   cancelPending(): void
 }
 
-// One honest, specific notice per tool, so the person watching the
-// terminal knows what reverie is actually doing rather than a generic
-// "searching memory" for everything. A tool this list has never heard of
-// (a future addition, or a stale build) still gets a plain, truthful
-// fallback instead of silence or a crash.
-const TOOL_NOTICES: Record<string, string> = {
-  remember: 'remembering',
-  set_mode: 'switching mode',
-  search_memory: 'searching memory',
-  read_document: 'reading memory',
-  read_transcript: 'reading memory',
-  graph_query: 'checking connections',
-  list_arcs: 'checking memory',
-  list_realms: 'checking memory',
-  list_people: 'checking memory',
-  list_entities: 'checking memory',
-  update_profile: 'updating profile',
-  declare_journal_method: 'setting journal method',
-  update_journaling_protocol: 'updating journal setup',
-  dream_feedback: 'noting your reaction',
-}
+// The wording itself (both the running and the done form, for every
+// known tool, plus the fallback for a tool this build has never heard
+// of) lives once in @openreverie/core's toolLabel, shared with every
+// other surface that narrates a tool call. The one deliberate
+// presentation difference kept here is casing: the shared table is
+// sentence case ("Remembering"), and the CLI's own aesthetic is dim,
+// lowercase text inside brackets ("[remembering]"). That lowercasing
+// happens at the two call sites below; the words themselves are never
+// forked.
 
+// The permanent scrollback line for a tool call, in the DONE form
+// ("[remembered]", not "[remembering]"): written once the call is known
+// to have actually finished, so scrollback reads as a record of what
+// happened rather than a promise of what was starting. See the
+// pendingTool handling in the main loop below for how "finished" is
+// determined, since the stream carries no explicit completion event.
 export function toolNotice(name: string): string {
-  const label = TOOL_NOTICES[name]
-  return label !== undefined ? `[${label}]` : `[using: ${name}]`
+  return `[${toolLabel(name).done.toLowerCase()}]`
 }
 
-// The status line's label for a tool call in flight: the same honest
-// wording as toolNotice, but bare, since the status line's own frame and
-// dim styling already carry the "this is a transient status" signal that
-// toolNotice's brackets exist to provide for the permanent notice line.
+// The status line's label for a tool call in flight, in the RUNNING
+// form: the same honest wording toolNotice reports after the fact, but
+// bare, since the status line's own frame and dim styling already carry
+// the "this is a transient status" signal that toolNotice's brackets
+// exist to provide for the permanent notice line.
 function toolStatusLabel(name: string): string {
-  return TOOL_NOTICES[name] ?? `using: ${name}`
+  return toolLabel(name).running.toLowerCase()
+}
+
+// The permanent notice for a tool call that just started, in the RUNNING
+// form and bracketed like toolNotice ("[remembering]", not
+// "[remembered]"). Used only when there is no spinner to carry that
+// signal (see the canRender check at the 'tool' event below): with a
+// spinner, the running form lives there instead and this is never
+// written, so a tool call is still narrated by exactly one permanent
+// line. Without a spinner (piped output, no TTY, color disabled), this
+// is the only record that the call started at all, so it is written
+// immediately rather than deferred, and the DONE line from toolNotice
+// still follows it once the call actually finishes.
+function toolStartNotice(name: string): string {
+  return `[${toolLabel(name).running.toLowerCase()}]`
+}
+
+// The notice for a tool call abandoned before it is known to have run at
+// all: composed from the RUNNING form, never the DONE form. toolNotice's
+// DONE form asserts the call actually happened, and on the interrupt
+// path below that is sometimes false: a second Ctrl-C landing right
+// after a 'tool' event, before dispatchTool has run, means the call
+// never dispatched at all. Printing the DONE form there would have the
+// CLI claim, in permanent scrollback, that something was written to the
+// person's memory when nothing was. Deliberately composed here rather
+// than added as a fourth column on @openreverie/core's shared table:
+// the web hand-copies that table, and every column added there is
+// another thing that can drift out of sync.
+function toolInterruptedNotice(name: string): string {
+  return `[${toolLabel(name).running.toLowerCase()}, interrupted]`
 }
 
 function errorMessage(err: unknown): string {
@@ -328,6 +351,36 @@ export async function runChat(deps: {
 
     let sawText = false
     let taggedThisTurn = false
+    // The name of a tool call whose permanent notice has not been written
+    // to scrollback yet. There is no explicit tool-completion event in
+    // the stream: a call is known to be over only once the next event of
+    // any other kind arrives ('tool', 'text', 'mode', 'done', or a thrown
+    // provider error; 'thinking' never carries permanent output of its
+    // own, so it needs no flush). Every one of those cases is reached
+    // only after dispatchTool has actually resolved for this call
+    // (dispatchTool itself never throws, per its own header comment in
+    // packages/core/src/tools.ts, so any exception on the way to one of
+    // those events happens strictly after this call's dispatch already
+    // completed): flushPendingTool's default 'done' outcome is correct
+    // there. The one exception is a second Ctrl-C landing in the window
+    // right after a 'tool' event is processed but before the generator
+    // resumes past its yield: chat.ts's for-await loop then breaks
+    // without ever calling dispatchTool for that call at all, and the
+    // 'interrupted' outcome (passed explicitly at the finally backstop
+    // below, the only place that can still see a pendingTool that
+    // genuinely never ran) says so honestly instead of claiming the call
+    // finished. flushPendingTool clears pendingTool as it writes, so a
+    // call is never flushed twice.
+    let pendingTool: string | undefined
+    const flushPendingTool = (outcome: 'done' | 'interrupted' = 'done'): void => {
+      if (pendingTool === undefined) {
+        return
+      }
+      const name = pendingTool
+      pendingTool = undefined
+      const notice = outcome === 'done' ? toolNotice(name) : toolInterruptedNotice(name)
+      io.write(`${dim(notice, colorEnabled)}\n`)
+    }
     responding = true
     try {
       for await (const event of session.send(parsed.text)) {
@@ -335,6 +388,7 @@ export async function runChat(deps: {
           statusLine.start('thinking')
         } else if (event.type === 'text') {
           statusLine.stop()
+          flushPendingTool()
           sawText = true
           if (!taggedThisTurn) {
             io.write(magenta('reverie> ', colorEnabled))
@@ -343,13 +397,31 @@ export async function runChat(deps: {
           io.write(event.text)
         } else if (event.type === 'tool') {
           statusLine.stop()
-          io.write(`${dim(toolNotice(event.name), colorEnabled)}\n`)
+          flushPendingTool()
+          pendingTool = event.name
+          if (!statusLine.canRender) {
+            // No spinner exists to show the call is in flight (piped
+            // output, no TTY, or color disabled), so the running-form
+            // notice is written here, immediately, as the only record
+            // that the call started at all. flushPendingTool still
+            // writes the DONE line later: "started, then finished" is
+            // exactly what a piped log needs, and with no spinner there
+            // is no risk of this ever doubling up with it.
+            io.write(`${dim(toolStartNotice(event.name), colorEnabled)}\n`)
+          }
           statusLine.start(toolStatusLabel(event.name))
         } else if (event.type === 'mode') {
           statusLine.stop()
+          // A mode switch is dispatched by the tool call immediately
+          // before it (set_mode): by the time this event arrives, that
+          // call has already finished, so its own DONE line belongs in
+          // scrollback before the mode notice that its effect produced,
+          // not after.
+          flushPendingTool()
           io.write(`${dim(`[mode: ${event.mode}]`, colorEnabled)}\n`)
         } else if (event.type === 'done') {
           statusLine.stop()
+          flushPendingTool()
           io.write('\n')
           if (!sawText) {
             if (!taggedThisTurn) {
@@ -365,12 +437,27 @@ export async function runChat(deps: {
       }
     } catch (err) {
       // This stop() is the one the ordering invariant actually depends on:
-      // it clears the frame before the error message below is written, so
-      // the message never lands after a stale frame stranded in scrollback.
-      // Do not remove it on the assumption that the finally below covers
-      // the same guarantee; the finally runs after this whole block,
-      // which is too late to protect the write order here.
+      // it clears the frame before flushPendingTool and the error message
+      // below are written, so neither ever lands after a stale frame
+      // stranded in scrollback. Do not remove it on the assumption that
+      // the finally below covers the same guarantee; the finally runs
+      // after this whole block, which is too late to protect the write
+      // order here.
+      //
+      // flushPendingTool here always uses the default 'done' outcome, on
+      // purpose, never 'interrupted': dispatchTool never throws (see its
+      // own header comment in packages/core/src/tools.ts, and it wraps
+      // every case in try/catch and returns an error string instead of
+      // rejecting), so any exception that reaches this catch block can
+      // only come from something awaited strictly after dispatchTool for
+      // the currently pending call already resolved (appending the tool
+      // result line to the transcript, appending the next call's
+      // assistant line, or the next round's own model request). That
+      // pending call genuinely finished before this exception happened,
+      // so its DONE notice is truthful, and belongs in scrollback ahead
+      // of the error line below.
       statusLine.stop()
+      flushPendingTool()
       io.write(
         `\nI could not reach the model: ${errorMessage(err)}. Your message is saved; try again, or type /bye.\n`,
       )
@@ -378,8 +465,18 @@ export async function runChat(deps: {
       // A backstop, not the ordering guarantor above: this covers the path
       // that exits the loop without ever emitting 'done' and without
       // throwing (a break on the second Ctrl-C mid response), which the
-      // catch block above never sees.
+      // catch block above never sees. If a pendingTool is still set by
+      // the time execution reaches here, it can only be because that
+      // break happened: every other path that could leave this turn
+      // (the 'text'/'mode'/'done' handlers and the catch block above)
+      // already flushed it themselves before getting here. That means
+      // this pendingTool's dispatchTool call never even started, so
+      // 'interrupted' is passed explicitly rather than the default
+      // 'done': this is the one call site that can still see a tool
+      // call abandoned before it ran at all, and it must not claim that
+      // call finished.
       statusLine.stop()
+      flushPendingTool('interrupted')
       responding = false
     }
 
@@ -404,6 +501,22 @@ export interface CliEngineDeps {
   colorEnabled?: boolean
   setInterval?: (fn: () => void, ms: number) => unknown
   clearInterval?: (handle: unknown) => void
+  // Set only for `reverie dream`. That command is itself an explicit,
+  // foreground request to dream right now; MemoryEngine.open() otherwise
+  // fires its own onStart dream un-awaited in the background whenever
+  // dreaming.triggers.onStart is on (the CLI's default engine open, used
+  // by every other subcommand, leaves maintenance running and does not
+  // touch this). Left alone, that background attempt grabs the dream lock
+  // before the dream command's own dreamNow call gets to it, so
+  // `reverie dream --force` fails with "another process is already
+  // dreaming" even though no other process exists: the same process
+  // racing itself (Defect 3, 2026-08-25 dreaming investigation, reproduced
+  // live against a real config with onStart enabled). Suppressing onStart
+  // only for this one engine open is not the same as disabling the
+  // feature: chat, reflect, and every other subcommand still fire it
+  // exactly as configured, and dreamNow itself still ignores the
+  // per-trigger switches for its own run either way.
+  suppressDreamOnStart?: boolean
 }
 
 export type CliContextResult =
@@ -447,6 +560,11 @@ export async function openCliContext(deps: CliEngineDeps): Promise<CliContextRes
         })
       : undefined
 
+  const dreaming =
+    deps.suppressDreamOnStart === true
+      ? { ...config.dreaming, triggers: { ...config.dreaming.triggers, onStart: false } }
+      : config.dreaming
+
   try {
     if (spinner !== undefined) spinner.start()
     const engine = await deps.openEngine(config, {
@@ -454,8 +572,8 @@ export async function openCliContext(deps: CliEngineDeps): Promise<CliContextRes
       embeddings,
       reflectionModel: config.models.reflection,
       embeddingModel: config.models.embeddings,
-      dreamingModel: config.models.dreaming ?? config.models.reflection,
-      dreaming: config.dreaming,
+      dreamingModel: resolveDreamingModel(config),
+      dreaming,
       dreamPersona: (style) => buildPersona(config.safety.mode, config.safety.resources, style),
     })
     return { ok: true, engine, config, chat }

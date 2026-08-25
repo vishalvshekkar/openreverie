@@ -21,6 +21,7 @@ import {
 } from './reflection.js'
 import { type EmbedFn, MemoryIndex } from './sqlite.js'
 import { SessionStore, type TranscriptLine } from './transcripts.js'
+import { PROSE_VOICE_RULE } from './voice.js'
 
 const TRANSCRIPT: TranscriptLine[] = [
   {
@@ -616,6 +617,26 @@ describe('reflection', () => {
       const prompt = chat.requests[0]?.messages[0]?.content ?? ''
       expect(prompt).toContain('Original arc narrative.')
       expect(prompt).toContain('Went for another run.')
+    })
+
+    it('carries the shared prose voice rule, before the JSON response instruction', async () => {
+      const chat = new FakeChatProvider([
+        { text: JSON.stringify({ body: 'Updated body.' }), toolCalls: [] },
+      ])
+
+      await rewriteNarrative(chat, 'fake-model', {
+        name: 'Health',
+        currentBody: 'Original arc narrative.\n',
+        summary: 'A quiet session.',
+        itemTexts: ['Went for a run'],
+        note: 'Went for another run.',
+      })
+
+      const prompt = chat.requests[0]?.messages[0]?.content ?? ''
+      expect(prompt).toContain(PROSE_VOICE_RULE)
+      expect(prompt.indexOf(PROSE_VOICE_RULE)).toBeLessThan(
+        prompt.indexOf('Respond with only JSON matching this shape'),
+      )
     })
 
     it('retries once on malformed JSON, then returns null if the retry also fails', async () => {
@@ -1924,6 +1945,25 @@ describe('reflection prompt', () => {
       [],
     )
   }
+
+  it('carries the shared prose voice rule, before the JSON response instruction', () => {
+    const prompt = buildReflectionPromptForTest()
+    expect(prompt).toContain(PROSE_VOICE_RULE)
+    expect(prompt.indexOf(PROSE_VOICE_RULE)).toBeLessThan(
+      prompt.indexOf('Respond with only JSON matching this shape'),
+    )
+  })
+
+  it('scopes the voice rule to the prose fields, not the JSON shape itself', () => {
+    const prompt = buildReflectionPromptForTest()
+    expect(prompt).toContain('summary')
+    const scopeSentence = prompt
+      .split('\n\n')
+      .find((paragraph) => paragraph.includes('every prose field you write'))
+    expect(scopeSentence).toBeDefined()
+    expect(scopeSentence).toContain('narrative')
+    expect(scopeSentence).toContain('constitutionUpdate')
+  })
 
   it('names the profile fields rather than routing them to the constitution', () => {
     const prompt = buildReflectionPromptForTest()

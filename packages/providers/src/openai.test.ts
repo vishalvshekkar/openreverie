@@ -43,6 +43,37 @@ function fakeFetch(response: Response): { fetch: FetchLike; calls: RecordedCall[
   return { fetch: fetchImpl, calls }
 }
 
+// One response per call, in order, for tests that exercise a retry: the
+// plain fakeFetch above always returns the same Response, which cannot
+// express "the first call gets a 400, the second gets a 200".
+function fakeFetchSequence(responses: Response[]): { fetch: FetchLike; calls: RecordedCall[] } {
+  const calls: RecordedCall[] = []
+  let cursor = 0
+  const fetchImpl: FetchLike = async (input, init) => {
+    calls.push({ url: String(input), init })
+    const response = responses[cursor]
+    if (!response) throw new Error('fakeFetchSequence: no response scripted for this call')
+    cursor += 1
+    return response
+  }
+  return { fetch: fetchImpl, calls }
+}
+
+// The real body OpenAI returns when a model rejects a temperature other
+// than its default (captured live on 2026-08-25 against gpt-5, truncated
+// to the fields this file's detection actually reads).
+function temperatureRejectionBody(): string {
+  return JSON.stringify({
+    error: {
+      message:
+        "Unsupported value: 'temperature' does not support 0.9 with this model. Only the default (1) value is supported.",
+      type: 'invalid_request_error',
+      param: 'temperature',
+      code: 'unsupported_value',
+    },
+  })
+}
+
 const baseRequest: ChatRequest = {
   model: 'gpt-4o-mini',
   system: 'You are a helpful companion.',
@@ -192,6 +223,90 @@ describe('OpenAiChatProvider.complete', () => {
     await expect(provider.complete(baseRequest)).rejects.toThrow(
       `openai: HTTP 401: ${longBody.slice(0, 200)}`,
     )
+  })
+
+  // Found live on 2026-08-25: gpt-5 (a reasoning model) rejects any
+  // temperature other than its default with exactly this 400 shape.
+  // temperature is a preference, not a hard requirement, so this must not
+  // fail the call outright when the caller asked for one.
+  describe('a request with temperature set, against a model that rejects it', () => {
+    const withTemperature: ChatRequest = { ...baseRequest, temperature: 0.9 }
+
+    it('retries once without temperature and returns the retried answer', async () => {
+      const { fetch, calls } = fakeFetchSequence([
+        new Response(temperatureRejectionBody(), { status: 400 }),
+        new Response(
+          JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'a dream' } }] }),
+          { status: 200 },
+        ),
+      ])
+      const provider = new OpenAiChatProvider({ apiKey: 'sk-test' }, fetch)
+
+      const result = await provider.complete(withTemperature)
+
+      expect(result.text).toBe('a dream')
+      expect(calls).toHaveLength(2)
+      const firstBody = JSON.parse(String(calls[0]?.init?.body))
+      expect(firstBody.temperature).toBe(0.9)
+      const secondBody = JSON.parse(String(calls[1]?.init?.body))
+      expect(secondBody.temperature).toBeUndefined()
+    })
+
+    it('marks the result with a warning naming the dropped temperature, so the decision is not silent', async () => {
+      const { fetch } = fakeFetchSequence([
+        new Response(temperatureRejectionBody(), { status: 400 }),
+        new Response(
+          JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'a dream' } }] }),
+          { status: 200 },
+        ),
+      ])
+      const provider = new OpenAiChatProvider({ apiKey: 'sk-test' }, fetch)
+
+      const result = await provider.complete(withTemperature)
+
+      expect(result.warnings).toHaveLength(1)
+      expect(result.warnings?.[0]).toContain('0.9')
+      expect(result.warnings?.[0]).toContain('gpt-4o-mini')
+    })
+
+    it('never retries, and carries no warnings, when the caller did not ask for a temperature at all', async () => {
+      const { fetch, calls } = fakeFetch(new Response(temperatureRejectionBody(), { status: 400 }))
+      const provider = new OpenAiChatProvider({ apiKey: 'sk-test' }, fetch)
+
+      await expect(provider.complete(baseRequest)).rejects.toThrow(/HTTP 400/)
+      expect(calls).toHaveLength(1)
+    })
+
+    it('does not retry, and surfaces the original error, for a 400 that is not the temperature shape', async () => {
+      const otherBadRequest = JSON.stringify({
+        error: { message: 'model not found', type: 'invalid_request_error', param: 'model' },
+      })
+      const { fetch, calls } = fakeFetch(new Response(otherBadRequest, { status: 400 }))
+      const provider = new OpenAiChatProvider({ apiKey: 'sk-test' }, fetch)
+
+      await expect(provider.complete(withTemperature)).rejects.toThrow('model not found')
+      expect(calls).toHaveLength(1)
+    })
+
+    it('does not retry a 400 whose body is not valid JSON at all', async () => {
+      const { fetch, calls } = fakeFetch(new Response('not json', { status: 400 }))
+      const provider = new OpenAiChatProvider({ apiKey: 'sk-test' }, fetch)
+
+      await expect(provider.complete(withTemperature)).rejects.toThrow(/HTTP 400/)
+      expect(calls).toHaveLength(1)
+    })
+
+    it('still classifies a genuine outage on the retry itself as ProviderUnavailableError', async () => {
+      const { fetch } = fakeFetchSequence([
+        new Response(temperatureRejectionBody(), { status: 400 }),
+        new Response('service unavailable', { status: 503 }),
+      ])
+      const provider = new OpenAiChatProvider({ apiKey: 'sk-test' }, fetch)
+
+      await expect(provider.complete(withTemperature)).rejects.toBeInstanceOf(
+        ProviderUnavailableError,
+      )
+    })
   })
 
   it('classifies a socket error code as a provider outage', async () => {

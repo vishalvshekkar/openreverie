@@ -138,6 +138,33 @@ describe('Settings', () => {
     expect(screen.getByText(/config\.toml/)).toBeInTheDocument()
   })
 
+  // The user's own complaint: "the settings in the web should mention how
+  // to save it, or should say whatever you change is automatically saved
+  // instantly". Every field on this page calls updateProfile on change (a
+  // select or checkbox) or on blur (a text field), which writes profile.md
+  // atomically via engine.updateProfileSettings; there is no separate save
+  // step anywhere on this page. The copy states that, and only that: it
+  // must not claim anything about config.toml-governed settings, which are
+  // not on this page at all.
+  it('states plainly that every field on the page saves automatically, with no save button', async () => {
+    render(<Settings api={makeApi()} />)
+    const note = await screen.findByText(/saved the moment you change it/)
+    expect(note).toHaveTextContent(/no separate save button/i)
+  })
+
+  // config.toml is read once at startup (packages/server/src/launch.ts
+  // calls loadConfig exactly once and bakes config.dreaming into the
+  // registry's dreamTrigger wiring at construction time), so a hand-edit
+  // to config.toml's [dreaming] table cannot take effect in an already
+  // running server or CLI session. The Dreams section must say this
+  // plainly rather than implying a config.toml edit takes effect live the
+  // way this page's own fields do.
+  it('says a config.toml dreaming change takes effect on the next start, not while the current process keeps running', async () => {
+    render(<Settings api={makeApi()} />)
+    await screen.findByText('Dreams')
+    expect(screen.getByText(/next time you start/)).toBeInTheDocument()
+  })
+
   it('says so plainly when settings cannot be loaded', async () => {
     const failing = {
       getProfile: async () => {

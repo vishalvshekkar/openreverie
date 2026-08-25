@@ -82,6 +82,33 @@
   padding: var(--space-3);
 }
 
+.dreams-status-panel {
+  font-family: var(--font-ui);
+  font-size: var(--step--1);
+  color: var(--ink-soft);
+  padding: var(--space-3);
+  margin-bottom: var(--space-2);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-2);
+  background: var(--panel);
+}
+
+.dreams-status-panel-line {
+  margin: 0 0 var(--space-1);
+}
+
+.dreams-status-panel-line:last-of-type {
+  margin-bottom: 0;
+}
+
+.dreams-status-panel-attempt {
+  margin: var(--space-2) 0 0;
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--rule);
+  color: var(--ink);
+  font-weight: 600;
+}
+
 .dreams-status-error {
   display: flex;
   align-items: baseline;

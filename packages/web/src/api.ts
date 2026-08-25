@@ -251,8 +251,33 @@ const dreamFeedbackResponseSchema = z.strictObject({
   verdict: dreamVerdictSchema,
 })
 
+// Backs the Dreams tab's status panel: whether dreaming is on, whether it
+// can run right now, and why the last real attempt did not produce a
+// dream, if there was one. See GET /api/v1/dreams/status in
+// packages/server/src/app.ts.
+const dreamAttemptSchema = z.strictObject({
+  ts: z.string(),
+  trigger: z.string(),
+  outcome: z.enum(['aborted', 'failed']),
+  reason: z.string(),
+})
+export const dreamStatusSchema = z.strictObject({
+  configured: z.boolean(),
+  enabled: z.boolean(),
+  cadence: z.enum(['daily', 'weekly']),
+  model: z.string().optional(),
+  period: z.string(),
+  periodCovered: z.boolean(),
+  reflectedSessionCount: z.number().int().nonnegative(),
+  minReflectedSessions: z.number().int().nonnegative(),
+  reflectedFloorMet: z.boolean(),
+  due: z.boolean(),
+  lastAttempt: dreamAttemptSchema.optional(),
+})
+
 export type PublicProfile = z.infer<typeof profileSchema>
 export type PublicSettings = z.infer<typeof settingsSchema>
+export type DreamStatus = z.infer<typeof dreamStatusSchema>
 
 export type StreamEvent = z.infer<typeof streamEventSchema>
 export type Session = z.infer<typeof sessionSchema>
@@ -307,6 +332,7 @@ export interface AppApi {
     verdict: DreamVerdict,
     note?: string,
   ): Promise<void>
+  getDreamStatus(): Promise<DreamStatus>
 }
 
 export class ApiHttpError extends Error {
@@ -578,6 +604,10 @@ export class ApiClient implements AppApi {
       },
       dreamFeedbackResponseSchema,
     )
+  }
+
+  getDreamStatus(): Promise<DreamStatus> {
+    return this.request('/api/v1/dreams/status', {}, dreamStatusSchema)
   }
 
   private async ndjson(path: string, init: RequestInit): Promise<AsyncIterable<StreamEvent>> {

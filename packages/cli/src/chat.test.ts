@@ -241,7 +241,7 @@ describe('runChat', () => {
     await engine.close()
   })
 
-  it('renders tool events as dim searching-memory notices', async () => {
+  it('renders a finished tool call as a dim, done-form notice in scrollback', async () => {
     const chat = new FakeChatProvider([
       { text: 'Good to see you.', toolCalls: [] },
       {
@@ -260,7 +260,7 @@ describe('runChat', () => {
     await runChat({ engine, config, chat, io })
 
     const joined = output.join('')
-    expect(joined).toContain('[searching memory]')
+    expect(joined).toContain('[searched memory]')
     expect(joined).toContain('Found something.')
 
     await engine.close()
@@ -1165,6 +1165,106 @@ describe('openCliContext', () => {
     }
   })
 
+  // Defect 1, 2026-08-25 dreaming investigation: dreamingModel used to fall
+  // back to config.models.reflection when no dreaming model was set, which
+  // is exactly how one real user's dreaming broke permanently (dreaming
+  // runs a tool loop; a reasoning-effort reflection model rejects function
+  // tools with an HTTP 400). It must resolve through resolveDreamingModel,
+  // which falls back to models.chat instead.
+  it('resolves dreamingModel via resolveDreamingModel, never falling back to reflectionModel', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'openreverie-cli-context-model-'))
+    try {
+      let seenDreamingModel: string | undefined
+      const result = await openCliContext({
+        loadConfig: async () => testConfig(dir),
+        buildChat: () => new FakeChatProvider([]),
+        buildEmbeddings: () => new FakeEmbeddingProvider(),
+        openEngine: async (config, deps) => {
+          seenDreamingModel = deps.dreamingModel
+          return MemoryEngine.open(config.memoryDir, deps)
+        },
+      })
+
+      expect(result.ok).toBe(true)
+      if (result.ok) await result.engine.close()
+      expect(seenDreamingModel).toBe('fake-chat')
+      expect(seenDreamingModel).not.toBe('fake-reflect')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  // Defect 3, 2026-08-25 dreaming investigation: `reverie dream --force`
+  // used to fail with "another process is already dreaming" because
+  // MemoryEngine.open()'s own un-awaited onStart trigger grabbed the lock
+  // before the dream command's explicit dreamNow call got to it, in the
+  // same process. suppressDreamOnStart is how the dream command's own
+  // engine open turns that background trigger off for itself, without
+  // touching the config or any other subcommand's behavior.
+  it('suppressDreamOnStart forces triggers.onStart off for this engine open only, leaving the rest of dreaming config untouched', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'openreverie-cli-context-suppress-'))
+    try {
+      let seenDreaming: EngineDeps['dreaming']
+      const result = await openCliContext({
+        loadConfig: async () => ({
+          ...testConfig(dir),
+          dreaming: {
+            enabled: true,
+            cadence: 'daily',
+            triggers: { afterSession: true, onStart: true, serverTimer: true },
+            maxToolCalls: 10,
+          },
+        }),
+        buildChat: () => new FakeChatProvider([]),
+        buildEmbeddings: () => new FakeEmbeddingProvider(),
+        openEngine: async (config, deps) => {
+          seenDreaming = deps.dreaming
+          return MemoryEngine.open(config.memoryDir, deps, { maintenance: false })
+        },
+        suppressDreamOnStart: true,
+      })
+
+      expect(result.ok).toBe(true)
+      if (result.ok) await result.engine.close()
+      expect(seenDreaming?.enabled).toBe(true)
+      expect(seenDreaming?.triggers.onStart).toBe(false)
+      expect(seenDreaming?.triggers.afterSession).toBe(true)
+      expect(seenDreaming?.triggers.serverTimer).toBe(true)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('leaves triggers.onStart alone when suppressDreamOnStart is not set', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'openreverie-cli-context-nosuppress-'))
+    try {
+      let seenDreaming: EngineDeps['dreaming']
+      const result = await openCliContext({
+        loadConfig: async () => ({
+          ...testConfig(dir),
+          dreaming: {
+            enabled: true,
+            cadence: 'daily',
+            triggers: { afterSession: true, onStart: true, serverTimer: true },
+            maxToolCalls: 10,
+          },
+        }),
+        buildChat: () => new FakeChatProvider([]),
+        buildEmbeddings: () => new FakeEmbeddingProvider(),
+        openEngine: async (config, deps) => {
+          seenDreaming = deps.dreaming
+          return MemoryEngine.open(config.memoryDir, deps, { maintenance: false })
+        },
+      })
+
+      expect(result.ok).toBe(true)
+      if (result.ok) await result.engine.close()
+      expect(seenDreaming?.triggers.onStart).toBe(true)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
   it('tags a config load failure with kind: config', async () => {
     const result = await openCliContext({
       loadConfig: async () => {
@@ -1412,42 +1512,51 @@ describe('color helpers', () => {
 })
 
 describe('toolNotice', () => {
-  it('maps each known tool to its honest, specific notice', () => {
-    expect(toolNotice('remember')).toBe('[remembering]')
-    expect(toolNotice('set_mode')).toBe('[switching mode]')
-    expect(toolNotice('search_memory')).toBe('[searching memory]')
-    expect(toolNotice('read_document')).toBe('[reading memory]')
-    expect(toolNotice('read_transcript')).toBe('[reading memory]')
-    expect(toolNotice('graph_query')).toBe('[checking connections]')
-    expect(toolNotice('list_arcs')).toBe('[checking memory]')
-    expect(toolNotice('list_realms')).toBe('[checking memory]')
-    expect(toolNotice('list_people')).toBe('[checking memory]')
-    expect(toolNotice('list_entities')).toBe('[checking memory]')
-    expect(toolNotice('update_profile')).toBe('[updating profile]')
-    expect(toolNotice('declare_journal_method')).toBe('[setting journal method]')
-    expect(toolNotice('update_journaling_protocol')).toBe('[updating journal setup]')
-    expect(toolNotice('dream_feedback')).toBe('[noting your reaction]')
+  // toolNotice is the permanent scrollback line, written once a tool call
+  // is known to have finished, so it renders the DONE form of the shared
+  // @openreverie/core label (see toolLabel), lowercased to match the
+  // CLI's own dim, lowercase, bracketed aesthetic. The running form (the
+  // spinner's toolStatusLabel) is covered separately in the runChat
+  // scenarios below, since it is not exported on its own.
+  it('maps each known tool to its honest, specific done notice', () => {
+    expect(toolNotice('remember')).toBe('[remembered]')
+    expect(toolNotice('set_mode')).toBe('[switched mode]')
+    expect(toolNotice('search_memory')).toBe('[searched memory]')
+    expect(toolNotice('read_document')).toBe('[read that back]')
+    expect(toolNotice('read_transcript')).toBe('[read a past conversation]')
+    expect(toolNotice('graph_query')).toBe('[traced connections]')
+    expect(toolNotice('list_arcs')).toBe('[reviewed your storylines]')
+    expect(toolNotice('list_realms')).toBe('[reviewed your life areas]')
+    expect(toolNotice('list_people')).toBe('[looked over people]')
+    expect(toolNotice('list_entities')).toBe('[looked over things]')
+    expect(toolNotice('update_profile')).toBe('[updated your profile]')
+    expect(toolNotice('declare_journal_method')).toBe('[set the journal format]')
+    expect(toolNotice('update_journaling_protocol')).toBe('[updated your journal setup]')
+    expect(toolNotice('dream_feedback')).toBe('[noted your reaction]')
   })
 
   it('falls back to a plain, truthful notice for an unknown tool', () => {
-    expect(toolNotice('some_future_tool')).toBe('[using: some_future_tool]')
+    expect(toolNotice('some_future_tool')).toBe('[used: some_future_tool]')
   })
 
   // forget is parked, not shipped: it has no notice of its own and falls
   // back to the same plain, truthful default as any other unlisted tool.
   it('has no notice of its own for forget, since the feature is parked', () => {
-    expect(toolNotice('forget')).toBe('[using: forget]')
+    expect(toolNotice('forget')).toBe('[used: forget]')
   })
 
-  // The gap this guards: TOOL_NOTICES is a hand-maintained table next to a
+  // The gap this guards: a hand-maintained label table sitting next to a
   // tool list that grows in a different file. When toolDefinitions() grew
-  // from eight to thirteen, five names were never added here and fell
-  // through to the generic "[using: name]" fallback. This test derives the
-  // expected names from toolDefinitions() itself, never a hardcoded list,
-  // so the next tool added cannot reopen the same gap silently.
-  it('has a specific notice for every tool the agent can actually call', () => {
+  // from eight to thirteen, five names were never added to the CLI's old
+  // TOOL_NOTICES table and fell through to the generic "[using: name]"
+  // fallback. The canonical table now lives in @openreverie/core (see
+  // tool-labels.test.ts for the guard on both its running and done
+  // forms); this test derives the expected names from toolDefinitions()
+  // itself too, never a hardcoded list, so a gap in the CLI's own
+  // done-form rendering cannot reopen silently either.
+  it('has a specific done notice for every tool the agent can actually call', () => {
     for (const tool of toolDefinitions()) {
-      expect(toolNotice(tool.name)).not.toBe(`[using: ${tool.name}]`)
+      expect(toolNotice(tool.name)).not.toBe(`[used: ${tool.name}]`)
     }
   })
 })
@@ -1594,17 +1703,318 @@ describe('runChat status line', () => {
     })
 
     const joined = output.join('')
-    // The permanent, dim, bracketed notice line: printed once and left on
-    // screen.
-    expect(joined).toContain('[searching memory]')
-    // The status line's own bare, spinner-framed render of the same label,
-    // distinct from the notice above: with the tick fake here never firing,
-    // start() renders exactly once, on the first frame, so the full frame
-    // is asserted rather than just the word "searching memory" (which the
-    // bracketed notice above already contains as a substring and would let
-    // this assertion pass even with the status line never wired to tool
-    // calls at all).
+    // The permanent, dim, bracketed notice line, in the DONE form: printed
+    // once the call is known to have finished (flushed here by the
+    // following 'text' event) and left on screen.
+    expect(joined).toContain('[searched memory]')
+    // The status line's own bare, spinner-framed render of the RUNNING
+    // form, distinct in wording from the DONE notice above (not just in
+    // framing): with the tick fake here never firing, start() renders
+    // exactly once, on the first frame, so the full frame is asserted
+    // rather than just the word "searching memory".
     expect(joined).toContain('\r\x1b[2m| searching memory\x1b[0m\x1b[K')
+
+    await engine.close()
+  })
+
+  // The running/done flip, proven two ways, and only one of them
+  // discriminates a revert of the flush timing itself. toolNotice always
+  // renders the DONE form now (it never has access to the running form at
+  // all), so a revert of chat.ts back to writing the permanent notice
+  // immediately at the 'tool' event would still print '[remembered]', the
+  // same string as today, just too early: string content alone cannot
+  // catch that regression. The doneNoticeIndex/spinnerIndex ordering
+  // check below is what actually catches it, since the immediate-write
+  // revert writes the notice before the spinner's first frame rather
+  // than after. The not.toContain('[remembering]') assertion below is
+  // kept as a real but separate guard: it would only fire if toolNotice
+  // itself regressed to rendering the running form, which is covered
+  // independently in describe('toolNotice') above and in
+  // tool-labels.test.ts's parity guard, not by anything in this test.
+  it('writes the DONE form to permanent scrollback, only the RUNNING form to the spinner', async () => {
+    const chat = new FakeChatProvider([
+      { text: 'Good to see you.', toolCalls: [] },
+      {
+        text: '',
+        toolCalls: [
+          { id: 'call_1', name: 'remember', arguments: JSON.stringify({ text: 'a note' }) },
+        ],
+      },
+      { text: 'Noted.', toolCalls: [] },
+      { text: emptyReflectionJson('Remembered something.'), toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const { io, output } = scriptedIo(['remember this', '/bye'])
+
+    await runChat({
+      engine,
+      config,
+      chat,
+      io,
+      colorEnabled: true,
+      setInterval: () => 1,
+      clearInterval: () => {},
+      now: () => 0,
+    })
+
+    const spinnerIndex = output.indexOf('\r\x1b[2m| remembering\x1b[0m\x1b[K')
+    const doneNoticeIndex = output.indexOf('\x1b[2m[remembered]\x1b[0m\n')
+
+    expect(spinnerIndex).toBeGreaterThanOrEqual(0)
+    expect(doneNoticeIndex).toBeGreaterThan(spinnerIndex)
+
+    const joined = output.join('')
+    // A separate, narrower guard than the ordering check above: the
+    // running-form bracket must never appear at all, in permanent
+    // scrollback or anywhere else.
+    expect(joined).not.toContain('[remembering]')
+
+    await engine.close()
+  })
+
+  // Two tool calls back to back, in the same round, per Task 3's own
+  // requirement: the first tool's DONE line must be flushed before the
+  // second tool's spinner starts, not held until the whole turn ends. The
+  // discriminating check is each tool's own done notice landing after its
+  // own spinner (firstToolDoneIndex > firstToolSpinnerIndex): comparing
+  // the first tool's done index only against the second tool's spinner
+  // index would not by itself catch an immediate-write revert, since an
+  // immediate-write notice for call_1 still lands before call_2's spinner
+  // even though it landed at the wrong moment relative to call_1's own
+  // spinner.
+  it('flushes the first tool call as DONE before starting the second tool call as RUNNING', async () => {
+    const chat = new FakeChatProvider([
+      { text: 'Good to see you.', toolCalls: [] },
+      {
+        text: '',
+        toolCalls: [
+          { id: 'call_1', name: 'remember', arguments: JSON.stringify({ text: 'a note' }) },
+          {
+            id: 'call_2',
+            name: 'search_memory',
+            arguments: JSON.stringify({ query: 'a note' }),
+          },
+        ],
+      },
+      { text: 'Done with both.', toolCalls: [] },
+      { text: emptyReflectionJson('Did two things.'), toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const { io, output } = scriptedIo(['remember this and look it up', '/bye'])
+
+    await runChat({
+      engine,
+      config,
+      chat,
+      io,
+      colorEnabled: true,
+      setInterval: () => 1,
+      clearInterval: () => {},
+      now: () => 0,
+    })
+
+    const firstToolSpinnerIndex = output.indexOf('\r\x1b[2m| remembering\x1b[0m\x1b[K')
+    const firstToolDoneIndex = output.indexOf('\x1b[2m[remembered]\x1b[0m\n')
+    const secondToolSpinnerIndex = output.indexOf('\r\x1b[2m| searching memory\x1b[0m\x1b[K')
+    const secondToolDoneIndex = output.indexOf('\x1b[2m[searched memory]\x1b[0m\n')
+
+    expect(firstToolSpinnerIndex).toBeGreaterThanOrEqual(0)
+    expect(firstToolDoneIndex).toBeGreaterThanOrEqual(0)
+    expect(secondToolSpinnerIndex).toBeGreaterThanOrEqual(0)
+    expect(secondToolDoneIndex).toBeGreaterThanOrEqual(0)
+    // The discriminating check: the first tool's own done notice lands
+    // after the first tool's own spinner, not written immediately when
+    // the 'tool' event for call_1 arrived.
+    expect(firstToolDoneIndex).toBeGreaterThan(firstToolSpinnerIndex)
+    // The first tool's permanent notice lands before the second tool's
+    // spinner ever starts: the first call is fully narrated as finished
+    // before the second call is narrated as running at all.
+    expect(firstToolDoneIndex).toBeLessThan(secondToolSpinnerIndex)
+    // And the second tool's own done notice only lands after its own
+    // spinner started, same as the first.
+    expect(secondToolDoneIndex).toBeGreaterThan(secondToolSpinnerIndex)
+
+    await engine.close()
+  })
+
+  // Non-TTY / piped output has no spinner at all (createStatusLine is a
+  // no-op when colorEnabled is false, which is runChat's own default).
+  // Without a spinner, the running-form notice is the only record that a
+  // tool call started, so it is written immediately, and the done-form
+  // notice still follows once the call actually finishes: "started, then
+  // finished" is the whole record in a piped log.
+  it('writes both a RUNNING notice and a DONE notice, in order, when there is no spinner to show progress', async () => {
+    const chat = new FakeChatProvider([
+      { text: 'Good to see you.', toolCalls: [] },
+      {
+        text: '',
+        toolCalls: [
+          { id: 'call_1', name: 'remember', arguments: JSON.stringify({ text: 'a note' }) },
+        ],
+      },
+      { text: 'Noted.', toolCalls: [] },
+      { text: emptyReflectionJson('Remembered something.'), toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const { io, output } = scriptedIo(['remember this', '/bye'])
+
+    // No colorEnabled passed: defaults to false, so createStatusLine's
+    // start()/stop() are no-ops and canRender is false.
+    await runChat({ engine, config, chat, io })
+
+    const runningIndex = output.indexOf('[remembering]\n')
+    const doneIndex = output.indexOf('[remembered]\n')
+
+    expect(runningIndex).toBeGreaterThanOrEqual(0)
+    expect(doneIndex).toBeGreaterThanOrEqual(0)
+    expect(runningIndex).toBeLessThan(doneIndex)
+
+    await engine.close()
+  })
+
+  // The mirror image of the test above: with a spinner able to render,
+  // the running form lives there and only the done form ever reaches
+  // permanent scrollback, so a future change to the canRender check above
+  // cannot quietly start double-printing for every color-capable session.
+  it('writes exactly one permanent notice for a tool call when the spinner can render it live', async () => {
+    const chat = new FakeChatProvider([
+      { text: 'Good to see you.', toolCalls: [] },
+      {
+        text: '',
+        toolCalls: [
+          { id: 'call_1', name: 'remember', arguments: JSON.stringify({ text: 'a note' }) },
+        ],
+      },
+      { text: 'Noted.', toolCalls: [] },
+      { text: emptyReflectionJson('Remembered something.'), toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const { io, output } = scriptedIo(['remember this', '/bye'])
+
+    await runChat({
+      engine,
+      config,
+      chat,
+      io,
+      colorEnabled: true,
+      setInterval: () => 1,
+      clearInterval: () => {},
+      now: () => 0,
+    })
+
+    const bracketedNotices = output.filter(
+      (line) => line.includes('[remembered]') || line.includes('[remembering]'),
+    )
+    expect(bracketedNotices).toHaveLength(1)
+    expect(bracketedNotices[0]).toContain('[remembered]')
+
+    await engine.close()
+  })
+
+  // set_mode's own DONE notice describes the call that produced the mode
+  // switch, so it must land in scrollback before the '[mode: ...]' notice
+  // that switch produced, not after: the tool call is fully finished
+  // before its effect is announced.
+  it('flushes the set_mode DONE notice before the mode notice it produced', async () => {
+    const chat = new FakeChatProvider([
+      { text: 'Good to see you.', toolCalls: [] },
+      {
+        text: '',
+        toolCalls: [
+          { id: 'call_1', name: 'set_mode', arguments: JSON.stringify({ mode: 'decompress' }) },
+        ],
+      },
+      { text: 'Switched.', toolCalls: [] },
+      { text: emptyReflectionJson('Switched mode.'), toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const { io, output } = scriptedIo(['switch to decompress', '/bye'])
+
+    await runChat({ engine, config, chat, io })
+
+    const doneIndex = output.indexOf('[switched mode]\n')
+    const modeIndex = output.indexOf('[mode: decompress]\n')
+
+    expect(doneIndex).toBeGreaterThanOrEqual(0)
+    expect(modeIndex).toBeGreaterThanOrEqual(0)
+    expect(doneIndex).toBeLessThan(modeIndex)
+
+    await engine.close()
+  })
+
+  // The regression this guards: agent.ts yields the 'tool' event BEFORE
+  // awaiting dispatchTool. If a second Ctrl-C lands in the window right
+  // after that event is handled, chat.ts's for-await loop breaks before
+  // the generator ever resumes past the yield, so dispatchTool never
+  // runs at all, and the tool call never happened. Before this fix, the
+  // finally backstop still flushed the DONE form there, which meant the
+  // CLI could print "[remembered]" in permanent scrollback for a
+  // remember() that never wrote anything: the interface lying about the
+  // memory. This test fires the interrupt handler synchronously from
+  // inside the write of the tool's own RUNNING notice (the non-TTY path,
+  // where that notice is written immediately, giving a reliable hook
+  // into the exact window), twice, so interruptLevel is already >= 2 by
+  // the time chat.ts's break check runs right after handling that event.
+  it('writes an INTERRUPTED notice, never the DONE form, for a tool call cut off before dispatchTool ever ran', async () => {
+    const chat = new FakeChatProvider([
+      { text: 'Good to see you.', toolCalls: [] },
+      {
+        text: '',
+        toolCalls: [
+          { id: 'call_1', name: 'remember', arguments: JSON.stringify({ text: 'a note' }) },
+        ],
+      },
+      { text: 'Noted.', toolCalls: [] },
+      { text: emptyReflectionJson('Remembered something.'), toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const config = testConfig(dir)
+    const output: string[] = []
+    let handler: (() => void) | undefined
+    let fired = false
+    const io: ChatIo = {
+      async question(prompt) {
+        output.push(prompt)
+        return 'remember this'
+      },
+      write(text) {
+        output.push(text)
+        // The non-TTY RUNNING notice for the pending 'remember' call:
+        // exactly the write that happens right after the 'tool' event is
+        // processed and right before chat.ts's interruptLevel check.
+        // Firing the handler twice here reaches interruptLevel >= 2
+        // before that check runs, so the break happens before the
+        // generator resumes to actually call dispatchTool.
+        if (text === '[remembering]\n' && !fired) {
+          fired = true
+          handler?.()
+          handler?.()
+        }
+      },
+      onInterrupt(h) {
+        handler = h
+      },
+      cancelPending() {},
+    }
+
+    await expect(runChat({ engine, config, chat, io })).resolves.toEqual({ interrupted: true })
+
+    const joined = output.join('')
+    expect(joined).toContain('[remembering, interrupted]')
+    expect(joined).not.toContain('[remembered]')
+
+    // Independent evidence beyond wording: dispatchTool's own call to
+    // MemoryEngine's remember path appends a role: 'tool' transcript
+    // line once it actually runs. If that line exists, the call ran
+    // regardless of what the notice said; its absence is what actually
+    // proves dispatchTool never dispatched at all.
+    const transcript = await soleTranscript(dir)
+    expect(transcript.some((line) => line.role === 'tool')).toBe(false)
 
     await engine.close()
   })

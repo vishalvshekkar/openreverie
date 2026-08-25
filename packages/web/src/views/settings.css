@@ -21,6 +21,14 @@
   font-size: var(--step--1);
 }
 
+.settings-page-note {
+  color: var(--ink-soft);
+  font-size: var(--step--1);
+  margin: 0 0 var(--space-5);
+  padding-bottom: var(--space-4);
+  border-bottom: 1px solid var(--rule);
+}
+
 .settings-error {
   font-size: var(--step--1);
 }

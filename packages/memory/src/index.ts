@@ -29,6 +29,13 @@ export {
   randomWalk,
 } from './dreamSelection.js'
 export * from './engine.js'
+export {
+  computeDreamStatus,
+  type DreamingSettings,
+  type DreamStatus,
+  existingDreamDates,
+  reflectedSessionCount,
+} from './engineDreams.js'
 export * from './gitSync.js'
 export * from './graph.js'
 export * from './journal.js'
@@ -43,3 +50,4 @@ export * from './sqlite.js'
 export * from './style.js'
 export * from './time.js'
 export * from './transcripts.js'
+export * from './voice.js'

@@ -41,6 +41,13 @@ export type ChatEvent =
 export interface ChatResult {
   text: string
   toolCalls: ToolCall[]
+  // Set when the provider could not honor part of the request as asked and
+  // adjusted it to get a real answer back, rather than failing the call
+  // outright. Optional and absent on the ordinary path: a caller that never
+  // reads it loses nothing, but one that cares (dreaming's own process.jsonl
+  // is the reason this field exists) can make an otherwise-silent provider
+  // decision inspectable instead of invisible.
+  warnings?: string[]
 }
 
 export interface ChatProvider {

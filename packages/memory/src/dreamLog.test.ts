@@ -75,4 +75,38 @@ describe('dream log', () => {
     expect(state.feedback.get('ins_01B')?.verdict).toBe('right')
     expect(state.mentioned.has('dream_01C')).toBe(true)
   })
+
+  const attempt: DreamLogRecord = {
+    ts: '2026-08-24T03:00:00.000Z',
+    type: 'attempt',
+    period: '2026-08-24',
+    trigger: 'onStart',
+    outcome: 'failed',
+    reason: 'openai: HTTP 400: Function tools with reasoning_effort are not supported',
+  }
+
+  it('round-trips an attempt record through append and read', async () => {
+    await appendDreamLog(paths, [attempt])
+    expect(await readDreamLog(paths)).toEqual([attempt])
+  })
+
+  it('folds the most recent attempt record as lastAttempt, not swallowed into mentioned', async () => {
+    const earlierAttempt: DreamLogRecord = {
+      ...attempt,
+      ts: '2026-08-23T03:00:00.000Z',
+      reason: 'an earlier failure',
+    }
+    const state = foldDreamLog([earlierAttempt, attempt])
+    expect(state.lastAttempt).toEqual(attempt)
+    // An attempt record must never be folded into `mentioned`: that was the
+    // exact hazard of the old catch-all `else` branch this schema addition
+    // replaced (an unhandled record type silently landing in whatever
+    // branch was last, rather than being visibly its own case).
+    expect(state.mentioned.size).toBe(0)
+  })
+
+  it('has no lastAttempt when the log carries no attempt record', async () => {
+    const state = foldDreamLog([dreamt, feedback])
+    expect(state.lastAttempt).toBeUndefined()
+  })
 })

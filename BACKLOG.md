@@ -286,6 +286,33 @@ item ships, remove it from here and record it in `ROADMAP.md`'s Done narrative.
     argue is weaker than a test that makes them.
   - Size: small for the measurement, medium if the assertion moves onto a rendered prompt.
 
+- **config.toml has no live reload for dreaming settings.** `launchServer` calls `loadConfig`
+  exactly once and bakes `config.dreaming` into the registry's `dreamTrigger` wiring at
+  construction time; `MemoryEngine.open()`'s own `onStart` trigger is likewise decided once, at
+  open time. Editing `[dreaming]` in config.toml while `reverie web` or a long-running CLI session
+  is up has no effect until that process is restarted. The web Settings page now says this
+  plainly, but the underlying limitation is still there.
+  - Why deferred: found as a side discovery while fixing why the web never dreamt (2026-08-25
+    dreaming investigation); not requested to be fixed, and a config watcher plus safe re-wiring
+    of the live engine's dependencies is a larger change than this task's five named defects.
+  - Where: `docs/dreaming.md`, 2026-08-25 changelog entry; `packages/server/src/launch.ts`.
+  - Trigger: not stated.
+  - Size: medium (a file watcher, plus a way to re-wire `dreamTrigger` and `EngineDeps.dreaming`
+    on a live `MemoryEngine`/registry without restarting either).
+
+- **`OpenAiChatProvider`'s temperature-preference retry covers `complete()` only, not `stream()`.**
+  Fixed 2026-08-25: a model that rejects a non-default `temperature` (an HTTP 400 naming
+  `error.param === 'temperature'`) is retried once without it in `complete()`, with the drop
+  recorded on `ChatResult.warnings`. `stream()` has no equivalent, since nothing in the codebase
+  currently sets `temperature` on a streamed call (only dreaming's narrative step ever sets
+  `temperature` at all, and it always uses `complete()`).
+  - Why deferred: no current caller exercises the streaming path with a temperature set, so
+    building and testing a second retry path now would be speculative code with no real coverage.
+  - Where: `packages/providers/src/openai.ts`; `docs/dreaming.md`, 2026-08-25 changelog entry.
+  - Trigger: a future caller that sets `temperature` on a `ChatProvider.stream()` call.
+  - Size: small (mirror `complete()`'s retry-and-warn logic; `ChatEvent` has no warnings-carrying
+    variant yet, so that shape needs deciding too).
+
 ## 2. Retrieval and memory quality
 
 - **`DocumentHit.snippet` and `chunks[0]` can name different physical chunks of the same
@@ -1481,6 +1508,45 @@ help welcome" section. Read [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](A
     `packages/memory/src/engineDreams.ts` (`readDream`).
   - Trigger: not stated.
   - Size: small.
+
+- **A deterministic post-filter for em dashes and LLM cadence in model output.** The prose voice
+  rule now sits in the companion and firewall personas, in both reflection prompts, and in both
+  dreaming prompts, telling the model not to use em dashes and to vary sentence structure. That is
+  an instruction, not enforcement: nothing in the code inspects or rewrites what the model actually
+  returns before it is spoken or written into the memory folder.
+  - Why deferred: the implementer's own words, "this is a prompt instruction, not deterministic
+    post-processing. It can meaningfully reduce em dashes and stacked-clause cadence in model
+    output, but it cannot guarantee elimination: the model can still ignore it, especially under
+    retry pressure or on a weaker configured provider." The tests added alongside it "prove the
+    instruction is present in all four prompts, not that model output changed."
+  - Where: `packages/memory/src/voice.ts` (`PROSE_VOICE_RULE`, the canonical text), consumed by
+    `packages/core/src/personas.ts`, `packages/memory/src/reflection.ts` and
+    `packages/memory/src/dreaming.ts`.
+  - Trigger to revisit: not stated. The observation that prompted the rule was em dashes appearing
+    in stored memory items and in live replies, so recurrence of that after the rule shipped would
+    be the natural signal.
+  - Size: small for a mechanical em dash pass over stored and spoken prose; larger if it is meant
+    to cover cadence, which is not mechanically detectable.
+
+- **The Atlas categorical palette cannot separate all seven node types under simulated colour
+  vision deficiency, only adjacent ones.** Each node type now has its own accent hue, validated to
+  clear the 3:1 contrast floor on both the light and the dark canvas surface, and validated for
+  CVD separation between palette-adjacent pairs. The all-pairs check fails beyond three slots.
+  - Why deferred: the dataviz skill's own reference documents this as an unavoidable limit at seven
+    categories, not a mistake in the choice of hues. The mitigation actually in place is composite
+    encoding: the all-pairs failures land on type pairs that node size already separates by several
+    size bands (item at 3 to 5px against arc at 13 to 16.5px), while the validated adjacent pairs
+    are exactly the pairs size does not separate. Ring thickness varies by type as a second
+    non-hue channel, and the per-type filter checkboxes let any type be isolated regardless of hue
+    confusion.
+  - Where: `packages/web/src/tokens.css`, the comment on the `--type-*` custom properties, and
+    `packages/web/src/atlas.tsx`, the comment on `TYPE_COLOR_VAR`, which carries the measured
+    numbers.
+  - Trigger to revisit: not stated. An eighth node type would force the question, since slot 8 of
+    the reference palette is deliberately left unused and the composite-encoding argument would
+    have to be re-made for the new pairs.
+  - Size: small to re-validate, larger if it means adding a genuine second visual channel such as
+    node shape.
 
 ## 6. Decided against, with a trigger to revisit
 

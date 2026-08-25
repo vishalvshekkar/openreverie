@@ -29,6 +29,15 @@ export interface StatusLineDeps {
 export interface StatusLine {
   start(label: string): void
   stop(): void
+  // True when start()/stop() actually render an animated frame (a
+  // color-capable TTY). False in the no-op case (piped, non-TTY, or
+  // color disabled), where start() and stop() do nothing at all and no
+  // interval is ever registered. A caller that needs to know whether a
+  // transient in-flight signal is actually visible to the person (so it
+  // can fall back to a permanent one when it is not) asks this, rather
+  // than re-deriving the same colorEnabled check itself: the status line
+  // is the thing that actually knows whether it renders.
+  readonly canRender: boolean
 }
 
 export function createStatusLine(deps: StatusLineDeps): StatusLine {
@@ -36,6 +45,7 @@ export function createStatusLine(deps: StatusLineDeps): StatusLine {
     return {
       start() {},
       stop() {},
+      canRender: false,
     }
   }
 
@@ -75,5 +85,6 @@ export function createStatusLine(deps: StatusLineDeps): StatusLine {
       active = false
       deps.write('\r\x1b[K')
     },
+    canRender: true,
   }
 }

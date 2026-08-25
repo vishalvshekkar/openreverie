@@ -1,12 +1,14 @@
 /*
  * Atlas view. Consumes tokens.css only; every colour, spacing, and type
  * choice in this file is a var(--token) reference. The exception lives
- * entirely in atlas.tsx, not here: colorForType's two ramps and dimColor's
- * two literals are the only raw monochrome hex values in the view, and
- * borderColorForType, edgeColor, and edgeEmphasisColor all derive their
- * colours from those rather than adding new literals of their own. Sigma
- * paints to a canvas and cannot read CSS custom properties, which is why
- * that code cannot just reference these tokens directly.
+ * entirely in atlas.tsx, not here: Sigma paints the graph to a WebGL canvas
+ * and cannot read a CSS custom property directly, so atlas.tsx's
+ * colorForType and borderColorForType read tokens.css's --type-* and
+ * --panel values at render time via getComputedStyle (see readCSSVar()
+ * there) instead of referencing them from a stylesheet, falling back to a
+ * literal only where no live stylesheet is available (this package's jsdom
+ * test suite). dimColor, edgeColor, and edgeEmphasisColor derive from those
+ * two functions rather than adding literals of their own.
  *
  * Layout note: the root and every scrolling region below it carry an
  * explicit min-height: 0. A grid or flex child defaults to min-height: auto,

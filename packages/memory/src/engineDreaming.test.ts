@@ -653,6 +653,78 @@ describe('MemoryEngine dreaming', () => {
     expect(await lockFileExists(paths)).toBe(false)
   })
 
+  // Defect 2, 2026-08-25 dreaming investigation: an aborted or failed
+  // dream attempt used to leave no trace anywhere on disk. A person had no
+  // way to find out dreaming had even tried and failed, let alone why.
+  it('an aborted dream attempt leaves a durable attempt record in the dream log', async () => {
+    const { paths, engine, script } = await openTestEngine({ dreaming: ENABLED_DREAMING })
+    await seedReflectedSessions(engine, script, 5)
+    script.push(
+      { text: 'noted', toolCalls: [] },
+      { text: 'not json', toolCalls: [] },
+      { text: 'still not json', toolCalls: [] },
+    )
+
+    const result = await engine.dreamNow({ force: true })
+    if ('dryRun' in result) throw new Error('expected a real run, not a dry run preview')
+    expect(result.outcome).toBe('aborted')
+
+    const records = await readDreamLog(paths)
+    const attempts = records.filter((r) => r.type === 'attempt')
+    expect(attempts).toHaveLength(1)
+    expect(attempts[0]).toMatchObject({ outcome: 'aborted', trigger: 'manual' })
+    expect(String(attempts[0]?.reason)).toContain('insight output failed validation twice')
+  })
+
+  // Defect 1, 2026-08-25 dreaming investigation: dreaming used to fall back
+  // silently to reflectionModel when dreamingModel was unset, which is
+  // exactly how one real user's dreaming broke permanently (a reflection
+  // model that rejects function tools with an HTTP 400). There must be no
+  // such fallback: an unset dreamingModel is now a loud, specific failure,
+  // recorded the same durable way any other failed attempt is.
+  it('a missing dreamingModel fails loudly, with no fallback to reflectionModel, and records a failed attempt', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'openreverie-dreaming-nomodel-'))
+    const paths = memoryPaths(dir)
+    await ensureMemoryTree(paths)
+    await pinTimezoneUtc(paths)
+    const script: FakeChatResult[] = []
+    const chat = new FakeChatProvider(script)
+    const engine = await MemoryEngine.open(
+      dir,
+      {
+        chat,
+        embeddings: new FakeEmbeddingProvider(),
+        reflectionModel: 'fake-reflect',
+        embeddingModel: 'fake-embed',
+        // dreamingModel deliberately omitted.
+        dreamPersona: () => 'DREAM_PERSONA',
+        dreaming: ENABLED_DREAMING,
+      },
+      { maintenance: false },
+    )
+    try {
+      await seedReflectedSessions(engine, script, 5)
+
+      await expect(engine.dreamNow({ force: true })).rejects.toThrow(
+        /no fallback to reflectionModel/i,
+      )
+
+      const records = await readDreamLog(paths)
+      const attempts = records.filter((r) => r.type === 'attempt')
+      expect(attempts).toHaveLength(1)
+      expect(attempts[0]).toMatchObject({ outcome: 'failed' })
+      expect(String(attempts[0]?.reason)).toContain('dreamingModel')
+
+      // Never silently spent a call against reflectionModel or any other
+      // fallback: the only requests made are the 5 reflectSession calls
+      // seedReflectedSessions itself scripted.
+      expect(chat.requests).toHaveLength(5)
+    } finally {
+      await engine.close()
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
   it('Ruling A5: skipped sessions never count toward the reflected-session floor', async () => {
     const { engine, chat } = await openTestEngine({ dreaming: ENABLED_DREAMING })
     // Each of these ends with no user transcript line at all, so

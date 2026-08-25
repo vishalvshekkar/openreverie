@@ -213,6 +213,22 @@ export async function saveConfig(config: ReverieConfig, configPath?: string): Pr
   await rename(tempPath, resolvedPath)
 }
 
+// The one place that decides which model dreaming actually runs on.
+// Dreaming runs a tool loop (search_memory, read_document, read_transcript,
+// graph_query), so it needs a model that supports function tools. The
+// reflection model is deliberately not a candidate fallback: it is picked
+// for cheap structured, non-tool output, and at least one real-world
+// config (a reasoning-effort reflection model) rejects tool calls outright
+// with an HTTP 400. models.chat is required by the schema and is already
+// proven to run the tool loop the chat REPL itself uses, so it is the only
+// safe default. Every caller that opens a MemoryEngine with dreaming
+// enabled must route through this function rather than writing its own
+// `config.models.dreaming ?? ...` fallback, so this stays the one place
+// that can go wrong.
+export function resolveDreamingModel(config: ReverieConfig): string {
+  return config.models.dreaming ?? config.models.chat
+}
+
 export function resolveApiKey(config: ReverieConfig): string {
   const { apiKey, apiKeyEnv } = config.provider
 

@@ -106,4 +106,18 @@ describe('mode catalogue', () => {
     expect(isModeName('Listen')).toBe(false)
     expect(isModeName('moed')).toBe(false)
   })
+
+  // The shared prose voice rule (personas.ts) governs mechanics everywhere;
+  // these are the short, mode-specific cadence notes layered on top of it
+  // for the three modes whose own paragraph most needed one: real leans on
+  // one plain sentence rather than a hedge, listen keeps its own voice out
+  // of the way, and journal keeps its own asides from competing with the
+  // method's structure.
+  it("gives real's engagement clause a cadence note that favors one plain sentence over a hedge", () => {
+    expect(MODES.real.clauses.engagement).toContain('one plain sentence')
+  })
+
+  it("gives listen's engagement clause a cadence note to keep its own sentences short", () => {
+    expect(MODES.listen.clauses.engagement).toContain('Keep your own sentences short')
+  })
 })

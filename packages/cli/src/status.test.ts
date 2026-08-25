@@ -76,6 +76,34 @@ describe('createStatusLine', () => {
     expect(intervals).toHaveLength(0)
   })
 
+  // canRender is the capability a caller checks before deciding whether
+  // it needs its own fallback signal (see chat.ts's non-TTY tool notice).
+  // Checked against the actual behavior it claims to describe, not just
+  // against colorEnabled a second time: canRender: false must line up
+  // with start()/stop() genuinely doing nothing, and canRender: true
+  // with them genuinely writing and registering an interval.
+  it('reports canRender: false exactly when start()/stop() are genuinely no-ops', () => {
+    const { deps, output, intervals } = fakeDeps(false)
+    const status = createStatusLine(deps)
+
+    expect(status.canRender).toBe(false)
+    status.start('thinking')
+    status.stop()
+    expect(output).toHaveLength(0)
+    expect(intervals).toHaveLength(0)
+  })
+
+  it('reports canRender: true exactly when start()/stop() genuinely write and animate', () => {
+    const { deps, output, intervals } = fakeDeps(true)
+    const status = createStatusLine(deps)
+
+    expect(status.canRender).toBe(true)
+    status.start('thinking')
+    status.stop()
+    expect(output.length).toBeGreaterThan(0)
+    expect(intervals).toHaveLength(1)
+  })
+
   it('clears the line with a bare carriage return and erase before any real output follows', () => {
     const { deps, output } = fakeDeps()
     const status = createStatusLine(deps)

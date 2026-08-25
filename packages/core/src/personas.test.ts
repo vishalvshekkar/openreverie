@@ -1,4 +1,4 @@
-import { JOURNALING_PROTOCOL_ABSENT } from '@openreverie/memory'
+import { JOURNALING_PROTOCOL_ABSENT, PROSE_VOICE_RULE } from '@openreverie/memory'
 import { describe, expect, it } from 'vitest'
 import { type CrisisResource, defaultCrisisResources, type StyleConfig } from './config.js'
 import { EXPRESSIVE_WRITING_SAFETY_GATE } from './journaling.js'
@@ -92,6 +92,56 @@ describe('buildPersona', () => {
         expect(text).not.toContain('—')
       }
     }
+  })
+
+  // The tone-only loop above never renders a mode paragraph (activeMode
+  // defaults to 'general'), so it cannot catch an em dash introduced by a
+  // mode's own clause text (the cadence notes added to real, listen, and
+  // journal, in particular). Every mode, both safety modes, checked here.
+  it('never contains an em dash character, for any mode, in either safety mode', () => {
+    for (const safety of ['companion', 'firewall'] as const) {
+      for (const name of MODE_NAMES) {
+        const text = buildPersona(
+          safety,
+          resources,
+          defaultStyle,
+          name,
+          'A configured protocol, verbatim.',
+        )
+        expect(text, `${safety}/${name}`).not.toContain('—')
+      }
+    }
+  })
+
+  describe('prose voice rule', () => {
+    it('carries the shared prose-mechanics rule in both companion and firewall prompts', () => {
+      const companion = buildPersona('companion', resources, defaultStyle)
+      const firewall = buildPersona('firewall', resources, defaultStyle)
+      expect(companion).toContain(PROSE_VOICE_RULE)
+      expect(firewall).toContain(PROSE_VOICE_RULE)
+    })
+
+    it('states plainly that it governs mechanics only and does not soften the mode', () => {
+      const persona = buildPersona('companion', resources, defaultStyle)
+      expect(persona).toContain('governs sentence mechanics only')
+      expect(persona).toContain('does not soften a stance')
+      expect(persona).toContain('the mode you are in')
+    })
+
+    it('instructs avoiding em dashes concretely, not just "write naturally"', () => {
+      const persona = buildPersona('companion', resources, defaultStyle)
+      expect(persona).toContain('Do not use an em dash')
+      expect(persona).toContain('comma, a period, a colon, or parentheses')
+    })
+
+    it('is part of the identical shared prefix between safety modes', () => {
+      const companion = buildPersona('companion', resources, defaultStyle)
+      const firewall = buildPersona('firewall', resources, defaultStyle)
+      const marker = 'How you write: this rule governs sentence mechanics only'
+      expect(companion.slice(0, companion.indexOf(marker) + marker.length)).toEqual(
+        firewall.slice(0, firewall.indexOf(marker) + marker.length),
+      )
+    })
   })
 
   it('explains what reverie is and is not, in both modes', () => {

@@ -1,5 +1,5 @@
 import type { RequestListener, Server } from 'node:http'
-import { buildPersona, type ReverieConfig } from '@openreverie/core'
+import { buildPersona, type ReverieConfig, resolveDreamingModel } from '@openreverie/core'
 import type { EngineDeps, MemoryEngine } from '@openreverie/memory'
 import {
   type ChatEvent,
@@ -111,7 +111,7 @@ export function createServerLauncher(deps: ServerLaunchDeps) {
         embeddings: providers.embeddings,
         reflectionModel: config.models.reflection,
         embeddingModel: config.models.embeddings,
-        dreamingModel: config.models.dreaming ?? config.models.reflection,
+        dreamingModel: resolveDreamingModel(config),
         dreaming: config.dreaming,
         dreamPersona: (style) => buildPersona(config.safety.mode, config.safety.resources, style),
       },
@@ -131,16 +131,37 @@ export function createServerLauncher(deps: ServerLaunchDeps) {
       const port = await deps.listen(server, '127.0.0.1', options.port ?? 0)
       const origin = `http://127.0.0.1:${port}`
       const { token, auth } = deps.createAuth({ origin, now: options.now ?? Date.now })
+      // The same condition that decides whether the registry's own 30
+      // minute sweep is wired up at all: dreaming enabled, and the
+      // serverTimer trigger specifically on.
+      const serverTimerDreamingOn = config.dreaming.enabled && config.dreaming.triggers.serverTimer
       registry = deps.createRegistry({
         engine,
         config,
         chat: providers.chat,
         providerAvailable: providers.available,
         ...(options.now ? { now: options.now } : {}),
-        ...(config.dreaming.enabled && config.dreaming.triggers.serverTimer
-          ? { dreamTrigger: () => engine.maybeDream('serverTimer') }
-          : {}),
+        ...(serverTimerDreamingOn ? { dreamTrigger: () => engine.maybeDream('serverTimer') } : {}),
       })
+      // Defect 4, 2026-08-25 dreaming investigation: `reverie web` opens
+      // its engine with { maintenance: false }, which also gates off
+      // MemoryEngine.open()'s own onStart dream trigger (Ruling A4), so
+      // the web server used to have no early dream trigger at all. The
+      // only trigger was this registry's own 30 minute sweep, and a
+      // person who starts and stops the server repeatedly (exactly what
+      // the reporting user did) can go a long time without ever reaching
+      // that mark. Firing one attempt immediately, right after the engine
+      // opens, gives the web server the same "try once at startup"
+      // posture the CLI and chat REPL already have via onStart, while
+      // still keeping the 30 minute interval for a server that stays up.
+      // No new guards needed here: maybeDream's own dreamAttemptedPeriods
+      // set (added under the lock, after acquireDreamLock succeeds, see
+      // engine.ts) and the under-lock periodCovered recheck already make
+      // an extra concurrent call safe, so this immediate kick cannot
+      // double-dream against the interval sweep that follows it.
+      if (serverTimerDreamingOn) {
+        void engine.maybeDream('serverTimer').catch(() => {})
+      }
       listener = deps.createApp({ engine, config, auth, registry, staticDir, origin })
       const bootstrapUrl = `${origin}/?token=${token}`
       options.write(`Web interface: ${origin}`)

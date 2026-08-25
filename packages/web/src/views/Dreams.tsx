@@ -1,6 +1,13 @@
 import type { JSX } from 'react'
 import { useCallback, useEffect, useState } from 'react'
-import type { AppApi, DreamDetail, DreamInsight, DreamRow, DreamVerdict } from '../api.js'
+import type {
+  AppApi,
+  DreamDetail,
+  DreamInsight,
+  DreamRow,
+  DreamStatus,
+  DreamVerdict,
+} from '../api.js'
 import { Markdown } from './markdown.js'
 import './dreams.css'
 
@@ -39,9 +46,41 @@ function confidenceLabel(confidence: number): string {
 
 type ListStatus = 'loading' | 'ready' | 'error'
 
+// A plain-language line per fact the 2026-08-25 dreaming investigation
+// found nowhere to see: whether dreaming is on, what it will actually run
+// on, whether it can run right now, and (via the caller checking
+// lastAttempt separately) why the last real attempt did not leave a dream
+// behind. Kept as a pure function so it is directly testable without
+// rendering.
+export function dreamStatusSummary(status: DreamStatus): string[] {
+  if (!status.configured) {
+    return ['Dreaming is not configured on this server.']
+  }
+  if (!status.enabled) {
+    return [
+      'Dreaming is off. Turn it on with enabled = true under [dreaming] in your config file, ' +
+        'then restart reverie for the change to take effect.',
+    ]
+  }
+  const lines: string[] = [
+    `Dreaming is on, ${status.cadence}. Model: ${status.model ?? 'none configured'}.`,
+    `Reflected sessions: ${status.reflectedSessionCount}/${status.minReflectedSessions}` +
+      `${status.reflectedFloorMet ? '' : ' (below the floor; dreaming will not run yet)'}.`,
+  ]
+  lines.push(
+    status.periodCovered
+      ? `This period (${status.period}) already has a dream.`
+      : status.due
+        ? `This period (${status.period}) is due and has not run yet.`
+        : `This period (${status.period}) has not run yet, and is not due (see reflected sessions above).`,
+  )
+  return lines
+}
+
 export function Dreams({ api }: { api: AppApi }): JSX.Element {
   const [rows, setRows] = useState<DreamRow[]>([])
   const [listStatus, setListStatus] = useState<ListStatus>('loading')
+  const [status, setStatus] = useState<DreamStatus | null>(null)
   const [selectedDreamId, setSelectedDreamId] = useState<string | null>(null)
   const [selectedDream, setSelectedDream] = useState<DreamDetail | null>(null)
   const [detailError, setDetailError] = useState<string | null>(null)
@@ -59,9 +98,21 @@ export function Dreams({ api }: { api: AppApi }): JSX.Element {
     }
   }, [api])
 
+  const loadStatus = useCallback(async () => {
+    try {
+      setStatus(await api.getDreamStatus())
+    } catch {
+      // The dreams list itself still works without the status panel; a
+      // failure here is shown as the panel simply not appearing, not as a
+      // page-blocking error.
+      setStatus(null)
+    }
+  }, [api])
+
   // biome-ignore lint/correctness/useExhaustiveDependencies: only ever run on mount, like Journal's own loader
   useEffect(() => {
     void loadDreams()
+    void loadStatus()
   }, [])
 
   const selectDream = useCallback(
@@ -108,6 +159,22 @@ export function Dreams({ api }: { api: AppApi }): JSX.Element {
   return (
     <div className="dreams">
       <section className="dreams-index" aria-label="Dreams">
+        {status !== null && (
+          <section className="dreams-status-panel" aria-label="Dreaming status">
+            {dreamStatusSummary(status).map((line) => (
+              <p key={line} className="dreams-status-panel-line">
+                {line}
+              </p>
+            ))}
+            {status.lastAttempt !== undefined && (
+              <p className="dreams-status-panel-attempt" role="note">
+                The last attempt ({status.lastAttempt.trigger}, {status.lastAttempt.outcome}) did
+                not produce a dream: {status.lastAttempt.reason}
+              </p>
+            )}
+          </section>
+        )}
+
         {listStatus === 'loading' && <p className="dreams-status">Loading dreams.</p>}
 
         {listStatus === 'error' && (

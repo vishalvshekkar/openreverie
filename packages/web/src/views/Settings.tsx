@@ -91,6 +91,11 @@ export function Settings({ api }: { api: AppApi }): JSX.Element {
   return (
     <div className="settings">
       <h2>Settings</h2>
+      <p className="settings-page-note">
+        Every field below is saved the moment you change it: a select or a checkbox saves as soon as
+        you pick it, a text field saves when you click or tab away from it. There is no separate
+        save button, and nothing here is a draft.
+      </p>
       {error !== null && (
         <p className="settings-error" role="alert">
           {error}
@@ -100,7 +105,8 @@ export function Settings({ api }: { api: AppApi }): JSX.Element {
       <section className="settings-group">
         <h3>Style</h3>
         <p className="settings-note">
-          How reverie talks with you in general. This is saved and lasts.
+          How reverie talks with you in general. Saved automatically, like everything else on this
+          page.
         </p>
         <StyleSelect
           id="engagement"
@@ -153,8 +159,12 @@ export function Settings({ api }: { api: AppApi }): JSX.Element {
       <section className="settings-group">
         <h3>Dreams</h3>
         <p className="settings-note">
-          Turning dreaming on and how often it runs are set in config.toml, not here. These settings
-          only shape a dream once one has run.
+          Turning dreaming on and how often it runs are set in config.toml, not here. These three
+          settings below only shape a dream once one has run: they save automatically like
+          everything else on this page. A config.toml change to dreaming, on the other hand, is read
+          once when reverie starts, so it takes effect the next time you start the web server or the
+          CLI, not while this one keeps running. See the Dreams tab for whether dreaming is
+          currently on and why the last attempt did or did not produce a dream.
         </p>
         <label className="settings-row" htmlFor="dreamsVoice">
           <span>Voice</span>

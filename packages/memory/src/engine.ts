@@ -44,7 +44,13 @@ import {
   type DreamVoice,
   runDream,
 } from './dreaming.js'
-import { type DreamLogState, type DreamVerdict, foldDreamLog, readDreamLog } from './dreamLog.js'
+import {
+  appendDreamLog,
+  type DreamLogState,
+  type DreamVerdict,
+  foldDreamLog,
+  readDreamLog,
+} from './dreamLog.js'
 import {
   acquireDreamLock,
   type DreamCadence,
@@ -59,7 +65,9 @@ import {
   markDreamMentioned as appendDreamMentionedRecord,
   buildRecentDreamDigest as buildDreamDigest,
   collectDreamCandidates,
+  computeDreamStatus,
   reflectedSessionCount as countReflectedSessions,
+  type DreamStatus,
   adjacent as dreamNodesAdjacent,
   listDreamSummaries,
   existingDreamDates as listExistingDreamDates,
@@ -284,9 +292,14 @@ export interface EngineDeps {
   embeddings: EmbeddingProvider
   reflectionModel: string
   embeddingModel: string
-  // The model dreaming's own pipeline calls use. Falls back to
-  // reflectionModel when unset, the same non-chat model already used for
-  // every other structured, off-conversation call.
+  // The model dreaming's own pipeline calls use. No fallback to
+  // reflectionModel: dreaming runs a tool loop, and the reflection model is
+  // picked for cheap structured, non-tool output, which at least one real
+  // provider rejects outright for function tools. Every caller opening a
+  // MemoryEngine with dreaming enabled must resolve this itself (see
+  // resolveDreamingModel in @openreverie/core) and set it here; leaving it
+  // unset when dreaming is enabled makes every dream attempt fail with a
+  // clear error rather than silently running on the wrong model.
   dreamingModel?: string
   // Builds the persona string a dream run's system prompt carries. Lives on
   // deps, not here, because buildPersona is in @openreverie/core and memory
@@ -2895,6 +2908,21 @@ export class MemoryEngine implements DreamLookup {
     await appendDreamMentionedRecord(this.paths, dreamId)
   }
 
+  // Everything a person, `reverie doctor`, or the web Dreams tab needs to
+  // answer "why hasn't dreaming produced anything": see computeDreamStatus
+  // in engineDreams.ts, which this is a thin wrapper around. Reports
+  // this.deps.dreamingModel as-is, with no fallback: an unset model here
+  // is itself part of the honest status, not something to paper over.
+  async dreamStatus(): Promise<DreamStatus> {
+    return computeDreamStatus(
+      this.paths,
+      this.deps.dreaming,
+      this.deps.dreamingModel,
+      this.timezone(),
+      new Date(),
+    )
+  }
+
   // The shared final step of maybeDream and dreamNow, once a run has
   // actually been decided on: calls the pipeline, then reindexes whatever
   // it wrote and commits. A written dream's insight.md always exists;
@@ -2915,32 +2943,73 @@ export class MemoryEngine implements DreamLookup {
       // reaching here; this only fires if a future caller forgets to.
       throw new Error('executeDream called with no dreaming config')
     }
-    const model = this.deps.dreamingModel ?? this.deps.reflectionModel
+    // No fallback to reflectionModel. Dreaming runs a tool loop
+    // (search_memory, read_document, read_transcript, graph_query), and the
+    // reflection model is picked for cheap structured, non-tool output: at
+    // least one real provider rejects function tools outright for a
+    // reasoning-effort reflection model with an HTTP 400. Every caller that
+    // opens a MemoryEngine with dreaming enabled must resolve a real
+    // dreaming model itself (see resolveDreamingModel in
+    // @openreverie/core, the one place that decides which model dreaming
+    // actually uses) and pass it as dreamingModel; a caller that forgets
+    // gets a loud, specific error here rather than a dream silently run on
+    // the wrong model.
+    const model = this.deps.dreamingModel
+    if (model === undefined) {
+      const reason =
+        'Dreaming has no model configured: EngineDeps.dreamingModel was not set. There is no fallback to reflectionModel.'
+      await this.recordDreamAttempt(args.period, args.trigger, 'failed', reason)
+      throw new Error(reason)
+    }
     const voice: DreamVoice = this.profileCache.meta.dreams?.voice ?? 'first'
     const persona = this.deps.dreamPersona?.(this.currentStyle()) ?? ''
     const seedBodies = await this.buildSeedBodies(args.seeds)
     const recentDreamDigest = await buildDreamDigest(this.paths, args.logState, DREAM_DIGEST_COUNT)
 
-    const result = await runDream({
-      chat: this.deps.chat,
-      model,
-      persona,
-      lookup: this,
-      paths: this.paths,
-      maxToolCalls: dreaming.maxToolCalls,
-      voice,
-      now: args.now,
-      timezone: this.timezone(),
-      period: args.period,
-      trigger: args.trigger,
-      rngSeed: args.rngSeed,
-      seeds: args.seeds,
-      walk: args.walk,
-      seedBodies,
-      recentDreamDigest,
-      entitiesTouched: args.seeds.map((s) => s.id),
-      resolveNode: (id) => this.graphState.nodes.has(id),
-    })
+    // From here down is wrapped so that an aborted or failed attempt always
+    // leaves a durable record in the dream log, not just a warning that
+    // disappears when the process exits. Before this, nothing on disk ever
+    // recorded why a dream that got past the lock produced nothing: a
+    // person (or `reverie doctor`, or the web Dreams tab) had no way to
+    // find out. Routine declines that never reach this point (dreaming
+    // off, period covered, floor not met, lock held) are deliberately not
+    // recorded here: they are cheap to recompute live, and recording every
+    // 30-minute or every-launch decline would bury the one line that
+    // matters under noise.
+    let result: DreamRunResult
+    try {
+      result = await runDream({
+        chat: this.deps.chat,
+        model,
+        persona,
+        lookup: this,
+        paths: this.paths,
+        maxToolCalls: dreaming.maxToolCalls,
+        voice,
+        now: args.now,
+        timezone: this.timezone(),
+        period: args.period,
+        trigger: args.trigger,
+        rngSeed: args.rngSeed,
+        seeds: args.seeds,
+        walk: args.walk,
+        seedBodies,
+        recentDreamDigest,
+        entitiesTouched: args.seeds.map((s) => s.id),
+        resolveNode: (id) => this.graphState.nodes.has(id),
+      })
+    } catch (err) {
+      await this.recordDreamAttempt(args.period, args.trigger, 'failed', errorMessage(err))
+      throw err
+    }
+    if (result.outcome === 'aborted') {
+      await this.recordDreamAttempt(
+        args.period,
+        args.trigger,
+        'aborted',
+        result.reason ?? 'unknown',
+      )
+    }
 
     if (result.outcome === 'written' && result.dir !== undefined && result.dreamId !== undefined) {
       try {
@@ -2964,6 +3033,29 @@ export class MemoryEngine implements DreamLookup {
     }
 
     return result
+  }
+
+  // Appends the durable record behind an aborted or failed dream attempt
+  // (Defect 2, 2026-08-25 dreaming investigation). Logging failures are
+  // swallowed rather than thrown: the real error executeDream is already
+  // handling must never be masked by a secondary failure to write a log
+  // line about it, the same posture releaseDreamLock's own callers take
+  // toward a stuck lock file.
+  private async recordDreamAttempt(
+    period: string,
+    trigger: string,
+    outcome: 'aborted' | 'failed',
+    reason: string,
+  ): Promise<void> {
+    try {
+      await appendDreamLog(this.paths, [
+        { ts: new Date().toISOString(), type: 'attempt', period, trigger, outcome, reason },
+      ])
+    } catch (err) {
+      this.warnings.push(
+        `Could not record the dream attempt for period ${period}: ${errorMessage(err)}`,
+      )
+    }
   }
 
   // A node seed contributes its page body when it has one (no page means

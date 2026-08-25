@@ -7,7 +7,7 @@
 // are built from the same shared parts so the two prompts stay in sync by
 // construction, and so tests can assert the shared prefix is identical.
 
-import { JOURNALING_PROTOCOL_ABSENT } from '@openreverie/memory'
+import { JOURNALING_PROTOCOL_ABSENT, PROSE_VOICE_RULE } from '@openreverie/memory'
 import type { CrisisResource, StyleConfig } from './config.js'
 import { buildJournalModeParagraph } from './journaling.js'
 import { MODES, type ModeName, modeOverrides, modeParagraph } from './modes.js'
@@ -171,6 +171,7 @@ export function buildPersona(
     MEMORY_ORIENTATION,
     CONVERSATIONAL_VOICE,
     STANCE_DOCTRINE,
+    PROSE_VOICE_RULE,
     styleSection(style, activeMode),
     modeSection(activeMode, journalingProtocol),
     crisisSection(mode, resources),
