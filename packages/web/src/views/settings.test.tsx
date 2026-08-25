@@ -89,6 +89,55 @@ describe('Settings', () => {
     }
   })
 
+  it('defaults the dreams voice to first person and the two checkboxes to on when profile.dreams is absent', async () => {
+    render(<Settings api={makeApi()} />)
+    expect(await screen.findByLabelText('Voice')).toHaveValue('first')
+    expect(screen.getByLabelText('Mention a fresh dream when we next talk')).toBeChecked()
+    expect(
+      screen.getByLabelText('Let reverie recall dream insights during conversation'),
+    ).toBeChecked()
+  })
+
+  it('reflects an explicit dreams voice and a checkbox turned off', async () => {
+    render(
+      <Settings
+        api={makeApi({
+          ...emptyProfile,
+          dreams: { voice: 'second', openerMention: false },
+        })}
+      />,
+    )
+    expect(await screen.findByLabelText('Voice')).toHaveValue('second')
+    expect(screen.getByLabelText('Mention a fresh dream when we next talk')).not.toBeChecked()
+    expect(
+      screen.getByLabelText('Let reverie recall dream insights during conversation'),
+    ).toBeChecked()
+  })
+
+  it('patches dreams.voice through the profile PATCH path when the select changes', async () => {
+    render(<Settings api={makeApi()} />)
+    const select = await screen.findByLabelText('Voice')
+    await user.selectOptions(select, 'third')
+    await waitFor(() => expect(patches).toHaveLength(1))
+    expect(patches[0]).toEqual({ dreams: { voice: 'third' } })
+  })
+
+  it('patches dreams.promptSection through the profile PATCH path when its checkbox changes', async () => {
+    render(<Settings api={makeApi()} />)
+    const checkbox = await screen.findByLabelText(
+      'Let reverie recall dream insights during conversation',
+    )
+    await user.click(checkbox)
+    await waitFor(() => expect(patches).toHaveLength(1))
+    expect(patches[0]).toEqual({ dreams: { promptSection: false } })
+  })
+
+  it('says plainly that enabling dreaming and its cadence live in config.toml, not here', async () => {
+    render(<Settings api={makeApi()} />)
+    expect(await screen.findByText('Dreams')).toBeInTheDocument()
+    expect(screen.getByText(/config\.toml/)).toBeInTheDocument()
+  })
+
   it('says so plainly when settings cannot be loaded', async () => {
     const failing = {
       getProfile: async () => {

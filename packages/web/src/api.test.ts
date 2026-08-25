@@ -209,6 +209,78 @@ describe('ApiClient request and NDJSON parsing', () => {
     expect(url).toBe('/api/v1/settings')
   })
 
+  it('lists dreams', async () => {
+    const row = {
+      dreamId: 'dream_01A',
+      date: '2026-08-20',
+      period: '2026-08-20',
+      hasNarrative: true,
+      insightCount: 2,
+    }
+    fetchMock.mockResolvedValue(jsonResponse({ data: [row], meta: { nextCursor: null } }))
+    const client = new ApiClient()
+    await expect(client.listDreams()).resolves.toEqual([row])
+    const [url, init] = fetchMock.mock.calls[0] ?? []
+    expect(url).toBe('/api/v1/dreams')
+    expect(init?.method).toBeUndefined()
+  })
+
+  it('gets one dream, narrative and insights included', async () => {
+    const detail = {
+      dreamId: 'dream_01A',
+      date: '2026-08-20',
+      period: '2026-08-20',
+      narrative: 'A short piece of writing.',
+      insights: [
+        {
+          insightId: 'ins_1',
+          kind: 'pattern',
+          headline: 'Evenings feel heavier lately',
+          claim: 'Journal entries after 8pm mention tiredness more than earlier ones.',
+          confidence: 0.62,
+        },
+      ],
+      processLog: 'seed: arc_01X\nwrote narrative\nwrote 1 insight',
+    }
+    fetchMock.mockResolvedValue(jsonResponse({ data: detail, meta: { nextCursor: null } }))
+    const client = new ApiClient()
+    await expect(client.getDream('dream_01A')).resolves.toEqual(detail)
+    const [url] = fetchMock.mock.calls[0] ?? []
+    expect(url).toBe('/api/v1/dreams/dream_01A')
+  })
+
+  it('sends feedback for one insight with a POST carrying the exact verdict', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        data: { insightId: 'ins_1', verdict: 'wrong' },
+        meta: { nextCursor: null },
+      }),
+    )
+    const client = new ApiClient()
+    await client.sendDreamFeedback('dream_01A', 'ins_1', 'wrong')
+    const [url, init] = fetchMock.mock.calls[0] ?? []
+    expect(url).toBe('/api/v1/dreams/dream_01A/feedback')
+    expect(init?.method).toBe('POST')
+    expect(JSON.parse(init?.body as string)).toEqual({ insightId: 'ins_1', verdict: 'wrong' })
+  })
+
+  it('includes a note in the feedback body only when one is given', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        data: { insightId: 'ins_2', verdict: 'do_not_bring_up' },
+        meta: { nextCursor: null },
+      }),
+    )
+    const client = new ApiClient()
+    await client.sendDreamFeedback('dream_01A', 'ins_2', 'do_not_bring_up', 'not relevant to me')
+    const [, init] = fetchMock.mock.calls[0] ?? []
+    expect(JSON.parse(init?.body as string)).toEqual({
+      insightId: 'ins_2',
+      verdict: 'do_not_bring_up',
+      note: 'not relevant to me',
+    })
+  })
+
   it('documentRowSchema accepts a journal row with method and entryDate', () => {
     const result = documentRowSchema.safeParse({
       docId: 'doc_01JZZZ',

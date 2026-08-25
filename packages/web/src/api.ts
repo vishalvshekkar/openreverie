@@ -156,6 +156,12 @@ export const streamEventSchema = z.discriminatedUnion('type', [
   }),
 ])
 
+export const profileDreamsSchema = z.strictObject({
+  voice: z.enum(['first', 'second', 'third']).optional(),
+  openerMention: z.boolean().optional(),
+  promptSection: z.boolean().optional(),
+})
+
 export const profileSchema = z.strictObject({
   preferredName: z.string().nullable(),
   pronouns: z.string().nullable(),
@@ -170,10 +176,56 @@ export const profileSchema = z.strictObject({
     orientation: z.string(),
   }),
   prose: z.string(),
+  dreams: profileDreamsSchema.optional(),
 })
 
 export const settingsSchema = z.strictObject({
   safetyMode: z.enum(['companion', 'firewall']),
+})
+
+export const dreamVerdictSchema = z.enum(['right', 'wrong', 'do_not_bring_up'])
+
+export const dreamRowSchema = z.strictObject({
+  dreamId: z.string(),
+  date: z.string(),
+  period: z.string(),
+  hasNarrative: z.boolean(),
+  insightCount: z.number().int().nonnegative(),
+})
+
+const dreamInsightKindSchema = z.enum([
+  'pattern',
+  'change_over_time',
+  'connection',
+  'open_question',
+  'strength',
+])
+
+export const dreamInsightSchema = z.strictObject({
+  insightId: z.string(),
+  kind: dreamInsightKindSchema,
+  headline: z.string(),
+  claim: z.string(),
+  confidence: z.number().min(0).max(1),
+  verdict: dreamVerdictSchema.optional(),
+})
+
+export const dreamDetailSchema = z.strictObject({
+  dreamId: z.string(),
+  date: z.string(),
+  period: z.string(),
+  narrative: z.string().optional(),
+  insights: z.array(dreamInsightSchema),
+  processLog: z.string(),
+})
+
+// The feedback endpoint's own response body is not part of the shared HTTP
+// contract (only its request body is), so this mirrors the established
+// resolve-and-echo-back convention already used for proposal resolution
+// rather than inventing a new shape.
+const dreamFeedbackResponseSchema = z.strictObject({
+  insightId: z.string(),
+  verdict: dreamVerdictSchema,
 })
 
 export type PublicProfile = z.infer<typeof profileSchema>
@@ -189,6 +241,10 @@ export type Proposal = z.infer<typeof proposalSchema>
 export type GraphNode = z.infer<typeof graphNodeSchema>
 export type GraphEdge = z.infer<typeof graphEdgeSchema>
 export type GraphSnapshot = z.infer<typeof graphSnapshotSchema>
+export type DreamVerdict = z.infer<typeof dreamVerdictSchema>
+export type DreamRow = z.infer<typeof dreamRowSchema>
+export type DreamInsight = z.infer<typeof dreamInsightSchema>
+export type DreamDetail = z.infer<typeof dreamDetailSchema>
 
 export interface Page<T> {
   data: T[]
@@ -220,6 +276,14 @@ export interface AppApi {
   getProfile(): Promise<PublicProfile>
   updateProfile(patch: Record<string, unknown>): Promise<PublicProfile>
   getSettings(): Promise<PublicSettings>
+  listDreams(): Promise<DreamRow[]>
+  getDream(dreamId: string): Promise<DreamDetail>
+  sendDreamFeedback(
+    dreamId: string,
+    insightId: string,
+    verdict: DreamVerdict,
+    note?: string,
+  ): Promise<void>
 }
 
 export class ApiHttpError extends Error {
@@ -464,6 +528,33 @@ export class ApiClient implements AppApi {
 
   getSettings(): Promise<PublicSettings> {
     return this.request('/api/v1/settings', {}, settingsSchema)
+  }
+
+  listDreams(): Promise<DreamRow[]> {
+    return this.request('/api/v1/dreams', {}, z.array(dreamRowSchema))
+  }
+
+  getDream(dreamId: string): Promise<DreamDetail> {
+    return this.request(`/api/v1/dreams/${encodeURIComponent(dreamId)}`, {}, dreamDetailSchema)
+  }
+
+  async sendDreamFeedback(
+    dreamId: string,
+    insightId: string,
+    verdict: DreamVerdict,
+    note?: string,
+  ): Promise<void> {
+    await this.request(
+      `/api/v1/dreams/${encodeURIComponent(dreamId)}/feedback`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(
+          note === undefined ? { insightId, verdict } : { insightId, verdict, note },
+        ),
+      },
+      dreamFeedbackResponseSchema,
+    )
   }
 
   private async ndjson(path: string, init: RequestInit): Promise<AsyncIterable<StreamEvent>> {

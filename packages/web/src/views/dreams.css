@@ -1,0 +1,285 @@
+/*
+ * Styles for the Dreams view. Every colour comes from a var(--token) defined
+ * in tokens.css; this file defines no raw colours. tokens.css is not
+ * imported here because styles.css already loads it.
+ */
+
+.dreams {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  background: var(--paper);
+  color: var(--ink);
+}
+
+.dreams-index {
+  width: var(--sidebar-width);
+  flex: 0 0 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-4) var(--space-3);
+  border-right: 1px solid var(--rule);
+  font-family: var(--font-ui);
+}
+
+.dreams-index ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.dreams-index li button {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  width: 100%;
+  text-align: left;
+  font-family: var(--font-ui);
+  color: var(--ink-soft);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-2);
+  padding: var(--space-2) var(--space-3);
+  cursor: pointer;
+}
+
+.dreams-index li button:hover {
+  background: var(--panel);
+  color: var(--ink);
+}
+
+.dreams-index li button[aria-current="true"] {
+  background: var(--panel-raised);
+  border-color: var(--rule-strong);
+  color: var(--ink);
+  font-weight: 600;
+  box-shadow: var(--shadow);
+}
+
+.dreams-index li button:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+.dreams-row-date {
+  font-size: var(--step-0);
+}
+
+.dreams-row-meta {
+  font-size: var(--step--1);
+  color: var(--ink-faint);
+}
+
+.dreams-status,
+.dreams-empty,
+.dreams-notice {
+  font-family: var(--font-ui);
+  font-size: var(--step-0);
+  color: var(--ink-soft);
+  padding: var(--space-3);
+}
+
+.dreams-status-error {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.dreams-status-error button {
+  font-family: var(--font-ui);
+  font-size: var(--step-0);
+  color: var(--ink);
+  background: none;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-1);
+  padding: var(--space-1) var(--space-2);
+  cursor: pointer;
+}
+
+.dreams-reading {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-6);
+}
+
+.dreams-reading-header {
+  max-width: var(--reading-measure);
+  margin: 0 0 var(--space-5);
+}
+
+.dreams-meta {
+  margin: 0;
+  font-family: var(--font-record);
+  font-size: var(--step--1);
+  letter-spacing: 0.02em;
+  color: var(--ink-faint);
+}
+
+.dreams-narrative,
+.dreams-insights {
+  max-width: var(--reading-measure);
+  margin: 0 0 var(--space-7);
+}
+
+.dreams-narrative h3,
+.dreams-insights h3 {
+  font-family: var(--font-ui);
+  font-size: var(--step--1);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin: 0 0 var(--space-3);
+}
+
+/* The narrative is prose meant to be read, so it takes the reading face. */
+.dreams-narrative-body {
+  font-family: var(--font-reading);
+  font-size: var(--step-2);
+  line-height: 1.75;
+  color: var(--ink);
+}
+
+.dreams-narrative-body p {
+  margin: 0 0 var(--space-4);
+}
+
+.dreams-no-narrative {
+  font-family: var(--font-ui);
+  font-size: var(--step-0);
+  color: var(--ink-soft);
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-2);
+  padding: var(--space-3);
+  margin: 0;
+}
+
+.dreams-insights ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+/*
+ * Each insight is a hedged observation, not prose, so it is a bordered
+ * card in the utility face rather than a paragraph in the reading face:
+ * a deliberate visual break from the narrative section above it.
+ */
+.dreams-insight {
+  background: var(--panel-raised);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-2);
+  padding: var(--space-4);
+  font-family: var(--font-ui);
+}
+
+.dreams-insight-kind {
+  margin: 0 0 var(--space-1);
+  font-size: var(--step--1);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+.dreams-insight-headline {
+  margin: 0 0 var(--space-2);
+  font-size: var(--step-1);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.dreams-insight-claim {
+  margin: 0 0 var(--space-2);
+  font-size: var(--step-0);
+  color: var(--ink-soft);
+}
+
+.dreams-insight-confidence {
+  margin: 0 0 var(--space-3);
+  font-size: var(--step--1);
+  color: var(--ink-faint);
+}
+
+.dreams-insight-feedback {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin: 0;
+  border: 0;
+  padding: 0;
+  min-width: 0;
+}
+
+.dreams-insight-feedback button {
+  font-family: var(--font-ui);
+  font-size: var(--step--1);
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-1);
+  padding: var(--space-1) var(--space-3);
+  cursor: pointer;
+}
+
+.dreams-insight-feedback button:hover {
+  background: var(--said);
+}
+
+.dreams-insight-feedback button[aria-pressed="true"] {
+  background: var(--ink);
+  color: var(--ink-invert);
+  border-color: var(--ink);
+}
+
+.dreams-insight-feedback button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.dreams-insight-feedback button:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+.dreams-insight-verdict {
+  margin: var(--space-2) 0 0;
+  font-size: var(--step--1);
+  color: var(--ink-soft);
+}
+
+/*
+ * The process log is an audit trail, not part of the reading experience:
+ * collapsed by default behind a disclosure, and rendered preformatted.
+ */
+.dreams-process-log {
+  max-width: var(--reading-measure);
+  font-family: var(--font-ui);
+  font-size: var(--step-0);
+  color: var(--ink-soft);
+}
+
+.dreams-process-log summary {
+  cursor: pointer;
+  color: var(--ink-faint);
+}
+
+.dreams-process-log pre {
+  margin: var(--space-3) 0 0;
+  background: var(--paper-sunken);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-2);
+  padding: var(--space-3);
+  overflow-x: auto;
+  white-space: pre-wrap;
+  font-family: var(--font-record);
+  font-size: var(--step--1);
+  color: var(--ink-soft);
+}

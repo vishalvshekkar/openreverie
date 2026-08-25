@@ -2,19 +2,21 @@ import { Component, type ReactNode, useEffect, useState } from 'react'
 import type { AppApi } from './api.js'
 import { AtlasView } from './atlas.js'
 import { Conversations } from './views/Conversations.js'
+import { Dreams } from './views/Dreams.js'
 import { Journal } from './views/Journal.js'
 import { Library } from './views/Library.js'
 import { Settings } from './views/Settings.js'
 
-export type ViewId = 'conversations' | 'atlas' | 'library' | 'journal' | 'settings'
+export type ViewId = 'conversations' | 'atlas' | 'library' | 'journal' | 'dreams' | 'settings'
 
-const VIEW_IDS: ViewId[] = ['conversations', 'atlas', 'library', 'journal', 'settings']
+const VIEW_IDS: ViewId[] = ['conversations', 'atlas', 'library', 'journal', 'dreams', 'settings']
 
 const VIEW_LABELS: Record<ViewId, string> = {
   conversations: 'Talk',
   atlas: 'Atlas',
   library: 'Record',
   journal: 'Journal',
+  dreams: 'Dreams',
   settings: 'Settings',
 }
 
@@ -60,6 +62,14 @@ function RailIcon({ view }: { view: ViewId }) {
       <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
         <path d="M6 4h10.5A1.5 1.5 0 0 1 18 5.5v13a1.5 1.5 0 0 1-1.5 1.5H6z" />
         <path d="M6 4v16M9 8.5h6M9 12h6M9 15.5h3" />
+      </svg>
+    )
+  }
+  if (view === 'dreams') {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path d="M15.5 4.5A8 8 0 1 0 19.5 17 6.5 6.5 0 0 1 15.5 4.5z" />
+        <path d="M17.5 5.5l.6 1.4 1.4.6-1.4.6-.6 1.4-.6-1.4-1.4-.6 1.4-.6z" />
       </svg>
     )
   }
@@ -160,6 +170,11 @@ export function App({ api }: { api: AppApi }) {
         {view === 'journal' && (
           <ViewBoundary>
             <Journal api={api} />
+          </ViewBoundary>
+        )}
+        {view === 'dreams' && (
+          <ViewBoundary>
+            <Dreams api={api} />
           </ViewBoundary>
         )}
         {view === 'settings' && (

@@ -151,6 +151,44 @@ export function Settings({ api }: { api: AppApi }): JSX.Element {
       </section>
 
       <section className="settings-group">
+        <h3>Dreams</h3>
+        <p className="settings-note">
+          Turning dreaming on and how often it runs are set in config.toml, not here. These settings
+          only shape a dream once one has run.
+        </p>
+        <label className="settings-row" htmlFor="dreamsVoice">
+          <span>Voice</span>
+          <select
+            id="dreamsVoice"
+            value={profile.dreams?.voice ?? 'first'}
+            onChange={(event) => void patch({ dreams: { voice: event.target.value } })}
+          >
+            <option value="first">First person</option>
+            <option value="second">Second person</option>
+            <option value="third">Third person</option>
+          </select>
+        </label>
+        <label className="settings-row" htmlFor="dreamsOpenerMention">
+          <span>Mention a fresh dream when we next talk</span>
+          <input
+            id="dreamsOpenerMention"
+            type="checkbox"
+            checked={profile.dreams?.openerMention !== false}
+            onChange={(event) => void patch({ dreams: { openerMention: event.target.checked } })}
+          />
+        </label>
+        <label className="settings-row" htmlFor="dreamsPromptSection">
+          <span>Let reverie recall dream insights during conversation</span>
+          <input
+            id="dreamsPromptSection"
+            type="checkbox"
+            checked={profile.dreams?.promptSection !== false}
+            onChange={(event) => void patch({ dreams: { promptSection: event.target.checked } })}
+          />
+        </label>
+      </section>
+
+      <section className="settings-group">
         <h3>Safety mode</h3>
         <p>{safetyMode ?? 'not known'}</p>
         <p className="settings-note">
