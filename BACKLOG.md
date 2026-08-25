@@ -452,6 +452,30 @@ item ships, remove it from here and record it in `ROADMAP.md`'s Done narrative.
     time), which the writer and the `unknown` transition would both key off.
   - Size: medium (needs a live-session design decision, not only a data-layer change).
 
+- **An untimed commitment has no channel to reach the live companion at all.** Spec Section 3
+  says a commitment with "no timing, no bracket" should be "surfaced only when the conversation
+  touches the subject, never by the calendar," but that channel does not exist. Verified directly:
+  `sqlite.ts` writes no commitment rows (`grep -n commitment packages/memory/src/sqlite.ts` returns
+  nothing), `graph_query` needs a `nodeId` the model has no way to discover, commitment nodes carry
+  no edges unless `waitsOn` is set, and none of the thirteen live tools enumerates commitments.
+  After the Important 8 eligibility fix, an untimed commitment is invisible to the live
+  conversation entirely; it is not orphaned, since reflection still sees every commitment,
+  uncapped (`packages/memory/src/engine.ts:1867`), so it stays revisable and resolvable at session
+  end, but nothing brings it back into a live conversation on its own. Related: a `clearTiming`
+  revision (`packages/memory/src/reflection.ts`, Important 6) now makes a commitment permanently
+  unsurfaceable to the live model the same way, which is not what "withdraw the stated time" reads
+  as to whoever calls it.
+  - Why deferred: not stated (this gap surfaced in a 2026-08-25 re-review that corrected an
+    unsupported claim in code comments and tests, not from a recorded scoping decision).
+  - Where the thinking lives: `docs/superpowers/specs/2026-08-24-commitments-design.md`, Section 3,
+    "Not stated at all"; `packages/memory/src/commitments.ts`
+    (`isTimeEligible`, `selectCommitments`); `packages/core/src/context.ts` (`commitmentsSection`);
+    `packages/memory/src/sqlite.ts` (no commitment indexing); `packages/memory/src/reflection.ts`
+    (`clearTiming`, Important 6).
+  - Trigger: not stated.
+  - Size: not stated (a live-session design decision on what indexes commitments for search or
+    tool lookup, similar in shape to the deferred `askedAt` mechanism above).
+
 - **Proposals returning for arbitration, in a non-conversational surface.** Not permission to
   remember, but arbitration only the user can settle: merging two nodes that turn out to be the
   same human, closing an arc gone quiet, resolving a contradiction between what was said months

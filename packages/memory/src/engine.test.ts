@@ -3350,8 +3350,9 @@ describe('MemoryEngine', () => {
       // Important 8: an untimed ("someday") commitment has no bracket and
       // can never fall within one, or within a lead time before one, so it
       // is never eligible through this standing, always-rendered section.
-      // It still reaches the model through search, unaffected by
-      // selectCommitments.
+      // Nothing else in the live companion surfaces it either (see
+      // BACKLOG.md): it stays invisible to the live conversation, though
+      // reflection still sees it, uncapped, at session end.
       await recordCommitment(paths, {
         label: 'Do something, someday',
         flavor: 'errand',

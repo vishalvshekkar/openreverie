@@ -16,7 +16,7 @@ A rebuild does two independent things:
 
 - **Documents.** `MemoryIndex.wipeAllDocuments` clears the `documents`,
   `chunks`, `chunks_fts`, and `embeddings` tables, then `reindexAll`
-  (`packages/memory/src/engine.ts:1817`) walks the memory folder
+  (`packages/memory/src/engine.ts:1822`) walks the memory folder
   (`walkAllDocuments`) and reinserts every document it finds: the
   constitution, realms, arcs, person pages, daily and weekly rollups, and
   each session's `summary.md`. Verbatim session transcripts are never
@@ -25,7 +25,7 @@ A rebuild does two independent things:
   written into the `nodes` and `edges` tables via `replaceGraph`. This runs
   every time the engine opens (`MemoryEngine.open`,
   `packages/memory/src/engine.ts:461`), and again on every `reindexAll` and
-  every live graph write (`syncGraph`, `packages/memory/src/engine.ts:1877`).
+  every live graph write (`syncGraph`, `packages/memory/src/engine.ts:1882`).
 
 ## Schema
 

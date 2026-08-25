@@ -275,8 +275,10 @@ describe('selectCommitments', () => {
     // Important 8 / spec Section 4: eligibility is defined positively as
     // "today falls within its bracket, or within a lead time before it".
     // An untimed commitment has no bracket and can never satisfy that, so
-    // it never reaches this always-on standing section. It still reaches
-    // the model through search, which is unaffected by selectCommitments.
+    // it never reaches this always-on standing section, and nothing else
+    // in the live companion surfaces it either (see BACKLOG.md). It is
+    // still seen by reflection, uncapped, at session end, so it stays
+    // revisable and resolvable there.
     const untimed = { ...base }
     const noBracket = {
       ...base,
@@ -344,10 +346,21 @@ function stripComments(source: string): string {
 // crude tripwire by design (see the comment on the test below), and
 // crude tools should stay scoped to files that are actually about the
 // thing they guard.
+//
+// packages/core/src/context.ts (commitmentsSection) renders the
+// commitment shape into the prompt and was also considered, but stays out
+// of this scan for a different reason: this is a packages/memory test,
+// and reading a file from another package by a cross-package relative
+// path here would be a coupling this test should not carry. A 2026-08-25
+// re-review ran this test's own stripComments against context.ts directly
+// and found it clean of all five forbidden words, its only "hit" sitting
+// inside a `//` comment, which stripComments already strips, so the
+// cross-package read is the only reason to exclude it, not anything
+// currently worth guarding there.
 const COMMITMENT_OWNING_FILES = ['./commitments.ts', './graph.ts']
 
 describe('no-overdue-state guarantee', () => {
-  it('has no state, field or helper expressing lateness, across every file that owns or renders the commitment shape', () => {
+  it('has no state, field or helper expressing lateness, across every file that owns the commitment shape', () => {
     // Spec section 6: if the data cannot express "you failed to do this",
     // nothing downstream can render it. This test is a crude string scan
     // of the code with comments stripped out, not a type system, and that

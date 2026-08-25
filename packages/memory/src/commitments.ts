@@ -316,10 +316,13 @@ const ASK_GRACE_DAYS = 14
 // nothing for the calendar to gate on, so it is never eligible through
 // this standing, always-rendered section: spec Section 4 defines
 // eligibility positively ("today falls within its bracket, or within a
-// lead time before it"), which an unbounded commitment can never satisfy,
-// and spec Section 3's "surfaced only when the conversation touches the
-// subject, never by the calendar" for that case describes retrieval
-// (search), not this always-on prompt section. A live-tool commitment
+// lead time before it"), which an unbounded commitment can never satisfy.
+// Spec Section 3 says that case should be "surfaced only when the
+// conversation touches the subject, never by the calendar", but no such
+// channel exists yet: nothing indexes commitments for search or tool
+// lookup (see BACKLOG.md). An untimed commitment stays invisible to the
+// live companion; reflection still sees it, uncapped, at session end, so
+// it remains revisable and resolvable there. A live-tool commitment
 // with an unresolvable stated time and no gloss yet (buildCommitmentTiming
 // in engine.ts, the refused branch) is therefore not eligible until
 // reflection glosses it at session end; that is correct, not a gap, since
