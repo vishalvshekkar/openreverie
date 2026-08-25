@@ -8,8 +8,10 @@ import {
   type Document,
   type DreamSummary,
   type DreamVerdict,
+  EDGE_TYPES,
   foldDreamLog,
   memoryPaths,
+  NODE_TYPES,
   type Profile,
   type ProfileSettingsPatch,
   type Proposal,
@@ -618,8 +620,17 @@ const publicProposalSchema = z.strictObject({
   sourceSessionId: z.string(),
 })
 const publicProposalsSchema = z.array(publicProposalSchema)
-const graphNodeTypeSchema = z.enum(['realm', 'arc', 'item', 'session', 'person', 'entity'])
-const graphEdgeTypeSchema = z.enum(['part_of', 'in', 'from', 'involves', 'relates_to'])
+// Derived from @openreverie/memory's NODE_TYPES/EDGE_TYPES rather than
+// hand copied. server is allowed to depend on memory (server -> core ->
+// memory is a permitted downward direction), so this schema cannot drift
+// from the real graph vocabulary the way a second hand written literal
+// list could. See graph-vocabulary-parity.test.ts for the guard that
+// would catch it if a future edit undoes this derivation.
+// Exported only so graph-vocabulary-parity.test.ts can assert this schema
+// stays derived from @openreverie/memory's NODE_TYPES/EDGE_TYPES, not so
+// any route handler needs it directly.
+export const graphNodeTypeSchema = z.enum(NODE_TYPES)
+export const graphEdgeTypeSchema = z.enum(EDGE_TYPES)
 const publicGraphNodeSchema = z.strictObject({
   id: z.string(),
   type: graphNodeTypeSchema,

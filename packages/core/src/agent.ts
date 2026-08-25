@@ -65,7 +65,7 @@ If the guidance above is the first conversation guidance, follow it exactly and 
 Otherwise: always speak, even when nothing in particular needs raising. If nothing is pressing, one or two warm sentences with no agenda is enough.
 
 If there is something worth opening with, choose exactly one, in this order, and lead with only that:
-1. Something left unresolved from the most recent session.
+1. Something left unresolved from the most recent session. A recorded intention is evidence the person meant to do something, never evidence that they did it: do not ask how something went unless the record shows it actually happened.
 2. Something notable in the recent record: a day that sounded hard, a milestone coming up.
 3. Nothing. A short hello.
 
@@ -219,12 +219,18 @@ export class AgentSession {
     options: AgentSessionOptions = {},
   ): Promise<AgentSession> {
     const mode = options.mode ?? 'general'
+    // assembleSystemPrompt's own injectable clock is only useful if
+    // AgentSession actually passes its clock to it. Computed once here,
+    // ahead of the call, rather than passing options.now directly, so a
+    // caller that omits options.now keeps reading the real wall clock
+    // unchanged, the same default assembleSystemPrompt itself falls back to.
     const now = options.now ?? (() => new Date())
-    const system = await assembleSystemPrompt(engine, config, mode)
+    const system = await assembleSystemPrompt(engine, config, mode, now)
     // A second, narrower read of session context, just for freshDream (see
     // the field comment above): sessionContext reads only disk state as of
     // `now`, so calling it twice here costs an extra read, never a
-    // different answer than what assembleSystemPrompt already used.
+    // different answer than what assembleSystemPrompt already used. It reads
+    // the same injected clock, so a pinned test clock stays pinned here too.
     const context = await engine.sessionContext(now(), mode)
     const sessionId = await engine.startSession()
     // Recorded from the session's first moment, so a process that dies
@@ -269,7 +275,7 @@ export class AgentSession {
   // the codebase is buried inside runTurn, and a /style change would apply
   // no earlier than the next session.
   async refreshSystemPrompt(): Promise<void> {
-    this.system = await assembleSystemPrompt(this.engine, this.config, this.activeMode)
+    this.system = await assembleSystemPrompt(this.engine, this.config, this.activeMode, this.now)
   }
 
   async *send(userText: string): AsyncIterable<AgentEvent> {
@@ -459,7 +465,12 @@ export class AgentSession {
         // during the first conversation. Messages already stamped keep the
         // stamp they were written with and are never re-rendered.
         if (toolCall.name === 'update_profile' && !this.resultHasError(result)) {
-          this.system = await assembleSystemPrompt(this.engine, this.config, this.activeMode)
+          this.system = await assembleSystemPrompt(
+            this.engine,
+            this.config,
+            this.activeMode,
+            this.now,
+          )
         }
 
         // Same reasoning as update_profile above: journaling.md feeds

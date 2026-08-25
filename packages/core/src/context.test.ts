@@ -12,6 +12,7 @@ import {
   type MemoryPaths,
   memoryPaths,
   newId,
+  recordCommitment,
   SessionStore,
   writeDocumentAtomic,
   writeProfile,
@@ -307,6 +308,7 @@ describe('assembleSystemPrompt', () => {
     expect(prompt).not.toContain('## People')
     expect(prompt).not.toContain('## Entities')
     expect(prompt).not.toContain('## Recent intentions')
+    expect(prompt).not.toContain('## Commitments')
     expect(prompt).not.toContain('## Latest daily rollup')
     expect(prompt).not.toContain('## Recent sessions')
 
@@ -447,7 +449,366 @@ describe('assembleSystemPrompt', () => {
     expect(prompt).toContain('## Recent intentions')
     expect(prompt).toContain(`${dateString}: Call the dentist next week.`)
 
+    // Cleanly omitted, not rendered as an empty parenthetical: the exact
+    // line has nothing trailing it, not even "()".
+    const lines = prompt.split('\n')
+    const intentionLine = lines.find((line) => line.includes('Call the dentist next week.'))
+    expect(intentionLine).toBe(`- ${dateString}: Call the dentist next week.`)
+
     await engine.close()
+  })
+
+  it("renders a recent intention's stated eventTime as the person's own words next to the date it was said", async () => {
+    await pinTimezoneUtc(paths)
+    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)
+    const store = await SessionStore.start(paths, yesterday)
+    await store.appendLine({ ts: yesterday.toISOString(), role: 'user', content: 'Hi.' })
+    const dateString = yesterday.toISOString().slice(0, 10)
+    await writeDocumentAtomic({
+      path: join(store.dir, 'summary.md'),
+      meta: {
+        id: newId('doc'),
+        items: [
+          {
+            id: newId('item'),
+            text: 'See Nightfall with Arjun.',
+            kind: 'intention',
+            ts: '',
+            eventTime: 'this evening',
+          },
+        ],
+      },
+      body: 'A quiet day.\n',
+    })
+
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+    const prompt = await assembleSystemPrompt(engine, testConfig())
+
+    expect(prompt).toContain('## Recent intentions')
+    const lines = prompt.split('\n')
+    const intentionLine = lines.find((line) => line.includes('See Nightfall with Arjun.'))
+    // The stated wording appears verbatim, next to the date it was said.
+    // Never resolved into a timestamp or a computed date.
+    expect(intentionLine).toContain(dateString)
+    expect(intentionLine).toContain('this evening')
+    expect(intentionLine).not.toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/)
+
+    await engine.close()
+  })
+
+  it('renders no parenthetical for an intention whose eventTime came in as an empty or whitespace-only string, at either write site (a live remember() call and a reflected item)', async () => {
+    await pinTimezoneUtc(paths)
+    // The reflection response carries one item with an empty eventTime and
+    // one with a whitespace-only eventTime, exercising mintItems (the
+    // reflection.ts write site). A live remember() call for a third item,
+    // also with an empty eventTime, exercises engine.remember (the
+    // engine.ts write site) in the same session.
+    const chat = new FakeChatProvider([
+      {
+        text: JSON.stringify({
+          summary: 'A quiet check-in.',
+          items: [
+            {
+              text: 'See Nightfall with Priya, reflected empty case',
+              kind: 'intention',
+              eventTime: '',
+            },
+            {
+              text: 'See Nightfall with Meera, reflected whitespace case',
+              kind: 'intention',
+              eventTime: '   ',
+            },
+          ],
+          attributions: [],
+          newArcs: [],
+          newPersons: [],
+          newEntities: [],
+          pagePromotions: [],
+          arcUpdates: [],
+          personUpdates: [],
+          constitutionUpdate: null,
+          journalingUpdate: null,
+        }),
+        toolCalls: [],
+      },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const startedAt = new Date()
+    const sessionId = await engine.startSession(startedAt)
+    await engine.appendTranscript(sessionId, {
+      ts: startedAt.toISOString(),
+      role: 'user',
+      content: 'Just checking in.',
+    })
+    await engine.remember(
+      sessionId,
+      'See Nightfall with Arjun, remembered empty case',
+      'intention',
+      '',
+    )
+
+    await engine.endSession(sessionId)
+
+    const prompt = await assembleSystemPrompt(engine, testConfig())
+    expect(prompt).toContain('## Recent intentions')
+    const lines = prompt.split('\n')
+
+    for (const text of [
+      'See Nightfall with Priya, reflected empty case',
+      'See Nightfall with Meera, reflected whitespace case',
+      'See Nightfall with Arjun, remembered empty case',
+    ]) {
+      const line = lines.find((l) => l.includes(text))
+      expect(line).toBeDefined()
+      expect(line).not.toContain('eventTime')
+      // Nothing trailing at all, not even an empty "()": the line ends
+      // exactly at the item's own text.
+      expect(line?.endsWith(text)).toBe(true)
+    }
+
+    await engine.close()
+  })
+
+  it('renders no parenthetical for a hand-written summary.md carrying eventTime: "" directly in frontmatter (Ruling 11): the read boundary, not a write site', async () => {
+    // Unlike the test above, this never goes through engine.remember() or
+    // reflection at all: it writes the frontmatter directly, the shape a
+    // summary.md from before the write-site fixes (commit 1f602e7), or a
+    // hand-edited one, has on a real disk. AGENTS.md: the memory folder is
+    // truth, so this is the untrusted-input case the write-site fixes
+    // alone cannot cover; assembleSystemPrompt reaches it through
+    // engine.sessionContext reading this file's frontmatter straight off
+    // disk, with no write site in between to have normalized it.
+    await pinTimezoneUtc(paths)
+    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)
+    const store = await SessionStore.start(paths, yesterday)
+    await store.appendLine({ ts: yesterday.toISOString(), role: 'user', content: 'Hi.' })
+    await writeDocumentAtomic({
+      path: join(store.dir, 'summary.md'),
+      meta: {
+        id: newId('doc'),
+        items: [
+          {
+            id: newId('item'),
+            text: 'Call the dentist, hand-written blank stated time',
+            kind: 'intention',
+            ts: '',
+            eventTime: '',
+          },
+        ],
+      },
+      body: 'A quiet day.\n',
+    })
+
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+    const prompt = await assembleSystemPrompt(engine, testConfig())
+
+    expect(prompt).toContain('## Recent intentions')
+    const lines = prompt.split('\n')
+    const line = lines.find((l) => l.includes('Call the dentist, hand-written blank stated time'))
+    expect(line).toBeDefined()
+    expect(line).not.toContain('eventTime')
+    expect(line?.endsWith('Call the dentist, hand-written blank stated time')).toBe(true)
+
+    await engine.close()
+  })
+
+  it('states plainly in the recent intentions section that a recorded intention is not evidence it happened', async () => {
+    await pinTimezoneUtc(paths)
+    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)
+    const store = await SessionStore.start(paths, yesterday)
+    await store.appendLine({ ts: yesterday.toISOString(), role: 'user', content: 'Hi.' })
+    await writeDocumentAtomic({
+      path: join(store.dir, 'summary.md'),
+      meta: {
+        id: newId('doc'),
+        items: [
+          { id: newId('item'), text: 'Call the dentist next week.', kind: 'intention', ts: '' },
+        ],
+      },
+      body: 'A quiet day.\n',
+    })
+
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+    const prompt = await assembleSystemPrompt(engine, testConfig())
+
+    expect(prompt).toContain('## Recent intentions')
+    expect(prompt).toContain('is evidence the person said they meant to do something')
+    expect(prompt).toContain('never evidence that they did it')
+
+    await engine.close()
+  })
+
+  describe('commitments section', () => {
+    // A reflected session with no items of its own, present in every test
+    // below, so this memory is never treated as a first conversation (which
+    // would replace every normal section, including Commitments, with the
+    // guided onboarding flow instead).
+    async function markNotFirstSession(): Promise<void> {
+      const store = await SessionStore.start(paths, new Date('2026-08-01T00:00:00.000Z'))
+      await store.appendLine({
+        ts: '2026-08-01T00:00:00.000Z',
+        role: 'user',
+        content: 'An earlier session.',
+      })
+      await writeDocumentAtomic({
+        path: join(store.dir, 'summary.md'),
+        meta: { id: newId('doc') },
+        body: 'A quiet day.\n',
+      })
+    }
+
+    it("renders a commitment with the person's own words, never the bracket", async () => {
+      await pinTimezoneUtc(paths)
+      await markNotFirstSession()
+      await recordCommitment(paths, {
+        label: 'Start swimming again',
+        flavor: 'plan',
+        sessionId: 'session_test',
+        timing: {
+          words: 'come summer',
+          anchor: '2026-08-13T09:00:00.000Z',
+          interpretation: {
+            statedPrecision: 'period',
+            gloss:
+              'Summer where they live, Bangalore, runs roughly February to May, so this points at early 2027.',
+            bracketFrom: '2027-02-01',
+            bracketTo: '2027-05-31',
+            interpretationConfidence: 'medium',
+          },
+        },
+      })
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      // 2027-01-10 sits inside the period lead window (eligible from
+      // 2027-01-02, 30 days before the 2027-02-01 bracket opens).
+      const prompt = await assembleSystemPrompt(
+        engine,
+        testConfig(),
+        'general',
+        () => new Date('2027-01-10T00:00:00.000Z'),
+      )
+
+      expect(prompt).toContain('## Commitments')
+      expect(prompt).toContain('come summer')
+      expect(prompt).toContain('Summer where they live')
+      // Spec Section 3: the bracket selects, the gloss speaks. It must
+      // never reach the prompt at all.
+      expect(prompt).not.toContain('2027-02-01')
+      expect(prompt).not.toContain('2027-05-31')
+
+      await engine.close()
+    })
+
+    it('never renders a commitment with no timing at all: it has no bracket to ever fall inside', async () => {
+      // Important 8 / spec Section 4: eligibility is "today falls within
+      // its bracket, or within a lead time before it". An untimed
+      // ("someday") commitment has no bracket, so it can never satisfy
+      // that and never reaches this standing, always-rendered section.
+      await pinTimezoneUtc(paths)
+      await markNotFirstSession()
+      await recordCommitment(paths, {
+        label: 'Do something, someday',
+        flavor: 'errand',
+        sessionId: 'session_test',
+      })
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const prompt = await assembleSystemPrompt(engine, testConfig())
+
+      expect(prompt).not.toContain('## Commitments')
+      expect(prompt).not.toContain('Do something, someday')
+
+      await engine.close()
+    })
+
+    it('states that a recorded commitment is not evidence the thing happened', async () => {
+      await pinTimezoneUtc(paths)
+      await markNotFirstSession()
+      await recordCommitment(paths, {
+        label: 'Call the dentist',
+        flavor: 'errand',
+        sessionId: 'session_test',
+        timing: {
+          words: 'today',
+          anchor: '2026-08-14T09:00:00.000Z',
+          resolved: { from: '2026-08-14', to: '2026-08-14', statedPrecision: 'day' },
+        },
+      })
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const prompt = await assembleSystemPrompt(
+        engine,
+        testConfig(),
+        'general',
+        () => new Date('2026-08-14T00:00:00.000Z'),
+      )
+
+      expect(prompt).toContain('## Commitments')
+      expect(prompt).toContain('is evidence the person said they meant to do something')
+      expect(prompt).toContain('never evidence that they did it')
+
+      await engine.close()
+    })
+
+    it('is left out entirely, no empty header, when there are no eligible commitments', async () => {
+      await pinTimezoneUtc(paths)
+      await markNotFirstSession()
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const prompt = await assembleSystemPrompt(engine, testConfig())
+
+      expect(prompt).not.toContain('## Commitments')
+
+      await engine.close()
+    })
+
+    it('renders byte-identical across two different clock reads that both keep the same commitment eligible', async () => {
+      await pinTimezoneUtc(paths)
+      await markNotFirstSession()
+      await recordCommitment(paths, {
+        label: 'Start swimming again',
+        flavor: 'plan',
+        sessionId: 'session_test',
+        timing: {
+          words: 'come summer',
+          anchor: '2026-08-13T09:00:00.000Z',
+          interpretation: {
+            statedPrecision: 'period',
+            gloss: 'Summer where they live runs roughly February to May.',
+            bracketFrom: '2027-02-01',
+            bracketTo: '2027-05-31',
+            interpretationConfidence: 'medium',
+          },
+        },
+      })
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      // Both dates fall inside the same eligible window (2027-01-02 onward);
+      // only `now` moves. The rendered section must not move with it: `now`
+      // selects what is in range, it is never printed.
+      const first = await assembleSystemPrompt(
+        engine,
+        testConfig(),
+        'general',
+        () => new Date('2027-01-10T00:00:00.000Z'),
+      )
+      const second = await assembleSystemPrompt(
+        engine,
+        testConfig(),
+        'general',
+        () => new Date('2027-03-15T00:00:00.000Z'),
+      )
+
+      const section = (prompt: string): string => {
+        const start = prompt.indexOf('## Commitments')
+        const end = prompt.indexOf('\n\n## ', start + 1)
+        return end === -1 ? prompt.slice(start) : prompt.slice(start, end)
+      }
+
+      expect(section(first)).toBe(section(second))
+
+      await engine.close()
+    })
   })
 
   it('marks the people section as truncated once there are more people than the cap, and still shows each remaining line with its id', async () => {
@@ -521,6 +882,24 @@ describe('assembleSystemPrompt', () => {
     expect(prompt.indexOf('## Time')).toBeLessThan(prompt.indexOf('## Constitution'))
     // Nothing in this section moves on its own: a clock read here would
     // cost the whole conversation history's cache on every turn.
+    expect(prompt).not.toContain(new Date().toISOString().slice(0, 10))
+
+    await engine.close()
+  })
+
+  it('tells the model a stated event time is relative to the date beside it, resolved against the current stamp', async () => {
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+    await engine.updateProfile({ timezone: 'Asia/Kolkata' })
+    const prompt = await assembleSystemPrompt(engine, testConfig())
+
+    const timeSectionText = prompt.slice(
+      prompt.indexOf('## Time'),
+      prompt.indexOf('## Profile') > -1 ? prompt.indexOf('## Profile') : undefined,
+    )
+    expect(timeSectionText).toContain('own wording')
+    expect(timeSectionText).toContain('relative to the date')
+    expect(timeSectionText).toContain('current')
+    // Still no clock reading of any kind in this static, cache-stable section.
     expect(prompt).not.toContain(new Date().toISOString().slice(0, 10))
 
     await engine.close()
@@ -1077,12 +1456,68 @@ describe('assembleSystemPrompt', () => {
       maintenance: false,
     })
     await engine.updateProfile({ timezone: 'UTC' })
-    const prompt = await assembleSystemPrompt(engine, testConfig())
+    // Pinned two days after the session, well inside the seven-day recent
+    // window, so this test's pass or fail does not depend on the date it
+    // happens to run: the fixture's 2026-08-15 session is only "recent"
+    // relative to a clock, and a real wall-clock read would eventually
+    // carry it outside the window and rot this assertion.
+    const prompt = await assembleSystemPrompt(
+      engine,
+      testConfig(),
+      'general',
+      () => new Date('2026-08-17T09:00:00.000Z'),
+    )
 
     expect(prompt).toContain('## Recent sessions')
     expect(prompt).toContain(
       `2026-08-15 (${store.sessionId}): We talked about the move and how unsettled it left him.`,
     )
+
+    await engine.close()
+  })
+
+  it('actually reads the injected clock rather than the wall clock, for the recent-sessions window', async () => {
+    // A session dated in 2020: under the real wall clock it is years
+    // outside the seven-day recent window no matter when this suite runs,
+    // so if assembleSystemPrompt ever goes back to reading `new Date()`
+    // internally instead of the `now` it was handed, this session drops
+    // out of "## Recent sessions" and the first assertion below fails.
+    const startedAt = new Date('2020-01-01T09:00:00.000Z')
+    const store = await SessionStore.start(paths, startedAt, 'UTC')
+    await store.appendLine({ ts: startedAt.toISOString(), role: 'user', content: 'Hello.' })
+    await writeDocumentAtomic({
+      path: join(store.dir, 'summary.md'),
+      meta: {
+        id: newId('doc'),
+        kind: 'summary',
+        session: store.sessionId,
+        date: '2020-01-01',
+        items: [],
+      },
+      body: 'A session from long ago.\n',
+    })
+
+    const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])), {
+      maintenance: false,
+    })
+    await engine.updateProfile({ timezone: 'UTC' })
+
+    // Pinned two days later: inside the window, only when `now` is what
+    // actually drives the cutoff.
+    const pinnedPrompt = await assembleSystemPrompt(
+      engine,
+      testConfig(),
+      'general',
+      () => new Date('2020-01-03T09:00:00.000Z'),
+    )
+    expect(pinnedPrompt).toContain('## Recent sessions')
+    expect(pinnedPrompt).toContain('A session from long ago.')
+
+    // Left to the default (no override, the real wall clock), the same
+    // 2020 session is long outside the window: the default keeps every
+    // existing caller's unchanged behavior.
+    const defaultPrompt = await assembleSystemPrompt(engine, testConfig())
+    expect(defaultPrompt).not.toContain('## Recent sessions')
 
     await engine.close()
   })

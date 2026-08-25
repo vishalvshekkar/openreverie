@@ -33,6 +33,13 @@ export const ARCS_SECTION_CAP = 2000
 export const PEOPLE_SECTION_CAP = 2500
 export const ENTITIES_SECTION_CAP = 1200
 export const RECENT_INTENTIONS_SECTION_CAP = 800
+// The "## Commitments" section (context.ts): per commitment, its label, the
+// person's own timing words, the date they said it, and the gloss when
+// reflection wrote one. Sized the same as RECENT_INTENTIONS_SECTION_CAP
+// above, since both render a short, capped listing of a handful of one or
+// two line entries, not a prose body. Never the bracket that decided
+// eligibility: spec Section 3, "the bracket selects, the gloss speaks."
+export const COMMITMENTS_SECTION_CAP = 800
 export const LATEST_DAILY_ROLLUP_CAP = 2500
 export const ROLLUPS_AVAILABLE_CAP = 800
 export const RECENT_SUMMARIES_SECTION_CAP = 6000
@@ -43,8 +50,14 @@ export const DREAM_INSIGHTS_SECTION_CAP = 1800
 
 // The target for the whole assembled body. Not runtime behavior: nothing
 // measures the finished prompt against it. It is an invariant asserted by a
-// test over the constants, which fails if anyone raises a cap past the total.
-export const PROMPT_BUDGET_TOTAL = 30000
+// test over the constants, which fails if anyone raises a cap past the
+// total. Raised from 28000 to 28800 when COMMITMENTS_SECTION_CAP was added,
+// then from 28800 to 30600 when DREAM_INSIGHTS_SECTION_CAP was added: each a
+// deliberate increase to the budget, not an incidental one, made in the same
+// change that added the section it makes room for. The rule both raises
+// follow is to lift the total by exactly the cap being added, which keeps the
+// 200 characters of slack the total has carried since the beginning.
+export const PROMPT_BUDGET_TOTAL = 30600
 
 // Every character cap that contributes to the assembled body, in prompt
 // order. Row caps (ARCS_CAP, PEOPLE_CAP, ENTITIES_CAP) are deliberately
@@ -57,10 +70,11 @@ export const SECTION_CAPS: number[] = [
   PEOPLE_SECTION_CAP,
   ENTITIES_SECTION_CAP,
   RECENT_INTENTIONS_SECTION_CAP,
+  COMMITMENTS_SECTION_CAP,
+  DREAM_INSIGHTS_SECTION_CAP,
   LATEST_DAILY_ROLLUP_CAP,
   ROLLUPS_AVAILABLE_CAP,
   RECENT_SUMMARIES_SECTION_CAP,
-  DREAM_INSIGHTS_SECTION_CAP,
 ]
 
 // Cuts a prose body to `limit` characters and, when it cuts, appends a

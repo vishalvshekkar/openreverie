@@ -4,13 +4,36 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
   appendGraph,
+  EDGE_TYPES,
   edgeKey,
+  edgeRecordSchema,
   foldGraph,
   type GraphRecord,
+  NODE_TYPES,
+  nodeRecordSchema,
   readGraph,
   readGraphRecords,
 } from './graph.js'
 import { ensureMemoryTree, memoryPaths } from './paths.js'
+
+// NODE_TYPES/EDGE_TYPES are the single source of truth for the graph
+// vocabulary (see the comment above their definition in graph.ts). This
+// test exists as a regression lock: if a future edit hand-rewrites the
+// z.enum in nodeRecordSchema or edgeRecordSchema instead of building it
+// from NODE_TYPES/EDGE_TYPES, the two lists can drift apart again exactly
+// the way they used to before this file was made derived, and this test
+// catches that the moment it happens.
+describe('graph vocabulary stays derived from a single source', () => {
+  it('nodeRecordSchema accepts exactly the members of NODE_TYPES', () => {
+    const typeField = nodeRecordSchema.shape.type
+    expect([...typeField.options].sort()).toEqual([...NODE_TYPES].sort())
+  })
+
+  it('edgeRecordSchema accepts exactly the members of EDGE_TYPES', () => {
+    const edgeField = edgeRecordSchema.shape.edge
+    expect([...edgeField.options].sort()).toEqual([...EDGE_TYPES].sort())
+  })
+})
 
 describe('edgeKey', () => {
   it('builds a key from edge, from, and to', () => {
@@ -335,5 +358,38 @@ describe('appendGraph and readGraph', () => {
     const state = await readGraph(paths)
     expect(state.nodes.size).toBe(0)
     expect(state.edges.size).toBe(0)
+  })
+
+  it('round-trips a commitment node and a waits_on edge through the log', async () => {
+    const paths = memoryPaths(dir)
+    await ensureMemoryTree(paths)
+
+    await appendGraph(paths, [
+      {
+        ts: '2026-08-24T10:00:00.000Z',
+        op: 'assert',
+        node: 'commitment_01ABC',
+        type: 'commitment',
+        label: 'See Nightfall with Arjun',
+      },
+      {
+        ts: '2026-08-24T10:00:00.000Z',
+        op: 'assert',
+        edge: 'waits_on',
+        from: 'commitment_01ABC',
+        to: 'entity_01WEDDING',
+        confidence: 1,
+        confirmed: true,
+      },
+    ])
+
+    const graph = await readGraph(paths)
+
+    expect(graph.nodes.get('commitment_01ABC')?.type).toBe('commitment')
+    expect(
+      Array.from(graph.edges.values()).some(
+        (e) => e.edge === 'waits_on' && e.from === 'commitment_01ABC',
+      ),
+    ).toBe(true)
   })
 })

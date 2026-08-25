@@ -58,7 +58,7 @@ export function addDaysLocal(date: Date, days: number, timezone: string): string
   return `${shiftedYear}-${shiftedMonth}-${shiftedDay}`
 }
 
-interface LocalParts {
+export interface LocalParts {
   weekday: string
   year: string
   month: string
@@ -70,7 +70,7 @@ interface LocalParts {
 // hourCycle: 'h23' rather than hour12: false. The latter renders local
 // midnight as 24:00 in some locales, which would put a stamp on the wrong
 // calendar day at exactly the boundary this spec exists to get right.
-function localParts(date: Date, timezone: string): LocalParts {
+export function localParts(date: Date, timezone: string): LocalParts {
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone: timezone,
     weekday: 'short',

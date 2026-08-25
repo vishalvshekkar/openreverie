@@ -1,8 +1,9 @@
-import { chmod, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { type ChatProvider, FakeChatProvider } from '@openreverie/providers'
+import { type ChatProvider, FakeChatProvider, FakeEmbeddingProvider } from '@openreverie/providers'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { recordCommitment } from './commitments.js'
 import { newId, readDocument, writeDocumentAtomic } from './documents.js'
 import { appendGraph, readGraph } from './graph.js'
 import { ensureMemoryTree, type MemoryPaths, memoryPaths } from './paths.js'
@@ -10,6 +11,7 @@ import { pendingProposals } from './proposals.js'
 import {
   applyReflection,
   buildReflectionPrompt,
+  type ReflectionContext,
   type ReflectionItem,
   type ReflectionOutput,
   reflectionOutputSchema,
@@ -17,6 +19,7 @@ import {
   resolveNarratives,
   rewriteNarrative,
 } from './reflection.js'
+import { type EmbedFn, MemoryIndex } from './sqlite.js'
 import { SessionStore, type TranscriptLine } from './transcripts.js'
 
 const TRANSCRIPT: TranscriptLine[] = [
@@ -126,6 +129,138 @@ describe('reflectionOutputSchema', () => {
       journalingUpdate: null,
     }
     expect(reflectionOutputSchema.safeParse(rest).success).toBe(false)
+  })
+
+  it('accepts commitments with a gloss for a time it could not resolve', () => {
+    const out: ReflectionOutput = {
+      ...emptyReflectionOutput('A session.'),
+      commitments: [
+        {
+          label: 'Start swimming',
+          flavor: 'plan',
+          statedTime: 'come summer',
+          gloss:
+            'Said on 2026-08-24. Summer where they live, Bangalore, runs roughly February to May, so this points at early 2027 rather than the middle of the year.',
+          bracketFrom: '2027-02-01',
+          bracketTo: '2027-05-31',
+          confidence: 'medium',
+        },
+      ],
+    }
+    const parsed = reflectionOutputSchema.safeParse(out)
+    expect(parsed.success).toBe(true)
+  })
+
+  it('accepts a commitment with no stated time at all', () => {
+    const out: ReflectionOutput = {
+      ...emptyReflectionOutput('A session.'),
+      commitments: [{ label: 'Pick up dry cleaning', flavor: 'errand' }],
+    }
+    expect(reflectionOutputSchema.safeParse(out).success).toBe(true)
+  })
+
+  it('rejects a gloss with no stated words to interpret', () => {
+    const out: ReflectionOutput = {
+      ...emptyReflectionOutput('A session.'),
+      commitments: [{ label: 'x', flavor: 'plan', gloss: 'invented from nothing' }],
+    }
+    const parsed = reflectionOutputSchema.safeParse(out)
+    expect(parsed.success).toBe(false)
+    // Not just success:false: the failure must actually name the
+    // gloss/statedTime problem, or this test would pass for the wrong
+    // reason (e.g. a required key missing elsewhere in the literal) and
+    // the falsification below would prove nothing.
+    if (!parsed.success) {
+      expect(parsed.error.issues.some((issue) => issue.path.includes('statedTime'))).toBe(true)
+    }
+  })
+
+  it('rejects a commitmentRevisions gloss with no stated words to interpret', () => {
+    const out: ReflectionOutput = {
+      ...emptyReflectionOutput('A session.'),
+      commitmentRevisions: [{ commitmentId: 'commitment_1', gloss: 'invented from nothing' }],
+    }
+    const parsed = reflectionOutputSchema.safeParse(out)
+    expect(parsed.success).toBe(false)
+  })
+
+  it('rejects a commitment bracket date that is not YYYY-MM-DD', () => {
+    const out: ReflectionOutput = {
+      ...emptyReflectionOutput('A session.'),
+      commitments: [
+        {
+          label: 'Start swimming',
+          flavor: 'plan',
+          statedTime: 'come summer',
+          gloss: 'Points at next February.',
+          bracketFrom: 'February 2027',
+          confidence: 'medium',
+        },
+      ],
+    }
+    expect(reflectionOutputSchema.safeParse(out).success).toBe(false)
+  })
+
+  it('accepts a commitmentRevisions entry that only changes the label', () => {
+    const out: ReflectionOutput = {
+      ...emptyReflectionOutput('A session.'),
+      commitmentRevisions: [{ commitmentId: 'commitment_1', label: 'See Nightfall with Arjun' }],
+    }
+    expect(reflectionOutputSchema.safeParse(out).success).toBe(true)
+  })
+
+  it('accepts an output with commitments and commitmentRevisions entirely absent', () => {
+    const out = emptyReflectionOutput('A session with no commitments.')
+    expect(reflectionOutputSchema.safeParse(out).success).toBe(true)
+  })
+
+  it('accepts statedPrecision on a commitment and on a revision (Important 5)', () => {
+    const out: ReflectionOutput = {
+      ...emptyReflectionOutput('A session.'),
+      commitments: [
+        {
+          label: 'Start swimming',
+          flavor: 'plan',
+          statedTime: 'come summer',
+          gloss: 'Points at next February.',
+          confidence: 'medium',
+          statedPrecision: 'period',
+        },
+      ],
+      commitmentRevisions: [
+        {
+          commitmentId: 'commitment_1',
+          statedTime: 'someday',
+          gloss: 'No shape to it.',
+          statedPrecision: 'vague',
+        },
+      ],
+    }
+    expect(reflectionOutputSchema.safeParse(out).success).toBe(true)
+  })
+
+  it('accepts clearTiming on a commitmentRevisions entry (Important 6)', () => {
+    const out: ReflectionOutput = {
+      ...emptyReflectionOutput('A session.'),
+      commitmentRevisions: [{ commitmentId: 'commitment_1', clearTiming: true }],
+    }
+    expect(reflectionOutputSchema.safeParse(out).success).toBe(true)
+  })
+
+  it('accepts commitmentResolutions with a valid outcome and rejects unknown as an outcome (Important 3)', () => {
+    const accepted: ReflectionOutput = {
+      ...emptyReflectionOutput('A session.'),
+      commitmentResolutions: [{ commitmentId: 'commitment_1', outcome: 'done' }],
+    }
+    expect(reflectionOutputSchema.safeParse(accepted).success).toBe(true)
+
+    // 'unknown' is reserved for the real askedAt/one-ask mechanism
+    // (BACKLOG.md), which reflection has no live-session signal for.
+    const rejected = {
+      ...emptyReflectionOutput('A session.'),
+      commitmentResolutions: [{ commitmentId: 'commitment_1', outcome: 'unknown' }],
+    }
+    expect(reflectionOutputSchema.safeParse(rejected).success).toBe(false)
   })
 })
 
@@ -1073,6 +1208,84 @@ describe('reflection', () => {
       expect(mintedItems[1]?.eventTime).toBeUndefined()
     })
 
+    it('reflectionOutputSchema normalizes an empty or whitespace-only item eventTime to absent, the model\'s \'"eventTime": ""\' shape rather than an omitted key', () => {
+      const out = {
+        ...emptyReflectionOutput('An evening plan.'),
+        items: [
+          { text: 'Watching Halcyon', kind: 'event', eventTime: '' },
+          { text: 'Watching Nightfall', kind: 'event', eventTime: '   ' },
+          { text: 'Feeling behind lately', kind: 'feeling' },
+        ],
+      }
+      const parsed = reflectionOutputSchema.safeParse(out)
+      expect(parsed.success).toBe(true)
+      if (!parsed.success) return
+      expect(parsed.data.items[0]?.eventTime).toBeUndefined()
+      expect(parsed.data.items[1]?.eventTime).toBeUndefined()
+      expect(parsed.data.items[2]?.eventTime).toBeUndefined()
+      // Absent means the key itself is gone, not present with value
+      // undefined: the two read differently to `'eventTime' in item`, and
+      // only the former matches what an omitted key produces.
+      expect('eventTime' in (parsed.data.items[0] ?? {})).toBe(false)
+      expect('eventTime' in (parsed.data.items[1] ?? {})).toBe(false)
+    })
+
+    it('mints an item with an empty or whitespace-only eventTime as fully absent, and the indexed chunk carries no fabricated anchor', async () => {
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('An evening plan.'),
+        items: [
+          { text: 'Watching Halcyon empty case', kind: 'event', eventTime: '' },
+          { text: 'Watching Nightfall whitespace case', kind: 'event', eventTime: '   ' },
+          { text: 'Feeling behind lately absent case', kind: 'feeling' },
+        ],
+      }
+
+      const store = await SessionStore.start(paths, new Date('2026-08-16T10:49:00Z'), 'UTC')
+      await store.appendLine({
+        ts: '2026-08-16T10:49:00.000Z',
+        utcOffsetMinutes: 330,
+        role: 'user',
+        content: 'Watching Halcyon tonight',
+      })
+
+      const { mintedItems, summaryDoc } = await applyReflection(
+        paths,
+        out,
+        store.sessionId,
+        [],
+        new Date('2026-08-16T10:49:00.000Z'),
+        new Map(),
+        async () => {},
+      )
+
+      expect(mintedItems[0]?.eventTime).toBeUndefined()
+      expect(mintedItems[1]?.eventTime).toBeUndefined()
+      expect(mintedItems[2]?.eventTime).toBeUndefined()
+      expect('eventTime' in (mintedItems[0] ?? {})).toBe(false)
+      expect('eventTime' in (mintedItems[1] ?? {})).toBe(false)
+
+      const dbPath = join(
+        await mkdtemp(join(tmpdir(), 'openreverie-reflection-index-')),
+        'index.db',
+      )
+      const index = MemoryIndex.open(dbPath)
+      try {
+        const provider = new FakeEmbeddingProvider()
+        const embed: EmbedFn = (texts: string[]) => provider.embed('fake-model', texts)
+        await index.upsertDocument(summaryDoc, 'summary', embed)
+
+        for (const term of ['empty', 'whitespace', 'absent']) {
+          const hits = index.searchText(term, 10)
+          expect(hits.length).toBeGreaterThan(0)
+          const snippet = hits[0]?.snippet ?? ''
+          expect(snippet).not.toContain('eventTime')
+          expect(snippet).not.toContain('as stated on')
+        }
+      } finally {
+        index.close()
+      }
+    })
+
     it('writes journaling.md when journalingUpdate is set, preserving the id on a second write', async () => {
       const first = {
         ...emptyReflectionOutput('First session about journaling.'),
@@ -1115,6 +1328,272 @@ describe('reflection', () => {
       const out = emptyReflectionOutput('An ordinary session, nothing about journaling.')
       await applyReflection(paths, out, sessionId, [], new Date(), new Map(), noopMaterialize)
       await expect(readDocument(paths.journaling)).rejects.toThrow()
+    })
+  })
+
+  describe('applyReflection: commitments', () => {
+    const now = new Date('2026-08-13T10:00:00.000Z')
+
+    it('captures a commitment from reflection alone and writes the gloss for a stated time it cannot resolve', async () => {
+      const chat = new FakeChatProvider([
+        {
+          text: JSON.stringify({
+            ...emptyReflectionOutput('They want to get back into swimming.'),
+            commitments: [
+              {
+                label: 'Start swimming again',
+                flavor: 'plan',
+                statedTime: 'come summer',
+                gloss:
+                  'Said on 2026-08-13. Summer where they live, Bangalore, runs roughly February to May, so this points at early 2027 rather than the middle of the year.',
+                bracketFrom: '2027-02-01',
+                bracketTo: '2027-05-31',
+                confidence: 'medium',
+              },
+            ],
+          }),
+          toolCalls: [],
+        },
+      ])
+      const context: ReflectionContext = {
+        constitution: 'Empty constitution.',
+        arcs: [],
+        realms: [],
+        people: [],
+        entities: [],
+        profile: { id: 'doc_test', location: 'Bangalore' },
+      }
+      const swimTranscript: TranscriptLine[] = [
+        {
+          ts: '2026-08-13T09:00:00.000Z',
+          utcOffsetMinutes: 330,
+          role: 'user',
+          content: 'come summer I want to start swimming again',
+        },
+      ]
+
+      const raw = await reflectSession({ chat, model: 'test' }, swimTranscript, context)
+      if ('degraded' in raw) throw new Error('expected a parsed reflection, not a degraded one')
+
+      await applyReflection(paths, raw, sessionId, [], now, new Map(), noopMaterialize)
+
+      const graph = await readGraph(paths)
+      const commitmentNode = [...graph.nodes.values()].find((node) => node.type === 'commitment')
+      if (!commitmentNode?.commitment) throw new Error('expected a commitment node to be written')
+
+      expect(commitmentNode.label).toBe('Start swimming again')
+      expect(commitmentNode.commitment.flavor).toBe('plan')
+      expect(commitmentNode.commitment.timing?.words).toBe('come summer')
+      expect(commitmentNode.commitment.timing?.interpretation).toBeDefined()
+      expect(commitmentNode.commitment.timing?.interpretation?.gloss.length).toBeGreaterThan(0)
+      expect(commitmentNode.commitment.timing?.resolved).toBeUndefined()
+    })
+
+    it('reflection wins over the live path: a same-session, same-label commitment is revised, not duplicated', async () => {
+      const live = await recordCommitment(paths, {
+        label: 'See Nightfall with Arjun',
+        flavor: 'plan',
+        sessionId,
+      })
+
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('They confirmed the plan with Arjun.'),
+        commitments: [
+          {
+            label: 'see nightfall with arjun',
+            flavor: 'plan',
+            statedTime: 'saturday',
+          },
+        ],
+      }
+
+      await applyReflection(paths, out, sessionId, [], now, new Map(), noopMaterialize)
+
+      const graph = await readGraph(paths)
+      const commitmentNodes = [...graph.nodes.values()].filter((node) => node.type === 'commitment')
+      expect(commitmentNodes).toHaveLength(1)
+      expect(commitmentNodes[0]?.id).toBe(live.id)
+      expect(commitmentNodes[0]?.commitment?.timing?.words).toBe('saturday')
+    })
+
+    it('does not duplicate a same-labelled commitment from a different session', async () => {
+      const otherSessionId = newId('session')
+      await recordCommitment(paths, {
+        label: 'See Nightfall with Arjun',
+        flavor: 'plan',
+        sessionId: otherSessionId,
+      })
+
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('A different session, coincidentally the same plan.'),
+        commitments: [{ label: 'See Nightfall with Arjun', flavor: 'plan' }],
+      }
+
+      await applyReflection(paths, out, sessionId, [], now, new Map(), noopMaterialize)
+
+      const graph = await readGraph(paths)
+      const commitmentNodes = [...graph.nodes.values()].filter((node) => node.type === 'commitment')
+      expect(commitmentNodes).toHaveLength(2)
+    })
+
+    it('drops a commitmentRevisions entry that references an unknown id without aborting the rest of reflection', async () => {
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('A session that misremembered an id.'),
+        commitmentRevisions: [{ commitmentId: 'commitment_does_not_exist', label: 'Renamed' }],
+      }
+
+      const result = await applyReflection(
+        paths,
+        out,
+        sessionId,
+        [],
+        now,
+        new Map(),
+        noopMaterialize,
+      )
+
+      expect(result.summaryDoc.body).toBe('A session that misremembered an id.\n')
+      const graph = await readGraph(paths)
+      const commitmentNodes = [...graph.nodes.values()].filter((node) => node.type === 'commitment')
+      expect(commitmentNodes).toHaveLength(0)
+    })
+
+    it('resolves a commitment stated time against when the session happened, not against reflection time', async () => {
+      // The transcript's first line is 2026-08-10; reflection (`now`, set
+      // above for this whole describe block) runs on 2026-08-13, as if
+      // this session sat unreflected until runMaintenance swept it up
+      // days later. "tomorrow" must resolve relative to the session's own
+      // day, 2026-08-11, never relative to `now`.
+      const transcriptPath = join(sessionDir, 'transcript.jsonl')
+      const line: TranscriptLine = {
+        ts: '2026-08-10T09:00:00.000Z',
+        utcOffsetMinutes: 330,
+        role: 'user',
+        content: 'reminder to self',
+      }
+      await writeFile(transcriptPath, `${JSON.stringify(line)}\n`, 'utf8')
+
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('A session from a few days ago.'),
+        commitments: [{ label: 'Call the dentist', flavor: 'errand', statedTime: 'tomorrow' }],
+      }
+
+      await applyReflection(
+        paths,
+        out,
+        sessionId,
+        [],
+        now,
+        new Map(),
+        noopMaterialize,
+        'Asia/Kolkata',
+      )
+
+      const graph = await readGraph(paths)
+      const commitmentNode = [...graph.nodes.values()].find((node) => node.type === 'commitment')
+      expect(commitmentNode?.commitment?.timing?.resolved?.from).toBe('2026-08-11')
+    })
+
+    it('resolves a commitment through commitmentResolutions, the reflection-side backstop for resolution (Important 3)', async () => {
+      const live = await recordCommitment(paths, {
+        label: 'File the tax paperwork',
+        flavor: 'errand',
+        sessionId,
+      })
+
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('They filed the paperwork today.'),
+        commitmentResolutions: [{ commitmentId: live.id, outcome: 'done' }],
+      }
+
+      await applyReflection(paths, out, sessionId, [], now, new Map(), noopMaterialize)
+
+      const graph = await readGraph(paths)
+      const commitmentNode = [...graph.nodes.values()].find((node) => node.type === 'commitment')
+      expect(commitmentNode?.commitment?.state).toBe('done')
+    })
+
+    it('drops a commitmentResolutions entry that references an unknown id without aborting the rest of reflection', async () => {
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('A session that misremembered an id.'),
+        commitmentResolutions: [{ commitmentId: 'commitment_does_not_exist', outcome: 'done' }],
+      }
+
+      const result = await applyReflection(
+        paths,
+        out,
+        sessionId,
+        [],
+        now,
+        new Map(),
+        noopMaterialize,
+      )
+
+      expect(result.summaryDoc.body).toBe('A session that misremembered an id.\n')
+    })
+
+    it('never fabricates a timing block from an empty-string statedTime (Important 4)', async () => {
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('A session.'),
+        commitments: [{ label: 'Start swimming', flavor: 'plan', statedTime: '' }],
+      }
+
+      await applyReflection(paths, out, sessionId, [], now, new Map(), noopMaterialize)
+
+      const graph = await readGraph(paths)
+      const commitmentNode = [...graph.nodes.values()].find((node) => node.type === 'commitment')
+      if (!commitmentNode?.commitment) throw new Error('expected a commitment node to be written')
+      expect(commitmentNode.commitment.timing).toBeUndefined()
+    })
+
+    it('reads statedPrecision straight from the model instead of inferring it from the bracket shape (Important 5)', async () => {
+      // Only bracketFrom is given (no bracketTo), which the old inference
+      // would read as 'vague'. The model states 'period' directly and
+      // that must win.
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('A session.'),
+        commitments: [
+          {
+            label: 'Start swimming',
+            flavor: 'plan',
+            statedTime: 'come summer',
+            gloss: 'Points at next February.',
+            bracketFrom: '2027-02-01',
+            confidence: 'medium',
+            statedPrecision: 'period',
+          },
+        ],
+      }
+
+      await applyReflection(paths, out, sessionId, [], now, new Map(), noopMaterialize)
+
+      const graph = await readGraph(paths)
+      const commitmentNode = [...graph.nodes.values()].find((node) => node.type === 'commitment')
+      expect(commitmentNode?.commitment?.timing?.interpretation?.statedPrecision).toBe('period')
+    })
+
+    it('clears a stale timing on revision when clearTiming is set and no fresh statedTime replaces it (Important 6)', async () => {
+      const live = await recordCommitment(paths, {
+        label: 'See Nightfall with Arjun',
+        flavor: 'plan',
+        sessionId,
+        timing: {
+          words: 'friday',
+          anchor: '2026-08-13T09:00:00.000Z',
+          resolved: { from: '2026-08-14', to: '2026-08-14', statedPrecision: 'day' },
+        },
+      })
+
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('They are no longer sure when.'),
+        commitmentRevisions: [{ commitmentId: live.id, clearTiming: true }],
+      }
+
+      await applyReflection(paths, out, sessionId, [], now, new Map(), noopMaterialize)
+
+      const graph = await readGraph(paths)
+      const commitmentNode = [...graph.nodes.values()].find((node) => node.type === 'commitment')
+      expect(commitmentNode?.commitment?.timing).toBeUndefined()
     })
   })
 
@@ -1458,6 +1937,62 @@ describe('reflection prompt', () => {
     expect(prompt).toContain('Current profile:')
     expect(prompt).toContain('preferredName: Vish')
     expect(prompt).toContain('occupation: nurse')
+  })
+
+  it('carries the commitment instruction, and lists a known commitment by id and label but never its gloss or bracket', () => {
+    const prompt = buildReflectionPrompt(
+      {
+        constitution: '',
+        arcs: [],
+        realms: [],
+        people: [],
+        entities: [],
+        commitments: [
+          {
+            id: 'commitment_1',
+            label: 'Start swimming again',
+            flavor: 'plan',
+            state: 'open',
+            sessionId: 'session_earlier',
+            timing: {
+              words: 'come summer',
+              anchor: '2026-08-13T09:00:00.000Z',
+              interpretation: {
+                statedPrecision: 'period',
+                gloss: 'Points at next February, roughly, since summer in Bangalore runs Feb-May.',
+                bracketFrom: '2027-02-01',
+                bracketTo: '2027-05-31',
+                interpretationConfidence: 'medium',
+              },
+            },
+          },
+        ],
+        profile: { id: 'doc_1' },
+      },
+      [],
+    )
+
+    // The commitment instruction paragraphs themselves, by a phrase found
+    // only in that prose, not in RESPONSE_SHAPE's JSON literal (which also
+    // contains the bare word "gloss"): deleting the paragraphs must fail
+    // this assertion, closing the hole where they could be removed with
+    // the rest of the suite staying green.
+    expect(prompt).toContain('Write a gloss only when')
+    expect(prompt).toContain('Known commitments:')
+
+    // Known commitments lists the commitment so the model can reference
+    // its id in commitmentRevisions.
+    expect(prompt).toContain('commitment_1')
+    expect(prompt).toContain('Start swimming again')
+
+    // The bracket selects, the gloss speaks (spec Section 7): neither is
+    // ever shown or spoken to the person, and a prompt the model reads
+    // and could echo into a reply or a summary is exactly a place that
+    // rule has to hold. Falsify by making renderCommitmentListing
+    // interpolate timing: this assertion should then fail.
+    expect(prompt).not.toContain('2027-02-01')
+    expect(prompt).not.toContain('2027-05-31')
+    expect(prompt).not.toContain('Points at next February')
   })
 })
 

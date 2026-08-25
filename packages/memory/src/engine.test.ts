@@ -10,6 +10,7 @@ import {
 } from '@openreverie/providers'
 import Database from 'better-sqlite3'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { recordCommitment, resolveCommitment } from './commitments.js'
 import { listDocuments, newId, readDocument, writeDocumentAtomic } from './documents.js'
 import { type EngineDeps, MemoryEngine } from './engine.js'
 import { appendGraph, readGraph } from './graph.js'
@@ -18,6 +19,7 @@ import { loadProfile, writeProfile } from './profile.js'
 import { appendProposals, type Proposal, pendingProposals } from './proposals.js'
 import { applyReflection, type ReflectionItem, type ReflectionOutput } from './reflection.js'
 import { buildDailyRollup } from './rollups.js'
+import { formatLocalDate } from './time.js'
 import { SessionStore } from './transcripts.js'
 
 async function rmWithRetry(path: string, attempts = 3, delayMs = 50): Promise<void> {
@@ -94,10 +96,6 @@ describe('rmWithRetry', () => {
 })
 
 const execFileAsync = promisify(execFile)
-
-function isoDate(date: Date): string {
-  return date.toISOString().slice(0, 10)
-}
 
 async function pinTimezoneUtc(paths: MemoryPaths): Promise<void> {
   const profile = await loadProfile(paths)
@@ -387,7 +385,10 @@ describe('MemoryEngine', () => {
       await engine.endSession(sessionId)
 
       // Summary landed on disk as the commit marker for reflection.
-      const sessionDir = join(paths.sessionsDir, `${isoDate(startedAt)}-${sessionId}`)
+      const sessionDir = join(
+        paths.sessionsDir,
+        `${formatLocalDate(startedAt, engine.timezone())}-${sessionId}`,
+      )
       const summaryDoc = await readDocument(join(sessionDir, 'summary.md'))
       expect(summaryDoc.body).toBe(`${scriptedReflection.summary}\n`)
       const items = summaryDoc.meta.items as ReflectionItem[]
@@ -537,7 +538,7 @@ describe('MemoryEngine', () => {
 
       const engine = await MemoryEngine.open(dir, deps)
 
-      const staleDate = isoDate(twoDaysAgo)
+      const staleDate = formatLocalDate(twoDaysAgo, 'UTC')
       const staleSummary = await readDocument(
         join(paths.sessionsDir, `${staleDate}-${staleStore.sessionId}`, 'summary.md'),
       )
@@ -546,7 +547,7 @@ describe('MemoryEngine', () => {
       const staleDaily = await readDocument(join(paths.rollupsDailyDir, `${staleDate}.md`))
       expect(staleDaily.body.length).toBeGreaterThan(0)
 
-      const yesterdayDate = isoDate(yesterday)
+      const yesterdayDate = formatLocalDate(yesterday, 'UTC')
       const yesterdayDaily = await readDocument(join(paths.rollupsDailyDir, `${yesterdayDate}.md`))
       expect(yesterdayDaily.body.length).toBeGreaterThan(0)
 
@@ -577,7 +578,7 @@ describe('MemoryEngine', () => {
 
       expect(chat.requests).toHaveLength(0)
 
-      const yesterdayDate = isoDate(yesterday)
+      const yesterdayDate = formatLocalDate(yesterday, 'UTC')
       await expect(
         readDocument(join(paths.rollupsDailyDir, `${yesterdayDate}.md`)),
       ).rejects.toThrow()
@@ -1620,7 +1621,10 @@ describe('MemoryEngine', () => {
         await chmod(paths.arcsDir, 0o700)
       }
 
-      const sessionDir = join(paths.sessionsDir, `${isoDate(new Date())}-${sessionId}`)
+      const sessionDir = join(
+        paths.sessionsDir,
+        `${formatLocalDate(new Date(), engine.timezone())}-${sessionId}`,
+      )
       await expect(readDocument(join(sessionDir, 'summary.md'))).rejects.toThrow()
 
       const graph = await readGraph(paths)
@@ -1690,7 +1694,7 @@ describe('MemoryEngine', () => {
 
       const staleSessionDir = join(
         paths.sessionsDir,
-        `${isoDate(twoDaysAgo)}-${staleStore.sessionId}`,
+        `${formatLocalDate(twoDaysAgo, 'UTC')}-${staleStore.sessionId}`,
       )
       await expect(readDocument(join(staleSessionDir, 'summary.md'))).rejects.toThrow()
 
@@ -2383,7 +2387,11 @@ describe('MemoryEngine', () => {
       await expect(engine.endSession(sessionId)).resolves.toBeUndefined()
 
       const summaryDoc = await readDocument(
-        join(paths.sessionsDir, `${isoDate(new Date())}-${sessionId}`, 'summary.md'),
+        join(
+          paths.sessionsDir,
+          `${formatLocalDate(new Date(), engine.timezone())}-${sessionId}`,
+          'summary.md',
+        ),
       )
       expect(summaryDoc.body).toBe(`${out.summary}\n`)
 
@@ -2392,6 +2400,124 @@ describe('MemoryEngine', () => {
       if (!promotedNode?.doc) throw new Error('expected the promotion to have landed')
       const personDoc = await readDocument(promotedNode.doc)
       expect(personDoc.body).toBe('Priya, promoted this session.\n')
+
+      await engine.close()
+    })
+  })
+
+  describe('commitments: reflection-side wiring', () => {
+    let dir: string
+    let paths: MemoryPaths
+
+    beforeEach(async () => {
+      dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-commitments-'))
+      paths = memoryPaths(dir)
+      await ensureMemoryTree(paths)
+      await pinTimezoneUtc(paths)
+    })
+
+    afterEach(async () => {
+      await rmWithRetry(dir)
+    })
+
+    // Guards the engine.ts wiring itself, not just applyReflection in
+    // isolation: this.timezone() actually has to reach applyReflection's
+    // buildCommitmentTiming through the real endSession path. Runs the
+    // same session twice, once per profile timezone, and requires the two
+    // resolved dates to differ. Deliberately not a fixed expected date
+    // against a single timezone: applyReflection falls back to the
+    // machine's own system timezone when none is passed (see reflection.ts,
+    // the default on the `timezone` parameter), and this suite's own
+    // machine timezone is not something a test should have to know or
+    // pin. Deleting `this.timezone()` from the applyReflection call site
+    // in engine.ts makes both runs silently fall back to that same system
+    // default regardless of profile, so the two dates collapse to one and
+    // this test fails, while reflection.test.ts's own suite (which calls
+    // applyReflection directly and always passes its own timezone) stays
+    // green.
+    async function resolvedDateFor(zone: string): Promise<string | undefined> {
+      const runDir = await mkdtemp(join(tmpdir(), 'openreverie-engine-commitments-tz-'))
+      const runPaths = memoryPaths(runDir)
+      await ensureMemoryTree(runPaths)
+      await pinTimezoneUtc(runPaths)
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('A late-night reminder.'),
+        commitments: [{ label: 'Call the dentist', flavor: 'errand', statedTime: 'tomorrow' }],
+      }
+      const chat = new FakeChatProvider([{ text: JSON.stringify(out), toolCalls: [] }])
+      const engine = await MemoryEngine.open(runDir, fakeDeps(chat))
+      await engine.updateProfile({ timezone: zone })
+
+      const sessionId = await engine.startSession()
+      await engine.appendTranscript(sessionId, {
+        ts: '2026-08-13T20:00:00.000Z',
+        role: 'user',
+        content: 'Remind me to call the dentist tomorrow.',
+      })
+      await engine.endSession(sessionId)
+
+      const graph = await readGraph(runPaths)
+      const commitmentNode = [...graph.nodes.values()].find((n) => n.type === 'commitment')
+      const resolvedFrom = commitmentNode?.commitment?.timing?.resolved?.from
+      await engine.close()
+      await rmWithRetry(runDir)
+      return resolvedFrom
+    }
+
+    it("resolves a commitment's stated time in the person's own timezone, differently for two far-apart zones", async () => {
+      // Asia/Kolkata (UTC+5:30) and Etc/GMT+12 (UTC-12, POSIX sign
+      // reversed) are as far apart as the IANA database gets: for the
+      // same UTC anchor they can never land on the same local calendar
+      // day, so "tomorrow" resolved against each must differ.
+      const kolkata = await resolvedDateFor('Asia/Kolkata')
+      const farBehind = await resolvedDateFor('Etc/GMT+12')
+      expect(kolkata).toBeDefined()
+      expect(farBehind).toBeDefined()
+      expect(kolkata).not.toBe(farBehind)
+    })
+
+    // Guards buildReflectionContext's own commitments wiring: deleting
+    // `commitments,` from its return object makes this test fail while
+    // reflection.test.ts's prompt test, which builds a ReflectionContext
+    // literal directly, stays green.
+    it("carries a commitment recorded in one session into the next session's reflection prompt", async () => {
+      const firstOut: ReflectionOutput = {
+        ...emptyReflectionOutput('Made a plan with Arjun.'),
+        commitments: [{ label: 'See Nightfall with Arjun', flavor: 'plan' }],
+      }
+      const secondOut = emptyReflectionOutput('A quieter second session.')
+      const chat = new FakeChatProvider([
+        { text: JSON.stringify(firstOut), toolCalls: [] },
+        { text: JSON.stringify(secondOut), toolCalls: [] },
+      ])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      const firstSessionId = await engine.startSession()
+      await engine.appendTranscript(firstSessionId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'Made a plan to see Nightfall with Arjun.',
+      })
+      await engine.endSession(firstSessionId)
+
+      const graph = await readGraph(paths)
+      const commitmentNode = [...graph.nodes.values()].find((n) => n.type === 'commitment')
+      if (!commitmentNode) throw new Error('expected a commitment node from the first session')
+
+      const secondSessionId = await engine.startSession()
+      await engine.appendTranscript(secondSessionId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'Nothing much today.',
+      })
+      await engine.endSession(secondSessionId)
+
+      const secondPrompt = chat.requests[1]?.messages[0]?.content
+      if (typeof secondPrompt !== 'string') {
+        throw new Error('expected the second session to send a reflection prompt')
+      }
+      expect(secondPrompt).toContain(commitmentNode.id)
+      expect(secondPrompt).toContain('See Nightfall with Arjun')
 
       await engine.close()
     })
@@ -2550,7 +2676,7 @@ describe('MemoryEngine', () => {
       // caught even if it happened to be outranked in the fused results.
       const summaryPath = join(
         paths.sessionsDir,
-        `${isoDate(startedAt)}-${sessionId}`,
+        `${formatLocalDate(startedAt, engine.timezone())}-${sessionId}`,
         'summary.md',
       )
       const hits = (await engine.search('reflection')).documents
@@ -2936,11 +3062,158 @@ describe('MemoryEngine', () => {
       const context = await engine.sessionContext()
 
       expect(context.recentIntentions).toEqual([
-        { text: 'Call the dentist next week.', date: isoDate(yesterday) },
+        { text: 'Call the dentist next week.', date: formatLocalDate(yesterday, 'UTC') },
       ])
 
       await engine.close()
     })
+
+    it("carries an intention item's stated eventTime into recentIntentions when present", async () => {
+      const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)
+      const store = await SessionStore.start(paths, yesterday)
+      await store.appendLine({ ts: yesterday.toISOString(), role: 'user', content: 'Hi.' })
+      await writeDocumentAtomic({
+        path: join(store.dir, 'summary.md'),
+        meta: {
+          id: newId('doc'),
+          items: [
+            {
+              id: newId('item'),
+              text: 'See Nightfall with Arjun.',
+              kind: 'intention',
+              ts: '',
+              eventTime: 'this evening',
+            },
+          ],
+        },
+        body: 'A quiet day.\n',
+      })
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const context = await engine.sessionContext()
+
+      expect(context.recentIntentions).toEqual([
+        {
+          text: 'See Nightfall with Arjun.',
+          date: formatLocalDate(yesterday, 'UTC'),
+          eventTime: 'this evening',
+        },
+      ])
+
+      await engine.close()
+    })
+
+    it("tolerates a hand-written summary.md carrying eventTime: '' at both read boundaries (Ruling 11): no anchor in the search index, no eventTime in recentIntentions", async () => {
+      // Unlike the write-site tests below, this never goes through
+      // engine.remember() at all: it writes the frontmatter directly,
+      // the same way a summary.md from before the write-site fixes
+      // (commit 1f602e7), or a hand-edited one, exists on a real disk.
+      // AGENTS.md: the memory folder is truth and SQLite is a derived
+      // index rebuildable from it, so this is the untrusted-input case
+      // the write-site fixes alone cannot cover.
+      const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)
+      const store = await SessionStore.start(paths, yesterday)
+      await store.appendLine({ ts: yesterday.toISOString(), role: 'user', content: 'Hi.' })
+      await writeDocumentAtomic({
+        path: join(store.dir, 'summary.md'),
+        meta: {
+          id: newId('doc'),
+          date: formatLocalDate(yesterday, 'UTC'),
+          items: [
+            {
+              id: newId('item'),
+              text: 'Watching Zephyrquest',
+              kind: 'intention',
+              ts: '',
+              eventTime: '',
+            },
+          ],
+        },
+        body: 'A quiet day.\n',
+      })
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      // reindexAll is the path that actually walks this file into the
+      // search index (sqlite.ts:itemChunkText); sessionContext reads the
+      // frontmatter directly and needs no reindex.
+      await engine.reindexAll()
+
+      const hits = (await engine.search('Zephyrquest')).documents
+      expect(hits.length).toBeGreaterThan(0)
+      const snippet = hits[0]?.snippet ?? ''
+      expect(snippet).not.toContain('eventTime')
+      expect(snippet).not.toContain('as stated on')
+
+      const context = await engine.sessionContext()
+      const intention = context.recentIntentions.find((i) => i.text === 'Watching Zephyrquest')
+      expect(intention).toBeDefined()
+      expect('eventTime' in (intention ?? {})).toBe(false)
+
+      await engine.close()
+    })
+
+    it.each([
+      ['empty string', ''],
+      ['whitespace-only', '   '],
+    ])(
+      'remember normalizes a %s eventTime to absent: no eventTime key in the summary, no anchor in the indexed chunk, no eventTime in recentIntentions',
+      async (_label, eventTime) => {
+        const chat = new FakeChatProvider([
+          { text: JSON.stringify(emptyReflectionOutput('A quiet check-in.')), toolCalls: [] },
+        ])
+        const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+        const startedAt = new Date()
+        const sessionId = await engine.startSession(startedAt)
+        await engine.appendTranscript(sessionId, {
+          ts: startedAt.toISOString(),
+          role: 'user',
+          content: 'Just checking in.',
+        })
+
+        // Called directly, bypassing tools.ts's schema entirely, so this
+        // proves the write-site normalization in engine.remember() itself,
+        // not just the schema layer in front of it.
+        await engine.remember(
+          sessionId,
+          'See Nightfall with Arjun, unstated time',
+          'intention',
+          eventTime,
+        )
+
+        await engine.endSession(sessionId)
+
+        const summaryPath = join(
+          paths.sessionsDir,
+          `${formatLocalDate(startedAt, engine.timezone())}-${sessionId}`,
+          'summary.md',
+        )
+        const summaryDoc = await readDocument(summaryPath)
+        const items = summaryDoc.meta.items as { text: string; eventTime?: string }[]
+        const item = items.find((i) => i.text === 'See Nightfall with Arjun, unstated time')
+        expect(item).toBeDefined()
+        expect('eventTime' in (item ?? {})).toBe(false)
+
+        // No fabricated anchor in the indexed chunk: itemChunkText only
+        // appends the "(eventTime: ..., as stated on ...)" anchor when
+        // eventTime is present, so its absence here is the assertion.
+        const hits = (await engine.search('Nightfall')).documents
+        expect(hits.length).toBeGreaterThan(0)
+        const snippet = hits[0]?.snippet ?? ''
+        expect(snippet).not.toContain('eventTime')
+        expect(snippet).not.toContain('as stated on')
+
+        // No parenthetical possible in the rendered prompt either: the
+        // object context.ts renders from has no eventTime key to render.
+        const context = await engine.sessionContext()
+        const intention = context.recentIntentions.find(
+          (i) => i.text === 'See Nightfall with Arjun, unstated time',
+        )
+        expect(intention).toBeDefined()
+        expect('eventTime' in (intention ?? {})).toBe(false)
+
+        await engine.close()
+      },
+    )
 
     it('tolerates a hand-written summary.md with no items key at all, in the same recentSummaries window', async () => {
       const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)
@@ -2956,6 +3229,235 @@ describe('MemoryEngine', () => {
       const context = await engine.sessionContext()
 
       expect(context.recentIntentions).toEqual([])
+
+      await engine.close()
+    })
+  })
+
+  describe('MemoryEngine.recordCommitment: the live-tool timing write site', () => {
+    let dir: string
+    let paths: MemoryPaths
+
+    beforeEach(async () => {
+      dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-commitment-timing-'))
+      paths = memoryPaths(dir)
+      await ensureMemoryTree(paths)
+      await pinTimezoneUtc(paths)
+    })
+
+    afterEach(async () => {
+      await rmWithRetry(dir)
+    })
+
+    it.each([
+      ['empty string', ''],
+      ['whitespace-only', '   '],
+    ])(
+      'never fabricates a timing block from a %s statedTime, called directly (Important 4, second site)',
+      async (_label, statedTime) => {
+        // Calls engine.recordCommitment directly, bypassing tools.ts's
+        // statedTimeField schema entirely, so this proves the write-site
+        // normalization inside MemoryEngine's own private
+        // buildCommitmentTiming, not just the schema layer in front of it.
+        // Before this normalization existed, this call wrote a timing
+        // block with no words in it (`{ words: '', anchor: <now> }`),
+        // which context.ts would render as `(said <today>: "")`.
+        const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+        const sessionId = await engine.startSession()
+
+        const recorded = await engine.recordCommitment(sessionId, {
+          label: 'Start swimming',
+          flavor: 'plan',
+          statedTime,
+        })
+
+        expect(recorded.timing).toBeUndefined()
+
+        await engine.close()
+      },
+    )
+  })
+
+  describe('sessionContext commitments', () => {
+    let dir: string
+    let paths: MemoryPaths
+
+    beforeEach(async () => {
+      dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-commitments-context-'))
+      paths = memoryPaths(dir)
+      await ensureMemoryTree(paths)
+      await pinTimezoneUtc(paths)
+    })
+
+    afterEach(async () => {
+      await rmWithRetry(dir)
+    })
+
+    it('carries an eligible commitment with its own words, the local date it was said, and its gloss, with no field to carry a bracket', async () => {
+      await recordCommitment(paths, {
+        label: 'Start swimming again',
+        flavor: 'plan',
+        sessionId: 'session_test',
+        timing: {
+          words: 'come summer',
+          anchor: '2026-08-13T09:00:00.000Z',
+          interpretation: {
+            statedPrecision: 'period',
+            gloss: 'Summer where they live runs roughly February to May.',
+            bracketFrom: '2027-02-01',
+            bracketTo: '2027-05-31',
+            interpretationConfidence: 'medium',
+          },
+        },
+      })
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      // 2027-01-10 is inside the period lead window (30 days before the
+      // 2027-02-01 bracket opens, i.e. eligible from 2027-01-02).
+      const context = await engine.sessionContext(new Date('2027-01-10T00:00:00.000Z'))
+
+      expect(context.commitments).toEqual([
+        {
+          label: 'Start swimming again',
+          words: 'come summer',
+          date: '2026-08-13',
+          gloss: 'Summer where they live runs roughly February to May.',
+        },
+      ])
+
+      await engine.close()
+    })
+
+    it("reads the date said in the person's own local timezone, not the UTC date the anchor's ISO string starts with", async () => {
+      // 2026-08-13T20:30:00.000Z is already 2026-08-14 local time in
+      // Asia/Kolkata (UTC+5:30). A test pinned to UTC cannot distinguish
+      // "converted to local time" from "read the ISO date prefix off the
+      // anchor directly": both would print 2026-08-13. Pinning a non-UTC
+      // zone and crossing the local day boundary is the only way to make
+      // the two implementations disagree.
+      const profile = await loadProfile(paths)
+      await writeProfile(paths, {
+        meta: { ...profile.meta, timezone: 'Asia/Kolkata', timezoneSource: 'user-confirmed' },
+        body: profile.body,
+      })
+      await recordCommitment(paths, {
+        label: 'Call the dentist',
+        flavor: 'errand',
+        sessionId: 'session_test',
+        // A resolved window is required for eligibility (Important 8): an
+        // unresolved, unglossed timing has no bracket to be eligible
+        // through. 2026-08-14 is the local day the commitment is said on
+        // (the property this test is actually about), and also the local
+        // "today" of the sessionContext call below, so the window is open.
+        timing: {
+          words: 'tomorrow',
+          anchor: '2026-08-13T20:30:00.000Z',
+          resolved: { from: '2026-08-14', to: '2026-08-14', statedPrecision: 'day' },
+        },
+      })
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const context = await engine.sessionContext(new Date('2026-08-14T00:00:00.000Z'))
+
+      expect(context.commitments).toEqual([
+        { label: 'Call the dentist', words: 'tomorrow', date: '2026-08-14' },
+      ])
+
+      await engine.close()
+    })
+
+    it('excludes a commitment with no timing at all: spec Section 4 defines eligibility only in terms of a bracket', async () => {
+      // Important 8: an untimed ("someday") commitment has no bracket and
+      // can never fall within one, or within a lead time before one, so it
+      // is never eligible through this standing, always-rendered section.
+      // Nothing else in the live companion surfaces it either (see
+      // BACKLOG.md): it stays invisible to the live conversation, though
+      // reflection still sees it, uncapped, at session end.
+      await recordCommitment(paths, {
+        label: 'Do something, someday',
+        flavor: 'errand',
+        sessionId: 'session_test',
+      })
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const context = await engine.sessionContext()
+
+      expect(context.commitments).toEqual([])
+
+      await engine.close()
+    })
+
+    it('excludes a commitment not yet inside its eligible window', async () => {
+      await recordCommitment(paths, {
+        label: 'Start swimming again',
+        flavor: 'plan',
+        sessionId: 'session_test',
+        timing: {
+          words: 'come summer',
+          anchor: '2026-08-13T09:00:00.000Z',
+          interpretation: {
+            statedPrecision: 'period',
+            gloss: 'Summer where they live runs roughly February to May.',
+            bracketFrom: '2027-02-01',
+            bracketTo: '2027-05-31',
+            interpretationConfidence: 'medium',
+          },
+        },
+      })
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const context = await engine.sessionContext(new Date('2026-09-01T00:00:00.000Z'))
+
+      expect(context.commitments).toEqual([])
+
+      await engine.close()
+    })
+
+    it('excludes a quiet commitment even when its window is eligible', async () => {
+      // Carries a real, currently-eligible timing so this test actually
+      // exercises the quiet filter: an untimed commitment would be
+      // excluded anyway (see the untimed test above), which would make
+      // this pass for the wrong reason.
+      const recorded = await recordCommitment(paths, {
+        label: 'Call the dentist',
+        flavor: 'errand',
+        sessionId: 'session_test',
+        timing: {
+          words: 'today',
+          anchor: '2026-08-14T09:00:00.000Z',
+          resolved: { from: '2026-08-14', to: '2026-08-14', statedPrecision: 'day' },
+        },
+      })
+      await resolveCommitment(paths, recorded.id, 'quiet')
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const context = await engine.sessionContext(new Date('2026-08-14T00:00:00.000Z'))
+
+      expect(context.commitments).toEqual([])
+
+      await engine.close()
+    })
+
+    it('excludes a resolved commitment (done or dropped) even when its window is eligible', async () => {
+      // Critical 1: the allow-list fix. A resolved commitment must not
+      // keep loading into the prompt after the model has recorded an
+      // outcome for it.
+      const recorded = await recordCommitment(paths, {
+        label: 'Call the dentist',
+        flavor: 'errand',
+        sessionId: 'session_test',
+        timing: {
+          words: 'today',
+          anchor: '2026-08-14T09:00:00.000Z',
+          resolved: { from: '2026-08-14', to: '2026-08-14', statedPrecision: 'day' },
+        },
+      })
+      await resolveCommitment(paths, recorded.id, 'done')
+
+      const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+      const context = await engine.sessionContext(new Date('2026-08-14T00:00:00.000Z'))
+
+      expect(context.commitments).toEqual([])
 
       await engine.close()
     })
@@ -3603,7 +4105,10 @@ describe('MemoryEngine', () => {
         content: 'Jo and I had a falling out.',
       })
 
-      const sessionDir = join(forgetPaths.sessionsDir, `${isoDate(startedAt)}-${sessionId}`)
+      const sessionDir = join(
+        forgetPaths.sessionsDir,
+        `${formatLocalDate(startedAt, engine.timezone())}-${sessionId}`,
+      )
       const transcriptPath = join(sessionDir, 'transcript.jsonl')
       const before = await readFile(transcriptPath, 'utf8')
 

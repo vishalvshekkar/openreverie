@@ -16,6 +16,20 @@ import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { ChatProvider, EmbeddingProvider } from '@openreverie/providers'
 import { decodeTime } from 'ulid'
+import type {
+  Commitment,
+  CommitmentFlavor,
+  CommitmentState,
+  CommitmentTiming,
+} from './commitments.js'
+import {
+  readCommitments,
+  recordCommitment as recordCommitmentRecord,
+  resolveCommitment as resolveCommitmentRecord,
+  reviseCommitment as reviseCommitmentRecord,
+  selectCommitments,
+} from './commitments.js'
+import { resolveStatedTime } from './commitmentTime.js'
 import {
   type Document,
   listDocuments,
@@ -347,8 +361,25 @@ export interface SessionContext {
   // what the person said they wanted to do. The date matters here exactly
   // as it does for recentSummaries and the daily rollup: without it the
   // model cannot tell an intention from yesterday apart from one from last
-  // week.
-  recentIntentions: { text: string; date: string }[]
+  // week. eventTime, when the item carries one, is the person's own stated
+  // wording ("tonight", "next week"), never a resolved instant: see
+  // ReflectionItem.eventTime (reflection.ts) and the time spec's section 2.
+  // It is relative to date above, not to whenever the model reads it.
+  recentIntentions: { text: string; date: string; eventTime?: string }[]
+  // Commitments already inside their eligible window (commitments.ts,
+  // selectCommitments), up to COMMITMENTS_CAP, soonest window first. Spec
+  // Section 3: "the bracket selects, the gloss speaks." selectCommitments
+  // uses the bracket only to decide whether an entry belongs in this array
+  // at all; once it is in, this shape has no field to carry the bracket, a
+  // resolved window, or any derived date forward, so context.ts has
+  // nothing to render even if it tried. words and date come from the same
+  // timing block and are only present together (absent together on a
+  // commitment with no timing at all, such as "someday"): words is the
+  // person's own wording, never resolved, and date is the local calendar
+  // day they said it, read off timing.anchor, not off `now`. gloss is
+  // present only when reflection wrote one for a stated time it could not
+  // resolve to a window.
+  commitments: { label: string; words?: string; date?: string; gloss?: string }[]
   latestDailyRollup?: { date: string; body: string; docId: string }
   recentSummaries: { sessionId: string; date: string; body: string; docId: string }[]
   // The newest WEEKLY_INDEX_CAP weekly rollups, newest first, each with the
@@ -431,6 +462,11 @@ const ARC_STARTER_BODY = 'This arc is new. It grows as we talk.\n'
 const RECENT_SUMMARIES_WINDOW_DAYS = 7
 const RECENT_SUMMARIES_CAP = 3
 const RECENT_INTENTIONS_CAP = 5
+// The cap selectCommitments (commitments.ts) is called with: how many
+// eligible commitments sessionContext carries into the prompt, soonest
+// window first. Matches RECENT_INTENTIONS_CAP: both are short, capped
+// listings of a handful of recent or upcoming things, not a full roster.
+const COMMITMENTS_CAP = 5
 // People and entity nodes are created generously and never forgotten, so
 // both lists only ever grow. Every sibling prompt section is bounded
 // (active-only for arcs, a window and a cap for recentSummaries, a cap for
@@ -749,18 +785,95 @@ export class MemoryEngine implements DreamLookup {
     kind: ReflectionItemKind = 'observation',
     eventTime?: string,
   ): Promise<void> {
+    // Normalized here too, not only at tools.ts's rememberArgs schema:
+    // remember() is a public method other callers (direct tests among
+    // them) can reach without going through that schema, so the write
+    // site itself must not trust that its caller already stripped a blank
+    // eventTime. An empty or whitespace-only string is never a stated
+    // time; treated as absent, not rejected, for the same reason as the
+    // schema: the text is still worth keeping.
+    const statedEventTime =
+      eventTime !== undefined && eventTime.trim().length > 0 ? eventTime : undefined
     const item: ReflectionItem = {
       id: newId('item'),
       text,
       kind,
       ts: new Date().toISOString(),
-      ...(eventTime !== undefined ? { eventTime } : {}),
+      ...(statedEventTime !== undefined ? { eventTime: statedEventTime } : {}),
     }
     const items = this.liveItems.get(sessionId)
     if (items) {
       items.push(item)
     } else {
       this.liveItems.set(sessionId, [item])
+    }
+  }
+
+  // Records a brand new commitment: a bounded thing the person means to
+  // do, identity on the graph log rather than an append-only item. Unlike
+  // remember() above, this writes straight through to graph.jsonl: a
+  // commitment is a thing with a lifecycle, not a fact queued for
+  // end-of-session reflection.
+  //
+  // No waitsOn parameter here: the live remember tool no longer exposes
+  // it (packages/core/src/tools.ts), so nothing calls this with one.
+  // recordCommitmentRecord itself still accepts waitsOn for the data
+  // model; that is unchanged, only unreachable from this method.
+  async recordCommitment(
+    sessionId: string,
+    input: { label: string; flavor: CommitmentFlavor; statedTime?: string },
+  ): Promise<Commitment> {
+    const timing = this.buildCommitmentTiming(input.statedTime)
+    return recordCommitmentRecord(this.paths, {
+      label: input.label,
+      flavor: input.flavor,
+      sessionId,
+      ...(timing !== undefined ? { timing } : {}),
+    })
+  }
+
+  // Reasserts the same commitment id with the changed fields, per
+  // commitments.ts's reviseCommitment: whatever is not passed here carries
+  // forward from the current live version rather than being dropped.
+  async reviseCommitment(
+    id: string,
+    changes: { label?: string; statedTime?: string },
+  ): Promise<Commitment> {
+    const timing = this.buildCommitmentTiming(changes.statedTime)
+    return reviseCommitmentRecord(this.paths, id, {
+      ...(changes.label !== undefined ? { label: changes.label } : {}),
+      ...(timing !== undefined ? { timing } : {}),
+    })
+  }
+
+  // Records the outcome the caller already knows. Invents nothing: the
+  // caller (dispatchRemember) is the one that must have already gotten an
+  // explicit outcome out of the model, this only appends it.
+  async resolveCommitment(id: string, outcome: CommitmentState): Promise<Commitment> {
+    return resolveCommitmentRecord(this.paths, id, outcome)
+  }
+
+  // The stated time, resolved when the words are unambiguous enough to
+  // reduce to a calendar window, carried as bare words and an anchor when
+  // they are not. No interpretation is invented here on the refused
+  // branch: a live tool call has no reliable moment to ask a model for a
+  // gloss, so that gloss is written later, by reflection.
+  private buildCommitmentTiming(statedTime: string | undefined): CommitmentTiming | undefined {
+    // Important 4, second site: normalized here too, not only at
+    // tools.ts's statedTimeField, for the same reason MemoryEngine.remember
+    // (above) does not trust its caller already stripped a blank
+    // eventTime. This method is reached from recordCommitment and
+    // reviseCommitment, both public, so a direct caller (tests among them)
+    // bypassing tools.ts must not be able to write a fabricated
+    // `(said <today>: "")` anchor either.
+    const stated = statedTime !== undefined && statedTime.trim().length > 0 ? statedTime : undefined
+    if (stated === undefined) return undefined
+    const anchor = new Date()
+    const resolved = resolveStatedTime(stated, anchor, this.timezone())
+    return {
+      words: stated,
+      anchor: anchor.toISOString(),
+      ...(resolved !== undefined ? { resolved } : {}),
     }
   }
 
@@ -969,6 +1082,7 @@ export class MemoryEngine implements DreamLookup {
       now,
       narratives,
       materializeNew,
+      this.timezone(),
     )
     this.liveItems.delete(sessionId)
 
@@ -1194,11 +1308,53 @@ export class MemoryEngine implements DreamLookup {
             // recentSummaries and the daily rollup, and unlike ts (empty
             // on a hand-written summary.md in several tests) it is always
             // present.
-            recentIntentions.push({ text: (item as { text: string }).text, date: session.date })
+            //
+            // Ruling 11: this reads raw frontmatter off a summary.md on
+            // disk, the same untrusted-folder boundary as sqlite.ts's
+            // itemChunkText. A summary.md written before the write-site
+            // fixes, or hand-edited, can carry `eventTime: ""`; trimmed
+            // and treated as absent here too, so it never renders as a
+            // fabricated `(eventTime: "")` in the prompt.
+            const eventTimeRaw = (item as { eventTime?: unknown }).eventTime
+            const eventTime =
+              typeof eventTimeRaw === 'string' && eventTimeRaw.trim().length > 0
+                ? eventTimeRaw
+                : undefined
+            recentIntentions.push({
+              text: (item as { text: string }).text,
+              date: session.date,
+              ...(eventTime !== undefined ? { eventTime } : {}),
+            })
           }
         }
       }
     }
+
+    // The bracket that decides eligibility never leaves selectCommitments:
+    // this map only ever reads label, words, anchor, and interpretation.gloss
+    // off the commitments it returns. today is computed the same way every
+    // other local-day selection in this method is (formatLocalDate against
+    // this.timezone()), not off `now` directly, so a commitment recorded
+    // late at night and one recorded just after midnight the same local day
+    // select the same way.
+    const today = formatLocalDate(now, this.timezone())
+    const allCommitments = await readCommitments(this.paths)
+    const eligibleCommitments = selectCommitments(allCommitments, today, COMMITMENTS_CAP)
+    const commitments: SessionContext['commitments'] = eligibleCommitments.map((commitment) => {
+      const timing = commitment.timing
+      // The `timing === undefined` branch below is defensive, not
+      // reachable today: selectCommitments' Important 8 fix already
+      // requires a computable window (and therefore a defined timing) to
+      // be eligible through this section at all, so every commitment
+      // reaching this map has one.
+      const said =
+        timing !== undefined
+          ? { words: timing.words, date: formatLocalDate(new Date(timing.anchor), this.timezone()) }
+          : {}
+      const gloss =
+        timing?.interpretation !== undefined ? { gloss: timing.interpretation.gloss } : {}
+      return { label: commitment.label, ...said, ...gloss }
+    })
 
     const personNodes: GraphNode[] = []
     const entityNodes: GraphNode[] = []
@@ -1331,6 +1487,7 @@ export class MemoryEngine implements DreamLookup {
       entitiesTruncated: cappedEntities.truncated,
       entitiesTotal: entityNodes.length,
       recentIntentions: recentIntentions.slice(0, RECENT_INTENTIONS_CAP),
+      commitments,
       ...(latestDailyRollup ? { latestDailyRollup } : {}),
       recentSummaries,
       weeklyRollups: weeklyRollups.slice(0, WEEKLY_INDEX_CAP),
@@ -1912,6 +2069,12 @@ export class MemoryEngine implements DreamLookup {
     const cappedPeople = capPeople(allPeople)
     const cappedEntities = capEntities(allEntities)
     const journalingProtocol = await readJournalingProtocolIfPresent(this.paths)
+    // Every commitment, so reflection can reference an existing id in
+    // commitmentRevisions instead of proposing a duplicate. Uncapped,
+    // unlike people/entities above: a person accumulates far fewer open
+    // commitments than named people or things over time, so there is no
+    // truncation story to tell yet; revisit if that stops being true.
+    const commitments = await readCommitments(this.paths)
     return {
       constitution: constitutionDoc.body,
       arcs,
@@ -1920,6 +2083,7 @@ export class MemoryEngine implements DreamLookup {
       peopleTruncated: cappedPeople.truncated,
       entities: cappedEntities.nodes,
       entitiesTruncated: cappedEntities.truncated,
+      commitments,
       profile: this.profileCache.meta,
       ...(journalingProtocol !== undefined ? { journalingProtocol } : {}),
     }

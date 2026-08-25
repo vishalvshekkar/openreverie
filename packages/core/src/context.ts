@@ -26,6 +26,7 @@ import type { MemoryEngine, Profile, SessionContext } from '@openreverie/memory'
 import { PROFILE_STARTER_BODY } from '@openreverie/memory'
 import {
   ARCS_SECTION_CAP,
+  COMMITMENTS_SECTION_CAP,
   CONSTITUTION_CAP,
   capBody,
   capRows,
@@ -48,8 +49,14 @@ export async function assembleSystemPrompt(
   engine: MemoryEngine,
   config: ReverieConfig,
   activeMode: ModeName = 'general',
+  // Injectable clock, matching AgentSessionOptions.now in agent.ts. It is
+  // read exactly once, only to pick which recent sessions and rollups fall
+  // inside their recency windows: it never appears in the rendered prompt.
+  // A test can pin it without touching process-wide state; every existing
+  // caller that omits it keeps reading the real wall clock unchanged.
+  now: () => Date = () => new Date(),
 ): Promise<string> {
-  const context = await engine.sessionContext(new Date(), activeMode)
+  const context = await engine.sessionContext(now(), activeMode)
   const profile = engine.profile()
   const persona = buildPersona(
     config.safety.mode,
@@ -76,6 +83,7 @@ export async function assembleSystemPrompt(
     peopleSection(context),
     entitiesSection(context),
     recentIntentionsSection(context),
+    commitmentsSection(context),
     dreamsSection(context),
     latestDailyRollupSection(context),
     rollupsAvailableSection(context),
@@ -104,6 +112,8 @@ function timeSection(context: SessionContext): string {
     '## Time',
     '',
     `This person's timezone is ${context.timezone}. Every message from them is stamped with the local date and time it was sent, in square brackets at the start of the message. Read the newest stamp as the current time, and read the gaps between stamps as elapsed time: something the person described as happening later in the day may already have happened by a later message.`,
+    '',
+    "A stated event time elsewhere in this prompt, such as in a recent intention or a memory, is the person's own wording, not a resolved instant: read it as relative to the date printed beside it, and resolve it against the current message stamp rather than as if it were said today.",
   ]
   if (context.timezoneSource === 'system-default') {
     lines.push(
@@ -337,9 +347,15 @@ function profileSection(profile: Profile): string | undefined {
 
 function recentIntentionsSection(context: SessionContext): string | undefined {
   if (context.recentIntentions.length === 0) return undefined
-  const lines = context.recentIntentions.map(
-    (intention) => `- ${intention.date}: ${intention.text}`,
-  )
+  const lines = context.recentIntentions.map((intention) => {
+    // eventTime is the person's own stated wording ("tonight", "next
+    // week"), never resolved into a date or a timestamp. The date already
+    // leading this line is what it is relative to, so it renders right
+    // next to that date and is left out entirely, not as an empty
+    // parenthetical, when the item stated none.
+    const anchor = intention.eventTime !== undefined ? ` (eventTime: "${intention.eventTime}")` : ''
+    return `- ${intention.date}: ${intention.text}${anchor}`
+  })
   const capped = capRows(lines, RECENT_INTENTIONS_SECTION_CAP)
   const rows = capped.rows
   if (capped.shown < lines.length) {
@@ -348,5 +364,48 @@ function recentIntentionsSection(context: SessionContext): string | undefined {
     // unreachable in practice; the character cap is a budget backstop.
     rows.push(`(showing ${capped.shown} of ${lines.length} recent intentions.)`)
   }
-  return `## Recent intentions\n\n${rows.join('\n')}`
+  return `## Recent intentions\n\nA recorded intention is evidence the person said they meant to do something. It is never evidence that they did it.\n\n${rows.join('\n')}`
+}
+
+// Spec section 3, "the bracket selects, the gloss speaks": a derived time
+// bracket only ever decides whether a commitment made it into
+// context.commitments in the first place (engine.ts, sessionContext,
+// selectCommitments). That shape carries no field for a bracket, a resolved
+// window, or any count of anything unresolved, so there is nothing here to
+// leak even by mistake. Only what the person actually said, and the gloss
+// when reflection wrote one, ever reaches this string.
+function commitmentsSection(context: SessionContext): string | undefined {
+  if (context.commitments.length === 0) return undefined
+  const lines = context.commitments.map((commitment) => {
+    // words and date come from the same timing block and are only ever
+    // present together. The label-alone branch below is defensive, not
+    // reachable today: an open-ended "someday" commitment has no
+    // computable window, so selectCommitments (Important 8, 2026-08-25)
+    // never selects it into this section at all. It has no other channel
+    // to the live model either (nothing indexes commitments for search or
+    // tool lookup; see BACKLOG.md): reflection is the only place it is
+    // still seen, uncapped, at session end. Left in rather than removed
+    // for the same reason as the sort's own defensive branches in
+    // commitments.ts: this function should not silently assume a shape
+    // its caller happens to provide today.
+    const said =
+      commitment.words !== undefined && commitment.date !== undefined
+        ? ` (said ${commitment.date}: "${commitment.words}")`
+        : ''
+    const gloss = commitment.gloss !== undefined ? ` ${commitment.gloss}` : ''
+    return `- ${commitment.label}${said}${gloss}`
+  })
+  const capped = capRows(lines, COMMITMENTS_SECTION_CAP)
+  // A single gloss is model prose with no length limit of its own, so the
+  // very first row can already exceed the section cap on its own; capRows
+  // then returns no rows at all. A header with nothing under it is exactly
+  // the defect the rest of this file exists to avoid, so this section
+  // follows the same rule as every sibling: nothing to say, left out
+  // entirely, rather than an empty listing under a marker.
+  if (capped.rows.length === 0) return undefined
+  const rows = capped.rows
+  if (capped.shown < lines.length) {
+    rows.push(`(showing ${capped.shown} of ${lines.length} commitments.)`)
+  }
+  return `## Commitments\n\nA recorded commitment is evidence the person said they meant to do something. It is never evidence that they did it. This informs what you say. It is never read out to the person as a list, a status report, or a checklist.\n\n${rows.join('\n')}`
 }

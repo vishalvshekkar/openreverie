@@ -54,10 +54,99 @@ const readTranscriptArgs = z.strictObject({
   sessionId: z.string(),
 })
 
-const rememberArgs = z.strictObject({
+// A stated time in a person's own words ("sunday", "by Friday") is shared
+// between recording and revising a commitment, so both shapes below reuse
+// this transform. Same reasoning as rememberItemArgs's eventTime: a model
+// emitting an empty or whitespace-only string is a known structured-output
+// tendency, not a stated time, so it is normalized to absent rather than
+// rejected or stored as a fabricated anchor.
+const statedTimeField = z
+  .string()
+  .transform((value) => (value.trim().length === 0 ? undefined : value))
+  .optional()
+
+// Four shapes, deliberately kept as four separate strict schemas rather
+// than merged into one optional-everything object. Spec Section 7:
+// recording, revising and resolving a commitment are three different
+// operations and must stay distinguishable at the boundary, the same as
+// the plain item shape stays distinguishable from all three. If these
+// shapes ever need optional-everything to typecheck, the extension has
+// flattened and should be revisited.
+//
+// dispatchRemember picks which one applies by checking which top-level key
+// the raw arguments carry, then parses against that single shape, never
+// against a combined z.union. A union's safeParse collapses every branch's
+// failure into one root-level "Invalid input" with no field path, which
+// both throws away the per-field detail this file's own header promises
+// the model ("the model sees its own mistake ... and can correct it") and
+// silently regresses the plain item shape's existing error messages (a
+// non-string text used to report `text: Expected string, received
+// number`; through a union it does not). Four disjoint strict schemas,
+// each parsed on its own, keeps that detail exactly as before this task.
+
+// The plain item shape. Unchanged from before this task, and stays the
+// default: a call with a bare `text` (optionally `kind` and `eventTime`)
+// behaves exactly as it always has.
+const rememberItemArgs = z.strictObject({
   text: z.string(),
   kind: z.enum(['observation', 'feeling', 'event', 'intention']).optional(),
-  eventTime: z.string().optional(),
+  // A model emitting `"eventTime": ""` instead of omitting the key is a
+  // well known structured-output tendency, not malice: the person stated
+  // no time. Treated as absent rather than rejected: the text itself is
+  // still worth keeping, and failing the whole remember call over a blank
+  // optional field would lose real content to punish a shape the model
+  // did not mean maliciously. Whitespace-only input is treated the same
+  // way. This flows into engine.remember's optional `eventTime?: string`
+  // parameter, not an object property, so a normalized `string |
+  // undefined` here is fine under exactOptionalPropertyTypes; see
+  // reflection.ts's reflectionOutputSchema for why that schema needs a
+  // different shape to normalize the same way.
+  eventTime: z
+    .string()
+    .transform((value) => (value.trim().length === 0 ? undefined : value))
+    .optional(),
+})
+
+// Record a brand new commitment. flavor is required because an errand and
+// a plan are selected and asked about differently; statedTime is a real,
+// distinct field, never prose packed into label.
+//
+// waitsOn is deliberately absent from this shape. Commitment.waitsOn still
+// exists on the record type in packages/memory/src/commitments.ts, and
+// selectCommitments still excludes any commitment with waitsOn set, but
+// nothing anywhere reactivates a commitment once the thing it waits on
+// happens: that reactivation is spec Section 5, and it is not built. A
+// live tool call that could set waitsOn would make a commitment
+// permanently unselectable with no path to undo it, which is worse than
+// not offering the field at all. Restore it here only once Section 5's
+// waits_on edge and reactivation check exist.
+const rememberCommitmentArgs = z.strictObject({
+  commitment: z.strictObject({
+    label: z.string(),
+    flavor: z.enum(['errand', 'plan']),
+    statedTime: statedTimeField,
+  }),
+})
+
+// Revise an existing commitment. commitmentId is required: a revision
+// that cannot say what it revises is exactly the flattening this shape
+// exists to prevent.
+const rememberReviseCommitmentArgs = z.strictObject({
+  reviseCommitment: z.strictObject({
+    commitmentId: z.string(),
+    label: z.string().optional(),
+    statedTime: statedTimeField,
+  }),
+})
+
+// Resolve an existing commitment. commitmentId and outcome are both
+// required: a resolution with no named outcome is the other half of the
+// flattening this shape exists to prevent.
+const rememberResolveCommitmentArgs = z.strictObject({
+  resolveCommitment: z.strictObject({
+    commitmentId: z.string(),
+    outcome: z.enum(['done', 'dropped', 'quiet']),
+  }),
 })
 
 const declareJournalMethodArgs = z.strictObject({
@@ -115,11 +204,21 @@ export function toolDefinitions(): ToolDefinition[] {
         'Search memory before answering from a vague impression of what was probably said. Use this whenever the ' +
         'conversation touches something that might already be recorded: an ongoing arc, a past event, a person, a ' +
         'decision made earlier. Retrieve before asserting: check the record rather than guess. Results come back ' +
-        'in two parts. documents are ranked passages from pages, summaries and rollups, each with a snippet. ' +
-        'nodes are graph nodes whose name matches the query, including people and things that have no page of ' +
-        'their own; a node hit carries an id you can pass to graph_query, and a docId only when a page exists. A ' +
-        'node hit with hasPage: false means this person or thing is known and recorded, and there is nothing ' +
-        'written about them beyond their name and their links.',
+        'in two parts. documents are ranked passages from pages, summaries and rollups. Each document hit carries ' +
+        'a snippet (its single best-matching passage) and chunks, a list of every matching passage from that same ' +
+        'document, most relevant first: a summary can hold both a vague early mention and a later, precise, dated ' +
+        'version of the same fact, and chunks is how both reach you instead of only whichever ranked best. ' +
+        'chunksTotal is the count of matching passages found, before any cap trims the list, so a document whose ' +
+        'chunks does not equal chunksTotal has more passages than shown; read_document with its docId gets the ' +
+        'rest. dateStart and ' +
+        'dateEnd give the date, or date range, this content is about, read from the document, not guessed. ' +
+        'Session summaries, daily rollups, weekly rollups and journal entries carry one. Living documents that are ' +
+        'rewritten over time (the constitution, and realm, arc and person pages) have no single date and dateStart ' +
+        '/ dateEnd are absent on their hits rather than filled with a stand-in: absence there means the content is ' +
+        'ongoing, not that its date is unknown. nodes are graph nodes whose name matches the query, including ' +
+        'people and things that have no page of their own; a node hit carries an id you can pass to graph_query, ' +
+        'and a docId only when a page exists. A node hit with hasPage: false means this person or thing is known ' +
+        'and recorded, and there is nothing written about them beyond their name and their links.',
       parameters: {
         type: 'object',
         properties: {
@@ -230,8 +329,21 @@ export function toolDefinitions(): ToolDefinition[] {
       name: 'remember',
       description:
         'Capture something worth recording right now, mid-session, when it is urgent or explicit enough that it ' +
-        'should not wait for the automatic end-of-session reflection. This is for noting what is happening now, not ' +
-        'for asserting or correcting facts about the past.',
+        'should not wait for the automatic end-of-session reflection. Pass exactly one of four shapes, never a ' +
+        'mix. The default shape (text, and optionally kind and eventTime) is for noting what is happening now: an ' +
+        'observation, a feeling, an event, an intention. It is not for asserting or correcting facts about the ' +
+        'past, and it is not for something the person means to do: that is a commitment, the second shape. ' +
+        'Use commitment when the person states a bounded thing they intend to do, an errand ("pick up the dry ' +
+        'cleaning") or a plan with someone else ("see the film with Arjun"). Give it a plain label, a flavor ' +
+        '(errand or plan), and, only when the person actually stated one, statedTime in their own words ("sunday", ' +
+        '"by Friday", "next month"). Never fold a stated time into the label itself: "See the film with Arjun by ' +
+        'Friday" as a label is the exact mistake this shape exists to prevent. Use ' +
+        'reviseCommitment when a commitment already recorded has changed, a firmer date, a different plan, and ' +
+        'name commitmentId so it is clear which commitment is being changed, never a new remember call describing ' +
+        'the same thing again. Use resolveCommitment when a commitment is finished one way or another: name ' +
+        'commitmentId and outcome, done when it happened, dropped when it will not, quiet when the person should ' +
+        'not be asked about it again for any reason. A resolution with no outcome is refused, the same way a ' +
+        'revision with no commitmentId is refused: both must say plainly what they mean.',
       parameters: {
         type: 'object',
         properties: {
@@ -249,8 +361,82 @@ export function toolDefinitions(): ToolDefinition[] {
             description:
               'When the thing happens or happened, in the person\'s own words ("tonight at 7.25", "last Tuesday"), only when they actually stated a time. Leave it out otherwise. This is separate from when they told you.',
           },
+          commitment: {
+            type: 'object',
+            description:
+              'Record a brand new commitment: a bounded thing the person means to do. Use this instead of text ' +
+              'when what happened is that they stated an intention with a shape, not a passing feeling or note.',
+            properties: {
+              label: {
+                type: 'string',
+                description:
+                  'A plain, short label for the commitment ("See Nightfall with Arjun"), never with a stated time ' +
+                  'folded into it. The time belongs in statedTime.',
+              },
+              flavor: {
+                type: 'string',
+                enum: ['errand', 'plan'],
+                description:
+                  'errand for a solo bounded task ("pick up the dry cleaning"), plan for something involving ' +
+                  'someone else ("see the film with Arjun").',
+              },
+              statedTime: {
+                type: 'string',
+                description:
+                  'When the person said this happens, in their own words ("sunday", "by Friday", "come summer"). ' +
+                  'Only when they actually stated one. Leave it out otherwise.',
+              },
+            },
+            required: ['label', 'flavor'],
+            additionalProperties: false,
+          },
+          reviseCommitment: {
+            type: 'object',
+            description:
+              'Change a commitment already recorded: a firmer date, a changed plan. Always names the commitment ' +
+              'being changed. Never use this to describe the same thing again as if it were new.',
+            properties: {
+              commitmentId: {
+                type: 'string',
+                description: 'The id of the commitment being revised.',
+              },
+              label: {
+                type: 'string',
+                description:
+                  'The new label, only when it changed. Leave out fields that did not change.',
+              },
+              statedTime: {
+                type: 'string',
+                description:
+                  "The new stated time, in the person's own words, only when it changed. Leave out fields that " +
+                  'did not change.',
+              },
+            },
+            required: ['commitmentId'],
+            additionalProperties: false,
+          },
+          resolveCommitment: {
+            type: 'object',
+            description:
+              'Record how a commitment already recorded ended. Always names the commitment and the outcome; ' +
+              'a resolution with no outcome is refused.',
+            properties: {
+              commitmentId: {
+                type: 'string',
+                description: 'The id of the commitment being resolved.',
+              },
+              outcome: {
+                type: 'string',
+                enum: ['done', 'dropped', 'quiet'],
+                description:
+                  'done when it happened, dropped when the person said it will not, quiet when they should not ' +
+                  'be asked about it again for any reason.',
+              },
+            },
+            required: ['commitmentId', 'outcome'],
+            additionalProperties: false,
+          },
         },
-        required: ['text'],
         additionalProperties: false,
       },
     },
@@ -616,14 +802,61 @@ async function dispatchReadTranscript(engine: MemoryEngine, value: unknown): Pro
   return JSON.stringify(lines)
 }
 
+// Picks which of the four shapes applies by checking for the one top-level
+// key that only that shape carries in the raw, unvalidated arguments, then
+// validates against that single strict schema. See the comment above
+// rememberItemArgs for why this checks the raw value first rather than
+// parsing against a combined z.union: a union's error collapses every
+// branch's failure into one root-level message with no field path, and
+// this file's whole contract is that the model sees its own mistake and
+// can correct it.
+function hasKey(value: unknown, key: string): boolean {
+  return typeof value === 'object' && value !== null && key in value
+}
+
 async function dispatchRemember(
   engine: MemoryEngine,
   sessionId: string,
   value: unknown,
 ): Promise<string> {
-  const parsed = rememberArgs.safeParse(value)
-  if (!parsed.success) return errorJson(zodErrorMessage('remember', parsed.error))
+  if (hasKey(value, 'commitment')) {
+    const parsed = rememberCommitmentArgs.safeParse(value)
+    if (!parsed.success) return errorJson(zodErrorMessage('remember', parsed.error))
+    const { commitment } = parsed.data
+    const recorded = await engine.recordCommitment(sessionId, {
+      label: commitment.label,
+      flavor: commitment.flavor,
+      ...(commitment.statedTime !== undefined ? { statedTime: commitment.statedTime } : {}),
+    })
+    return JSON.stringify({ ok: true, commitmentId: recorded.id })
+  }
 
+  if (hasKey(value, 'reviseCommitment')) {
+    const parsed = rememberReviseCommitmentArgs.safeParse(value)
+    if (!parsed.success) return errorJson(zodErrorMessage('remember', parsed.error))
+    const { reviseCommitment } = parsed.data
+    const revised = await engine.reviseCommitment(reviseCommitment.commitmentId, {
+      ...(reviseCommitment.label !== undefined ? { label: reviseCommitment.label } : {}),
+      ...(reviseCommitment.statedTime !== undefined
+        ? { statedTime: reviseCommitment.statedTime }
+        : {}),
+    })
+    return JSON.stringify({ ok: true, commitmentId: revised.id })
+  }
+
+  if (hasKey(value, 'resolveCommitment')) {
+    const parsed = rememberResolveCommitmentArgs.safeParse(value)
+    if (!parsed.success) return errorJson(zodErrorMessage('remember', parsed.error))
+    const { resolveCommitment } = parsed.data
+    const resolved = await engine.resolveCommitment(
+      resolveCommitment.commitmentId,
+      resolveCommitment.outcome,
+    )
+    return JSON.stringify({ ok: true, commitmentId: resolved.id })
+  }
+
+  const parsed = rememberItemArgs.safeParse(value)
+  if (!parsed.success) return errorJson(zodErrorMessage('remember', parsed.error))
   await engine.remember(sessionId, parsed.data.text, parsed.data.kind, parsed.data.eventTime)
   return JSON.stringify({ ok: true })
 }

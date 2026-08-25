@@ -17,7 +17,16 @@ const Graph = graphology as unknown as GraphClass
 
 export type NodeType = GraphNode['type']
 
-const NODE_TYPES: NodeType[] = ['realm', 'arc', 'item', 'session', 'person', 'entity']
+// 'commitment' was added here to keep this list, and the Record<NodeType, ...>
+// maps below, matching GraphNode['type'] (the compiler enforces the Records;
+// nothing enforces this plain array, so check it by hand whenever NodeType
+// gains a member). Its visual identity below is a minimal, functional
+// default, not a considered design: the commitments plan explicitly
+// deferred the browser Record view for commitments to a separate plan, and
+// this file's own colour ramp, border width, and size band comments
+// describe a deliberate ordering that a follow-up should revisit rather
+// than this task guessing at.
+const NODE_TYPES: NodeType[] = ['realm', 'arc', 'item', 'session', 'person', 'entity', 'commitment']
 
 const DEFAULT_ENABLED: NodeType[] = NODE_TYPES.filter((type) => type !== 'item')
 
@@ -28,6 +37,7 @@ const PLURAL: Record<NodeType, string> = {
   session: 'sessions',
   person: 'people',
   entity: 'entities',
+  commitment: 'commitments',
 }
 
 // A monochrome ramp: one of the few places a raw colour literal may appear
@@ -44,7 +54,21 @@ const PLURAL: Record<NodeType, string> = {
 // weight runs realm (strongest) to item (weakest); "strongest" means darkest
 // on light paper but lightest on dark paper, since that is what reads as
 // more prominent against each ground.
-const TYPE_PRIORITY: NodeType[] = ['realm', 'arc', 'person', 'entity', 'session', 'item']
+// 'commitment' is appended after 'item' rather than inserted at its
+// considered place in the weight order, so the five original entries keep
+// their existing colours (renumbering them would recolour every node type
+// already shipped, not just add one). It continues the same 0x20 step,
+// making it the faintest entry in both ramps: a placeholder weight, not a
+// judgment that commitments matter least.
+const TYPE_PRIORITY: NodeType[] = [
+  'realm',
+  'arc',
+  'person',
+  'entity',
+  'session',
+  'item',
+  'commitment',
+]
 
 const LIGHT_TYPE_COLORS: Record<NodeType, string> = {
   realm: '#1a1a1a',
@@ -53,6 +77,7 @@ const LIGHT_TYPE_COLORS: Record<NodeType, string> = {
   entity: '#7a7a7a',
   session: '#9a9a9a',
   item: '#bababa',
+  commitment: '#dadada',
 }
 
 const DARK_TYPE_COLORS: Record<NodeType, string> = {
@@ -62,6 +87,7 @@ const DARK_TYPE_COLORS: Record<NodeType, string> = {
   entity: '#929292',
   session: '#727272',
   item: '#525252',
+  commitment: '#323232',
 }
 
 function prefersDarkGround(): boolean {
@@ -189,6 +215,9 @@ const TYPE_BORDER_WIDTH: Record<NodeType, number> = {
   entity: 0.13,
   session: 0.11,
   item: 0.09,
+  // Appended, continuing the downward trend, rather than inserted at a
+  // considered rank: see the comment on TYPE_PRIORITY above.
+  commitment: 0.07,
 }
 
 // Hover emphasis dims everything but the hovered node and its direct
@@ -211,6 +240,9 @@ export const TYPE_SIZE_BAND: Record<NodeType, { min: number; max: number }> = {
   entity: { min: 7.5, max: 9.5 },
   session: { min: 5.5, max: 7 },
   item: { min: 3, max: 5 },
+  // Appended, continuing the shrinking-band trend, rather than inserted at
+  // a considered rank: see the comment on TYPE_PRIORITY above.
+  commitment: { min: 2, max: 3.5 },
 }
 
 // The legend swatch beside each filter checkbox mirrors that same band, so

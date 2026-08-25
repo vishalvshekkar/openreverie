@@ -498,13 +498,21 @@ describe('Atlas', () => {
     expect(screen.getByText('Select a node to see its details.')).toBeVisible()
   })
 
-  it('exposes all six node types in the filter, each with a checkbox', () => {
+  it('exposes all seven node types in the filter, each with a checkbox', () => {
     render(<Atlas snapshot={realisticSnapshot} />)
     const filterGroup = screen.getByRole('group', { name: 'Node types' })
-    for (const label of ['realms', 'arcs', 'items', 'sessions', 'people', 'entities']) {
+    for (const label of [
+      'realms',
+      'arcs',
+      'items',
+      'sessions',
+      'people',
+      'entities',
+      'commitments',
+    ]) {
       expect(within(filterGroup).getByText(label, { exact: false })).toBeVisible()
     }
-    expect(within(filterGroup).getAllByRole('checkbox')).toHaveLength(6)
+    expect(within(filterGroup).getAllByRole('checkbox')).toHaveLength(7)
   })
 
   it('gives every filter legend swatch the exact colour colorForType returns for that type', () => {

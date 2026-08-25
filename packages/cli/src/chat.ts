@@ -12,7 +12,7 @@ import type { EngineDeps, MemoryEngine } from '@openreverie/memory'
 import { listDocuments, memoryPaths, readDocument } from '@openreverie/memory'
 import type { ChatProvider, EmbeddingProvider } from '@openreverie/providers'
 import { cyan, dim, magenta } from './colors.js'
-import { type CommandContext, parseInput, runCommand } from './commands.js'
+import { type CommandContext, commandModeSelect, parseInput, runCommand } from './commands.js'
 import { createStartupSpinner } from './startup.js'
 import { createStatusLine, type StatusLine } from './status.js'
 import { formatStripTime, renderStatusStrip } from './strip.js'
@@ -44,6 +44,11 @@ const TOOL_NOTICES: Record<string, string> = {
   graph_query: 'checking connections',
   list_arcs: 'checking memory',
   list_realms: 'checking memory',
+  list_people: 'checking memory',
+  list_entities: 'checking memory',
+  update_profile: 'updating profile',
+  declare_journal_method: 'setting journal method',
+  update_journaling_protocol: 'updating journal setup',
   dream_feedback: 'noting your reaction',
 }
 
@@ -258,18 +263,52 @@ export async function runChat(deps: {
     io.write(`${dim(line, colorEnabled)}\n`)
   }
 
+  // Set when a bare /mode just printed its numbered list and returned
+  // 'select-mode': the very next line typed is read as a mode selection,
+  // never parsed as a command or sent to the model as chat text. This is
+  // read through the same io.question() call as the ordinary prompt below
+  // (not a nested question() inside the command itself), which is what
+  // keeps the second-Ctrl-C exit contract working here for free: the
+  // interruptLevel >= 2 check right after that question() still runs
+  // before this state is ever consulted. One exception: EOF (the endOfInput
+  // flag below) always bypasses this state and exits, since EOF is not a
+  // typed line and has no mode selection to make.
+  let modeSelectionPending = false
+
   for (;;) {
     writeStatusStrip()
     let line: string
+    let endOfInput = false
     try {
       line = await io.question(cyan('you> ', colorEnabled))
     } catch {
-      // readline closed (EOF): treat exactly like /bye.
+      // readline closed (EOF): treat exactly like /bye. This is the input
+      // stream ending, not the person typing something, so it must exit
+      // immediately whatever state the loop is in: a pending mode
+      // selection is irrelevant to it. endOfInput is what lets the check
+      // below tell an EOF-synthesized '/bye' apart from someone actually
+      // typing /bye at the selection prompt (that path is handled by the
+      // modeSelectionPending branch on purpose; see commands.ts).
+      //
+      // modeSelectionPending itself is deliberately left set here, not
+      // cleared: this path always falls through to parseInput('/bye') and
+      // commandBye, which returns 'exit' on every path (try and catch
+      // alike), so runChat returns before another loop iteration could
+      // ever consult modeSelectionPending again. Clearing it here would
+      // add a second guard that no test could pin independently of the
+      // one below.
       line = '/bye'
+      endOfInput = true
     }
 
     if (interruptLevel >= 2) {
       return { interrupted: true }
+    }
+
+    if (modeSelectionPending && !endOfInput) {
+      modeSelectionPending = false
+      await commandModeSelect(line, commandContext)
+      continue
     }
 
     const parsed = parseInput(line)
@@ -277,6 +316,9 @@ export async function runChat(deps: {
       const outcome = await runCommand(parsed.name, parsed.arg, commandContext)
       if (outcome === 'exit') {
         return { interrupted: false }
+      }
+      if (outcome === 'select-mode') {
+        modeSelectionPending = true
       }
       continue
     }

@@ -70,13 +70,16 @@ export interface CommandContext {
   printWarnings: () => void
 }
 
-export type CommandOutcome = 'continue' | 'exit'
+// select-mode tells the caller (chat.ts's main loop) that a bare /mode
+// just printed a numbered list and the very next line typed should be
+// read as a mode selection, not parsed as a command or sent to the model.
+export type CommandOutcome = 'continue' | 'exit' | 'select-mode'
 
 export const COMMAND_NAMES = ['help', 'mode', 'style', 'settings', 'whoami', 'bye'] as const
 
 const HELP_LINES = [
   '/help                 this list',
-  '/mode [name]          what this conversation is for, for this conversation only',
+  '/mode [name]          what this conversation is for; no name opens a picker',
   '/style [axis value]   how reverie talks with you in general, saved to profile.md',
   '/settings             what is set and where it lives',
   '/whoami               what reverie knows about you',
@@ -112,14 +115,30 @@ function commandHelp(ctx: CommandContext): CommandOutcome {
   return 'continue'
 }
 
+// Shared by /mode <name> on one line and by commandModeSelect once the
+// selection state has resolved a name, so both paths report the switch
+// identically.
+async function applyMode(requested: ModeName, ctx: CommandContext): Promise<void> {
+  await ctx.session.setMode(requested, { source: 'cli' })
+  const overridden = modeOverrides(requested)
+  const suffix =
+    overridden.length === 0
+      ? 'It leaves your style settings alone.'
+      : `For this conversation it takes over your ${overridden.join(' and ')} setting.`
+  ctx.io.write(`Mode is now ${requested}: ${MODES[requested].summary} ${suffix}\n`)
+}
+
 async function commandMode(arg: string | undefined, ctx: CommandContext): Promise<CommandOutcome> {
   if (arg === undefined) {
-    const lines = MODE_NAMES.map((name) => {
+    const lines = MODE_NAMES.map((name, index) => {
       const marker = name === ctx.session.mode ? ' (current)' : ''
-      return `  ${name}${marker}: ${MODES[name].summary}`
+      return `  ${index + 1}. ${name}${marker}: ${MODES[name].summary}`
     })
-    ctx.io.write(`${lines.join('\n')}\nA mode lasts for this conversation only. It is not saved.\n`)
-    return 'continue'
+    ctx.io.write(
+      `${lines.join('\n')}\nA mode lasts for this conversation only. It is not saved.\n` +
+        'Type a number or a name to switch, or press Enter to leave it as is.\n',
+    )
+    return 'select-mode'
   }
 
   const requested = arg.trim().toLowerCase()
@@ -128,14 +147,43 @@ async function commandMode(arg: string | undefined, ctx: CommandContext): Promis
     return 'continue'
   }
 
-  await ctx.session.setMode(requested, { source: 'cli' })
-  const overridden = modeOverrides(requested)
-  const suffix =
-    overridden.length === 0
-      ? 'It leaves your style settings alone.'
-      : `For this conversation it takes over your ${overridden.join(' and ')} setting.`
-  ctx.io.write(`Mode is now ${requested}: ${MODES[requested].summary} ${suffix}\n`)
+  await applyMode(requested, ctx)
   return 'continue'
+}
+
+// Reads the line typed after a bare /mode, once chat.ts's main loop is in
+// the short-lived selection state it enters when commandMode returns
+// 'select-mode'. Accepts either the number or the name shown in the list.
+// Escape, an empty line, and anything unrecognised all land here as plain
+// text (a raw Escape keypress produces nothing at a line-based prompt, so
+// it surfaces as the next Enter on an empty line) and all leave the mode
+// exactly as it was: no setMode call, and this function never sees, and
+// never sends, anything to the model. That is chat.ts's job, by routing
+// this line here instead of through parseInput.
+export async function commandModeSelect(input: string, ctx: CommandContext): Promise<void> {
+  const trimmed = input.trim()
+
+  let requested: string | undefined
+  const asNumber = Number.parseInt(trimmed, 10)
+  if (String(asNumber) === trimmed && asNumber >= 1 && asNumber <= MODE_NAMES.length) {
+    requested = MODE_NAMES[asNumber - 1]
+  } else {
+    requested = trimmed.toLowerCase()
+  }
+
+  // Deliberate, owner-decided on 2026-08-24, not an oversight: anything
+  // that is not a mode name or number cancels the selection this same
+  // way, including a slash command like /bye or /help typed here instead
+  // of a mode. The tradeoff is accepted plainly: a command typed at this
+  // prompt does not run, and the person has to retype it once the
+  // selection has been cancelled. Do not special-case commands to run
+  // them from this state instead.
+  if (requested === undefined || !isModeName(requested)) {
+    ctx.io.write('Mode unchanged.\n')
+    return
+  }
+
+  await applyMode(requested, ctx)
 }
 
 const STYLE_AXES = {

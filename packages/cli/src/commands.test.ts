@@ -1,6 +1,6 @@
 import { MODE_NAMES } from '@openreverie/core'
 import { describe, expect, it } from 'vitest'
-import { type CommandContext, parseInput, runCommand } from './commands.js'
+import { type CommandContext, commandModeSelect, parseInput, runCommand } from './commands.js'
 
 describe('parseInput', () => {
   const table: [string, ReturnType<typeof parseInput>][] = [
@@ -114,6 +114,20 @@ describe('/mode', () => {
     expect(text).toContain('this conversation only')
   })
 
+  // The bug this guards: bare /mode used to list modes and return
+  // 'continue', so the next line typed at the prompt fell straight through
+  // to parseInput and got sent to the model as an ordinary message. The
+  // fix is a distinct outcome the caller (chat.ts) uses to read the very
+  // next line as a mode selection instead.
+  it('returns select-mode instead of continue, and numbers each entry', async () => {
+    const { ctx, output } = makeContext()
+    const outcome = await runCommand('mode', undefined, ctx)
+    expect(outcome).toBe('select-mode')
+    const text = output.join('')
+    expect(text).toContain('1. general')
+    expect(text).toContain(`${MODE_NAMES.length}. journal`)
+  })
+
   it('switches and names the axes it overrides', async () => {
     const switched: string[] = []
     const { ctx, output } = makeContext({
@@ -149,6 +163,62 @@ describe('/mode', () => {
     await runCommand('mode', 'moody', ctx)
     expect(switched).toEqual([])
     expect(output.join('')).toContain('general, listen, solve')
+  })
+})
+
+// commandModeSelect is what chat.ts calls with the raw next line typed
+// after a bare /mode, once it is in the short-lived selection state. It
+// never touches the model: the caller (chat.ts) is what keeps this line
+// out of parseInput and session.send, so these tests only cover what
+// commandModeSelect itself does with the line once it has it.
+describe('commandModeSelect', () => {
+  function trackedContext() {
+    const switched: string[] = []
+    const { ctx, output } = makeContext({
+      session: {
+        mode: 'general',
+        setMode: async (name) => {
+          switched.push(name)
+        },
+        refreshSystemPrompt: async () => {},
+        end: async () => {},
+      },
+    })
+    return { ctx, output, switched }
+  }
+
+  it('selects a mode by its number in the printed list', async () => {
+    const { ctx, output, switched } = trackedContext()
+    await commandModeSelect('5', ctx) // 5 is "deep" in MODE_NAMES order
+    expect(switched).toEqual(['deep'])
+    expect(output.join('')).toContain('Mode is now deep')
+  })
+
+  it('selects a mode by name', async () => {
+    const { ctx, output, switched } = trackedContext()
+    await commandModeSelect('brainstorm', ctx)
+    expect(switched).toEqual(['brainstorm'])
+    expect(output.join('')).toContain('Mode is now brainstorm')
+  })
+
+  it('leaves the mode unchanged on an empty line, without touching setMode', async () => {
+    const { ctx, output, switched } = trackedContext()
+    await commandModeSelect('', ctx)
+    expect(switched).toEqual([])
+    expect(output.join('')).toContain('Mode unchanged')
+  })
+
+  it('leaves the mode unchanged on unrecognised input, without touching setMode', async () => {
+    const { ctx, output, switched } = trackedContext()
+    await commandModeSelect('purple', ctx)
+    expect(switched).toEqual([])
+    expect(output.join('')).toContain('Mode unchanged')
+  })
+
+  it('leaves the mode unchanged on an out-of-range number, without touching setMode', async () => {
+    const { ctx, switched } = trackedContext()
+    await commandModeSelect('99', ctx)
+    expect(switched).toEqual([])
   })
 })
 

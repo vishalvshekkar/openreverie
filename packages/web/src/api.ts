@@ -76,8 +76,31 @@ export const proposalSchema = z.strictObject({
   sourceSessionId: z.string(),
 })
 
-const graphNodeTypeSchema = z.enum(['realm', 'arc', 'item', 'session', 'person', 'entity'])
-const graphEdgeTypeSchema = z.enum(['part_of', 'in', 'from', 'involves', 'relates_to'])
+// This is a hand copied mirror of NodeType/EdgeType in
+// packages/memory/src/graph.ts, not a derivation. web never imports a
+// runtime engine package (cli -> core -> memory -> providers and
+// server -> core -> memory -> providers are the only permitted downward
+// dependency chains; web talks to server over HTTP only), and that rule is
+// read here to forbid a test-only import too: memory is not even a
+// devDependency of this package today, and letting web's test suite reach
+// into the engine would mean web can no longer be built or tested in
+// isolation from it, which is exactly what the HTTP-only boundary is for.
+// See graph-vocabulary-parity.test.ts for the guard: it hardcodes the
+// members it expects (matching graph.ts's NodeType/EdgeType at the time of
+// writing) and fails loudly the moment this list stops matching those
+// hardcoded members. It cannot detect memory's NodeType/EdgeType changing
+// on its own; whoever adds a member there must update both this list and
+// that test's hardcoded expectation by hand.
+const graphNodeTypeSchema = z.enum([
+  'realm',
+  'arc',
+  'item',
+  'session',
+  'person',
+  'entity',
+  'commitment',
+])
+const graphEdgeTypeSchema = z.enum(['part_of', 'in', 'from', 'involves', 'relates_to', 'waits_on'])
 
 export const graphNodeSchema = z.strictObject({
   id: z.string(),

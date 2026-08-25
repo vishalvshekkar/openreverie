@@ -16,6 +16,7 @@ export type IdPrefix =
   | 'person'
   | 'entity'
   | 'prop'
+  | 'commitment'
   | 'dream'
   | 'ins'
 
