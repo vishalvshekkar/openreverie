@@ -75,7 +75,7 @@ defaults to `text-embedding-3-small`.
 ## Query time
 
 A search runs these steps in order (`searchMemory`,
-`packages/memory/src/retrieval.ts:130`):
+`packages/memory/src/retrieval.ts:135`):
 
 1. **Text search.** An FTS5 `MATCH` query against `chunks_fts`, ordered by
    FTS rank (`searchText`, `packages/memory/src/sqlite.ts:374`). Each query
@@ -97,7 +97,7 @@ A search runs these steps in order (`searchMemory`,
    such as `sqlite-vec` in the loop. These three steps run in sequence, not
    in parallel.
 4. **Fuse.** The two ranked lists are combined with reciprocal rank fusion
-   (`fuseByReciprocalRank`, `packages/memory/src/retrieval.ts:187`): each
+   (`fuseByReciprocalRank`, `packages/memory/src/retrieval.ts:192`): each
    document's score is the sum of `1 / (60 + rank)` over every list it
    appears in (`RRF_K = 60`), deduplicated by document id. There is no
    reranking model or second pass over the fused list; the only ranking
@@ -124,8 +124,8 @@ onward) and full, verbatim transcript reads are separate tools, not part of
 
 ## Result shape
 
-A fused hit (`DocumentHit`, `packages/memory/src/retrieval.ts`, just above
-`fuseByReciprocalRank`) is a document, not a single chunk: `docId`, `path`,
+A fused hit (`DocumentHit`, `packages/memory/src/retrieval.ts:105`) is a
+document, not a single chunk: `docId`, `path`,
 `kind`, `score`, and optionally `dateStart`/`dateEnd` (present together or
 not at all; absent on a living document). It also carries:
 
@@ -174,7 +174,7 @@ property of exactly those kinds, not a residual gap: a date-filtered search
 still surfaces an arc or person page outside the requested range, by design,
 alongside whichever point-in-time hits the filter actually narrowed. The
 `search_memory` tool's own `after`/`before` parameter descriptions
-(`packages/core/src/tools.ts:229`, `after`/`before`) state this distinction directly, so
+(`packages/core/src/tools.ts:230`, `after`/`before`) state this distinction directly, so
 the model is not left to infer it.
 
 **Entities are not searchable.** Entities (books, films, companies, places,
