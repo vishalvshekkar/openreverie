@@ -1588,10 +1588,10 @@ git commit -m "feat(web): dreams view with insight feedback and dream settings"
 
 **Steps:**
 
-- [ ] **Step 1:** Add a README "Dreaming" subsection under How it works: what it is (two artifacts per run, narrative and insights), off by default and why (it spends model calls in the background), how to turn it on (`[dreaming] enabled = true`, cadence daily or weekly), the four triggers, `reverie dream` and the web Dreams tab, that insights are the model's guesses with per-insight feedback, that nothing is ever rewritten, and the five-reflected-sessions floor. Update the Status section to claim exactly what landed and what did not (per AGENTS.md, overstating status is a serious defect).
-- [ ] **Step 2:** Update ROADMAP.md: dreaming v1 shipped; later items (graph writes, relevance ranking, transcript attribution, commitment-aware dreams) pointed at `docs/dreaming.md`.
-- [ ] **Step 3:** Run the full suite, build, and lint from the root: `pnpm test && pnpm build && pnpm lint`. Everything green except the one known pre-existing context.test.ts failure.
-- [ ] **Step 4: Commit**
+- [x] **Step 1:** Add a README "Dreaming" subsection under How it works: what it is (two artifacts per run, narrative and insights), off by default and why (it spends model calls in the background), how to turn it on (`[dreaming] enabled = true`, cadence daily or weekly), the four triggers, `reverie dream` and the web Dreams tab, that insights are the model's guesses with per-insight feedback, that nothing is ever rewritten, and the five-reflected-sessions floor. Update the Status section to claim exactly what landed and what did not (per AGENTS.md, overstating status is a serious defect).
+- [x] **Step 2:** Update ROADMAP.md: dreaming v1 shipped; later items (graph writes, relevance ranking, transcript attribution, commitment-aware dreams) pointed at `docs/dreaming.md`.
+- [x] **Step 3:** Run the full suite, build, and lint from the root: `pnpm test && pnpm build && pnpm lint`. Everything green except the one known pre-existing context.test.ts failure.
+- [x] **Step 4: Commit**
 
 ```bash
 git add README.md ROADMAP.md docs/dreaming.md
