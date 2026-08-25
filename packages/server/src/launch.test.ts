@@ -56,6 +56,18 @@ class FakeEngine implements RecordEngine {
     }
     return this.profileState
   }
+
+  async listDreams() {
+    return []
+  }
+
+  async readDream() {
+    return null
+  }
+
+  async recordDreamFeedback() {
+    return false
+  }
 }
 
 function config(memoryDir: string): ReverieConfig {
