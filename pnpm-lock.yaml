@@ -23,6 +23,10 @@ importers:
 
   packages/cli:
     dependencies:
+      better-sqlite3:
+        specifier: ^12.2.0
+        version: 12.11.1
+    devDependencies:
       '@openreverie/core':
         specifier: workspace:*
         version: link:../core
@@ -35,6 +39,9 @@ importers:
       '@openreverie/server':
         specifier: workspace:*
         version: link:../server
+      esbuild:
+        specifier: ^0.25.0
+        version: 0.25.12
 
   packages/core:
     dependencies:

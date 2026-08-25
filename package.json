@@ -16,7 +16,7 @@
     ]
   },
   "scripts": {
-    "build": "tsc -b --force && pnpm --filter @openreverie/web exec vite build",
+    "build": "tsc -b --force && pnpm --filter @openreverie/web exec vite build && pnpm --filter openreverie run bundle",
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",
     "lint": "biome check .",

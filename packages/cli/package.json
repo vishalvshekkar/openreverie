@@ -3,24 +3,42 @@
   "version": "0.7.0",
   "description": "A self-hosted companion agent with a memory that does not forget. Terminal chat interface.",
   "homepage": "https://reverie.my",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vishalvshekkar/openreverie.git"
+  },
+  "bugs": {
+    "url": "https://github.com/vishalvshekkar/openreverie/issues"
+  },
   "license": "FSL-1.1-ALv2",
   "type": "module",
   "main": "dist/index.js",
-  "types": "dist/index.d.ts",
   "bin": {
     "reverie": "dist/index.js"
   },
   "files": [
-    "dist"
+    "dist/index.js",
+    "dist/web",
+    "README.md",
+    "LICENSE"
   ],
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "build": "tsc -b",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run --passWithNoTests",
+    "bundle": "node ./scripts/bundle.mjs",
+    "prepack": "node ./scripts/bundle.mjs"
   },
   "dependencies": {
+    "better-sqlite3": "^12.2.0"
+  },
+  "devDependencies": {
     "@openreverie/core": "workspace:*",
     "@openreverie/memory": "workspace:*",
     "@openreverie/providers": "workspace:*",
-    "@openreverie/server": "workspace:*"
+    "@openreverie/server": "workspace:*",
+    "esbuild": "^0.25.0"
   }
 }

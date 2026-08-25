@@ -25,3 +25,10 @@ coverage/
 # everything in here is scratch for a single session.
 .superpowers/
 .claude/
+
+# Copied into the published openreverie package at bundle time
+# (packages/cli/scripts/bundle.mjs), from the root files of the same
+# names. Scoped with a leading slash so this can never match the root
+# copies themselves.
+/packages/cli/README.md
+/packages/cli/LICENSE
