@@ -26,6 +26,7 @@ The README's Status section must reflect reality at all times. After any meaning
 - Transcripts are sacred. Append-only, never modified, never deleted by code.
 - Relationship claims in prose are testimony, not record. The graph log is the record.
 - Model access goes through the provider interfaces in `@openreverie/providers`. Never call a provider SDK or HTTP API directly from other packages.
+- Dream artifacts live at `dreams/<local-date>-<dreamId>/`, holding `dream.md`, `insight.md`, and `process.jsonl`, plus an append-only `dreams/log.jsonl` alongside them. Dream files are written once and never modified afterward, the same posture as the rest of the memory folder.
 
 ## Domain sensitivity
 
@@ -45,10 +46,11 @@ The main agent in a session acts as an orchestrator. It plans, decomposes, revie
 - Prose file writes are atomic (temp file, then rename). Graph log writes are single-line appends.
 - Keep commits small and messages plain: what changed and why, no ceremony.
 
-Two review practices, learned the hard way here and not optional:
+Three review practices, learned the hard way here and not optional:
 
 - **A reviewer runs the tests, the build, and the lint itself.** Do not accept an implementer's report as evidence that the suite passes. One task reported a fully passing suite while a test file was failing, and it went two tasks undetected because reviewers had been told the report already carried that evidence.
 - **Falsify, do not read.** The recurring failure in this codebase is a test that passes for a reason unrelated to what it is named: an error-path test whose fake threw before any output accumulated, a status line test that passed with the wiring deleted, a narrative test asserting the body equals the new narrative, which is the bug recorded as the expectation. Delete the fix, watch the test fail, restore it. Reading tells you the code is right today; falsifying tells you it stays right.
+- **A green test suite does not mean the package compiles, and editing `memory/src` does not mean a `core` or `cli` test sees the edit.** Vitest does not typecheck. A test file can be fully green while its package fails to build: this hid two real TypeScript errors in `packages/cli` and one in `packages/server`, each a test fake that had stopped satisfying an interface, while 59 tests passed anyway. Run `pnpm exec tsc --noEmit` in a package, or `pnpm build`, before believing a package is sound. Separately, tests in `core`, `cli`, and `server` resolve `@openreverie/memory` through its compiled `dist`, not its source, because its `package.json` declares `main` as `dist/index.js` and nothing aliases the package to `src`. Editing `packages/memory/src` and re-running a `core` test is silently a no-op: the test still runs against the old `dist`. This produced a false negative on the highest-stakes property falsified in one task. Run `pnpm exec tsc -b` in `packages/memory`, or a full build, between editing `memory` and running a test outside it.
 
 ## Honesty about authorship
 
