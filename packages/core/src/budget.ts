@@ -52,11 +52,22 @@ export const DREAM_INSIGHTS_SECTION_CAP = 1800
 // measures the finished prompt against it. It is an invariant asserted by a
 // test over the constants, which fails if anyone raises a cap past the
 // total. Raised from 28000 to 28800 when COMMITMENTS_SECTION_CAP was added,
-// then from 28800 to 30600 when DREAM_INSIGHTS_SECTION_CAP was added: each a
-// deliberate increase to the budget, not an incidental one, made in the same
-// change that added the section it makes room for. The rule both raises
-// follow is to lift the total by exactly the cap being added, which keeps the
-// 200 characters of slack the total has carried since the beginning.
+// then from 28800 to 30600 when DREAM_INSIGHTS_SECTION_CAP was added. Each
+// was a deliberate increase to the budget, not an incidental one, made in the
+// same change that added the section it makes room for.
+//
+// Neither raise establishes a rule, and adding a cap does not entitle a
+// section to lift the ceiling. The only binding invariant is that the caps
+// sum stays at or under this total. A new section is a real decision with
+// three honest answers: fit it in the headroom that already exists, trim
+// another cap to pay for it and settle which section matters more, or raise
+// the total on purpose and say why here. Auto-incrementing the total by
+// whatever was just added would turn it into a running sum with extra steps,
+// and the test guarding it could never fail again.
+//
+// The dreams section took the third answer. At 1,800 characters it could not
+// fit the 200 of headroom, and trimming an established section to pay for it
+// is a judgment about the existing prompt that did not belong in a merge.
 export const PROMPT_BUDGET_TOTAL = 30600
 
 // Every character cap that contributes to the assembled body, in prompt
