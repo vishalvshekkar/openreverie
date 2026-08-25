@@ -567,8 +567,9 @@ item ships, remove it from here and record it in `ROADMAP.md`'s Done narrative.
     which is a live-session feature too large for this branch."
   - Where the thinking lives: spec Section 6; `packages/memory/src/commitments.ts`
     (`isTimeEligible`, `ASK_GRACE_DAYS`, and `selectCommitments`'s `askedAt` filter, which has no
-    production caller yet); `.superpowers/sdd/2026-08-24-commitments-engine/final-review-part2.md`,
-    Critical 2.
+    production caller yet). Found as Critical 2 of that branch's final whole-branch review, whose
+    report lived in the gitignored execution workspace and is gone with it, which is why the finding
+    is written out here rather than linked.
   - Trigger: a live-session signal that the companion actually raised a commitment in
     conversation (an explicit tool call, or an inferred one from the transcript at reflection
     time), which the writer and the `unknown` transition would both key off.
@@ -1019,7 +1020,8 @@ help welcome" section. Read [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](A
     something the task-7 brief asked for.
   - Where: `packages/memory/src/reflection.ts`, the two `try`/`catch` blocks in `applyReflection`
     that call `recordCommitment`/`reviseCommitment` for `out.commitments` and
-    `out.commitmentRevisions`; `.superpowers/sdd/2026-08-24-commitments-engine/task-7-report.md`.
+    `out.commitmentRevisions`. Raised by the implementing task's own report, which lived in the
+    gitignored execution workspace and is gone with it.
   - Trigger: not stated.
   - Size: small.
 
