@@ -165,6 +165,90 @@ item ships, remove it from here and record it in `ROADMAP.md`'s Done narrative.
     shape, and chasing the test's own logic would be wasted effort.
   - Size: not stated.
 
+- **Seven open deviations between the approved dreaming spec and what shipped in v1.** Each was
+  caught during implementation or the final whole-branch review, recorded, and deliberately left
+  for a human decision rather than resolved on an implementer's own judgment: "Both are format and
+  data-honesty decisions, not implementation work, so the choice is left to the human." Full detail
+  is in `docs/dreaming.md` section 14 (the changelog, the two 2026-08-25 entries and the final
+  whole-branch review entry).
+
+  1. **The CLI cannot record dream feedback, only display it.** The spec says the CLI "appends
+     directly through the engine," matching the web path; `reverie dream --show` displays verdicts
+     recorded elsewhere (the web UI, the `dream_feedback` tool) but has no command to record a new
+     one. Deciding this means choosing how a terminal-issued verdict is represented: the
+     `feedback` record's `source` field is typed `'ui' | 'tool'`, so either that enum gains a
+     third value (changing an append-only log's record shape) or a CLI verdict is written under
+     `source: 'ui'`, which would be false.
+     - Why deferred: "the `feedback` record's `source` field is typed `'ui' | 'tool'`... Both are
+       format and data-honesty decisions, not implementation work, so the choice is left to the
+       human rather than resolved on the implementer's own judgment."
+     - Where: `docs/dreaming.md`, section 14, the 2026-08-25 entry recording this deviation;
+       `docs/superpowers/specs/2026-08-24-dreaming-design.md`, Feedback section.
+     - Trigger: not stated.
+     - Size: small, once the `source` field's shape is decided.
+
+  2. **No CLI settings surface for the three dream preferences.** The spec says voice, opener
+     mention, and prompt section are changeable "from the CLI settings surface and the web
+     Settings view." The web half works (the 2026-08-25 review also fixed a bug where it silently
+     did not); hand-editing `profile.md` is the only other route from the CLI.
+     - Why deferred: not stated beyond it being one of the six deviations the final review left
+       for a human decision.
+     - Where: `docs/dreaming.md`, section 14, final whole-branch review entry, deviation 1.
+     - Trigger: not stated.
+     - Size: not stated.
+
+  3. **Calendar resonance (selection step 5) was never built.** The spec calls for a weight boost
+     when a candidate's date lands within about a week of "one or more years ago this week." This
+     was already absent from the implementation plan before v1 shipped; it was not written down as
+     a gap until the final review.
+     - Why deferred: not stated.
+     - Where: `docs/dreaming.md`, section 14, final whole-branch review entry, deviation 2;
+       `docs/superpowers/specs/2026-08-24-dreaming-design.md`, selection step 5.
+     - Trigger: not stated.
+     - Size: not stated.
+
+  4. **The dream packet omits the constitution and profile summary the spec lists as pipeline
+     inputs.** What shipped is narrower: the exploration prompt tells the model that reading the
+     constitution is fine, and the bounded tool loop can reach both the constitution and the
+     profile through `read_document` if a seed calls for them. They are tool-reachable, not
+     injected up front.
+     - Why deferred: not stated.
+     - Where: `docs/dreaming.md`, section 14, final whole-branch review entry, deviation 3;
+       `docs/superpowers/specs/2026-08-24-dreaming-design.md`, Pipeline step 1.
+     - Trigger: not stated.
+     - Size: not stated.
+
+  5. **`reverie dream` (`dreamNow`) lacks the spec's manual once-per-period exemption.** The spec
+     says a manual run should be exempt from the once-per-period rule. The code still refuses an
+     unforced manual run when the period is already covered, the same as a background trigger
+     would; `--force` is the current workaround.
+     - Why deferred: not stated.
+     - Where: `docs/dreaming.md`, section 14, final whole-branch review entry, deviation 4
+       (`dreamNow` in `packages/memory/src/engine.ts`).
+     - Trigger: not stated (confirming whether the exemption is still wanted given the `--force`
+       workaround).
+     - Size: not stated.
+
+  6. **The opener has no period bound.** The spec says the opener may mention a dream from the
+     current or previous period. The code offers the newest dream that has a narrative and has not
+     yet been mentioned, regardless of age, so a dream from months ago can still surface in an
+     opener.
+     - Why deferred: not stated.
+     - Where: `docs/dreaming.md`, section 14, final whole-branch review entry, deviation 5.
+     - Trigger: not stated.
+     - Size: not stated.
+
+  7. **The `dreamt` log record stores seeds only, not seeds plus walk plus tool-read entities.**
+     The spec says it should store all three, since a `dream_state` fold would derive "last
+     dreamt" times from that record. As shipped, anything reached only by the graph walk or by a
+     tool call during the dig-deeper loop is never marked dreamt, so its staleness keeps accruing
+     even after a dream actually touched it.
+     - Why deferred: not stated.
+     - Where: `docs/dreaming.md`, section 14, final whole-branch review entry, deviation 6.
+     - Trigger: not stated (widening the `dreamt` record's shape touches the append-only dream
+       log's format).
+     - Size: not stated.
+
 ## 2. Retrieval and memory quality
 
 - **`DocumentHit.snippet` and `chunks[0]` can name different physical chunks of the same
@@ -724,6 +808,85 @@ item ships, remove it from here and record it in `ROADMAP.md`'s Done narrative.
   - Trigger: the consolidated manual pass this section describes, which is not recorded anywhere
     as having happened yet.
   - Size: small (a sweep, not code).
+  - Also queued, same shape: dreaming v1's own manual testing pass. Nothing about whether a real
+    model produces a good dream, a well-grounded insight, or the right tone has had a human look
+    at it; every automated test in that branch runs against scripted fake providers. The full list
+    (reading real dreams across all three narrative voices, judging the insights, the opener
+    mention in a real session, the web Dreams view against real data including a tone-gated dream,
+    the Settings round trip for the three dream preferences, `reverie dream --dry-run`/`--show`
+    against a lived-in folder, and a feedback verdict read back correctly) is tracked at
+    [docs/dreaming.md, section 13](docs/dreaming.md#13-manual-testing-queue), not duplicated here.
+
+- **Eleven deferred pieces of dreaming v1**, chosen non-goals rather than things missed. Full
+  reasoning for each lives in `docs/dreaming.md` sections 5, 6, and 10:
+  - *Graph writes of any kind.* Dreaming writes prose and a jsonl dream log in v1, never a graph
+    edge or node. Section 10 sketches five options for later: unconfirmed `relates_to` edges
+    (`source: 'dream'`, `confirmed: false`), a `theme` node type for cross-cutting patterns, a
+    `dream` node type with `involves` edges to what it touched, a retract-on-feedback record when
+    a verdict is "wrong," and confidence-by-use (flagged in the source itself as speculative, with
+    "a real risk of confirming by silence"). Why deferred: not stated beyond being scoped out of
+    v1. Trigger: not stated. Size: not stated. Where: `docs/dreaming.md`, section 10.
+  - *Relevance-ranked prompt injection.* The dream section of the system prompt orders by
+    recency; ranking by similarity to the live conversation was always the intended refinement
+    (idea 19), not built in v1. Why deferred: not stated. Trigger: not stated. Size: not stated.
+    Where: `docs/dreaming.md`, section 5.
+  - *Transcript-level attribution tagging.* The third feedback-attribution option considered
+    (idea catalog section 9a): assistant turns carrying hidden metadata naming which insight ids
+    were in context, so the web UI could mark a turn as dream-informed. Why deferred: "Deferred in
+    favor of the simpler per-artifact feedback" that shipped. Trigger: not stated. Size: not
+    stated. Where: `docs/dreaming.md`, section 9a.
+  - *Insight decay.* Old, never-confirmed insights do not yet lose prompt priority over time
+    (idea 37); everything with equal recency competes equally for the capped prompt section. Why
+    deferred: not stated. Trigger: not stated. Size: not stated. Where: `docs/dreaming.md`,
+    section 5.
+  - *Cross-dream consolidation.* A periodic pass reading only past dream insights and writing a
+    higher-level digest (idea 38). Why deferred: "recorded as open but cautious: this is the exact
+    shape of the confabulation-drift risk the prior-art review flagged, so if it is ever built, the
+    digest must cite original evidence pointers, not dream ids." Trigger: not stated. Size: not
+    stated. Where: `docs/dreaming.md`, section 5.
+  - *Dream series.* A multi-night thread following one long arc across several dreams (idea 33).
+    Why deferred: not stated. Trigger: not stated. Size: not stated. Where: `docs/dreaming.md`,
+    section 5.
+  - *User-seeded and in-conversation-requested dreams.* A CLI flag or tool to ask for a dream
+    about something specific (idea 34, "flagged as cheap to build"), and honoring a request made
+    mid-conversation on the next dream (idea 35). Why deferred: not stated. Trigger: not stated.
+    Size: not stated, except idea 34 noted as cheap. Where: `docs/dreaming.md`, section 5.
+  - *Feedback-driven selection tuning.* Right/wrong/do-not-bring-up feedback shipped and
+    permanently excludes an insight from the prompt and opener once recorded, but it does not yet
+    adjust selection weights going forward. Why deferred: not stated; the source notes idea 18
+    "calls for keeping an exploration term so tuning selection by feedback does not collapse into
+    flattery," a design constraint on the eventual build, not a reason for the delay. Trigger: not
+    stated. Size: not stated. Where: `docs/dreaming.md`, section 5.
+  - *Dream-informed mode behavior and reading-aloud/ambient surfacing.* Two further open ideas
+    from the same catalog: mode behavior drawing on dream insights (idea 20, for example a
+    `boost` mode drawing on the strengths ledger), and a dream shown on the web landing page like
+    a morning note (idea 36). Why deferred: not stated. Trigger: not stated. Size: not stated.
+    Where: `docs/dreaming.md`, section 5.
+  - *Two alternate architectures considered and not built.* Approach 2, a tool-using agent
+    session replacing the bounded dig-deeper loop, named as the upgrade path "if the loop that
+    shipped proves too shallow" (not currently planned). Approach 3, continuous micro-dreaming
+    folded into reflection instead of run on a schedule, rejected for v1 but could return "as a
+    small supplement to idea 5 (dormant-arc revisits) if the scheduled path proves too infrequent
+    on a machine that is rarely on." Why deferred: quoted above, per approach. Trigger: quoted
+    above, per approach. Size: not stated. Where: `docs/dreaming.md`, section 6.
+
+- **Idea 39, commitment-aware dreams, is still blocked.** Once a `commitment` graph node type
+  exists, a dream could notice a quiet-but-alive commitment thread, a stated event whose time has
+  passed, or a seasonal gloss whose season has arrived, and surface it as a gentle open-question
+  insight, bound by the commitments design's anti-taskmaster guarantees: no open-question insight
+  about a commitment whose single ask is already spent or that is marked quiet, and interpreted
+  time brackets never rendered in dream prose. The `commitment` node type and the commitments
+  engine have since landed (see the commitments entries above in this section), so the node-type
+  precondition is met, but the mechanism idea 39's own guarantee depends on is not: the "real
+  `askedAt`/one-ask mechanism" entry above in this section records that nothing writes `askedAt`,
+  no commitment ever reaches the `unknown` state in production, and an interim grace period stands
+  in for it. Idea 39 stays blocked on that entry, not on the commitments design landing.
+  - Why deferred: not stated beyond being blocked on the commitments design, per
+    `docs/dreaming.md` section 11.
+  - Where: `docs/dreaming.md`, section 11; the "real `askedAt`/one-ask mechanism" entry above in
+    this section.
+  - Trigger: the `askedAt`/one-ask mechanism above landing in production.
+  - Size: not stated.
 
 ## 4. Larger pieces not built
 
@@ -1165,6 +1328,89 @@ help welcome" section. Read [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](A
   - Trigger: not stated.
   - Size: small (`expect(hits[0]?.chunks.length).toBe(3)`, or assert against the exported constant
     if it is worth exporting).
+
+- **Dreaming v1: four test-coverage gaps, not code-correctness bugs, from the implementation's
+  execution ledger.** The ledger (`.superpowers/sdd/2026-08-24-dreaming-implementation/progress.md`,
+  gitignored and deleted once the branch merges, which is why the detail is captured here rather
+  than left to disappear with it) flagged fifteen items as minor across the fourteen implementation
+  tasks; a final whole-branch review, scoped to the seams between already-reviewed tasks, triaged
+  all fifteen and cleared every one to ship (two of the fifteen describe the same finding, the
+  `dreams.css` lint warnings below, flagged once mid-review and once at task close, so fourteen
+  distinct items remain). This entry covers the four that are test-coverage gaps:
+  - `foldDreamLog`'s newest-wins guard for a `dreamt` record is under-tested: the fixture happens
+    to have array order match timestamp order for the one entity with two records, so deleting the
+    guard still passes; only inverting the comparison catches it. The guard itself is correct.
+  - The dream pipeline's every-insight-fails abort test passes because the fake provider's script
+    runs out at the narrative call, not via a clean assertion on the abort path itself; the outcome
+    assertion is real, just weaker than it looks.
+  - Only one direction of the opener/prompt-section switch-independence property has an automated
+    test (opener firing while the prompt section is off); the converse was checked manually against
+    a built distribution, no committed test.
+  - The artifact-tracking rule (`dream.md`, `insight.md`, `process.jsonl`, and `log.jsonl` stay
+    tracked while only the lock file is gitignored) was verified manually via `git ls-files`, not
+    as an automated regression test.
+  - Why deferred: the whole-branch review triaged all fourteen ledger-flagged minors and cleared
+    every one to ship; none blocked the merge.
+  - Where: `packages/memory/src/dreaming.test.ts` and related dream pipeline test files; the
+    execution ledger cited above.
+  - Trigger: not stated for any of the four.
+  - Size: small each (a fixture or script change per item, not a design question).
+
+- **Dreaming v1: six known, accepted behavior gaps from the same execution ledger, plus two
+  wording-only corrections to a completion report with no code action.** None of these are
+  defects; each was named and accepted deliberately during implementation or the final review.
+  - A write failure partway through producing a dream (for example `insight.md` throwing after
+    `dream.md` has already landed) can leave a partial dream directory: a narrative with no
+    insights, no process log, and no log record. Nothing is corrupted or deleted, and every reader
+    of a dream directory (CLI, server endpoints, web view) was told to tolerate an incomplete one
+    rather than assume both files exist.
+  - `candidateWeight`'s staleness term is a hard linear cap (days since last dreamt, capped at
+    365, divided by 365) rather than the smoother "soft cap" the spec's own wording suggests. The
+    spec treats exact constants as implementation detail tested by invariant, and the invariants
+    hold, so this is a wording mismatch, not a behavior gap.
+  - `POST /api/v1/dreams/:id/feedback` validates but discards the `:id` path segment, because
+    feedback recording resolves an insight by its own id across all dreams, not by dream id. This
+    matches the engine signature the task brief specified and was named as a known limitation by
+    both the implementer and the reviewer.
+  - A type-only import cycle exists between `engineDreams.ts` and `engine.ts` (one imports types
+    from the other, which imports values back). It erases at build and violates no package
+    boundary; moving the two shared interfaces to a leaf module would make the split acyclic.
+  - The CLI-level `!force &&` guard in the "dreaming is off" message check is dead code: the
+    engine never returns that reason when `force` is true, so the guard can never trigger.
+    Harmless.
+  - `dreams.css` carries four pre-existing cosmetic lint warnings (`noDescendingSpecificity`),
+    left as the original ordering; lint still exits clean since these are warnings, not errors.
+  - Wording only, no code action: a task's own completion report described a config
+    field-by-field assembly as strictly required, when a narrower interface-level change would
+    also have compiled (the approach that shipped mirrors an existing pattern in the same
+    function, so it stayed). A second task's completion report called three new lint warnings
+    "pre-existing"; they were new to the repository in that diff, but dictated verbatim by the
+    task brief.
+  - Why deferred: same whole-branch-review triage as above; all cleared to ship, none of these
+    is a defect in what shipped.
+  - Where: `packages/memory/src/dreaming.ts`, `packages/memory/src/engineDreams.ts`,
+    `packages/memory/src/engine.ts`, `packages/server/src/app.ts`, `packages/cli/src/dream.ts`,
+    `packages/web/src/views/dreams.css`; the execution ledger cited above.
+  - Trigger: not stated for any of these.
+  - Size: small each.
+  - Already resolved, not outstanding: the same ledger records that `dreamNow` originally had no
+    handling for a throwing `acquireDreamLock`, which would have surfaced a raw `ENOENT` error
+    from the CLI. This was carried into the CLI task as a requirement rather than left open, and
+    the CLI now catches it with "Dreaming could not run: ... Your memory folder may be damaged;
+    try 'reverie doctor'." Named here only so the ledger's original count of fifteen is
+    accounted for; there is nothing left to do.
+
+- **Dreaming v1: feedback-verdict folding logic is duplicated between the CLI and the server.**
+  `packages/cli/src/dream.ts` and `packages/server/src/app.ts` each re-derive verdicts from the
+  dream log independently. It would consolidate most naturally by having the engine's `readDream`
+  expose verdicts directly, so both callers read rather than re-derive them.
+  - Why deferred: ledger-flagged as a consolidation opportunity, not a bug; not picked up during
+    implementation. Cleared to ship by the final whole-branch review along with the rest of the
+    ledger.
+  - Where: `packages/cli/src/dream.ts`, `packages/server/src/app.ts`,
+    `packages/memory/src/engineDreams.ts` (`readDream`).
+  - Trigger: not stated.
+  - Size: small.
 
 ## 6. Decided against, with a trigger to revisit
 

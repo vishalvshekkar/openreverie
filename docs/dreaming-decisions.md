@@ -6,9 +6,11 @@ settle a question. The spec (`docs/superpowers/specs/2026-08-24-dreaming-design.
 binding authority throughout; where a ruling below diverges from it, that divergence is a
 deliberate exception argued from the spec's own text, not a silent departure. The resulting spec
 deviations, the ones that changed what ships versus what the spec describes, are recorded
-separately in `docs/dreaming.md` and `docs/dreaming-backlog.md`. This file is about how the code
-came to be shaped the way it is, not about what was left undone. Fifteen further findings were
-rated Minor and deferred without a full ruling; those live in `docs/dreaming-backlog.md` and are
+separately in `docs/dreaming.md` and `BACKLOG.md`. This file is about how the code came to be
+shaped the way it is, not about what was left undone. Fifteen further findings were rated Minor
+and deferred without a full ruling; two of the fifteen describe the same finding (the `dreams.css`
+lint warnings, flagged once mid-review and once at task close), so `BACKLOG.md` records them as
+fourteen distinct grouped entries, in its "Smaller improvements, help welcome" section; they are
 not repeated here.
 
 Each entry below states the question, what was decided, and the cost if the decision turns out
