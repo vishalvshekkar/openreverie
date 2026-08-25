@@ -98,7 +98,7 @@ describe('runDreamCommand: no flags (run now)', () => {
     expect(lines()).toEqual(['Dreaming did not run: fewer than 5 reflected sessions (have 2).\n'])
   })
 
-  it('names the config path and the --force escape hatch when dreaming is off, unforced', async () => {
+  it('names the default config path honestly (not asserted as the path in effect) and the --force escape hatch, when dreaming is off, unforced', async () => {
     const engine = stubEngine({
       dreamNow: vi.fn(
         async (): Promise<DreamRunResult> => ({ outcome: 'aborted', reason: 'dreaming is off' }),
@@ -111,6 +111,7 @@ describe('runDreamCommand: no flags (run now)', () => {
     expect(engine.dreamNow).toHaveBeenCalledWith({})
     const [line] = lines()
     expect(line).toContain('Dreaming is off.')
+    expect(line).toContain('default location')
     expect(line).toContain(defaultConfigPath())
     expect(line).toContain('--force')
   })

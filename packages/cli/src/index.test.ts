@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { DoctorDeps } from './doctor.js'
 import { subcommandHelp, TOP_LEVEL_HELP } from './help.js'
 import type { CliMainDeps } from './index.js'
@@ -319,6 +319,22 @@ describe('mainWith doctor', () => {
 
     expect(contextOpened).toBe(false)
     process.exitCode = 0
+  })
+})
+
+describe('mainWith dream dispatch', () => {
+  it('dispatches to runDreamCommand with the already-opened engine, config, args, and write', async () => {
+    const engine = { warnings: [], close: async () => {} } as never
+    const config = { memoryDir: '/fake/memory' } as never
+    const runDreamCommand = vi.fn(async () => {})
+    const { deps } = testDeps({
+      openCliContext: async () => ({ ok: true, engine, config, chat: {} as never }),
+      runDreamCommand,
+    })
+
+    await mainWith(['dream', '--force'], deps)
+
+    expect(runDreamCommand).toHaveBeenCalledWith(engine, config, ['--force'], deps.write)
   })
 })
 

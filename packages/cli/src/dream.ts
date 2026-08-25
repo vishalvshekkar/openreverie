@@ -96,7 +96,7 @@ async function runNow(
   if (result.outcome === 'aborted') {
     if (!force && result.reason === 'dreaming is off') {
       write(
-        `Dreaming is off. Turn it on by setting enabled = true under [dreaming] in ${defaultConfigPath()}, or run 'reverie dream --force' to dream anyway.\n`,
+        `Dreaming is off. Turn it on by setting enabled = true under [dreaming] in your config file (the default location is ${defaultConfigPath()}), or run 'reverie dream --force' to dream anyway.\n`,
       )
       return
     }
