@@ -1000,7 +1000,17 @@ design conversation first.
     `packages/memory/package.json`; the rule that makes a future swap safe, that SQLite is a
     derived index and must always be rebuildable from the memory folder, is in `AGENTS.md` under
     "Architecture rules".
-  - Trigger: `node:sqlite` losing its experimental flag.
+  - Second reason, observed on 2026-08-25 during the first real `npm i -g openreverie`: the install
+    prints `npm warn deprecated prebuild-install@7.1.3: No longer maintained. Please contact the
+    author of the relevant native addon; alternatives are available.` That package is what fetches
+    `better-sqlite3`'s prebuilt binary, and it is the only thing standing between a user and a C++
+    toolchain requirement: with it, the install took two seconds; without a working prebuild path,
+    it compiles from source. It works today and nothing is broken, but the mechanism the published
+    package depends on for a painless install is now formally unmaintained, and a user seeing a
+    deprecation warning on first install is a poor first impression regardless.
+  - Trigger: either `node:sqlite` losing its experimental flag, or `prebuild-install` breaking in a
+    way that makes installs start compiling. The second could arrive without warning and would be
+    felt by every new user at once.
   - Size: medium (swap the binding used in `packages/memory/src/sqlite.ts` and confirm
     `node:sqlite`'s query surface actually covers everything the indexer needs; no data
     migration is required, since the memory folder and `graph.jsonl` are the only truth and the
