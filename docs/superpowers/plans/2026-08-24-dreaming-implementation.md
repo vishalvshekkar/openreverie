@@ -1538,11 +1538,11 @@ git commit -m "feat(cli): reverie dream command with dry-run, list, show, force"
   - `GET /api/v1/dreams/:id` -> `engine.readDream(id)` as `{ dreamId, date, period, narrative?: string, insights: { insightId, kind, headline, claim, confidence, verdict? }[], processLog: string }`, 404 via `ApiError` when null
   - `POST /api/v1/dreams/:id/feedback` body `{ insightId, verdict, note? }` (zod), -> `engine.recordDreamFeedback({ ..., source: 'ui' })`, 404 when it returns false
 
-- [ ] **Step 1: Write the failing tests.** registry.test.ts drives the injectable scheduler manually and asserts the dream trigger fires on its interval and stops after `close()`. app.test.ts follows the existing route-test pattern with a stub engine: list returns rows; show 404s on unknown; feedback posts and 404s on false.
+- [x] **Step 1: Write the failing tests.** registry.test.ts drives the injectable scheduler manually and asserts the dream trigger fires on its interval and stops after `close()`. app.test.ts follows the existing route-test pattern with a stub engine: list returns rows; show 404s on unknown; feedback posts and 404s on false.
 
-- [ ] **Step 2: Run, verify failure.** **Step 3: Implement.** **Step 4: Run `pnpm vitest run packages/server`, verify pass.**
+- [x] **Step 2: Run, verify failure.** **Step 3: Implement.** **Step 4: Run `pnpm vitest run packages/server`, verify pass.**
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/server/src/launch.ts packages/server/src/registry.ts packages/server/src/app.ts packages/server/src/app.test.ts packages/server/src/registry.test.ts
