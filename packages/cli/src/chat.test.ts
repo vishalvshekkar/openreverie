@@ -1743,22 +1743,72 @@ describe('runChat status line', () => {
         now: () => 0,
       })
       let settled = false
-      done.then(() => {
-        settled = true
-      })
+      done.then(
+        () => {
+          settled = true
+        },
+        () => {
+          settled = true
+        },
+      )
 
-      // Advancing the fake clock in one single 20,001ms jump races ahead
-      // of runChat's own real (unfaked) async setup, MemoryEngine.open()'s
-      // session bookkeeping, assembling the system prompt: that work has
-      // not even reached the point of registering the timeout's setTimeout
-      // yet when a single advance call returns, so the jump finds nothing
-      // to fire and the greeting never times out. Advancing in many small
-      // steps, checked against the real event loop between each one,
-      // lets that real setup interleave normally while still accumulating
-      // well past the 20 second threshold.
-      for (let i = 0; i < 500 && !settled; i++) {
-        await vi.advanceTimersByTimeAsync(100)
+      // agent.ts's withTimeout is the only place in the whole runtime that
+      // calls setTimeout on this path (the greeting's 20 second timer), so
+      // vi.getTimerCount() going non-zero is an unambiguous signal that
+      // runChat's real (unfaked) async setup, MemoryEngine.open()'s session
+      // bookkeeping, assembling the system prompt, has reached the point of
+      // registering it. Advancing the fake clock by 0ms fires nothing by
+      // itself, but vitest's tickAsync always schedules its work through
+      // the real setTimeout captured before faking began, so each call
+      // still costs one real event-loop turn: exactly what lets that real
+      // setup interleave and eventually reach the registration. Waiting
+      // for the signal itself, rather than guessing how many turns it
+      // needs, keeps this deterministic no matter how fast or loaded the
+      // machine is: the number of turns the real setup needs is fixed by
+      // its own code, not by the clock (registering the timeout takes on
+      // the order of tens of turns; settling after it fires below, which
+      // shares this same cap, takes on the order of thousands, since it
+      // includes the /bye path and reflection). maxWaitTurns only bounds
+      // how long we are willing to wait for that fixed number of turns to
+      // happen, generously past what either wait ever actually needs, so
+      // the cap is reached only when something is genuinely stuck, not
+      // when the machine is merely slow.
+      const maxWaitTurns = 20_000
+      let turnsWaited = 0
+      while (vi.getTimerCount() === 0 && turnsWaited < maxWaitTurns) {
+        await vi.advanceTimersByTimeAsync(0)
+        turnsWaited++
       }
+      expect(
+        vi.getTimerCount(),
+        `the greeting's timeout was never registered after ${maxWaitTurns} real event-loop turns; runChat's setup (MemoryEngine session bookkeeping, system prompt assembly) appears stuck before ever reaching agent.ts's withTimeout`,
+      ).toBeGreaterThan(0)
+
+      // The timeout is now known to be registered, so one precise jump
+      // past its 20 second threshold fires it deterministically: no more
+      // guesswork about how many small steps are needed to cross it. This
+      // mirrors agent.ts's own (unexported) GREETING_TIMEOUT_MS; if that
+      // constant ever changes, the assertion below on settled, not a bare
+      // vitest timeout, is what will say so.
+      const greetingTimeoutMs = 20_000
+      await vi.advanceTimersByTimeAsync(greetingTimeoutMs + 1)
+
+      // Firing the timer is not the same as runChat having finished
+      // reacting to it: unwinding the generator, running the /bye path,
+      // and reflection all still have to happen. None of that depends on
+      // fake time (withTimeout's setTimeout is the only timer anywhere on
+      // this path), so it only needs more real event-loop turns, the same
+      // kind used above, not more virtual time.
+      let settleTurnsWaited = 0
+      while (!settled && settleTurnsWaited < maxWaitTurns) {
+        await vi.advanceTimersByTimeAsync(0)
+        settleTurnsWaited++
+      }
+      expect(
+        settled,
+        `the greeting's timeout fired but runChat never settled within ${maxWaitTurns} real event-loop turns afterward; check whether the timeout still throws at ${greetingTimeoutMs}ms and whether the /bye reflection path is parked on the hanging provider`,
+      ).toBe(true)
+
       await done
 
       const promptIndex = output.findIndex((chunk) => chunk.includes('you> '))
@@ -1769,7 +1819,7 @@ describe('runChat status line', () => {
     } finally {
       vi.useRealTimers()
     }
-  })
+  }, 30_000)
 
   it('stops the status line before writing the interrupt message, so no frame is left stranded in scrollback', async () => {
     const chat = new FakeChatProvider([{ text: 'Good to see you.', toolCalls: [] }])
