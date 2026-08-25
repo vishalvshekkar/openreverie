@@ -1,0 +1,60 @@
+name: Publish
+
+# Publishes the openreverie CLI to npm when a version tag is pushed. Runs
+# the full suite, the build, and the lint first, and refuses to publish if
+# any of them fail: a red run never reaches the publish step, because it
+# is a separate job that depends on the check job succeeding.
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm build
+      - run: pnpm test
+
+  publish:
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Required for npm provenance: it lets npm attach a signed
+      # attestation tying the published package back to this exact
+      # workflow run and commit, without a long-lived signing key.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          # Points npm at the public registry and wires NODE_AUTH_TOKEN
+          # below into a throwaway .npmrc. Without this, npm publish
+          # authenticates against nothing and fails with a 401 even
+          # though NPM_TOKEN is set.
+          registry-url: 'https://registry.npmjs.org'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      # The workspace build (tsc, vite) has already run above. This is
+      # publish-specific: it rebuilds the bundle one more time through
+      # `prepack`, which npm publish runs on its own regardless, so this
+      # line is here for a clear failure point rather than to be strictly
+      # necessary.
+      - name: Publish to npm
+        working-directory: packages/cli
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
