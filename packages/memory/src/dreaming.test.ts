@@ -317,6 +317,19 @@ function lookupGrounded(): DreamLookup {
   }
 }
 
+// The name of the single dream directory a run wrote. Every caller below has
+// already asserted the run's outcome, so an absent directory means the run
+// did not write what the test says it did: worth naming plainly rather than
+// failing later with a TypeError on an undefined path segment.
+async function dreamDirName(dreamsDir: string): Promise<string> {
+  const dirents = await readdir(dreamsDir, { withFileTypes: true })
+  const dreamDir = dirents.find((entry) => entry.isDirectory())
+  if (dreamDir === undefined) {
+    throw new Error(`expected one dream directory under ${dreamsDir}, found none`)
+  }
+  return dreamDir.name
+}
+
 function runArgs(paths: MemoryPaths, chat: FakeChatProvider): RunDreamArgs {
   return {
     chat,
@@ -363,15 +376,14 @@ describe('runDream', () => {
     ])
     const result = await runDream(runArgs(paths, chat))
     expect(result.outcome).toBe('written')
-    const dirents = await readdir(paths.dreamsDir, { withFileTypes: true })
-    const dreamDir = dirents.find((d) => d.isDirectory())
-    expect(dreamDir?.name).toMatch(/^2026-08-24-dream_/)
-    const insightDoc = await readDocument(join(paths.dreamsDir, dreamDir!.name, 'insight.md'))
+    const dirName = await dreamDirName(paths.dreamsDir)
+    expect(dirName).toMatch(/^2026-08-24-dream_/)
+    const insightDoc = await readDocument(join(paths.dreamsDir, dirName, 'insight.md'))
     const insights = insightDoc.meta.insights as DreamInsight[]
     expect(insights).toHaveLength(1) // doc_missing dropped
     expect(insights[0]?.id).toMatch(/^ins_/)
     expect(insightDoc.meta.rngSeed).toBe(7)
-    const dreamDoc = await readDocument(join(paths.dreamsDir, dreamDir!.name, 'dream.md'))
+    const dreamDoc = await readDocument(join(paths.dreamsDir, dirName, 'dream.md'))
     expect(dreamDoc.meta.kind).toBe('dream')
     expect(dreamDoc.body).toContain('shoreline')
     const log = await readDreamLog(paths)
@@ -413,14 +425,10 @@ describe('runDream', () => {
     // withholds on the first tone failure would leave two scripted
     // responses unconsumed, which this length check catches.
     expect(chat.requests).toHaveLength(6)
-    const dirents = await readdir(paths.dreamsDir, { withFileTypes: true })
-    const dreamDir = dirents.find((d) => d.isDirectory())
-    const files = await readdir(join(paths.dreamsDir, dreamDir!.name))
+    const dirName = await dreamDirName(paths.dreamsDir)
+    const files = await readdir(join(paths.dreamsDir, dirName))
     expect(files.sort()).toEqual(['insight.md', 'process.jsonl'])
-    const processRaw = await readFile(
-      join(paths.dreamsDir, dreamDir!.name, 'process.jsonl'),
-      'utf8',
-    )
+    const processRaw = await readFile(join(paths.dreamsDir, dirName, 'process.jsonl'), 'utf8')
     const processEvents = processRaw
       .trim()
       .split('\n')
@@ -469,9 +477,8 @@ describe('runDream', () => {
     args.resolveNode = (id) => id === 'node_ok'
     const result = await runDream(args)
     expect(result.outcome).toBe('written')
-    const dirents = await readdir(paths.dreamsDir, { withFileTypes: true })
-    const dreamDir = dirents.find((d) => d.isDirectory())
-    const insightDoc = await readDocument(join(paths.dreamsDir, dreamDir!.name, 'insight.md'))
+    const dirName = await dreamDirName(paths.dreamsDir)
+    const insightDoc = await readDocument(join(paths.dreamsDir, dirName, 'insight.md'))
     const insights = insightDoc.meta.insights as DreamInsight[]
     expect(insights).toHaveLength(2)
   })
