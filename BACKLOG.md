@@ -421,6 +421,37 @@ item ships, remove it from here and record it in `ROADMAP.md`'s Done narrative.
     `waitsOn` return to the live tool surface.
   - Size: not stated.
 
+- **The real `askedAt`/one-ask mechanism (spec Section 6) is not built; an interim time-bound
+  stands in for it.** Spec Section 6: "A commitment whose window has passed with no recorded
+  outcome becomes eligible for exactly one natural follow-up. Asking it sets `askedAt`. It is
+  never raised again and resolves to `unknown`." Nothing anywhere writes `askedAt` or transitions
+  a commitment to `unknown`: the 2026-08-25 final review (Critical 2) found the field had a reader
+  in `selectCommitments` and no writer anywhere in `packages/*/src/`, so a passed-window
+  commitment with no recorded outcome surfaced every session indefinitely, the exact taskmaster
+  behavior the feature exists to prevent. The proper fix needs the companion to signal that it
+  actually raised a commitment during a live conversation turn, which is a live-session feature
+  this review's scope could not build (fixing it, per the controller's own ruling on the finding,
+  "needs the companion to signal that it raised something, which is a live-session feature too
+  large for this branch"). As an interim anti-nag guard, `isTimeEligible`
+  (`packages/memory/src/commitments.ts`) now bounds eligibility above with a fixed grace period
+  (`ASK_GRACE_DAYS`, currently 14 days) after a commitment's window closes, after which it stops
+  entering the session prompt on its own, with no outcome ever recorded and no `askedAt` ever set.
+  That gets most of the same practical effect (a passed-window commitment does not nag forever)
+  without inventing a fake ask, but it is explicitly not the spec's own design: there is still no
+  `unknown` state reachable in production, and a commitment that ages out through the grace period
+  is silently dropped from the standing prompt rather than resolved to anything.
+  - Why deferred: controller ruling on Critical 2 (2026-08-25 final review): "Do NOT invent an
+    `askedAt` writer. Doing it properly needs the companion to signal that it raised something,
+    which is a live-session feature too large for this branch."
+  - Where the thinking lives: spec Section 6; `packages/memory/src/commitments.ts`
+    (`isTimeEligible`, `ASK_GRACE_DAYS`, and `selectCommitments`'s `askedAt` filter, which has no
+    production caller yet); `.superpowers/sdd/2026-08-24-commitments-engine/final-review-part2.md`,
+    Critical 2.
+  - Trigger: a live-session signal that the companion actually raised a commitment in
+    conversation (an explicit tool call, or an inferred one from the transcript at reflection
+    time), which the writer and the `unknown` transition would both key off.
+  - Size: medium (needs a live-session design decision, not only a data-layer change).
+
 - **Proposals returning for arbitration, in a non-conversational surface.** Not permission to
   remember, but arbitration only the user can settle: merging two nodes that turn out to be the
   same human, closing an arc gone quiet, resolving a contradiction between what was said months
@@ -941,6 +972,171 @@ help welcome" section. Read [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](A
   - Where: not stated.
   - Trigger: not stated.
   - Size: medium.
+
+- **`selectCommitments`'s cap and sort are exercised by no test.** Every one of the
+  `selectCommitments` tests in `packages/memory/src/commitments.test.ts` (as of the 2026-08-24
+  commitments engine work) passed a single-element array, so `.slice(0, cap)` and the whole sort
+  comparator (soonest-window-first, with three undefined-handling branches) went uncovered.
+  Deleting the entire `.sort(...)` call left the suite green.
+  - Why deferred: "Ledger-flagged as the controller's own omission" (2026-08-25 final review,
+    part two, Minor 10); not picked up in that review's fix pass, which was scoped to Critical and
+    Important findings only.
+  - Where: `packages/memory/src/commitments.ts` (`selectCommitments`'s cap and comparator);
+    `packages/memory/src/commitments.test.ts`.
+  - Trigger: not stated.
+  - Size: small.
+
+- **Three accepting branches of the commitment time resolver are untested.** `'this evening'`,
+  `'tomorrow night'`, and the `'this '` qualifier in the weekday regex
+  (`packages/memory/src/commitmentTime.ts`) are all accepted branches with no test covering them;
+  `commitmentTime.test.ts` covers `today`, `tonight`, `tomorrow`, `in N days`, a bare weekday, and
+  the `next <weekday>` refusal, but not these three. All three are reachable from two live call
+  paths (the live `remember` tool and reflection), not merely theoretical.
+  - Why deferred: "Ledger-flagged; confirmed" (2026-08-25 final review, part two, Minor 11); not
+    picked up in that review's fix pass, which was scoped to Critical and Important findings only.
+  - Where: `packages/memory/src/commitmentTime.ts` (the weekday regex and the two named-time
+    branches); `packages/memory/src/commitmentTime.test.ts`.
+  - Trigger: not stated.
+  - Size: small.
+
+- **`web`'s enum drift guard does not block a future merge that adds a graph node or edge type.**
+  `packages/web/src/api.ts` currently carries the full `NODE_TYPES`/`EDGE_TYPES` vocabulary
+  (including `'commitment'` and `'waits_on'`), verified against `packages/memory`'s own source of
+  truth by `packages/server/src/graph-vocabulary-parity.test.ts`. `web`'s own parity test compares
+  `api.ts` against a second hardcoded mirror in the same package, so it would still pass even if a
+  seventh node type were added to `memory` and `web` were never updated: the failure mode is Atlas
+  rendering degradation (an unrecognized node type), not a server error, since commitments (and
+  any future type) have no dedicated browser view yet regardless.
+  - Why deferred: "explicitly 'deferred for the final review to triage'" (per the commitments
+    engine ledger); not picked up in the 2026-08-25 final review's fix pass, which was scoped to
+    Critical and Important findings only (this is Minor 12 in that review).
+  - Where: `packages/web/src/api.ts` (the hardcoded node/edge enum and its own parity test);
+    `packages/server/src/graph-vocabulary-parity.test.ts` (the guard that does exist, for `server`
+    against `memory`). The review's own fix sketch: read `api.ts` as text and compare against
+    `memory`'s `NODE_TYPES`/`EDGE_TYPES`, the same guarding-without-importing shape
+    `graph-vocabulary-parity.test.ts` already uses, extended to also cover `web`.
+  - Trigger: not stated.
+  - Size: small.
+
+- **`weekdayIndex` returns -1 on an abbreviation miss instead of `undefined`, against the
+  refuse-over-guess contract the rest of the resolver follows.** Currently unreachable in
+  production (no caller passes an unrecognized abbreviation today), so this is defensive-only, not
+  a live defect.
+  - Why deferred: "unreachable today, defensive only" (2026-08-25 final review, part two, Minor
+    13's list); not picked up in that review's fix pass, which was scoped to Critical and
+    Important findings only.
+  - Where: `packages/memory/src/commitmentTime.ts` (`weekdayIndex`).
+  - Trigger: not stated.
+  - Size: small.
+
+- **`parseGraphRecord` reports a malformed node record's parse failure in terms of the edge
+  schema's field names.** When a `graph.jsonl` line fails both the node and edge schemas,
+  `parseGraphRecord` (`packages/memory/src/graph.ts`) currently surfaces
+  `edgeValidation.error.message` regardless of which shape the line was actually attempting, so a
+  bad `NODE` line's error is explained using edge field names, which is confusing rather than
+  wrong (the line is still correctly rejected).
+  - Why deferred: "not picked up in the 2026-08-25 final review's fix pass, which was scoped to
+    Critical and Important findings only (this is part of Minor 13's list in that review)."
+  - Where: `packages/memory/src/graph.ts` (`parseGraphRecord`, around line 281 to 291 as of
+    2026-08-25).
+  - Trigger: not stated.
+  - Size: small.
+
+- **`DOC_KINDS` is hand-copied across three packages** (`packages/memory/src/sqlite.ts`,
+  `packages/server/src/app.ts`, `packages/web/src/api.ts`), the same duplication shape the graph
+  vocabulary (`NODE_TYPES`/`EDGE_TYPES`) has, currently in sync and untouched, with no guard test
+  comparing the three the way `graph-vocabulary-parity.test.ts` does for the graph vocabulary.
+  - Why deferred: "currently in sync and untouched" (2026-08-25 final review, part two, Minor 13's
+    list); not picked up in that review's fix pass, which was scoped to Critical and Important
+    findings only.
+  - Where: `packages/memory/src/sqlite.ts` (`DOC_KINDS`), `packages/server/src/app.ts`,
+    `packages/web/src/api.ts`.
+  - Trigger: not stated.
+  - Size: small.
+
+- **The reflection prompt's "Known commitments" listing is uncapped and lists dead commitments
+  forever.** `readCommitments` (`packages/memory/src/engine.ts`) is deliberately uncapped for
+  reflection's own prompt (justified on the grounds that a person accumulates far fewer *open*
+  commitments than named people or things), but every commitment ever recorded, in every state
+  including `done`, `dropped`, and `quiet`, is rendered into every reflection prompt, so after a
+  year of daily use this is an unbounded, monotonically growing block in a prompt every other
+  section of which is capped. The listing itself renders only id, label, flavor, and state, never
+  gloss or bracket, so no leak was found here, only an unbounded-growth concern.
+  - Why deferred: "not picked up in the 2026-08-25 final review's fix pass, which was scoped to
+    Critical and Important findings only (this is Minor 15 in that review's part two)."
+  - Where: `packages/memory/src/engine.ts` (`readCommitments`); `packages/memory/src/reflection.ts`
+    (`renderCommitmentListing`).
+  - Trigger: not stated.
+  - Size: small to medium (needs a capping and truncation-marker design, the same shape every
+    other capped section in `packages/core/src/context.ts` already uses).
+
+- **One long commitment gloss can suppress the entire Commitments section, including shorter
+  rows that would have fit.** `capRows` (`packages/core/src/budget.ts`) breaks on the first row
+  that does not fit rather than skipping it and continuing. `selectCommitments` sorts
+  soonest-window-first, so the soonest commitment's row is checked first; if a model-written gloss
+  with no length bound makes that one row alone exceed `COMMITMENTS_SECTION_CAP` (800 characters),
+  the whole section is dropped, discarding shorter, later rows that would have fit on their own.
+  Pre-existing `capRows` behavior shared with every other capped section, so this is not a defect
+  introduced by the commitments work, but Commitments is the first section whose rows carry
+  unbounded model prose in a sorted-by-importance order, which is what makes head-of-list
+  suppression newly consequential.
+  - Why deferred: "not picked up in the 2026-08-25 final review's fix pass, which was scoped to
+    Critical and Important findings only (this is Minor 16 in that review's part two)."
+  - Where: `packages/core/src/budget.ts` (`capRows`); `packages/core/src/context.ts`
+    (`commitmentsSection`).
+  - Trigger: not stated.
+  - Size: small to medium (either bound gloss length at the schema boundary, or change `capRows`
+    to skip an oversized row and keep trying shorter ones after it).
+
+- **After a single Ctrl-C at the CLI's `/mode` selection prompt, typing `/bye` on the next line
+  does not stop the session.** The `/mode` selection state machine
+  (`packages/cli/src/chat.ts`) is otherwise correct: it is strictly one-shot, EOF bypasses it,
+  a second Ctrl-C still exits from the selection prompt, and out-of-range or unrecognized input
+  falls to "Mode unchanged." A single Ctrl-C at that prompt prints "Type /bye when you want to
+  stop; it reflects on the session first," and the person doing exactly that has their `/bye`
+  consumed as a cancelled mode selection instead, printing "Mode unchanged."; a second `/bye`
+  then works. This is a copy/ordering problem (the CLI told them to type `/bye` one line earlier
+  than the state machine expects it), not a state-machine bug, and no data is at risk.
+  - Why deferred: "not picked up in the 2026-08-25 final review's fix pass, which was scoped to
+    Critical and Important findings only (this is finding 6 in that review's part one)."
+  - Where: `packages/cli/src/chat.ts` (the `/mode` selection state and the Ctrl-C prompt text,
+    around lines 201-207 and 302-311 as of 2026-08-25).
+  - Trigger: not stated.
+  - Size: small.
+
+- **Two "no clock leaked into the prompt" test guards compare a UTC-formatted date against a
+  prompt that renders local dates, so they can pass vacuously.**
+  `expect(prompt).not.toContain(new Date().toISOString().slice(0, 10))` in
+  `packages/core/src/context.test.ts` checks the UTC calendar date, but the fixture pins the
+  profile timezone to `Asia/Kolkata` (UTC+5:30) and the code under test renders every date through
+  `formatLocalDate` in that zone. For roughly 23% of any given day (18:30 to 24:00 UTC), the
+  Kolkata local date is one day ahead of the UTC date the assertion checks for, so a leaked clock
+  reading during that window would carry a string the assertion is not looking for and the guard
+  would pass without actually having checked anything. No code path currently formats a
+  `now`-derived date into the prompt, so this is a latent test weakness, not a current false
+  negative.
+  - Why deferred: "not picked up in the 2026-08-25 final review's fix pass, which was scoped to
+    Critical and Important findings only (this is finding 13 in that review's part one)."
+  - Where: `packages/core/src/context.test.ts`, the two "does not leak the wall clock into the
+    prompt" style tests (one pre-existing, one added alongside this round's commitment-timing
+    work).
+  - Trigger: not stated.
+  - Size: small.
+
+- **The chunk-cap test does not pin the exact boundary `CHUNKS_PER_DOC_CAP` sets.** The
+  "caps the chunks returned per document" test in `packages/memory/src/retrieval.test.ts` asserts
+  `chunks.length < chunksTotal` and `chunks.length > 0`, which is satisfied by any value in 1..5
+  for six matching items, so changing `CHUNKS_PER_DOC_CAP` from 3 to 5, or to 1, leaves the test
+  green. `chunksTotal` itself is genuinely pinned by the same test, which is the more important
+  half. No off-by-one exists at the boundary (verified by reading: at exactly 3 matched chunks,
+  `chunks.length === chunksTotal === 3`; at 4, it is 3 and 4).
+  - Why deferred: "not picked up in the 2026-08-25 final review's fix pass, which was scoped to
+    Critical and Important findings only (this is finding 14 in that review's part one)."
+  - Where: `packages/memory/src/retrieval.test.ts` (the chunk-cap test); `packages/memory/src/retrieval.ts`
+    (`CHUNKS_PER_DOC_CAP`).
+  - Trigger: not stated.
+  - Size: small (`expect(hits[0]?.chunks.length).toBe(3)`, or assert against the exported constant
+    if it is worth exporting).
 
 ## 6. Decided against, with a trigger to revisit
 
