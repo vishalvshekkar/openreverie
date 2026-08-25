@@ -1,6 +1,6 @@
 {
   "name": "@openreverie/providers",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "Model provider abstraction for openreverie: chat and embedding interfaces with swappable adapters.",
   "homepage": "https://reverie.my",
   "license": "FSL-1.1-ALv2",

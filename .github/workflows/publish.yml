@@ -41,20 +41,38 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          # Points npm at the public registry and wires NODE_AUTH_TOKEN
-          # below into a throwaway .npmrc. Without this, npm publish
-          # authenticates against nothing and fails with a 401 even
-          # though NPM_TOKEN is set.
+          # Still required with trusted publishing: it points npm at the
+          # public registry. What it no longer does is wire in a token,
+          # because there is no longer a token to wire.
           registry-url: 'https://registry.npmjs.org'
+      # Node 22 bundles npm 10.x, which has no OpenID Connect support at
+      # all: it would try to authenticate with a token that does not exist
+      # and fail. Trusted publishing needs npm 11.5.1 or newer, so the
+      # bundled npm is upgraded before the publish step rather than after
+      # discovering this on a release.
+      - name: Upgrade npm for trusted publishing
+        run: npm install -g npm@latest
+      - name: Show npm version
+        run: npm --version
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
-      # The workspace build (tsc, vite) has already run above. This is
-      # publish-specific: it rebuilds the bundle one more time through
-      # `prepack`, which npm publish runs on its own regardless, so this
-      # line is here for a clear failure point rather than to be strictly
-      # necessary.
+      # Authentication here is OpenID Connect, not a secret. The id-token
+      # permission above lets this job mint a short-lived token that npm
+      # exchanges against the trusted publisher configured on the package
+      # (this repository, this workflow filename). Nothing long-lived is
+      # stored anywhere, so there is no NPM_TOKEN secret to leak, rotate,
+      # or accidentally widen.
+      #
+      # Deliberately no NODE_AUTH_TOKEN fallback. A token line left here
+      # "just in case" would silently take precedence the moment anyone
+      # added the secret, quietly undoing the guarantee that only a tagged
+      # run of this file can publish.
+      #
+      # The package is also set to require two-factor authentication and
+      # disallow bypass tokens, which trusted publishing is exempt from by
+      # design. The practical effect is that publishing is possible in
+      # exactly two ways: this workflow on a version tag, or a human at an
+      # interactive terminal with a passkey.
       - name: Publish to npm
         working-directory: packages/cli
         run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

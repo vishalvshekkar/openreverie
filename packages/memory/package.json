@@ -1,6 +1,6 @@
 {
   "name": "@openreverie/memory",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "The openreverie memory engine: prose files and graph log as truth, SQLite as a rebuildable index, reflection and rollup pipelines, hybrid retrieval.",
   "homepage": "https://reverie.my",
   "license": "FSL-1.1-ALv2",
