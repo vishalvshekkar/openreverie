@@ -23,6 +23,7 @@ import {
   type GraphState,
   listDocuments,
   memoryPaths,
+  nodeStores,
   readDocument,
   readGraph,
 } from '@openreverie/memory'
@@ -92,7 +93,7 @@ export async function runRead(args: string[], deps: ReadDeps): Promise<number> {
     deps.write(`${err instanceof Error ? err.message : String(err)}\n`)
     return 1
   }
-  const paths = memoryPaths(config.memoryDir)
+  const paths = memoryPaths(config.memoryDir, nodeStores())
 
   // A memory root that is not there at all is a different situation from
   // one that exists but happens to have nothing in it yet: the first is a
@@ -151,7 +152,7 @@ async function loadCandidates(
   const dir = kind === 'arc' ? paths.arcsDir : kind === 'realm' ? paths.realmsDir : paths.peopleDir
   let docs: Document[]
   try {
-    docs = await listDocuments(dir, onSkip)
+    docs = await listDocuments(paths.files, dir, onSkip)
   } catch {
     return []
   }
@@ -222,7 +223,7 @@ async function printOneOfKind(
 
   const match = found[0]
   if (!match) return 1
-  const doc = await readDocument(match.path)
+  const doc = await readDocument(paths.files, match.path)
   printDocument(deps, match.name, doc)
   return 0
 }
@@ -369,7 +370,7 @@ async function printSearchAllKinds(
   const match = found[0]
   if (!match) return 1
   if (match.path) {
-    const doc = await readDocument(match.path)
+    const doc = await readDocument(paths.files, match.path)
     printDocument(deps, match.name, doc)
     return 0
   }
@@ -386,7 +387,7 @@ async function printConstitution(
 ): Promise<number> {
   let doc: Document
   try {
-    doc = await readDocument(paths.constitution)
+    doc = await readDocument(paths.files, paths.constitution)
   } catch (err) {
     // A missing constitution.md (the file itself, not the folder: runRead
     // already checked the root exists before this runs) is reported the

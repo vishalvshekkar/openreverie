@@ -7,6 +7,7 @@ import { readDocument } from './documents.js'
 import type { DreamInsight, DreamLookup, RunDreamArgs } from './dreaming.js'
 import { dreamInsightsOutputSchema, runDream, runExploration } from './dreaming.js'
 import { readDreamLog } from './dreamLog.js'
+import { nodeStores } from './nodeStore.js'
 import { ensureMemoryTree, type MemoryPaths, memoryPaths } from './paths.js'
 import { PROSE_VOICE_RULE } from './voice.js'
 
@@ -360,8 +361,8 @@ describe('runDream', () => {
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'openreverie-dreaming-'))
-    paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
   })
 
   afterEach(async () => {
@@ -379,12 +380,12 @@ describe('runDream', () => {
     expect(result.outcome).toBe('written')
     const dirName = await dreamDirName(paths.dreamsDir)
     expect(dirName).toMatch(/^2026-08-24-dream_/)
-    const insightDoc = await readDocument(join(paths.dreamsDir, dirName, 'insight.md'))
+    const insightDoc = await readDocument(paths.files, join(paths.dreamsDir, dirName, 'insight.md'))
     const insights = insightDoc.meta.insights as DreamInsight[]
     expect(insights).toHaveLength(1) // doc_missing dropped
     expect(insights[0]?.id).toMatch(/^ins_/)
     expect(insightDoc.meta.rngSeed).toBe(7)
-    const dreamDoc = await readDocument(join(paths.dreamsDir, dirName, 'dream.md'))
+    const dreamDoc = await readDocument(paths.files, join(paths.dreamsDir, dirName, 'dream.md'))
     expect(dreamDoc.meta.kind).toBe('dream')
     expect(dreamDoc.body).toContain('shoreline')
     const log = await readDreamLog(paths)
@@ -582,7 +583,7 @@ describe('runDream', () => {
     const result = await runDream(args)
     expect(result.outcome).toBe('written')
     const dirName = await dreamDirName(paths.dreamsDir)
-    const insightDoc = await readDocument(join(paths.dreamsDir, dirName, 'insight.md'))
+    const insightDoc = await readDocument(paths.files, join(paths.dreamsDir, dirName, 'insight.md'))
     const insights = insightDoc.meta.insights as DreamInsight[]
     expect(insights).toHaveLength(2)
   })
@@ -626,7 +627,7 @@ describe('runDream', () => {
     const result = await runDream(args)
     expect(result.outcome).toBe('written')
     const dirName = await dreamDirName(paths.dreamsDir)
-    const insightDoc = await readDocument(join(paths.dreamsDir, dirName, 'insight.md'))
+    const insightDoc = await readDocument(paths.files, join(paths.dreamsDir, dirName, 'insight.md'))
     const insights = insightDoc.meta.insights as DreamInsight[]
     expect(insights).toHaveLength(1)
     expect(insights[0]?.headline).toBe('Mislabeled but real')

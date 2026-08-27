@@ -43,7 +43,7 @@ export async function writeJournalEntry(
 ): Promise<Document> {
   const id = newId('doc')
   const path = journalEntryPath(paths, input.entryDate, id)
-  await writeDocumentAtomic({
+  await writeDocumentAtomic(paths.files, {
     path,
     meta: {
       id,
@@ -56,7 +56,7 @@ export async function writeJournalEntry(
     },
     body: input.body,
   })
-  return readDocument(path)
+  return readDocument(paths.files, path)
 }
 
 const EXAMEN_LABELS = [
@@ -120,7 +120,7 @@ function isEnoent(err: unknown): boolean {
 // mode spec, section 4.4.
 export async function readJournalingProtocol(paths: MemoryPaths): Promise<string> {
   try {
-    const doc = await readDocument(paths.journaling)
+    const doc = await readDocument(paths.files, paths.journaling)
     return doc.body.trim()
   } catch (err) {
     if (isEnoent(err)) return JOURNALING_PROTOCOL_ABSENT
@@ -132,7 +132,7 @@ export async function readJournalingProtocolIfPresent(
   paths: MemoryPaths,
 ): Promise<string | undefined> {
   try {
-    const doc = await readDocument(paths.journaling)
+    const doc = await readDocument(paths.files, paths.journaling)
     return doc.body.trim()
   } catch (err) {
     if (isEnoent(err)) return undefined
@@ -155,15 +155,15 @@ export async function writeJournalingProtocol(
 ): Promise<Document> {
   let id: string
   try {
-    const existing = await readDocument(paths.journaling)
+    const existing = await readDocument(paths.files, paths.journaling)
     id = typeof existing.meta.id === 'string' ? existing.meta.id : newId('doc')
   } catch {
     id = newId('doc')
   }
-  await writeDocumentAtomic({
+  await writeDocumentAtomic(paths.files, {
     path: paths.journaling,
     meta: { id, kind: 'journaling', updated: now.toISOString() },
     body,
   })
-  return readDocument(paths.journaling)
+  return readDocument(paths.files, paths.journaling)
 }

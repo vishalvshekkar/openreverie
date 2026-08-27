@@ -12,6 +12,7 @@ import {
   type MemoryPaths,
   memoryPaths,
   newId,
+  nodeStores,
   SessionStore,
   writeDocumentAtomic,
   writeProfile,
@@ -30,8 +31,8 @@ let dir: string
 
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'openreverie-agent-'))
-  await ensureMemoryTree(memoryPaths(dir))
-  await pinTimezoneUtc(memoryPaths(dir))
+  await ensureMemoryTree(memoryPaths(dir, nodeStores()), 'UTC')
+  await pinTimezoneUtc(memoryPaths(dir, nodeStores()))
 })
 
 afterEach(async () => {
@@ -59,11 +60,12 @@ function fakeDeps(chat: ChatProvider): EngineDeps {
     embeddings: new FakeEmbeddingProvider(),
     reflectionModel: 'fake-reflect',
     embeddingModel: 'fake-embed',
+    timezone: 'UTC',
   }
 }
 
 async function pinTimezoneUtc(paths: MemoryPaths): Promise<void> {
-  const profile = await loadProfile(paths)
+  const profile = await loadProfile(paths, 'UTC')
   await writeProfile(paths, {
     meta: { ...profile.meta, timezone: 'UTC', timezoneSource: 'user-confirmed' },
     body: profile.body,
@@ -85,7 +87,7 @@ async function writeDream(
 ): Promise<void> {
   const dir = join(paths.dreamsDir, `${args.date}-${args.dreamId}`)
   await mkdir(dir, { recursive: true })
-  await writeDocumentAtomic({
+  await writeDocumentAtomic(paths.files, {
     path: join(dir, 'dream.md'),
     meta: {
       id: newId('doc'),
@@ -105,7 +107,7 @@ async function writeDream(
     confidence: 0.7,
     evidence: [],
   }
-  await writeDocumentAtomic({
+  await writeDocumentAtomic(paths.files, {
     path: join(dir, 'insight.md'),
     meta: {
       id: newId('doc'),
@@ -153,7 +155,7 @@ async function writeToneWithheldDream(
     confidence: 0.7,
     evidence: [],
   }
-  await writeDocumentAtomic({
+  await writeDocumentAtomic(paths.files, {
     path: join(dir, 'insight.md'),
     meta: {
       id: newId('doc'),
@@ -225,7 +227,7 @@ async function makeAgentFixture(rounds: ScriptedEvent[][] = []): Promise<{
   const chat = new FakeChatProvider(rounds.map(toFakeChatResult))
   const engine = await MemoryEngine.open(dir, fakeDeps(chat))
   const config = testConfig()
-  const paths = memoryPaths(dir)
+  const paths = memoryPaths(dir, nodeStores())
   const systems: string[] = []
   const originalStream = chat.stream.bind(chat)
   chat.stream = (req) => {
@@ -276,6 +278,36 @@ describe('AgentSession', () => {
     await engine.close()
   })
 
+  // P0-4: the provider's usage ChatEvent must reach neither the caller as
+  // an AgentEvent nor, worse, get concatenated into the greeting text.
+  // FakeChatProvider emits `usage` (when scripted) after any tool_call
+  // events and before `done`, mirroring where OpenAiChatProvider puts it;
+  // this proves runGreeting's explicit usage branch does what its comment
+  // says rather than silently falling through into the text branch above
+  // it or being missed entirely.
+  it('greet() does not turn a scripted usage event into an AgentEvent, and the greeting text carries no token numbers', async () => {
+    const chat = new FakeChatProvider([
+      {
+        text: 'Hello again.',
+        toolCalls: [],
+        usage: { model: 'fake-model', inputTokens: 111, outputTokens: 222 },
+      },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const session = await AgentSession.start(engine, testConfig(), chat)
+
+    const events = await collect(session.greet())
+
+    expect(events).toEqual([
+      { type: 'thinking' },
+      { type: 'text', text: 'Hello again.' },
+      { type: 'done' },
+    ])
+    expect(events.some((e) => e.type === 'text' && /111|222/.test(e.text))).toBe(false)
+
+    await engine.close()
+  })
+
   it('runs a tool round then a final text round, forwarding events and the transcript in order', async () => {
     const chat = new FakeChatProvider([
       {
@@ -321,6 +353,33 @@ describe('AgentSession', () => {
     const toolMessage = chat.requests[1]?.messages.find((m) => m.role === 'tool')
     expect(toolMessage?.toolCallId).toBe('call_1')
     expect(typeof toolMessage?.content).toBe('string')
+
+    await engine.close()
+  })
+
+  // Same hazard as the greet() test above, exercised through runTurn's
+  // separate loop (it has its own explicit usage branch, not shared code
+  // with runGreeting): a scripted usage event must not surface as text,
+  // as a tool call, or as any other AgentEvent.
+  it('send() does not turn a scripted usage event into an AgentEvent, and the reply text carries no token numbers', async () => {
+    const chat = new FakeChatProvider([
+      {
+        text: 'We went kayaking last spring.',
+        toolCalls: [],
+        usage: { model: 'fake-model', inputTokens: 333, outputTokens: 444 },
+      },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const session = await AgentSession.start(engine, testConfig(), chat)
+
+    const events = await collect(session.send('Did we ever go kayaking?'))
+
+    expect(events).toEqual([
+      { type: 'thinking' },
+      { type: 'text', text: 'We went kayaking last spring.' },
+      { type: 'done' },
+    ])
+    expect(events.some((e) => e.type === 'text' && /333|444/.test(e.text))).toBe(false)
 
     await engine.close()
   })
@@ -720,9 +779,10 @@ describe('AgentSession', () => {
     // context.test.ts's "actually reads the injected clock" test one
     // layer up, at the AgentSession boundary that test cannot reach.
     const startedAt = new Date('2020-01-01T09:00:00.000Z')
-    const store = await SessionStore.start(memoryPaths(dir), startedAt, 'UTC')
-    await store.appendLine({ ts: startedAt.toISOString(), role: 'user', content: 'Hello.' })
-    await writeDocumentAtomic({
+    const paths = memoryPaths(dir, nodeStores())
+    const store = await SessionStore.start(paths, startedAt, 'UTC')
+    await store.appendLine(paths, { ts: startedAt.toISOString(), role: 'user', content: 'Hello.' })
+    await writeDocumentAtomic(paths.files, {
       path: join(store.dir, 'summary.md'),
       meta: {
         id: newId('doc'),
@@ -803,7 +863,7 @@ describe('AgentSession', () => {
 
   describe('dream opener mention', () => {
     it('adds the dream mention guidance and marks the dream mentioned when the context carries a freshDream', async () => {
-      const paths = memoryPaths(dir)
+      const paths = memoryPaths(dir, nodeStores())
       await writeDream(paths, { date: '2026-08-20', dreamId: 'dream_fresh1' })
       const chat = new FakeChatProvider([{ text: 'Hello again.', toolCalls: [] }])
       const engine = await MemoryEngine.open(dir, fakeDeps(chat))
@@ -835,7 +895,7 @@ describe('AgentSession', () => {
     })
 
     it('never mentions the dream and never marks it mentioned in decompress mode, leaving it available for later', async () => {
-      const paths = memoryPaths(dir)
+      const paths = memoryPaths(dir, nodeStores())
       await writeDream(paths, { date: '2026-08-20', dreamId: 'dream_fresh2' })
       const chat = new FakeChatProvider([{ text: 'Hello again.', toolCalls: [] }])
       const engine = await MemoryEngine.open(dir, fakeDeps(chat))
@@ -852,7 +912,7 @@ describe('AgentSession', () => {
     })
 
     it('adds no dream mention guidance and marks nothing once the dream has already been mentioned', async () => {
-      const paths = memoryPaths(dir)
+      const paths = memoryPaths(dir, nodeStores())
       await writeDream(paths, { date: '2026-08-20', dreamId: 'dream_seen1' })
       await appendDreamLog(paths, [
         { ts: '2026-08-21T00:00:00.000Z', type: 'mentioned', dream: 'dream_seen1' },
@@ -872,9 +932,9 @@ describe('AgentSession', () => {
     })
 
     it('adds no dream mention guidance and marks nothing when profile.dreams.openerMention is false', async () => {
-      const paths = memoryPaths(dir)
+      const paths = memoryPaths(dir, nodeStores())
       await writeDream(paths, { date: '2026-08-20', dreamId: 'dream_fresh3' })
-      const profile = await loadProfile(paths)
+      const profile = await loadProfile(paths, 'UTC')
       await writeProfile(paths, {
         meta: { ...profile.meta, dreams: { openerMention: false } },
         body: profile.body,
@@ -894,9 +954,9 @@ describe('AgentSession', () => {
     })
 
     it('still adds the dream mention guidance when profile.dreams.promptSection is false: the opener is independent of the section', async () => {
-      const paths = memoryPaths(dir)
+      const paths = memoryPaths(dir, nodeStores())
       await writeDream(paths, { date: '2026-08-20', dreamId: 'dream_fresh4' })
-      const profile = await loadProfile(paths)
+      const profile = await loadProfile(paths, 'UTC')
       await writeProfile(paths, {
         meta: { ...profile.meta, dreams: { promptSection: false } },
         body: profile.body,
@@ -916,7 +976,7 @@ describe('AgentSession', () => {
     })
 
     it('does not offer a partial dream directory that has no insight.md, even when it is the newest', async () => {
-      const paths = memoryPaths(dir)
+      const paths = memoryPaths(dir, nodeStores())
       await writeDream(paths, { date: '2026-08-19', dreamId: 'dream_real1' })
       await writePartialDream(paths, { date: '2026-08-20', dreamId: 'dream_partial1' })
       const chat = new FakeChatProvider([{ text: 'Hello again.', toolCalls: [] }])
@@ -934,7 +994,7 @@ describe('AgentSession', () => {
     })
 
     it('never offers a tone-withheld dream (insight.md with no dream.md) in the opener, while its insights still reach the prompt section', async () => {
-      const paths = memoryPaths(dir)
+      const paths = memoryPaths(dir, nodeStores())
       // An arc so this is not treated as a first session, which would skip
       // dreamsSection entirely (see context.test.ts's own first-session
       // tests for the same setup). Appended before MemoryEngine.open,
@@ -1378,7 +1438,7 @@ describe('AgentSession', () => {
     // journalingProtocolSection tests for the same setup. Appended
     // before MemoryEngine.open, since the engine snapshots graph state
     // at open.
-    await appendGraph(memoryPaths(dir), [
+    await appendGraph(memoryPaths(dir, nodeStores()), [
       {
         ts: '2026-08-01T00:00:00.000Z',
         op: 'assert',

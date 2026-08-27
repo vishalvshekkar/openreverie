@@ -3,7 +3,7 @@ import { mkdtemp, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { defaultCrisisResources, loadConfig } from '@openreverie/core'
-import { loadProfile, memoryPaths, writeProfile } from '@openreverie/memory'
+import { loadProfile, memoryPaths, nodeStores, writeProfile } from '@openreverie/memory'
 import { describe, expect, it } from 'vitest'
 import { runSetup, type SetupIo } from './setup.js'
 
@@ -79,7 +79,7 @@ describe('runSetup happy path', () => {
     })
     expect(config.safety.mode).toBe('firewall')
     expect(config.safety.resources).toEqual(defaultCrisisResources)
-    const profile = await loadProfile(memoryPaths(memoryDir))
+    const profile = await loadProfile(memoryPaths(memoryDir, nodeStores()), 'UTC')
     expect(profile.meta.style).toEqual({
       engagement: 'balanced',
       tone: 'warm',
@@ -223,7 +223,7 @@ describe('runSetup style questions', () => {
     await runSetup(io, configPath)
 
     expect(queue).toHaveLength(0)
-    const profile = await loadProfile(memoryPaths(memoryDir))
+    const profile = await loadProfile(memoryPaths(memoryDir, nodeStores()), 'UTC')
     expect(profile.meta.style).toEqual({
       engagement: 'balanced',
       tone: 'warm',
@@ -238,7 +238,7 @@ describe('runSetup style questions', () => {
     await runSetup(io, configPath)
 
     expect(queue).toHaveLength(0)
-    const profile = await loadProfile(memoryPaths(memoryDir))
+    const profile = await loadProfile(memoryPaths(memoryDir, nodeStores()), 'UTC')
     expect(profile.meta.style).toEqual({
       engagement: 'leading',
       tone: 'playful',
@@ -269,7 +269,7 @@ describe('runSetup style questions', () => {
     const reprompt = output.find((line) => line.includes('Enter a number from 1 to'))
     expect(reprompt).toBeDefined()
 
-    const profile = await loadProfile(memoryPaths(memoryDir))
+    const profile = await loadProfile(memoryPaths(memoryDir, nodeStores()), 'UTC')
     expect(profile.meta.style?.engagement).toBe('leading')
   })
 
@@ -314,8 +314,8 @@ describe('setup writes style into profile.md', () => {
     const configText = await readFile(configPath, 'utf8')
     expect(configText).not.toContain('[style]')
 
-    const paths = memoryPaths(memoryDir)
-    const profile = await loadProfile(paths)
+    const paths = memoryPaths(memoryDir, nodeStores())
+    const profile = await loadProfile(paths, 'UTC')
     expect(profile.meta.style).toEqual({
       engagement: 'balanced',
       tone: 'warm',
@@ -330,8 +330,8 @@ describe('setup writes style into profile.md', () => {
     const first = scriptedIo(['', '', '', '', '', '', sharedMemoryDir, '1', '', '', ''])
     await runSetup(first.io, configPath)
 
-    const paths = memoryPaths(sharedMemoryDir)
-    const firstProfile = await loadProfile(paths)
+    const paths = memoryPaths(sharedMemoryDir, nodeStores())
+    const firstProfile = await loadProfile(paths, 'UTC')
     await writeProfile(paths, {
       ...firstProfile,
       meta: { ...firstProfile.meta, preferredName: 'Vish', location: 'Bengaluru' },
@@ -340,7 +340,7 @@ describe('setup writes style into profile.md', () => {
     const second = scriptedIo(['', '', '', '', '', '', sharedMemoryDir, '1', '', '', ''])
     await runSetup(second.io, configPath)
 
-    const secondProfile = await loadProfile(paths)
+    const secondProfile = await loadProfile(paths, 'UTC')
     expect(secondProfile.meta.preferredName).toBe('Vish')
     expect(secondProfile.meta.location).toBe('Bengaluru')
   })

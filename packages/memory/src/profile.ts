@@ -21,7 +21,7 @@ import { z } from 'zod'
 import { newId, readDocument, writeDocumentAtomic } from './documents.js'
 import type { MemoryPaths } from './paths.js'
 import { type StyleMeta, styleMetaSchema } from './style.js'
-import { isValidIanaTimeZone, systemTimeZone } from './time.js'
+import { isValidIanaTimeZone } from './time.js'
 
 export interface ProfileMeta {
   id: string
@@ -188,16 +188,19 @@ export function starterProfileDocument(
 // A folder created after this shipped always has profile.md, because
 // ensureMemoryTree seeds it. A folder that predates it does not, and
 // `reverie migrate` is what writes one. Until that runs, this returns an
-// in-memory system default and writes nothing: a read must never have a
-// write as a side effect.
-export async function loadProfile(paths: MemoryPaths): Promise<Profile> {
+// in-memory default built from the caller's own timezone argument and
+// writes nothing: a read must never have a write as a side effect. The
+// caller decides what that default is, not this function: see
+// ensureMemoryTree in paths.ts for why this package never reads the
+// ambient zone itself.
+export async function loadProfile(paths: MemoryPaths, timezone: string): Promise<Profile> {
   let raw: Awaited<ReturnType<typeof readDocument>>
   try {
-    raw = await readDocument(paths.profile)
+    raw = await readDocument(paths.files, paths.profile)
   } catch (err) {
     if (err instanceof Error && 'code' in err && err.code === 'ENOENT') {
       return {
-        meta: { id: newId('doc'), timezone: systemTimeZone(), timezoneSource: 'system-default' },
+        meta: { id: newId('doc'), timezone, timezoneSource: 'system-default' },
         body: PROFILE_STARTER_BODY,
       }
     }
@@ -218,5 +221,9 @@ export async function loadProfile(paths: MemoryPaths): Promise<Profile> {
 }
 
 export async function writeProfile(paths: MemoryPaths, profile: Profile): Promise<void> {
-  await writeDocumentAtomic({ path: paths.profile, meta: profile.meta, body: profile.body })
+  await writeDocumentAtomic(paths.files, {
+    path: paths.profile,
+    meta: profile.meta,
+    body: profile.body,
+  })
 }

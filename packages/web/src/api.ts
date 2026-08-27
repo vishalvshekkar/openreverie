@@ -429,8 +429,21 @@ function withCursor(path: string, cursor?: string): string {
 }
 
 export class ApiClient implements AppApi {
+  // Empty by default: every request path below is already absolute
+  // ('/api/v1/...'), so an empty base URL reproduces today's behavior of
+  // fetching same-origin. Reverie Cloud passes its API origin here instead.
+  private readonly baseUrl: string
+
+  constructor(baseUrl = '') {
+    this.baseUrl = baseUrl
+  }
+
+  private url(path: string): string {
+    return `${this.baseUrl}${path}`
+  }
+
   async request<T>(path: string, init: RequestInit, schema: z.ZodType<T>): Promise<T> {
-    const response = await fetch(path, {
+    const response = await fetch(this.url(path), {
       ...init,
       credentials: 'same-origin',
       headers: { Accept: 'application/json', ...init.headers },
@@ -440,7 +453,7 @@ export class ApiClient implements AppApi {
   }
 
   async requestPage<T>(path: string, schema: z.ZodType<T[]>): Promise<Page<T>> {
-    const response = await fetch(path, {
+    const response = await fetch(this.url(path), {
       credentials: 'same-origin',
       headers: { Accept: 'application/json' },
     })
@@ -611,7 +624,7 @@ export class ApiClient implements AppApi {
   }
 
   private async ndjson(path: string, init: RequestInit): Promise<AsyncIterable<StreamEvent>> {
-    const response = await fetch(path, {
+    const response = await fetch(this.url(path), {
       ...init,
       credentials: 'same-origin',
       headers: { Accept: 'application/x-ndjson; charset=utf-8', ...init.headers },

@@ -13,6 +13,7 @@ import {
   ProviderUnavailableError,
 } from '@openreverie/providers'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { ApiError } from './api.js'
 import {
   DEFAULT_REGISTRY_LIMITS,
   DREAM_SWEEP_INTERVAL,
@@ -292,6 +293,65 @@ describe('LiveSessionRegistry', () => {
     expect(events.filter((event) => event.type === 'error')).toHaveLength(1)
   })
 
+  it('finishes a turn on the default background hook even after the consumer stops pulling events', async () => {
+    const registry = createRegistry()
+    const { sessionId } = await registry.create()
+
+    // Take exactly the first event, the way a dropped HTTP connection would
+    // read one chunk and then never call next() again. Nothing downstream
+    // of this iterator drives the turn forward from here.
+    const iterator = registry
+      .message(sessionId, 'turn-1', { message: 'hello' })
+      [Symbol.asyncIterator]()
+    const first = await iterator.next()
+    expect(first.value).toMatchObject({ type: 'thinking' })
+
+    await fakeChat.waitUntilStreamStarted()
+    fakeChat.releaseText('hello back')
+    fakeChat.finish()
+
+    // Nobody is reading the abandoned iterator anymore, so the only way
+    // this transcript line appears is the detached runTurn itself finishing.
+    let transcript = await engine.readTranscript(sessionId)
+    for (let attempt = 0; attempt < 50 && transcript.length < 2; attempt += 1) {
+      await flushMicrotasks()
+      transcript = await engine.readTranscript(sessionId)
+    }
+    expect(transcript).toHaveLength(2)
+
+    // The turn is no longer active, so a second turn can start. The
+    // transcript write above lands inside AgentSession.send(), a tick
+    // before runTurn's own finally block clears activeTurnId, so retry
+    // past that narrow gap instead of asserting on the first attempt.
+    let secondTurn: StreamEvent[] | undefined
+    for (let attempt = 0; attempt < 50 && secondTurn === undefined; attempt += 1) {
+      try {
+        secondTurn = await collect(registry.message(sessionId, 'turn-2', { message: 'again' }))
+      } catch (error) {
+        if (!(error instanceof ApiError) || error.code !== 'turn_in_progress') throw error
+        await flushMicrotasks()
+      }
+    }
+    expect(secondTurn).toBeDefined()
+  })
+
+  it('hands turn generation and the initial greeting to a custom runBackground hook instead of a bare void', async () => {
+    const received: Promise<unknown>[] = []
+    const registry = createRegistry({
+      runBackground: (work) => {
+        received.push(work)
+      },
+    })
+    const { sessionId } = await registry.create()
+    expect(received).toHaveLength(1)
+    await expect(received[0]).resolves.toBeUndefined()
+
+    fakeChat.enqueueText('answer')
+    await collect(registry.message(sessionId, 'turn-1', { message: 'one' }))
+    expect(received).toHaveLength(2)
+    await expect(received[1]).resolves.toBeUndefined()
+  })
+
   it('records a mode event when the model switches mode mid-turn', async () => {
     const registry = createRegistry({
       chat: new FakeChatProvider([
@@ -317,6 +377,7 @@ function createRegistry(
     maxReplayEvents: number
     maxReplayBytes: number
     dreamTrigger: () => Promise<unknown>
+    runBackground: (work: Promise<unknown>) => void
   }> = {},
 ): LiveSessionRegistry {
   const { chat = fakeChat, ...registryOptions } = options
@@ -336,6 +397,7 @@ function engineDeps(chat: ChatProvider): EngineDeps {
     embeddings: new FakeEmbeddingProvider(),
     reflectionModel: 'fake-reflect',
     embeddingModel: 'fake-embed',
+    timezone: 'UTC',
   }
 }
 

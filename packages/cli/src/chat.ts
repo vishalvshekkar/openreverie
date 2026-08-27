@@ -9,7 +9,13 @@ import { join } from 'node:path'
 import type { ReverieConfig } from '@openreverie/core'
 import { AgentSession, buildPersona, resolveDreamingModel, toolLabel } from '@openreverie/core'
 import type { EngineDeps, MemoryEngine } from '@openreverie/memory'
-import { listDocuments, memoryPaths, readDocument } from '@openreverie/memory'
+import {
+  listDocuments,
+  memoryPaths,
+  nodeStores,
+  readDocument,
+  systemTimeZone,
+} from '@openreverie/memory'
 import type { ChatProvider, EmbeddingProvider } from '@openreverie/providers'
 import { cyan, dim, magenta } from './colors.js'
 import { type CommandContext, commandModeSelect, parseInput, runCommand } from './commands.js'
@@ -575,6 +581,10 @@ export async function openCliContext(deps: CliEngineDeps): Promise<CliContextRes
       dreamingModel: resolveDreamingModel(config),
       dreaming,
       dreamPersona: (style) => buildPersona(config.safety.mode, config.safety.resources, style),
+      // The CLI genuinely runs on the person's own machine, so the system
+      // zone is the honest default here; see EngineDeps.timezone's own
+      // comment for why the engine itself may never read it.
+      timezone: systemTimeZone(),
     })
     return { ok: true, engine, config, chat }
   } catch (err) {
@@ -589,13 +599,13 @@ export async function openCliContext(deps: CliEngineDeps): Promise<CliContextRes
 // memory folder the same way the engine does internally. Used to give the
 // `reindex` subcommand a concrete count line instead of a bare "done".
 export async function countMemoryDocuments(memoryDir: string): Promise<number> {
-  const paths = memoryPaths(memoryDir)
+  const paths = memoryPaths(memoryDir, nodeStores())
   let count = 1 // constitution.md always exists once the memory tree is set up.
-  count += (await listDocuments(paths.realmsDir)).length
-  count += (await listDocuments(paths.arcsDir)).length
-  count += (await listDocuments(paths.peopleDir)).length
-  count += (await listDocuments(paths.rollupsDailyDir)).length
-  count += (await listDocuments(paths.rollupsWeeklyDir)).length
+  count += (await listDocuments(paths.files, paths.realmsDir)).length
+  count += (await listDocuments(paths.files, paths.arcsDir)).length
+  count += (await listDocuments(paths.files, paths.peopleDir)).length
+  count += (await listDocuments(paths.files, paths.rollupsDailyDir)).length
+  count += (await listDocuments(paths.files, paths.rollupsWeeklyDir)).length
 
   let sessionDirs: string[] = []
   try {
@@ -606,7 +616,7 @@ export async function countMemoryDocuments(memoryDir: string): Promise<number> {
   }
   for (const name of sessionDirs) {
     try {
-      const doc = await readDocument(join(paths.sessionsDir, name, 'summary.md'))
+      const doc = await readDocument(paths.files, join(paths.sessionsDir, name, 'summary.md'))
       // A skipped summary (no user messages in that session) is never
       // indexed by walkAllDocuments/reindexAll either; counting it here
       // would report a document count higher than what reindex actually

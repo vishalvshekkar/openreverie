@@ -5,9 +5,10 @@ import { FakeEmbeddingProvider } from '@openreverie/providers'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Document } from './documents.js'
 import { fuseByReciprocalRank, searchMemory } from './retrieval.js'
-import { type EmbedFn, MemoryIndex, type SearchHit } from './sqlite.js'
+import { type DocKind, type EmbedFn, MemoryIndex, type SearchHit } from './sqlite.js'
 
 const MODEL = 'fake-model'
+const FIXED_MTIME = '2026-01-01T00:00:00.000Z'
 
 function doc(overrides: Partial<Document> = {}): Document {
   return {
@@ -19,7 +20,24 @@ function doc(overrides: Partial<Document> = {}): Document {
 }
 
 function embedFn(provider: FakeEmbeddingProvider): EmbedFn {
-  return (texts: string[]) => provider.embed(MODEL, texts)
+  return async (texts: string[]) => {
+    const { vectors } = await provider.embed(MODEL, texts)
+    return vectors
+  }
+}
+
+// A thin wrapper matching upsertDocument's pre-P0-6 test call shape (doc,
+// kind, embed): embeddingModel and mtime default to fixed values, since
+// none of the calls below care about either.
+function upsertDoc(
+  index: MemoryIndex,
+  doc: Document,
+  kind: DocKind,
+  embed: EmbedFn,
+  embeddingModel = MODEL,
+  mtime = FIXED_MTIME,
+): Promise<void> {
+  return index.upsertDocument(doc, kind, embed, embeddingModel, mtime)
 }
 
 describe('searchMemory', () => {
@@ -47,7 +65,8 @@ describe('searchMemory', () => {
     // all three query words) and rank 1 in vector search (cosine similarity
     // 1.0 against the query embedding, since FakeEmbeddingProvider is
     // deterministic per exact string).
-    await index.upsertDocument(
+    await upsertDoc(
+      index,
       doc({ meta: { id: 'doc_both' }, body: query }),
       'realm',
       embedFn(embeddings),
@@ -56,7 +75,8 @@ describe('searchMemory', () => {
     // Shares only one of the three query words. The FTS query is an
     // implicit AND over all terms, so this document never matches the
     // text search at all: it can only surface through the vector list.
-    await index.upsertDocument(
+    await upsertDoc(
+      index,
       doc({
         meta: { id: 'doc_one_list' },
         body: 'A long unrelated reflection about something else, discipline mentioned once quietly.',
@@ -76,12 +96,14 @@ describe('searchMemory', () => {
   it('excludes hits whose kind is not in the filter', async () => {
     const query = 'guitar lessons'
 
-    await index.upsertDocument(
+    await upsertDoc(
+      index,
       doc({ meta: { id: 'doc_realm' }, body: query }),
       'realm',
       embedFn(embeddings),
     )
-    await index.upsertDocument(
+    await upsertDoc(
+      index,
       doc({ meta: { id: 'doc_summary' }, body: query }),
       'summary',
       embedFn(embeddings),
@@ -103,7 +125,8 @@ describe('searchMemory', () => {
     // per exact string). This fills the CANDIDATE_LIMIT=20 window in both
     // lists entirely with kind-A docs, before any filtering happens.
     for (let i = 0; i < 21; i++) {
-      await index.upsertDocument(
+      await upsertDoc(
+        index,
         doc({ meta: { id: `doc_a_${i}` }, body: query }),
         'realm',
         embedFn(embeddings),
@@ -120,7 +143,8 @@ describe('searchMemory', () => {
     // these are the only candidates considered and all three come back.
     const bIds = ['doc_b_0', 'doc_b_1', 'doc_b_2']
     for (const id of bIds) {
-      await index.upsertDocument(
+      await upsertDoc(
+        index,
         doc({
           meta: { id },
           body: `${query} mentioned briefly amid a long stretch of unrelated padding text added specifically to dilute both the term frequency and the vector similarity well below every exact-match kind-A document seeded above.`,
@@ -140,7 +164,8 @@ describe('searchMemory', () => {
     const query = 'kayaking trip photos'
 
     for (let i = 0; i < 5; i++) {
-      await index.upsertDocument(
+      await upsertDoc(
+        index,
         doc({ meta: { id: `doc_${i}` }, body: `${query} number ${i}` }),
         'realm',
         embedFn(embeddings),
@@ -156,7 +181,8 @@ describe('searchMemory', () => {
     const query = 'lighthouse keeper journal'
 
     for (let i = 0; i < 10; i++) {
-      await index.upsertDocument(
+      await upsertDoc(
+        index,
         doc({ meta: { id: `doc_${i}` }, body: `${query} entry ${i}` }),
         'realm',
         embedFn(embeddings),
@@ -171,7 +197,8 @@ describe('searchMemory', () => {
   it('excludes a dated document outside the range, and returns it when unfiltered', async () => {
     const query = 'quiet morning walk'
 
-    await index.upsertDocument(
+    await upsertDoc(
+      index,
       doc({
         meta: { id: 'doc_may', date: '2026-05-01' },
         body: query,
@@ -180,7 +207,8 @@ describe('searchMemory', () => {
       'rollup_daily',
       embedFn(embeddings),
     )
-    await index.upsertDocument(
+    await upsertDoc(
+      index,
       doc({
         meta: { id: 'doc_august', date: '2026-08-01' },
         body: query,
@@ -203,7 +231,8 @@ describe('searchMemory', () => {
   it('never excludes a living document, whatever the date filter says', async () => {
     const query = 'quiet morning walk'
 
-    await index.upsertDocument(
+    await upsertDoc(
+      index,
       doc({
         meta: { id: 'doc_may', date: '2026-05-01' },
         body: query,
@@ -214,7 +243,8 @@ describe('searchMemory', () => {
     )
     // An arc page carries opened and updated, both well outside the range,
     // and still must not be excluded: it has no date span at all.
-    await index.upsertDocument(
+    await upsertDoc(
+      index,
       doc({
         meta: { id: 'doc_arc', opened: '2026-01-04', updated: '2026-01-20' },
         body: query,
@@ -233,7 +263,8 @@ describe('searchMemory', () => {
     const query = 'quiet morning walk'
 
     // 2026-W33 runs Monday 2026-08-10 through Sunday 2026-08-16.
-    await index.upsertDocument(
+    await upsertDoc(
+      index,
       doc({
         meta: { id: 'doc_week', week: '2026-W33' },
         body: query,
@@ -266,7 +297,8 @@ describe('searchMemory', () => {
     const query = 'quiet lake cabin'
 
     // Tops both lists outright: single chunk, exact match to the query.
-    await index.upsertDocument(
+    await upsertDoc(
+      index,
       doc({ meta: { id: 'doc_both' }, body: query }),
       'realm',
       embedFn(embeddings),
@@ -279,7 +311,8 @@ describe('searchMemory', () => {
     // would each contribute a reciprocal-rank term, letting it outscore
     // doc_both even though doc_both is the only document that genuinely
     // tops both lists.
-    await index.upsertDocument(
+    await upsertDoc(
+      index,
       doc({
         meta: {
           id: 'doc_many_chunks',
@@ -309,7 +342,8 @@ describe('searchMemory', () => {
   it('dedupes a document that appears in both lists, keeping one hit', async () => {
     const query = 'sailing lesson notes'
 
-    await index.upsertDocument(
+    await upsertDoc(
+      index,
       doc({ meta: { id: 'doc_dup' }, body: query }),
       'realm',
       embedFn(embeddings),
@@ -329,7 +363,8 @@ describe('searchMemory', () => {
     // best-ranked chunk's snippet, so whichever of the two ranked worse was
     // dropped from the payload even though the document itself was
     // returned.
-    await index.upsertDocument(
+    await upsertDoc(
+      index,
       doc({
         meta: {
           id: 'doc_nightfall',
@@ -362,7 +397,8 @@ describe('searchMemory', () => {
       id: `item_${i}`,
       text: `Kayak trip mention number ${i}, kayak kayak kayak.`,
     }))
-    await index.upsertDocument(
+    await upsertDoc(
+      index,
       doc({ meta: { id: 'doc_many_kayak', items }, body: '' }),
       'summary',
       embedFn(embeddings),
@@ -386,7 +422,8 @@ describe('searchMemory', () => {
     // survives only once the payload carries the chunk verbatim.
     const filler = Array.from({ length: 30 }, (_, i) => `filler${i}`).join(' ')
     const itemText = `startmarker ${filler} targetword ${filler} endmarker`
-    await index.upsertDocument(
+    await upsertDoc(
+      index,
       doc({
         meta: { id: 'doc_long_chunk', items: [{ id: 'item_long', text: itemText }] },
         body: '',
@@ -407,7 +444,8 @@ describe('searchMemory', () => {
   it('returns node matches in their own lane, never fused into the document ranking', async () => {
     const query = 'renata'
 
-    await index.upsertDocument(
+    await upsertDoc(
+      index,
       doc({ meta: { id: 'doc_note' }, body: 'A note that mentions renata once.' }),
       'realm',
       embedFn(embeddings),

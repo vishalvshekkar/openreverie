@@ -76,11 +76,12 @@ async function appendCommitmentNode(
   id: string,
   label: string,
   payload: CommitmentPayload,
+  now: Date,
 ): Promise<void> {
   commitmentPayloadSchema.parse(payload)
   await appendGraph(paths, [
     {
-      ts: new Date().toISOString(),
+      ts: now.toISOString(),
       op: 'assert',
       node: id,
       type: 'commitment',
@@ -102,6 +103,7 @@ async function liveCommitment(paths: MemoryPaths, id: string): Promise<Commitmen
 export async function recordCommitment(
   paths: MemoryPaths,
   input: RecordCommitmentInput,
+  now: Date,
 ): Promise<Commitment> {
   const id = newId('commitment')
   const payload: CommitmentPayload = {
@@ -113,7 +115,7 @@ export async function recordCommitment(
     ...(input.askedAt !== undefined ? { askedAt: input.askedAt } : {}),
   }
 
-  await appendCommitmentNode(paths, id, input.label, payload)
+  await appendCommitmentNode(paths, id, input.label, payload, now)
   return toCommitment(id, input.label, payload)
 }
 
@@ -125,6 +127,7 @@ export async function reviseCommitment(
   paths: MemoryPaths,
   id: string,
   changes: ReviseCommitmentInput,
+  now: Date,
 ): Promise<Commitment> {
   const current = await liveCommitment(paths, id)
   const label = changes.label ?? current.label
@@ -142,7 +145,7 @@ export async function reviseCommitment(
     ...resolveField(changes.askedAt, current.askedAt, 'askedAt'),
   }
 
-  await appendCommitmentNode(paths, id, label, payload)
+  await appendCommitmentNode(paths, id, label, payload, now)
   return toCommitment(id, label, payload)
 }
 
@@ -161,6 +164,7 @@ export async function resolveCommitment(
   paths: MemoryPaths,
   id: string,
   state: CommitmentState,
+  now: Date,
 ): Promise<Commitment> {
   const current = await liveCommitment(paths, id)
   const payload: CommitmentPayload = {
@@ -172,7 +176,7 @@ export async function resolveCommitment(
     ...(current.askedAt !== undefined ? { askedAt: current.askedAt } : {}),
   }
 
-  await appendCommitmentNode(paths, id, current.label, payload)
+  await appendCommitmentNode(paths, id, current.label, payload, now)
   return toCommitment(id, current.label, payload)
 }
 

@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { FakeChatProvider } from '@openreverie/providers'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { newId, readDocument, writeDocumentAtomic } from './documents.js'
+import { nodeStores } from './nodeStore.js'
 import { ensureMemoryTree, type MemoryPaths, memoryPaths } from './paths.js'
 import {
   buildDailyRollup,
@@ -145,8 +146,8 @@ describe('buildDailyRollup', () => {
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'openreverie-memory-'))
-    paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
   })
 
   afterEach(async () => {
@@ -156,7 +157,7 @@ describe('buildDailyRollup', () => {
   async function writeSummary(date: string, sessionId: string, body: string): Promise<void> {
     const sessionDir = join(paths.sessionsDir, `${date}-${sessionId}`)
     await mkdir(sessionDir, { recursive: true })
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: join(sessionDir, 'summary.md'),
       meta: { id: newId('doc') },
       body,
@@ -180,7 +181,7 @@ describe('buildDailyRollup', () => {
     expect(typeof doc.meta.id).toBe('string')
     expect(doc.body).toBe('A quiet day of walking and mending a friendship.\n')
 
-    const onDisk = await readDocument(doc.path)
+    const onDisk = await readDocument(paths.files, doc.path)
     expect(onDisk.meta).toEqual(doc.meta)
     expect(onDisk.body).toBe(doc.body)
 
@@ -228,7 +229,7 @@ describe('buildDailyRollup', () => {
   async function writeSkippedSummary(date: string, sessionId: string): Promise<void> {
     const sessionDir = join(paths.sessionsDir, `${date}-${sessionId}`)
     await mkdir(sessionDir, { recursive: true })
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: join(sessionDir, 'summary.md'),
       meta: { id: newId('doc'), skipped: true, reason: 'no user messages in this session' },
       body: 'This session had no user messages, so there was nothing to reflect on.\n',
@@ -268,8 +269,8 @@ describe('buildWeeklyRollup', () => {
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'openreverie-memory-'))
-    paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
   })
 
   afterEach(async () => {
@@ -277,7 +278,7 @@ describe('buildWeeklyRollup', () => {
   })
 
   async function writeDaily(date: string, body: string): Promise<void> {
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: join(paths.rollupsDailyDir, `${date}.md`),
       meta: { id: newId('doc'), kind: 'rollup_daily', date },
       body,
@@ -301,7 +302,7 @@ describe('buildWeeklyRollup', () => {
     expect(typeof doc.meta.id).toBe('string')
     expect(doc.body).toBe('A week of tiredness turning into pride.\n')
 
-    const onDisk = await readDocument(doc.path)
+    const onDisk = await readDocument(paths.files, doc.path)
     expect(onDisk.meta).toEqual(doc.meta)
     expect(onDisk.body).toBe(doc.body)
 

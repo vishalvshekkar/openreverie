@@ -7,6 +7,7 @@ import type {
   ChatRequest,
   ChatResult,
   EmbeddingProvider,
+  EmbedResult,
 } from './types.js'
 
 function hash32(s: string): number {
@@ -31,6 +32,11 @@ function hash32(s: string): number {
 //   after yielding this many 'text' events, before any tool_call or done
 //   event. Simulates a provider that fails mid-stream after some text has
 //   already reached the caller.
+//
+// `usage` (inherited from ChatResult) rides along for complete() with no
+// extra work. stream() emits it as a `usage` event, when set, after any
+// tool_call events and before `done`: the same position OpenAiChatProvider
+// puts it in, since OpenAI's usage chunk arrives after content is finished.
 export interface FakeChatResult extends ChatResult {
   textChunks?: string[]
   throwAfterTextEvents?: number
@@ -79,6 +85,9 @@ export class FakeChatProvider implements ChatProvider {
       for (const toolCall of result.toolCalls) {
         yield { type: 'tool_call', toolCall }
       }
+      if (result.usage) {
+        yield { type: 'usage', usage: result.usage }
+      }
       yield { type: 'done' }
     })()
   }
@@ -87,11 +96,17 @@ export class FakeChatProvider implements ChatProvider {
 export class FakeEmbeddingProvider implements EmbeddingProvider {
   readonly name = 'fake'
 
-  async embed(_model: string, texts: string[]): Promise<number[][]> {
-    return texts.map((t) => {
+  async embed(model: string, texts: string[]): Promise<EmbedResult> {
+    const vectors = texts.map((t) => {
       const raw = Array.from({ length: 8 }, (_, i) => (hash32(`${t}:${i}`) % 2000) / 1000 - 1)
       const norm = Math.sqrt(raw.reduce((s, v) => s + v * v, 0)) || 1
       return raw.map((v) => v / norm)
     })
+    // A deterministic stand-in, not a real token count: character length
+    // divided by 4 is the common rough chars-per-token heuristic. Good
+    // enough for a test that asserts usage is threaded through and summed
+    // correctly; not meant to resemble what any real tokenizer would say.
+    const inputTokens = texts.reduce((sum, t) => sum + Math.ceil(t.length / 4), 0)
+    return { vectors, usage: { model, inputTokens, outputTokens: 0 } }
   }
 }

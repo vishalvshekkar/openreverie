@@ -14,8 +14,8 @@
 // maintenance pass regenerates rollups (correctly, on local-day boundaries),
 // and those must not be deleted again by a second `reverie migrate`.
 
-import { readdir, rm } from 'node:fs/promises'
 import { join } from 'node:path'
+import type { FileStore } from '../store.js'
 import {
   type Migration,
   type MigrationContext,
@@ -25,10 +25,10 @@ import {
 
 const ID = 'utc-to-local-rollups'
 
-async function listRollupFiles(dir: string): Promise<string[]> {
+async function listRollupFiles(files: FileStore, dir: string): Promise<string[]> {
   let entries: string[]
   try {
-    entries = await readdir(dir)
+    entries = await files.readdir(dir)
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
       return []
@@ -49,20 +49,20 @@ export const utcToLocalRollupsMigration: Migration = {
     if (applied.has(ID)) {
       return false
     }
-    const daily = await listRollupFiles(ctx.paths.rollupsDailyDir)
-    const weekly = await listRollupFiles(ctx.paths.rollupsWeeklyDir)
+    const daily = await listRollupFiles(ctx.paths.files, ctx.paths.rollupsDailyDir)
+    const weekly = await listRollupFiles(ctx.paths.files, ctx.paths.rollupsWeeklyDir)
     return daily.length > 0 || weekly.length > 0
   },
   async apply(ctx: MigrationContext, opts: { dryRun: boolean }): Promise<MigrationResult> {
-    const daily = await listRollupFiles(ctx.paths.rollupsDailyDir)
-    const weekly = await listRollupFiles(ctx.paths.rollupsWeeklyDir)
+    const daily = await listRollupFiles(ctx.paths.files, ctx.paths.rollupsDailyDir)
+    const weekly = await listRollupFiles(ctx.paths.files, ctx.paths.rollupsWeeklyDir)
     const files = [...daily, ...weekly]
     const summary = opts.dryRun
       ? `would delete ${daily.length} daily and ${weekly.length} weekly rollup files; they will be regenerated with local-day boundaries on next use`
       : `deleted ${daily.length} daily and ${weekly.length} weekly rollup files; they will be regenerated with local-day boundaries on next use`
     if (!opts.dryRun) {
       for (const file of files) {
-        await rm(file)
+        await ctx.paths.files.rm(file)
       }
     }
     return { id: ID, applied: !opts.dryRun, summary, details: files }

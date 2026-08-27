@@ -105,7 +105,11 @@ export async function runRetrievalEval(
       evalQuery.filters?.after,
       evalQuery.filters?.before,
     )
-    const [queryVector] = await embeddings.embed(model, [evalQuery.query])
+    // Usage discarded here for the same reason retrieval.ts discards it:
+    // this eval harness has no ledger, and a hosted deployment's own
+    // wrapper already observed the call.
+    const { vectors } = await embeddings.embed(model, [evalQuery.query])
+    const [queryVector] = vectors
     const vectorHits = queryVector
       ? await index.searchVector(
           queryVector,

@@ -2,7 +2,6 @@
 // which entities each dream touched (coverage), feedback on insights, and
 // opener mentions. Validated on write and on read, like graph.jsonl: a
 // record that cannot parse back off disk can never be appended.
-import { appendFile, readFile } from 'node:fs/promises'
 import { z } from 'zod'
 import type { MemoryPaths } from './paths.js'
 
@@ -65,19 +64,12 @@ export type DreamAttemptRecord = z.infer<typeof attemptSchema>
 export async function appendDreamLog(paths: MemoryPaths, records: DreamLogRecord[]): Promise<void> {
   if (records.length === 0) return
   const lines = records.map((record) => JSON.stringify(dreamLogRecordSchema.parse(record)))
-  await appendFile(paths.dreamLog, `${lines.join('\n')}\n`, 'utf8')
+  await paths.logs.appendLines(paths.dreamLog, lines)
 }
 
 export async function readDreamLog(paths: MemoryPaths): Promise<DreamLogRecord[]> {
-  let raw: string
-  try {
-    raw = await readFile(paths.dreamLog, 'utf8')
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return []
-    throw err
-  }
-  return raw
-    .split('\n')
+  const lines = await paths.logs.readAll(paths.dreamLog)
+  return lines
     .filter((line) => line.trim().length > 0)
     .map((line) => dreamLogRecordSchema.parse(JSON.parse(line)))
 }

@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { newId } from './documents.js'
+import { nodeStores } from './nodeStore.js'
 import { ensureMemoryTree, type MemoryPaths, memoryPaths } from './paths.js'
 import { appendProposals, type Proposal, pendingProposals, resolveProposal } from './proposals.js'
 
@@ -24,8 +25,8 @@ describe('proposals', () => {
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'openreverie-memory-'))
-    paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
   })
 
   afterEach(async () => {
@@ -36,7 +37,7 @@ describe('proposals', () => {
     const first = makeProposal({ summary: 'First proposal.' })
     const second = makeProposal({ summary: 'Second proposal.' })
 
-    await appendProposals(paths, [first, second])
+    await appendProposals(paths, [first, second], 'UTC')
 
     const pending = await pendingProposals(paths)
     expect(pending).toHaveLength(2)
@@ -49,9 +50,9 @@ describe('proposals', () => {
   it('resolving one leaves only the other pending', async () => {
     const first = makeProposal({ summary: 'First proposal.' })
     const second = makeProposal({ summary: 'Second proposal.' })
-    await appendProposals(paths, [first, second])
+    await appendProposals(paths, [first, second], 'UTC')
 
-    await resolveProposal(paths, first.id, 'accepted')
+    await resolveProposal(paths, first.id, 'accepted', new Date())
 
     const pending = await pendingProposals(paths)
     expect(pending).toHaveLength(1)
@@ -60,13 +61,13 @@ describe('proposals', () => {
 
   it('resolving twice is a no-op at the storage level, and the proposal line is never rewritten', async () => {
     const only = makeProposal()
-    await appendProposals(paths, [only])
+    await appendProposals(paths, [only], 'UTC')
 
-    await resolveProposal(paths, only.id, 'rejected')
+    await resolveProposal(paths, only.id, 'rejected', new Date())
     const pendingAfterFirst = await pendingProposals(paths)
     expect(pendingAfterFirst).toHaveLength(0)
 
-    await resolveProposal(paths, only.id, 'rejected')
+    await resolveProposal(paths, only.id, 'rejected', new Date())
     const pendingAfterSecond = await pendingProposals(paths)
     expect(pendingAfterSecond).toHaveLength(0)
 
@@ -85,7 +86,9 @@ describe('proposals', () => {
   })
 
   it('resolving an unknown id throws', async () => {
-    await expect(resolveProposal(paths, 'prop_does_not_exist', 'accepted')).rejects.toThrow()
+    await expect(
+      resolveProposal(paths, 'prop_does_not_exist', 'accepted', new Date()),
+    ).rejects.toThrow()
   })
 
   it('pendingProposals returns an empty array when no proposals were ever appended', async () => {
@@ -95,7 +98,7 @@ describe('proposals', () => {
 
   it('appendProposals with an empty array does not add a line', async () => {
     const before = await pendingProposals(paths)
-    await appendProposals(paths, [])
+    await appendProposals(paths, [], 'UTC')
     const after = await pendingProposals(paths)
     expect(after).toEqual(before)
   })

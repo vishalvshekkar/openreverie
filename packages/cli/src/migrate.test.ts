@@ -6,6 +6,7 @@ import {
   ensureMemoryTree,
   memoryPaths,
   newId,
+  nodeStores,
   SessionStore,
   writeDocumentAtomic,
 } from '@openreverie/memory'
@@ -64,8 +65,8 @@ describe('runMigrate', () => {
   })
 
   it('lists pending migrations with --list', async () => {
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
     await rm(paths.profile, { force: true })
 
     const output: string[] = []
@@ -79,10 +80,10 @@ describe('runMigrate', () => {
   })
 
   it('applies pending migrations and reports what it did', async () => {
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
     await rm(paths.profile, { force: true })
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: join(paths.rollupsDailyDir, '2026-08-15.md'),
       meta: { id: newId('doc'), date: '2026-08-15' },
       body: 'A rollup.\n',
@@ -125,20 +126,20 @@ describe('runMigrate', () => {
   })
 
   it('--dry-run reports pending deletions and changes nothing on disk, proven by a folder hash', async () => {
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
     await rm(paths.profile, { force: true })
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: join(paths.rollupsDailyDir, '2026-08-14.md'),
       meta: { id: newId('doc'), date: '2026-08-14' },
       body: 'A rollup.\n',
     })
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: join(paths.rollupsDailyDir, '2026-08-15.md'),
       meta: { id: newId('doc'), date: '2026-08-15' },
       body: 'A rollup.\n',
     })
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: join(paths.rollupsWeeklyDir, '2026-W33.md'),
       meta: { id: newId('doc'), week: '2026-W33' },
       body: 'A week.\n',
@@ -158,16 +159,20 @@ describe('runMigrate', () => {
   })
 
   it('running twice does the work once: the second run reports nothing and leaves transcripts byte-identical', async () => {
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
     await rm(paths.profile, { force: true })
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: join(paths.rollupsDailyDir, '2026-08-15.md'),
       meta: { id: newId('doc'), date: '2026-08-15' },
       body: 'A rollup.\n',
     })
     const store = await SessionStore.start(paths, new Date('2026-08-15T21:00:00Z'))
-    await store.appendLine({ ts: '2026-08-15T21:00:00.000Z', role: 'user', content: 'hello' })
+    await store.appendLine(paths, {
+      ts: '2026-08-15T21:00:00.000Z',
+      role: 'user',
+      content: 'hello',
+    })
 
     const transcriptBefore = await readFile(join(store.dir, 'transcript.jsonl'), 'utf8')
 

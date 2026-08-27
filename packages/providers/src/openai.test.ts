@@ -327,6 +327,57 @@ describe('OpenAiChatProvider.complete', () => {
   })
 })
 
+describe('token usage (P0-4)', () => {
+  it('complete() carries usage from the response body, tagged with the requested model', async () => {
+    const canned = new Response(
+      JSON.stringify({
+        choices: [{ message: { role: 'assistant', content: 'hello back' } }],
+        usage: { prompt_tokens: 14, completion_tokens: 5 },
+      }),
+      { status: 200 },
+    )
+    const { fetch } = fakeFetch(canned)
+    const provider = new OpenAiChatProvider({ apiKey: 'sk-test' }, fetch)
+
+    const result = await provider.complete(baseRequest)
+
+    expect(result.usage).toEqual({ model: 'gpt-4o-mini', inputTokens: 14, outputTokens: 5 })
+  })
+
+  it('complete() carries no usage field when the response has none', async () => {
+    const canned = new Response(
+      JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'hello back' } }] }),
+      { status: 200 },
+    )
+    const { fetch } = fakeFetch(canned)
+    const provider = new OpenAiChatProvider({ apiKey: 'sk-test' }, fetch)
+
+    const result = await provider.complete(baseRequest)
+
+    expect(result.usage).toBeUndefined()
+  })
+
+  it('stream() sends stream_options.include_usage, and complete() sends no such field', async () => {
+    const streamCanned = new Response(sseStreamFor('text'), { status: 200 })
+    const { fetch: streamFetch, calls: streamCalls } = fakeFetch(streamCanned)
+    const streamProvider = new OpenAiChatProvider({ apiKey: 'sk-test' }, streamFetch)
+    const events: ChatEvent[] = []
+    for await (const event of streamProvider.stream(baseRequest)) events.push(event)
+    const streamBody = JSON.parse(String(streamCalls[0]?.init?.body))
+    expect(streamBody.stream_options).toEqual({ include_usage: true })
+
+    const completeCanned = new Response(
+      JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }),
+      { status: 200 },
+    )
+    const { fetch: completeFetch, calls: completeCalls } = fakeFetch(completeCanned)
+    const completeProvider = new OpenAiChatProvider({ apiKey: 'sk-test' }, completeFetch)
+    await completeProvider.complete(baseRequest)
+    const completeBody = JSON.parse(String(completeCalls[0]?.init?.body))
+    expect(completeBody.stream_options).toBeUndefined()
+  })
+})
+
 describe('OpenAiChatProvider.stream', () => {
   it('emits text events reassembled from SSE chunks, then done', async () => {
     const canned = new Response(sseStreamFor('text'), { status: 200 })
@@ -339,6 +390,7 @@ describe('OpenAiChatProvider.stream', () => {
     expect(events).toEqual([
       { type: 'text', text: 'Hello' },
       { type: 'text', text: ', world!' },
+      { type: 'usage', usage: { model: 'gpt-4o-mini', inputTokens: 12, outputTokens: 3 } },
       { type: 'done' },
     ])
   })
@@ -351,12 +403,16 @@ describe('OpenAiChatProvider.stream', () => {
     const events: ChatEvent[] = []
     for await (const event of provider.stream(baseRequest)) events.push(event)
 
-    expect(events).toHaveLength(2)
-    const [toolCallEvent, doneEvent] = events
+    expect(events).toHaveLength(3)
+    const [toolCallEvent, usageEvent, doneEvent] = events
     if (toolCallEvent?.type !== 'tool_call') throw new Error('expected a tool_call event first')
     expect(toolCallEvent.toolCall.id).toBe('call_abc123')
     expect(toolCallEvent.toolCall.name).toBe('search_memory')
     expect(JSON.parse(toolCallEvent.toolCall.arguments)).toEqual({ query: 'memory lane' })
+    expect(usageEvent).toEqual({
+      type: 'usage',
+      usage: { model: 'gpt-4o-mini', inputTokens: 20, outputTokens: 8 },
+    })
     expect(doneEvent).toEqual({ type: 'done' })
   })
 

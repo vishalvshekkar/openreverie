@@ -11,6 +11,7 @@ import {
   type EngineDeps,
   MemoryEngine,
   memoryPaths,
+  nodeStores,
 } from '@openreverie/memory'
 import { FakeChatProvider, FakeEmbeddingProvider } from '@openreverie/providers'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -271,6 +272,7 @@ describe('runDreamCommand: --dry-run', () => {
         embeddings: new FakeEmbeddingProvider(),
         reflectionModel: 'fake-reflect',
         embeddingModel: 'fake-embed',
+        timezone: 'UTC',
         dreamingModel: 'fake-dream',
         dreaming: {
           enabled: true,
@@ -452,7 +454,7 @@ describe('runDreamCommand: --show', () => {
     })
 
     it('annotates an insight with its recorded feedback verdict', async () => {
-      const paths = memoryPaths(dir)
+      const paths = memoryPaths(dir, nodeStores())
       await mkdir(paths.dreamsDir, { recursive: true })
       await appendDreamLog(paths, [
         {

@@ -9,6 +9,17 @@
 // is why MigrationContext carries configPath: the file lives outside the
 // memory folder and its location is overridable with --config, so a
 // migration must not guess the default path.
+//
+// P0-1 (docs/superpowers/specs/2026-08-27-hostable-engine-design.md) put
+// every filesystem touch inside the memory folder behind FileStore and
+// AppendOnlyStore, but config.toml's three fs calls below are deliberately
+// left on raw node:fs/promises rather than converted. Two reasons, both
+// load-bearing: config.toml is host plumbing outside the memory folder
+// (see the comment above), so there is no MemoryPaths-scoped FileStore for
+// it to naturally use, and it is written with `mode: 0o600` because it
+// holds the API key, a permission the frozen FileStore.writeFile has no
+// parameter for. Routing this through FileStore would silently drop that
+// permission. See BACKLOG.md for the deferral this leaves behind.
 
 import { randomBytes } from 'node:crypto'
 import { readFile, rename, writeFile } from 'node:fs/promises'
@@ -76,7 +87,7 @@ export const styleToProfile: Migration = {
       }
     }
 
-    const profile = await loadProfile(ctx.paths)
+    const profile = await loadProfile(ctx.paths, ctx.timezone)
     const profileStyle = profile.meta.style ?? {}
 
     // The profile wins on any axis it already has a value for, because a

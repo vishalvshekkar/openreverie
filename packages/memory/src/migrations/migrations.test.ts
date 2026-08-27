@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { newId, writeDocumentAtomic } from '../documents.js'
+import { nodeStores } from '../nodeStore.js'
 import { ensureMemoryTree, type MemoryPaths, memoryPaths } from '../paths.js'
 import { loadProfile } from '../profile.js'
 import {
@@ -20,7 +21,7 @@ describe('migrations log and runner', () => {
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'openreverie-migrations-'))
-    paths = memoryPaths(dir)
+    paths = memoryPaths(dir, nodeStores())
   })
 
   afterEach(async () => {
@@ -57,7 +58,7 @@ describe('profile-seed migration', () => {
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'openreverie-profile-seed-'))
-    paths = memoryPaths(dir)
+    paths = memoryPaths(dir, nodeStores())
   })
 
   afterEach(async () => {
@@ -65,20 +66,27 @@ describe('profile-seed migration', () => {
   })
 
   it('is pending when profile.md is absent and not pending once it exists', async () => {
-    await ensureMemoryTree(paths)
+    await ensureMemoryTree(paths, 'UTC')
     await rm(paths.profile, { force: true })
 
-    const ctx: MigrationContext = { paths, configPath: '/tmp/config.toml' }
+    const ctx: MigrationContext = { paths, configPath: '/tmp/config.toml', timezone: 'UTC' }
     await expect(profileSeedMigration.isPending(ctx)).resolves.toBe(true)
 
     await profileSeedMigration.apply(ctx, { dryRun: false })
     await expect(profileSeedMigration.isPending(ctx)).resolves.toBe(false)
   })
 
-  it('apply writes a system-default profile on disk, and a dry run does not', async () => {
-    await ensureMemoryTree(paths)
+  it('apply writes a system-default profile carrying the context zone, not a machine-read one', async () => {
+    await ensureMemoryTree(paths, 'UTC')
     await rm(paths.profile, { force: true })
-    const ctx: MigrationContext = { paths, configPath: '/tmp/config.toml' }
+    // Pacific/Midway (UTC-11), deliberately not the test runner's own zone,
+    // so this only passes if profileSeedMigration actually used ctx.timezone
+    // rather than reading Intl's system zone.
+    const ctx: MigrationContext = {
+      paths,
+      configPath: '/tmp/config.toml',
+      timezone: 'Pacific/Midway',
+    }
 
     const dry = await profileSeedMigration.apply(ctx, { dryRun: true })
     expect(dry.applied).toBe(false)
@@ -88,15 +96,15 @@ describe('profile-seed migration', () => {
     const real = await profileSeedMigration.apply(ctx, { dryRun: false })
     expect(real.applied).toBe(true)
     expect(real.summary).toContain('wrote')
-    const profile = await loadProfile(paths)
+    const profile = await loadProfile(paths, 'UTC')
     expect(profile.meta.timezoneSource).toBe('system-default')
-    expect(typeof profile.meta.timezone).toBe('string')
+    expect(profile.meta.timezone).toBe('Pacific/Midway')
   })
 
   it('runMigrations applies it once and records it, and a second run does nothing', async () => {
-    await ensureMemoryTree(paths)
+    await ensureMemoryTree(paths, 'UTC')
     await rm(paths.profile, { force: true })
-    const ctx: MigrationContext = { paths, configPath: '/tmp/config.toml' }
+    const ctx: MigrationContext = { paths, configPath: '/tmp/config.toml', timezone: 'UTC' }
 
     const first = await runMigrations(ctx)
     expect(first.map((result) => result.id)).toEqual(['profile-seed'])
@@ -115,7 +123,7 @@ describe('utc-to-local-rollups migration', () => {
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'openreverie-utc-rollups-'))
-    paths = memoryPaths(dir)
+    paths = memoryPaths(dir, nodeStores())
   })
 
   afterEach(async () => {
@@ -123,11 +131,11 @@ describe('utc-to-local-rollups migration', () => {
   })
 
   it('is pending when rollups exist, and not pending when there are none', async () => {
-    await ensureMemoryTree(paths)
-    const ctx: MigrationContext = { paths, configPath: '/tmp/config.toml' }
+    await ensureMemoryTree(paths, 'UTC')
+    const ctx: MigrationContext = { paths, configPath: '/tmp/config.toml', timezone: 'UTC' }
     await expect(utcToLocalRollupsMigration.isPending(ctx)).resolves.toBe(false)
 
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: join(paths.rollupsDailyDir, '2026-08-15.md'),
       meta: { id: newId('doc'), date: '2026-08-15' },
       body: 'A rollup.\n',
@@ -136,9 +144,9 @@ describe('utc-to-local-rollups migration', () => {
   })
 
   it('is not pending once recorded in the log, even when rollups exist again', async () => {
-    await ensureMemoryTree(paths)
-    const ctx: MigrationContext = { paths, configPath: '/tmp/config.toml' }
-    await writeDocumentAtomic({
+    await ensureMemoryTree(paths, 'UTC')
+    const ctx: MigrationContext = { paths, configPath: '/tmp/config.toml', timezone: 'UTC' }
+    await writeDocumentAtomic(paths.files, {
       path: join(paths.rollupsDailyDir, '2026-08-15.md'),
       meta: { id: newId('doc'), date: '2026-08-15' },
       body: 'A rollup.\n',
@@ -151,16 +159,16 @@ describe('utc-to-local-rollups migration', () => {
   })
 
   it('apply deletes every daily and weekly rollup, and a dry run deletes nothing', async () => {
-    await ensureMemoryTree(paths)
-    const ctx: MigrationContext = { paths, configPath: '/tmp/config.toml' }
+    await ensureMemoryTree(paths, 'UTC')
+    const ctx: MigrationContext = { paths, configPath: '/tmp/config.toml', timezone: 'UTC' }
     const dailyPath = join(paths.rollupsDailyDir, '2026-08-15.md')
     const weeklyPath = join(paths.rollupsWeeklyDir, '2026-W33.md')
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: dailyPath,
       meta: { id: newId('doc'), date: '2026-08-15' },
       body: 'A rollup.\n',
     })
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: weeklyPath,
       meta: { id: newId('doc'), week: '2026-W33' },
       body: 'A week.\n',
@@ -179,14 +187,14 @@ describe('utc-to-local-rollups migration', () => {
   })
 
   it('runMigrations runs both migrations once and a second run is a no-op', async () => {
-    await ensureMemoryTree(paths)
+    await ensureMemoryTree(paths, 'UTC')
     await rm(paths.profile, { force: true })
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: join(paths.rollupsDailyDir, '2026-08-15.md'),
       meta: { id: newId('doc'), date: '2026-08-15' },
       body: 'A rollup.\n',
     })
-    const ctx: MigrationContext = { paths, configPath: '/tmp/config.toml' }
+    const ctx: MigrationContext = { paths, configPath: '/tmp/config.toml', timezone: 'UTC' }
 
     const first = await runMigrations(ctx)
     expect(first.map((result) => result.id)).toEqual(['profile-seed', 'utc-to-local-rollups'])

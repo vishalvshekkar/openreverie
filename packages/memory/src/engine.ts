@@ -12,7 +12,6 @@
 // that touches the graph or adds a document, so a lost or deleted index.db
 // never loses information, only the SQL projection of it.
 
-import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { ChatProvider, EmbeddingProvider } from '@openreverie/providers'
 import { decodeTime } from 'ulid'
@@ -96,6 +95,7 @@ import {
   writeJournalEntry,
   writeJournalingProtocol,
 } from './journal.js'
+import { nodeStores } from './nodeStore.js'
 import { ensureMemoryTree, type MemoryPaths, memoryPaths } from './paths.js'
 import {
   loadProfile,
@@ -132,8 +132,9 @@ import {
   pendingWeeklyRollups,
 } from './rollups.js'
 import { type DocKind, MemoryIndex, type SearchHit } from './sqlite.js'
+import type { FileStore } from './store.js'
 import { resolveStyle, type StyleConfig } from './style.js'
-import { addDaysLocal, formatLocalDate, systemTimeZone } from './time.js'
+import { addDaysLocal, formatLocalDate, isValidIanaTimeZone } from './time.js'
 import { type PublicTranscriptLine, SessionStore, type TranscriptLine } from './transcripts.js'
 
 export type { SequencedGraphRecord } from './graph.js'
@@ -292,6 +293,22 @@ export interface EngineDeps {
   embeddings: EmbeddingProvider
   reflectionModel: string
   embeddingModel: string
+  // The IANA zone this engine treats as the person's own until profile.md
+  // carries a confirmed one. Required, not defaulted to Intl's system
+  // zone: inside a Cloudflare Durable Object that always resolves to UTC,
+  // which is wrong for every non-UTC user rather than a reasonable guess.
+  // The caller that opens this engine (cli or server, the outer
+  // interfaces that genuinely run on the person's own machine) is the
+  // right place to call systemTimeZone() and pass the result here; see
+  // docs/superpowers/specs/2026-08-27-hostable-engine-design.md, P0-3.
+  timezone: string
+  // Optional wall clock, defaulting to the real one (this.now() below).
+  // Every new Date() this class needs goes through that method rather
+  // than reading the clock directly, so a host with no ambient clock
+  // guarantee, or a test asserting exact local-day behavior, can pin one.
+  // Follows the same optional-with-real-default convention as
+  // LiveSessionRegistryOptions.now in @openreverie/server.
+  now?: () => Date
   // The model dreaming's own pipeline calls use. No fallback to
   // reflectionModel: dreaming runs a tool loop, and the reflection model is
   // picked for cheap structured, non-tool output, which at least one real
@@ -516,6 +533,41 @@ const DREAM_DIGEST_COUNT = 3
 // backstop, the same role PEOPLE_CAP and ENTITIES_CAP play above.
 const DREAM_INSIGHTS_CAP = 8
 
+// deps.timezone is the host-injected zone from P0-3
+// (docs/superpowers/specs/2026-08-27-hostable-engine-design.md). Self-hosted
+// callers (cli, server) always fill it with systemTimeZone(), which is
+// never empty or malformed, so this check is unreachable from either of
+// them today. A hosted caller (a Cloudflare Durable Object) is exactly the
+// audience P0-3 exists for, and nothing else on this path validates the
+// string it sends before it reaches Intl.DateTimeFormat deep inside
+// ensureMemoryTree, loadProfile, or a later startSession call, where an
+// empty or unrecognized zone throws a raw RangeError instead of a message
+// that names the bad value and where it came from. profile.md's own stored
+// timezone is already guarded the same way, by profileMetaSchema in
+// profile.ts; this is the equivalent guard for the value that arrives from
+// outside the memory folder rather than from inside it.
+//
+// Called at the top of both open() and fromPaths() below, before either
+// does anything else, rather than in only one of them: open() is a thin
+// wrapper that delegates to fromPaths(), but it also calls
+// ensureMemoryTree(paths, deps.timezone) directly, itself, before that
+// delegation happens, so validating only inside fromPaths would let a bad
+// zone from open() write a starter profile.md to disk before anyone
+// checked it. fromPaths() is also called directly by a filesystem-free
+// host that never goes through open() at all, so it needs its own check
+// regardless. AGENTS.md's fail-closed rule (an unhandled case defaults to
+// excluded, not admitted) is why an empty string is checked here rather
+// than assumed away: isValidIanaTimeZone already treats '' as invalid, but
+// this project has a real, recorded incident (2026-08-24) of a check that
+// covered every case except a field being present and empty, so that case
+// is exercised by name in this fix's tests, not just implied by the
+// general check.
+function assertValidTimezone(timezone: string, field: string): void {
+  if (!isValidIanaTimeZone(timezone)) {
+    throw new Error(`${field} is not a valid IANA timezone: ${JSON.stringify(timezone)}`)
+  }
+}
+
 export class MemoryEngine implements DreamLookup {
   private readonly paths: MemoryPaths
   private readonly deps: EngineDeps
@@ -544,6 +596,16 @@ export class MemoryEngine implements DreamLookup {
     this.warnings.push(`Skipping unreadable document at ${path}: ${reason}`)
   }
 
+  // The single wall-clock read left in this class. Every other new Date()
+  // in this file goes through this method instead of reading the clock
+  // itself, so a host with no ambient clock guarantee (a Cloudflare
+  // Durable Object, or a test) can pin one via EngineDeps.now. Defaults to
+  // the real clock when deps.now is not supplied, the same optional
+  // convention LiveSessionRegistryOptions.now already uses.
+  private now(): Date {
+    return this.deps.now?.() ?? new Date()
+  }
+
   private constructor(
     paths: MemoryPaths,
     deps: EngineDeps,
@@ -563,15 +625,51 @@ export class MemoryEngine implements DreamLookup {
     deps: EngineDeps,
     options: MemoryEngineOpenOptions = {},
   ): Promise<MemoryEngine> {
-    const paths = memoryPaths(root)
-    await ensureMemoryTree(paths)
+    // The self-hosted convenience path: a root string, and Node does the
+    // rest. It wires nodeStores() and opens index.db against a real file
+    // itself, then delegates everything else to fromPaths(), which is what
+    // a filesystem-free host (a Cloudflare Durable Object; see P0-2,
+    // docs/superpowers/specs/2026-08-27-hostable-engine-design.md) calls
+    // directly with its own MemoryStores and SqlDatabase. packages/core
+    // depends on MemoryEngine itself (agent.ts, context.ts), so such a
+    // host still needs a real MemoryEngine, not the paths-based functions
+    // in this package alone: an earlier version of this comment claimed
+    // otherwise, which was wrong and defeated the point of this change.
+    //
+    // ensureMemoryTree runs here too, before MemoryIndex.open: better-
+    // sqlite3 needs paths.root to exist before it can create the database
+    // file inside it, and fromPaths's own ensureMemoryTree call happens
+    // only after the index is already open. The second call inside
+    // fromPaths is a no-op for this path (every step it takes checks
+    // existence first) and is what makes fromPaths self-sufficient for a
+    // caller that has not ensured the tree itself.
+    assertValidTimezone(deps.timezone, 'deps.timezone')
+    const paths = memoryPaths(root, nodeStores())
+    await ensureMemoryTree(paths, deps.timezone)
     const index = MemoryIndex.open(paths.indexDb)
+    return MemoryEngine.fromPaths(paths, index, deps, options)
+  }
+
+  // The host-agnostic constructor. Takes a MemoryPaths built over any
+  // MemoryStores and a MemoryIndex already open over any SqlDatabase
+  // (MemoryIndex.open for a real file, MemoryIndex.fromDatabase for one the
+  // caller already holds, such as a Durable Object's own wrapper over
+  // ctx.storage.sql) and does everything open() used to do inline. open()
+  // is now a thin self-hosted wrapper around this.
+  static async fromPaths(
+    paths: MemoryPaths,
+    index: MemoryIndex,
+    deps: EngineDeps,
+    options: MemoryEngineOpenOptions = {},
+  ): Promise<MemoryEngine> {
+    assertValidTimezone(deps.timezone, 'deps.timezone')
+    await ensureMemoryTree(paths, deps.timezone)
     const graphState = await readGraph(paths)
     index.replaceGraph(graphState)
     // Loaded before the engine is constructed, and therefore before
     // runMaintenance() runs below: maintenance computes local calendar days
     // from this timezone, so a profile loaded after it would be too late.
-    const profile = await loadProfile(paths)
+    const profile = await loadProfile(paths, deps.timezone)
     const engine = new MemoryEngine(paths, deps, index, graphState, profile)
     engine.clearWarnings()
     // runMaintenance() before refreshDocPaths(): runMaintenance clears
@@ -641,11 +739,16 @@ export class MemoryEngine implements DreamLookup {
 
   // Every caller that needs a zone goes through here rather than reading
   // the optional field itself, so there is exactly one place that decides
-  // what happens when profile.md carries no timezone: fall back to the
-  // machine's own zone, which Intl always answers with.
+  // what happens when profile.md carries no timezone: fall back to
+  // deps.timezone, the zone the host that opened this engine was told to
+  // use. Never Intl's own system zone: inside a Cloudflare Durable Object
+  // that always resolves to UTC, which is not a guess about the person, it
+  // is simply wrong, so the engine must never read it (see time.ts's
+  // systemTimeZone comment and
+  // docs/superpowers/specs/2026-08-27-hostable-engine-design.md, P0-3).
   timezone(): string {
     const stored = this.profileCache.meta.timezone
-    return typeof stored === 'string' && stored.length > 0 ? stored : systemTimeZone()
+    return typeof stored === 'string' && stored.length > 0 ? stored : this.deps.timezone
   }
 
   timezoneSource(): 'system-default' | 'user-confirmed' {
@@ -729,7 +832,7 @@ export class MemoryEngine implements DreamLookup {
     return next
   }
 
-  async startSession(now: Date = new Date()): Promise<string> {
+  async startSession(now: Date = this.now()): Promise<string> {
     const store = await SessionStore.start(this.paths, now, this.timezone())
     this.liveItems.set(store.sessionId, [])
     return store.sessionId
@@ -782,14 +885,14 @@ export class MemoryEngine implements DreamLookup {
   // _doEndSession, on the same pattern the constitution update already
   // uses.
   async updateJournalingProtocol(body: string): Promise<Document> {
-    const doc = await writeJournalingProtocol(this.paths, body, new Date())
+    const doc = await writeJournalingProtocol(this.paths, body, this.now())
     await this.reindexOrWarn(doc, 'journaling', 'live update_journaling_protocol call')
     return doc
   }
 
   async appendTranscript(sessionId: string, line: TranscriptLine): Promise<void> {
     const store = await SessionStore.open(this.paths, sessionId)
-    await store.appendLine(line)
+    await store.appendLine(this.paths, line)
   }
 
   async remember(
@@ -811,7 +914,7 @@ export class MemoryEngine implements DreamLookup {
       id: newId('item'),
       text,
       kind,
-      ts: new Date().toISOString(),
+      ts: this.now().toISOString(),
       ...(statedEventTime !== undefined ? { eventTime: statedEventTime } : {}),
     }
     const items = this.liveItems.get(sessionId)
@@ -837,12 +940,16 @@ export class MemoryEngine implements DreamLookup {
     input: { label: string; flavor: CommitmentFlavor; statedTime?: string },
   ): Promise<Commitment> {
     const timing = this.buildCommitmentTiming(input.statedTime)
-    return recordCommitmentRecord(this.paths, {
-      label: input.label,
-      flavor: input.flavor,
-      sessionId,
-      ...(timing !== undefined ? { timing } : {}),
-    })
+    return recordCommitmentRecord(
+      this.paths,
+      {
+        label: input.label,
+        flavor: input.flavor,
+        sessionId,
+        ...(timing !== undefined ? { timing } : {}),
+      },
+      this.now(),
+    )
   }
 
   // Reasserts the same commitment id with the changed fields, per
@@ -853,17 +960,22 @@ export class MemoryEngine implements DreamLookup {
     changes: { label?: string; statedTime?: string },
   ): Promise<Commitment> {
     const timing = this.buildCommitmentTiming(changes.statedTime)
-    return reviseCommitmentRecord(this.paths, id, {
-      ...(changes.label !== undefined ? { label: changes.label } : {}),
-      ...(timing !== undefined ? { timing } : {}),
-    })
+    return reviseCommitmentRecord(
+      this.paths,
+      id,
+      {
+        ...(changes.label !== undefined ? { label: changes.label } : {}),
+        ...(timing !== undefined ? { timing } : {}),
+      },
+      this.now(),
+    )
   }
 
   // Records the outcome the caller already knows. Invents nothing: the
   // caller (dispatchRemember) is the one that must have already gotten an
   // explicit outcome out of the model, this only appends it.
   async resolveCommitment(id: string, outcome: CommitmentState): Promise<Commitment> {
-    return resolveCommitmentRecord(this.paths, id, outcome)
+    return resolveCommitmentRecord(this.paths, id, outcome, this.now())
   }
 
   // The stated time, resolved when the words are unambiguous enough to
@@ -881,7 +993,7 @@ export class MemoryEngine implements DreamLookup {
     // `(said <today>: "")` anchor either.
     const stated = statedTime !== undefined && statedTime.trim().length > 0 ? statedTime : undefined
     if (stated === undefined) return undefined
-    const anchor = new Date()
+    const anchor = this.now()
     const resolved = resolveStatedTime(stated, anchor, this.timezone())
     return {
       words: stated,
@@ -913,7 +1025,7 @@ export class MemoryEngine implements DreamLookup {
     // Internal session-ending logic used by runMaintenance's loop.
     // Does NOT clear warnings; the public endSession or runMaintenance
     // is responsible for warning lifecycle.
-    const now = new Date()
+    const now = this.now()
     // Read from disk rather than from any in-memory session registry, so
     // this works whether or not the process that started the session is the
     // one ending it. The journal spec's gated write reads this value.
@@ -1118,14 +1230,14 @@ export class MemoryEngine implements DreamLookup {
 
     if (out.constitutionUpdate !== null) {
       await this.reindexOrWarn(
-        await readDocument(this.paths.constitution),
+        await readDocument(this.paths.files, this.paths.constitution),
         'constitution',
         `session ${sessionId} constitution update`,
       )
     }
     if (out.journalingUpdate !== null) {
       await this.reindexOrWarn(
-        await readDocument(this.paths.journaling),
+        await readDocument(this.paths.files, this.paths.journaling),
         'journaling',
         `session ${sessionId} journaling protocol update`,
       )
@@ -1134,7 +1246,7 @@ export class MemoryEngine implements DreamLookup {
       const node = this.graphState.nodes.get(id)
       if (node?.doc) {
         await this.reindexOrWarn(
-          await readDocument(node.doc),
+          await readDocument(this.paths.files, node.doc),
           node.type === 'person' ? 'person' : 'arc',
           `session ${sessionId} narrative rewrite for ${id}`,
         )
@@ -1166,7 +1278,11 @@ export class MemoryEngine implements DreamLookup {
       }
     }
 
-    const commitResult = await commitMemory(this.paths.root, `reflect: session ${sessionId}`)
+    const commitResult = await commitMemory(
+      this.paths.files,
+      this.paths.root,
+      `reflect: session ${sessionId}`,
+    )
     if (!commitResult.ok && commitResult.warning) {
       this.warnings.push(commitResult.warning)
     }
@@ -1176,8 +1292,8 @@ export class MemoryEngine implements DreamLookup {
     }
   }
 
-  async sessionContext(now: Date = new Date(), mode?: string): Promise<SessionContext> {
-    const constitutionDoc = await readDocument(this.paths.constitution)
+  async sessionContext(now: Date = this.now(), mode?: string): Promise<SessionContext> {
+    const constitutionDoc = await readDocument(this.paths.files, this.paths.constitution)
 
     const arcs: SessionContext['arcs'] = []
     const arcRows: {
@@ -1193,7 +1309,7 @@ export class MemoryEngine implements DreamLookup {
       let lastTouched: string | undefined
       if (node.doc) {
         try {
-          const doc = await readDocument(node.doc)
+          const doc = await readDocument(this.paths.files, node.doc)
           if (typeof doc.meta.status === 'string') status = doc.meta.status
           if (typeof doc.meta.updated === 'string') lastTouched = doc.meta.updated
         } catch {
@@ -1231,7 +1347,7 @@ export class MemoryEngine implements DreamLookup {
       let firstLine = ''
       if (node.doc) {
         try {
-          const doc = await readDocument(node.doc)
+          const doc = await readDocument(this.paths.files, node.doc)
           firstLine = (doc.body.split('\n').find((line) => line.trim().length > 0) ?? '').trim()
         } catch {
           // Same fallback as arcs above.
@@ -1244,7 +1360,11 @@ export class MemoryEngine implements DreamLookup {
     let dailyTotal = 0
     let dailyEarliest: string | undefined
     let dailyLatest: string | undefined
-    for (const doc of await listDocuments(this.paths.rollupsDailyDir, this.onDocSkip)) {
+    for (const doc of await listDocuments(
+      this.paths.files,
+      this.paths.rollupsDailyDir,
+      this.onDocSkip,
+    )) {
       if (typeof doc.meta.date !== 'string') continue
       dailyTotal += 1
       if (dailyEarliest === undefined || doc.meta.date < dailyEarliest)
@@ -1263,7 +1383,11 @@ export class MemoryEngine implements DreamLookup {
     // The weekly shelf. Only the id-bearing index is preloaded, never the
     // bodies. One directory read plus a frontmatter parse per weekly file,
     // on the same order as the daily walk already performed beside it.
-    const weeklyDocs = await listDocuments(this.paths.rollupsWeeklyDir, this.onDocSkip)
+    const weeklyDocs = await listDocuments(
+      this.paths.files,
+      this.paths.rollupsWeeklyDir,
+      this.onDocSkip,
+    )
     const weeklyRollups: SessionContext['weeklyRollups'] = []
     let weeklyRollupsTotal = 0
     let earliestWeek: string | undefined
@@ -1297,7 +1421,7 @@ export class MemoryEngine implements DreamLookup {
     const recentIntentions: SessionContext['recentIntentions'] = []
     for (const session of recentCandidates) {
       const summaryPath = join(this.paths.sessionsDir, session.dirName, 'summary.md')
-      const doc = await readDocument(summaryPath)
+      const doc = await readDocument(this.paths.files, summaryPath)
       recentSummaries.push({
         sessionId: session.sessionId,
         date: session.date,
@@ -1435,7 +1559,7 @@ export class MemoryEngine implements DreamLookup {
         if (dreamInsights.length >= DREAM_INSIGHTS_CAP) break
         let insightDoc: Document
         try {
-          insightDoc = await readDocument(join(summary.dir, 'insight.md'))
+          insightDoc = await readDocument(this.paths.files, join(summary.dir, 'insight.md'))
         } catch {
           // No insight.md, or it does not parse: nothing usable from this
           // dream, same tolerance listDreamSummaries and readDreamById use.
@@ -1586,7 +1710,7 @@ export class MemoryEngine implements DreamLookup {
     }
     if (!path) return null
     try {
-      return await readDocument(path)
+      return await readDocument(this.paths.files, path)
     } catch {
       return null
     }
@@ -1681,7 +1805,7 @@ export class MemoryEngine implements DreamLookup {
       if (docId) row.docId = docId
       if (node.doc) {
         try {
-          const doc = await readDocument(node.doc)
+          const doc = await readDocument(this.paths.files, node.doc)
           if (typeof doc.meta.status === 'string') row.status = doc.meta.status
           if (typeof doc.meta.updated === 'string') row.lastTouched = doc.meta.updated
         } catch {
@@ -1764,8 +1888,8 @@ export class MemoryEngine implements DreamLookup {
         await this.materializeProposal(proposal)
       }
     }
-    await recordProposalResolution(this.paths, id, resolution)
-    await commitMemory(this.paths.root, `proposal: ${resolution} ${id}`)
+    await recordProposalResolution(this.paths, id, resolution, this.now())
+    await commitMemory(this.paths.files, this.paths.root, `proposal: ${resolution} ${id}`)
   }
 
   // Materializes and resolves every pending proposal silently, with no
@@ -1835,12 +1959,13 @@ export class MemoryEngine implements DreamLookup {
             'a page or realm it had already started writing may be left behind incomplete.',
         )
         try {
-          await recordProposalResolution(this.paths, proposal.id, 'accepted')
+          await recordProposalResolution(this.paths, proposal.id, 'accepted', this.now())
         } catch {
           // Already resolved, or the proposal queue itself is unreadable;
           // either way there is nothing more this can do.
         }
         const commitResult = await commitMemory(
+          this.paths.files,
           this.paths.root,
           `proposal: accepted ${proposal.id} (materialization failed, resolved anyway)`,
         )
@@ -1889,11 +2014,11 @@ export class MemoryEngine implements DreamLookup {
       if (!path) {
         throw new Error(`forget: no document found for id ${docId}`)
       }
-      const current = await readDocument(path)
+      const current = await readDocument(this.paths.files, path)
       targets.push({ path, doc: { ...current, body }, kind: this.kindForDocumentPath(path) })
     }
 
-    const now = new Date().toISOString()
+    const now = this.now().toISOString()
     const records: GraphRecord[] = []
     let retractedNodes = 0
     let retractedEdges = 0
@@ -1935,12 +2060,16 @@ export class MemoryEngine implements DreamLookup {
 
     const rewrittenDocuments: string[] = []
     for (const target of targets) {
-      await writeDocumentAtomic(target.doc)
+      await writeDocumentAtomic(this.paths.files, target.doc)
       await this.reindexOrWarn(target.doc, target.kind, `forget: ${input.what}`)
       rewrittenDocuments.push(target.path)
     }
 
-    const commitResult = await commitMemory(this.paths.root, `forget: ${input.what}`)
+    const commitResult = await commitMemory(
+      this.paths.files,
+      this.paths.root,
+      `forget: ${input.what}`,
+    )
     if (!commitResult.ok && commitResult.warning) {
       this.warnings.push(commitResult.warning)
     }
@@ -1948,7 +2077,7 @@ export class MemoryEngine implements DreamLookup {
     return { retractedNodes, retractedEdges, rewrittenDocuments }
   }
 
-  async runMaintenance(now: Date = new Date()): Promise<void> {
+  async runMaintenance(now: Date = this.now()): Promise<void> {
     this.clearWarnings()
 
     // Reflect stale sessions first: pendingDailyRollups only looks at
@@ -1985,7 +2114,7 @@ export class MemoryEngine implements DreamLookup {
     )
     const sessionDates = reflected.map((s) => s.date)
     const existingDailies = stringMeta(
-      await listDocuments(this.paths.rollupsDailyDir, this.onDocSkip),
+      await listDocuments(this.paths.files, this.paths.rollupsDailyDir, this.onDocSkip),
       'date',
     )
 
@@ -2009,11 +2138,11 @@ export class MemoryEngine implements DreamLookup {
     }
 
     const dailyDates = stringMeta(
-      await listDocuments(this.paths.rollupsDailyDir, this.onDocSkip),
+      await listDocuments(this.paths.files, this.paths.rollupsDailyDir, this.onDocSkip),
       'date',
     )
     const existingWeeklies = stringMeta(
-      await listDocuments(this.paths.rollupsWeeklyDir, this.onDocSkip),
+      await listDocuments(this.paths.files, this.paths.rollupsWeeklyDir, this.onDocSkip),
       'week',
     )
 
@@ -2034,6 +2163,7 @@ export class MemoryEngine implements DreamLookup {
     }
 
     const commitResult = await commitMemory(
+      this.paths.files,
       this.paths.root,
       'maintenance: reflect stale sessions and build pending rollups',
     )
@@ -2052,9 +2182,18 @@ export class MemoryEngine implements DreamLookup {
     // behind. Wiping first makes reindexAll() an actual repair tool
     // rather than something that only works after deleting index.db.
     this.index.wipeAllDocuments()
-    const embed = (texts: string[]) => this.deps.embeddings.embed(this.deps.embeddingModel, texts)
+    // Unwraps to match sqlite.ts's EmbedFn, which upsertDocument expects:
+    // (texts) => Promise<number[][]>. The usage this call reports is
+    // discarded here, not accounted for anywhere in this method: a
+    // hosted deployment's own EmbeddingProvider wrapper sits below
+    // this.deps.embeddings and already saw it before this closure ran.
+    const embed = async (texts: string[]) => {
+      const { vectors } = await this.deps.embeddings.embed(this.deps.embeddingModel, texts)
+      return vectors
+    }
     for (const { doc, kind } of docs) {
-      await this.index.upsertDocument(doc, kind, embed)
+      const mtime = await this.fileMtime(doc.path)
+      await this.index.upsertDocument(doc, kind, embed, this.deps.embeddingModel, mtime)
     }
     this.docPaths = new Map(docs.map(({ doc }) => [doc.meta.id, doc.path]))
     this.docIdByPath = new Map(docs.map(({ doc }) => [doc.path, doc.meta.id]))
@@ -2071,7 +2210,7 @@ export class MemoryEngine implements DreamLookup {
     // disk. capBody (in @openreverie/core) applies to assembleSystemPrompt
     // only and must never be applied here. See the test "the reflection
     // prompt carries the whole constitution body, sentinel included".
-    const constitutionDoc = await readDocument(this.paths.constitution)
+    const constitutionDoc = await readDocument(this.paths.files, this.paths.constitution)
     const arcs = [...this.graphState.nodes.values()].filter((node) => node.type === 'arc')
     const realms = [...this.graphState.nodes.values()].filter((node) => node.type === 'realm')
     const allPeople = [...this.graphState.nodes.values()].filter((node) => node.type === 'person')
@@ -2114,10 +2253,36 @@ export class MemoryEngine implements DreamLookup {
     // previous summary.md rewrite) and self-heals here before indexing
     // the current one.
     this.index.removeDocumentsAtPath(doc.path, doc.meta.id)
-    const embed = (texts: string[]) => this.deps.embeddings.embed(this.deps.embeddingModel, texts)
-    await this.index.upsertDocument(doc, kind, embed)
+    // Unwraps to match sqlite.ts's EmbedFn, which upsertDocument expects:
+    // (texts) => Promise<number[][]>. The usage this call reports is
+    // discarded here, not accounted for anywhere in this method: a
+    // hosted deployment's own EmbeddingProvider wrapper sits below
+    // this.deps.embeddings and already saw it before this closure ran.
+    const embed = async (texts: string[]) => {
+      const { vectors } = await this.deps.embeddings.embed(this.deps.embeddingModel, texts)
+      return vectors
+    }
+    const mtime = await this.fileMtime(doc.path)
+    await this.index.upsertDocument(doc, kind, embed, this.deps.embeddingModel, mtime)
     this.docPaths.set(doc.meta.id, doc.path)
     this.docIdByPath.set(doc.path, doc.meta.id)
+  }
+
+  // The document's own file modification time, so a reindex from the same
+  // folder produces the same mtime value rather than the wall-clock time of
+  // the reindex run. Falls back to the current time if the file cannot be
+  // stat'd (a document not yet flushed to disk, or a test fixture path).
+  // Moved here from sqlite.ts's own fileMtime helper (P0-2,
+  // docs/superpowers/specs/2026-08-27-hostable-engine-design.md):
+  // MemoryIndex now holds only a SqlDatabase, never a FileStore, so the
+  // caller that already holds paths.files computes this instead.
+  private async fileMtime(path: string): Promise<string> {
+    try {
+      const stats = await this.paths.files.stat(path)
+      return new Date(stats.mtimeMs).toISOString()
+    } catch {
+      return this.now().toISOString()
+    }
   }
 
   // Ruling 4: reindex failures inside endSession/runMaintenance must not
@@ -2168,7 +2333,7 @@ export class MemoryEngine implements DreamLookup {
     const dir = await SessionStore.sessionDir(this.paths, sessionId)
     const summaryPath = join(dir, 'summary.md')
 
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(this.paths.files, {
       path: summaryPath,
       meta: {
         id: newId('doc'),
@@ -2183,6 +2348,7 @@ export class MemoryEngine implements DreamLookup {
     })
 
     const commitResult = await commitMemory(
+      this.paths.files,
       this.paths.root,
       `reflect: session ${sessionId} skipped, no user messages`,
     )
@@ -2220,43 +2386,65 @@ export class MemoryEngine implements DreamLookup {
 
   private async walkAllDocuments(): Promise<{ doc: Document; kind: DocKind }[]> {
     const result: { doc: Document; kind: DocKind }[] = []
-    result.push({ doc: await readDocument(this.paths.constitution), kind: 'constitution' })
-    for (const doc of await listDocuments(this.paths.realmsDir, this.onDocSkip)) {
+    result.push({
+      doc: await readDocument(this.paths.files, this.paths.constitution),
+      kind: 'constitution',
+    })
+    for (const doc of await listDocuments(this.paths.files, this.paths.realmsDir, this.onDocSkip)) {
       result.push({ doc, kind: 'realm' })
     }
-    for (const doc of await listDocuments(this.paths.arcsDir, this.onDocSkip)) {
+    for (const doc of await listDocuments(this.paths.files, this.paths.arcsDir, this.onDocSkip)) {
       result.push({ doc, kind: 'arc' })
     }
-    for (const doc of await listDocuments(this.paths.peopleDir, this.onDocSkip)) {
+    for (const doc of await listDocuments(this.paths.files, this.paths.peopleDir, this.onDocSkip)) {
       result.push({ doc, kind: 'person' })
     }
-    for (const doc of await listDocuments(this.paths.rollupsDailyDir, this.onDocSkip)) {
+    for (const doc of await listDocuments(
+      this.paths.files,
+      this.paths.rollupsDailyDir,
+      this.onDocSkip,
+    )) {
       result.push({ doc, kind: 'rollup_daily' })
     }
-    for (const doc of await listDocuments(this.paths.rollupsWeeklyDir, this.onDocSkip)) {
+    for (const doc of await listDocuments(
+      this.paths.files,
+      this.paths.rollupsWeeklyDir,
+      this.onDocSkip,
+    )) {
       result.push({ doc, kind: 'rollup_weekly' })
     }
-    for (const doc of await listDocuments(this.paths.journalDir, this.onDocSkip)) {
+    for (const doc of await listDocuments(
+      this.paths.files,
+      this.paths.journalDir,
+      this.onDocSkip,
+    )) {
       result.push({ doc, kind: 'journal' })
     }
     try {
-      result.push({ doc: await readDocument(this.paths.journaling), kind: 'journaling' })
+      result.push({
+        doc: await readDocument(this.paths.files, this.paths.journaling),
+        kind: 'journaling',
+      })
     } catch {
       // journaling.md does not exist yet: nobody has journaled in this
       // memory folder. Not an error, just nothing to index.
     }
 
+    // FileStore.readdir returns names only, not Dirent, so the
+    // isDirectory() filter this used to have is dropped rather than
+    // replaced: sessionsDir only ever holds session directories, and a
+    // stray non-directory entry falls through to the try/catch below the
+    // same way a session with no summary.md yet already does.
     let sessionEntries: string[] = []
     try {
-      const entries = await readdir(this.paths.sessionsDir, { withFileTypes: true })
-      sessionEntries = entries.filter((e) => e.isDirectory()).map((e) => e.name)
+      sessionEntries = await this.paths.files.readdir(this.paths.sessionsDir)
     } catch {
       sessionEntries = []
     }
     for (const name of sessionEntries) {
       const summaryPath = join(this.paths.sessionsDir, name, 'summary.md')
       try {
-        const doc = await readDocument(summaryPath)
+        const doc = await readDocument(this.paths.files, summaryPath)
         // A skipped summary is never indexed, on the initial write path
         // (writeSkippedSummary) or here on a full rebuild: its body is a
         // fixed placeholder with nothing of the person's own in it.
@@ -2267,10 +2455,11 @@ export class MemoryEngine implements DreamLookup {
       }
     }
 
+    // Same reasoning as sessionEntries above: no Dirent, so no
+    // isDirectory() filter; dreamsDir only ever holds dream directories.
     let dreamEntries: string[] = []
     try {
-      const entries = await readdir(this.paths.dreamsDir, { withFileTypes: true })
-      dreamEntries = entries.filter((e) => e.isDirectory()).map((e) => e.name)
+      dreamEntries = await this.paths.files.readdir(this.paths.dreamsDir)
     } catch {
       dreamEntries = []
     }
@@ -2280,14 +2469,17 @@ export class MemoryEngine implements DreamLookup {
       // kinds, discriminated by filename. dreams/log.jsonl, dreams/.lock,
       // and each directory's process.jsonl are never read as documents.
       try {
-        result.push({ doc: await readDocument(join(dreamDir, 'dream.md')), kind: 'dream' })
+        result.push({
+          doc: await readDocument(this.paths.files, join(dreamDir, 'dream.md')),
+          kind: 'dream',
+        })
       } catch {
         // No dream.md: the tone gate withheld the narrative for this dream,
         // or it has not been written yet.
       }
       try {
         result.push({
-          doc: await readDocument(join(dreamDir, 'insight.md')),
+          doc: await readDocument(this.paths.files, join(dreamDir, 'insight.md')),
           kind: 'dream_insight',
         })
       } catch {
@@ -2328,7 +2520,7 @@ export class MemoryEngine implements DreamLookup {
     }
 
     // proposal.kind === 'link'
-    const now = new Date()
+    const now = this.now()
     const payload = proposal.payload as {
       edge: EdgeType
       from: string
@@ -2367,12 +2559,12 @@ export class MemoryEngine implements DreamLookup {
     // direct materialization, which nobody has seen yet.
     confirmed: boolean
   }): Promise<GraphNode> {
-    const now = new Date()
+    const now = this.now()
     const nowIso = now.toISOString()
     const realmNodeId = await this.resolveOrCreateRealm(input.realm, nowIso)
 
     const arcNodeId = newId('arc')
-    const slug = await uniqueSlug(this.paths.arcsDir, input.name)
+    const slug = await uniqueSlug(this.paths.files, this.paths.arcsDir, input.name)
     const arcPath = join(this.paths.arcsDir, `${slug}.md`)
     const narrative = input.narrative.trim()
     const arcDoc: Document = {
@@ -2386,7 +2578,7 @@ export class MemoryEngine implements DreamLookup {
       },
       body: narrative.length > 0 ? input.narrative : ARC_STARTER_BODY,
     }
-    await writeDocumentAtomic(arcDoc)
+    await writeDocumentAtomic(this.paths.files, arcDoc)
 
     // Node assert and every part_of edge for this arc's items go in one
     // appendGraph call: a failure partway through would otherwise leave an
@@ -2418,7 +2610,11 @@ export class MemoryEngine implements DreamLookup {
     }
     await appendGraph(this.paths, records)
     await this.syncGraph()
-    await this.reindexOrWarn(await readDocument(arcPath), 'arc', `arc page for ${input.name}`)
+    await this.reindexOrWarn(
+      await readDocument(this.paths.files, arcPath),
+      'arc',
+      `arc page for ${input.name}`,
+    )
     const node = this.graphState.nodes.get(arcNodeId)
     if (!node) {
       throw new Error(`createArc: arc node ${arcNodeId} missing from graph state after assert.`)
@@ -2445,10 +2641,10 @@ export class MemoryEngine implements DreamLookup {
     // proposal, false for reflection's direct materialization.
     confirmed: boolean
   }): Promise<GraphNode> {
-    const now = new Date()
+    const now = this.now()
     const nowIso = now.toISOString()
 
-    const slug = await uniqueSlug(this.paths.peopleDir, input.name)
+    const slug = await uniqueSlug(this.paths.files, this.paths.peopleDir, input.name)
     const personPath = join(this.paths.peopleDir, `${slug}.md`)
     const narrative = input.narrative.trim()
     const personDoc: Document = {
@@ -2456,7 +2652,7 @@ export class MemoryEngine implements DreamLookup {
       meta: { id: newId('doc'), name: input.name, node: input.personNodeId, opened: nowIso },
       body: narrative.length > 0 ? input.narrative : PERSON_STARTER_BODY,
     }
-    await writeDocumentAtomic(personDoc)
+    await writeDocumentAtomic(this.paths.files, personDoc)
 
     // Node assert and every involves edge for this person's items go in one
     // appendGraph call: a failure partway through would otherwise leave a
@@ -2549,7 +2745,7 @@ export class MemoryEngine implements DreamLookup {
     source: string
     confirmed: boolean
   }): Promise<GraphNode> {
-    const now = new Date()
+    const now = this.now()
     const nowIso = now.toISOString()
     const nodeId = newId(input.type)
     const edgeType: EdgeType = input.type === 'person' ? 'involves' : 'relates_to'
@@ -2594,7 +2790,7 @@ export class MemoryEngine implements DreamLookup {
       return
     }
     const edgeType: EdgeType = type === 'person' ? 'involves' : 'relates_to'
-    const nowIso = new Date().toISOString()
+    const nowIso = this.now().toISOString()
     const records: GraphRecord[] = itemIds.map((itemId) => ({
       ts: nowIso,
       op: 'assert',
@@ -2639,14 +2835,14 @@ export class MemoryEngine implements DreamLookup {
     }
 
     const realmNodeId = newId('realm')
-    const slug = await uniqueSlug(this.paths.realmsDir, realm)
+    const slug = await uniqueSlug(this.paths.files, this.paths.realmsDir, realm)
     const realmPath = join(this.paths.realmsDir, `${slug}.md`)
     const realmDoc: Document = {
       path: realmPath,
       meta: { id: newId('doc'), name: realm },
       body: REALM_STARTER_BODY,
     }
-    await writeDocumentAtomic(realmDoc)
+    await writeDocumentAtomic(this.paths.files, realmDoc)
     await appendGraph(this.paths, [
       { ts: nowIso, op: 'assert', node: realmNodeId, type: 'realm', label: realm, doc: realmPath },
     ])
@@ -2686,7 +2882,7 @@ export class MemoryEngine implements DreamLookup {
           : dreaming.triggers.serverTimer
     if (!triggerOn) return undefined
 
-    const now = new Date()
+    const now = this.now()
     const timezone = this.timezone()
     const period = periodFor(now, dreaming.cadence, timezone)
     // Once per period, per process (see the class-level dreamAttemptedPeriods
@@ -2734,7 +2930,7 @@ export class MemoryEngine implements DreamLookup {
       const docs = await this.listPublicDocuments()
       const candidates = collectDreamCandidates(this.graphState, docs)
       const logState = foldDreamLog(await readDreamLog(this.paths))
-      const rngSeed = Date.now() >>> 0
+      const rngSeed = this.now().getTime() >>> 0
       const rng = mulberry32(rngSeed)
       const seeds = pickSeeds({
         candidates,
@@ -2794,7 +2990,7 @@ export class MemoryEngine implements DreamLookup {
     options: { force?: boolean; dryRun?: boolean } = {},
   ): Promise<DreamRunResult | DreamDryRun> {
     const dreaming = this.deps.dreaming
-    const now = new Date()
+    const now = this.now()
     const timezone = this.timezone()
 
     if (!dreaming) {
@@ -2825,7 +3021,7 @@ export class MemoryEngine implements DreamLookup {
     const docs = await this.listPublicDocuments()
     const candidates = collectDreamCandidates(this.graphState, docs)
     const logState = foldDreamLog(await readDreamLog(this.paths))
-    const rngSeed = Date.now() >>> 0
+    const rngSeed = this.now().getTime() >>> 0
     const rng = mulberry32(rngSeed)
     const seeds = pickSeeds({
       candidates,
@@ -2901,11 +3097,11 @@ export class MemoryEngine implements DreamLookup {
     note?: string
     source: 'ui' | 'tool'
   }): Promise<boolean> {
-    return recordDreamFeedbackInLog(this.paths, args)
+    return recordDreamFeedbackInLog(this.paths, args, this.now())
   }
 
   async markDreamMentioned(dreamId: string): Promise<void> {
-    await appendDreamMentionedRecord(this.paths, dreamId)
+    await appendDreamMentionedRecord(this.paths, dreamId, this.now())
   }
 
   // Everything a person, `reverie doctor`, or the web Dreams tab needs to
@@ -2919,7 +3115,7 @@ export class MemoryEngine implements DreamLookup {
       this.deps.dreaming,
       this.deps.dreamingModel,
       this.timezone(),
-      new Date(),
+      this.now(),
     )
   }
 
@@ -3013,7 +3209,7 @@ export class MemoryEngine implements DreamLookup {
 
     if (result.outcome === 'written' && result.dir !== undefined && result.dreamId !== undefined) {
       try {
-        const insightDoc = await readDocument(join(result.dir, 'insight.md'))
+        const insightDoc = await readDocument(this.paths.files, join(result.dir, 'insight.md'))
         await this.reindexOrWarn(insightDoc, 'dream_insight', `dream ${result.dreamId} insights`)
       } catch (err) {
         this.warnings.push(
@@ -3021,12 +3217,16 @@ export class MemoryEngine implements DreamLookup {
         )
       }
       try {
-        const narrativeDoc = await readDocument(join(result.dir, 'dream.md'))
+        const narrativeDoc = await readDocument(this.paths.files, join(result.dir, 'dream.md'))
         await this.reindexOrWarn(narrativeDoc, 'dream', `dream ${result.dreamId} narrative`)
       } catch {
         // No dream.md: the tone gate withheld the narrative. Nothing to index.
       }
-      const commitResult = await commitMemory(this.paths.root, `dream: ${args.period}`)
+      const commitResult = await commitMemory(
+        this.paths.files,
+        this.paths.root,
+        `dream: ${args.period}`,
+      )
       if (!commitResult.ok && commitResult.warning) {
         this.warnings.push(commitResult.warning)
       }
@@ -3049,7 +3249,7 @@ export class MemoryEngine implements DreamLookup {
   ): Promise<void> {
     try {
       await appendDreamLog(this.paths, [
-        { ts: new Date().toISOString(), type: 'attempt', period, trigger, outcome, reason },
+        { ts: this.now().toISOString(), type: 'attempt', period, trigger, outcome, reason },
       ])
     } catch (err) {
       this.warnings.push(
@@ -3072,7 +3272,7 @@ export class MemoryEngine implements DreamLookup {
         const node = this.graphState.nodes.get(seed.id)
         if (node?.doc) {
           try {
-            body = (await readDocument(node.doc)).body
+            body = (await readDocument(this.paths.files, node.doc)).body
           } catch {
             body = undefined
           }
@@ -3274,11 +3474,11 @@ function kebabCase(name: string): string {
   return slug.length > 0 ? slug : 'untitled'
 }
 
-async function uniqueSlug(dir: string, name: string): Promise<string> {
+async function uniqueSlug(files: FileStore, dir: string, name: string): Promise<string> {
   const base = kebabCase(name)
   let existing: Set<string>
   try {
-    existing = new Set((await readdir(dir)).map((f) => f.replace(/\.md$/, '')))
+    existing = new Set((await files.readdir(dir)).map((f) => f.replace(/\.md$/, '')))
   } catch {
     existing = new Set()
   }

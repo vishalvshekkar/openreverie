@@ -8,6 +8,13 @@ interface RecordedCall {
   init: RequestInit | undefined
 }
 
+// prompt_tokens is the sum of the batch's own text lengths: deterministic,
+// and different per batch, so a test that sums it across two batches can
+// tell a correct sum apart from one batch's number reported alone.
+function batchPromptTokens(texts: string[]): number {
+  return texts.reduce((sum, t) => sum + t.length, 0)
+}
+
 function fakeEmbeddingFetch(): { fetch: FetchLike; calls: RecordedCall[] } {
   const calls: RecordedCall[] = []
   const fetchImpl: FetchLike = async (input, init) => {
@@ -18,7 +25,11 @@ function fakeEmbeddingFetch(): { fetch: FetchLike; calls: RecordedCall[] } {
     // index rather than trusting response array order.
     const items = body.input.map((text, i) => ({ index: i, embedding: [text.length, i] }))
     const data = [...items].reverse()
-    return new Response(JSON.stringify({ data }), { status: 200 })
+    const usage = {
+      prompt_tokens: batchPromptTokens(body.input),
+      total_tokens: batchPromptTokens(body.input),
+    }
+    return new Response(JSON.stringify({ data, usage }), { status: 200 })
   }
   return { fetch: fetchImpl, calls }
 }
@@ -39,14 +50,19 @@ describe('OpenAiEmbeddingProvider.embed', () => {
     expect(body.input).toEqual(['a', 'bb', 'ccc'])
     // The fake returns entries in reverse order; embed must use each
     // entry's index field to restore the original input order.
-    expect(result).toEqual([
+    expect(result.vectors).toEqual([
       [1, 0],
       [2, 1],
       [3, 2],
     ])
+    expect(result.usage).toEqual({
+      model: 'text-embedding-3-small',
+      inputTokens: 6,
+      outputTokens: 0,
+    })
   })
 
-  it('batches over 100 texts and preserves order across batches', async () => {
+  it('batches over 100 texts, preserves order across batches, and sums usage across both', async () => {
     const { fetch, calls } = fakeEmbeddingFetch()
     const provider = new OpenAiEmbeddingProvider({ apiKey: 'sk-test' }, fetch)
     const texts = Array.from({ length: 150 }, (_, i) => `text-${i}`)
@@ -61,12 +77,48 @@ describe('OpenAiEmbeddingProvider.embed', () => {
     expect(firstBody.input).toEqual(texts.slice(0, 100))
     expect(secondBody.input).toEqual(texts.slice(100))
 
-    expect(result).toHaveLength(150)
+    expect(result.vectors).toHaveLength(150)
     // Each embedding's second component is the within-batch position it
     // reordered from; the length component reveals which text produced it.
-    result.forEach((embedding, i) => {
+    result.vectors.forEach((embedding, i) => {
       expect(embedding[0]).toBe(texts[i]?.length)
     })
+
+    // The true total is both batches' token counts added together, not
+    // either one alone: proves embed() sums across every batch instead of
+    // reporting only the last (or first) response's usage.
+    const expectedTokens =
+      batchPromptTokens(texts.slice(0, 100)) + batchPromptTokens(texts.slice(100))
+    expect(result.usage).toEqual({
+      model: 'text-embedding-3-small',
+      inputTokens: expectedTokens,
+      outputTokens: 0,
+    })
+  })
+
+  it('omits usage entirely rather than report a partial sum, when one batch response carries no usage', async () => {
+    const texts = Array.from({ length: 150 }, (_, i) => `text-${i}`)
+    let callCount = 0
+    const fetchImpl: FetchLike = async (_input, init) => {
+      callCount += 1
+      const body = JSON.parse(String(init?.body)) as { input: string[] }
+      const data = body.input.map((text, i) => ({ index: i, embedding: [text.length, i] }))
+      // Only the first batch's response carries a usage field, as if a
+      // proxy stripped it from the second: a total built only from what
+      // the first call reported would be a fabricated whole, not a
+      // smaller true count, so the caller must get no number at all.
+      const usage =
+        callCount === 1
+          ? { prompt_tokens: batchPromptTokens(body.input), total_tokens: 0 }
+          : undefined
+      return new Response(JSON.stringify({ data, ...(usage ? { usage } : {}) }), { status: 200 })
+    }
+    const provider = new OpenAiEmbeddingProvider({ apiKey: 'sk-test' }, fetchImpl)
+
+    const result = await provider.embed('text-embedding-3-small', texts)
+
+    expect(callCount).toBe(2)
+    expect(result.usage).toBeUndefined()
   })
 
   it('throws with status and truncated body on a non-2xx response', async () => {

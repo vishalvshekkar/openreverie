@@ -12,6 +12,7 @@ import {
   type MemoryPaths,
   memoryPaths,
   newId,
+  nodeStores,
   recordCommitment,
   SessionStore,
   writeDocumentAtomic,
@@ -46,11 +47,12 @@ function fakeDeps(chat: FakeChatProvider): EngineDeps {
     embeddings: new FakeEmbeddingProvider(),
     reflectionModel: 'fake-reflect',
     embeddingModel: 'fake-embed',
+    timezone: 'UTC',
   }
 }
 
 async function pinTimezoneUtc(paths: MemoryPaths): Promise<void> {
-  const profile = await loadProfile(paths)
+  const profile = await loadProfile(paths, 'UTC')
   await writeProfile(paths, {
     meta: { ...profile.meta, timezone: 'UTC', timezoneSource: 'user-confirmed' },
     body: profile.body,
@@ -78,7 +80,7 @@ async function writeDream(
 ): Promise<void> {
   const dir = join(paths.dreamsDir, `${args.date}-${args.dreamId}`)
   await mkdir(dir, { recursive: true })
-  await writeDocumentAtomic({
+  await writeDocumentAtomic(paths.files, {
     path: join(dir, 'insight.md'),
     meta: {
       id: newId('doc'),
@@ -98,8 +100,8 @@ describe('assembleSystemPrompt', () => {
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'openreverie-context-'))
-    paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
   })
 
   afterEach(async () => {
@@ -107,14 +109,14 @@ describe('assembleSystemPrompt', () => {
   })
 
   it('leads with the persona, then renders every populated section in the specified order with its details', async () => {
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: paths.constitution,
       meta: { id: newId('doc') },
       body: 'The user prefers direct, unflinching honesty over comfort.\n',
     })
 
     const realmPath = join(paths.realmsDir, 'fitness.md')
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: realmPath,
       meta: { id: newId('doc'), name: 'Fitness' },
       body: 'Running, lifting, and sleep consistency.\n',
@@ -132,7 +134,7 @@ describe('assembleSystemPrompt', () => {
 
     const arcId = 'arc_marathon'
     const arcPath = join(paths.arcsDir, 'marathon.md')
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: arcPath,
       meta: {
         id: newId('doc'),
@@ -153,14 +155,14 @@ describe('assembleSystemPrompt', () => {
       },
     ])
 
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: join(paths.rollupsDailyDir, '2026-08-10.md'),
       meta: { id: newId('doc'), date: '2026-08-10' },
       body: 'A steady day of small wins.\n',
     })
 
     const pagedPersonPath = join(paths.peopleDir, 'priya.md')
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: pagedPersonPath,
       meta: { id: newId('doc'), name: 'Priya', node: 'person_paged', opened: '2026-08-01' },
       body: 'This page is new. It grows as we talk.\n',
@@ -192,12 +194,12 @@ describe('assembleSystemPrompt', () => {
 
     const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)
     const store = await SessionStore.start(paths, yesterday)
-    await store.appendLine({
+    await store.appendLine(paths, {
       ts: yesterday.toISOString(),
       role: 'user',
       content: 'A quiet evening.',
     })
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: join(store.dir, 'summary.md'),
       meta: {
         id: newId('doc'),
@@ -280,7 +282,7 @@ describe('assembleSystemPrompt', () => {
     // optional-section rendering (rather than the first-conversation
     // flow) is what is under test here.
     const dormantArcPath = join(paths.arcsDir, 'dormant-arc.md')
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: dormantArcPath,
       meta: { id: newId('doc'), name: 'Dormant Arc', status: 'dormant' },
       body: 'On pause.\n',
@@ -317,7 +319,7 @@ describe('assembleSystemPrompt', () => {
 
   it('includes realm names with their first line when realms exist', async () => {
     const realmPath = join(paths.realmsDir, 'fitness.md')
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: realmPath,
       meta: { id: newId('doc'), name: 'Fitness' },
       body: 'Running, lifting, and sleep consistency.\nMore notes below.\n',
@@ -336,7 +338,7 @@ describe('assembleSystemPrompt', () => {
     // the normal optional-section rendering applies here rather than the
     // first-conversation flow.
     const arcPath = join(paths.arcsDir, 'marathon.md')
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: arcPath,
       meta: { id: newId('doc'), name: 'Marathon Training', status: 'active' },
       body: 'Training for the fall marathon.\n',
@@ -371,18 +373,18 @@ describe('assembleSystemPrompt', () => {
     // directly (a session counts as reflected once summary.md exists;
     // see transcripts.ts SessionStore.listSessions).
     const store = await SessionStore.start(paths, yesterday)
-    await store.appendLine({
+    await store.appendLine(paths, {
       ts: yesterday.toISOString(),
       role: 'user',
       content: 'A quiet evening.',
     })
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: join(store.dir, 'summary.md'),
       meta: { id: newId('doc') },
       body: 'Talked through a quiet, low-key evening.\n',
     })
 
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: join(paths.rollupsDailyDir, '2026-08-10.md'),
       meta: { id: newId('doc'), date: '2026-08-10' },
       body: 'A steady day of small wins.\n',
@@ -404,13 +406,13 @@ describe('assembleSystemPrompt', () => {
     await pinTimezoneUtc(paths)
     const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000)
     const store = await SessionStore.start(paths, twoDaysAgo)
-    await store.appendLine({
+    await store.appendLine(paths, {
       ts: twoDaysAgo.toISOString(),
       role: 'user',
       content: 'A short, uneventful check-in.',
     })
     const dateString = twoDaysAgo.toISOString().slice(0, 10)
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: join(store.dir, 'summary.md'),
       meta: { id: newId('doc') },
       body: 'Checked in briefly, nothing pressing.\n',
@@ -430,9 +432,9 @@ describe('assembleSystemPrompt', () => {
     await pinTimezoneUtc(paths)
     const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)
     const store = await SessionStore.start(paths, yesterday)
-    await store.appendLine({ ts: yesterday.toISOString(), role: 'user', content: 'Hi.' })
+    await store.appendLine(paths, { ts: yesterday.toISOString(), role: 'user', content: 'Hi.' })
     const dateString = yesterday.toISOString().slice(0, 10)
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: join(store.dir, 'summary.md'),
       meta: {
         id: newId('doc'),
@@ -462,9 +464,9 @@ describe('assembleSystemPrompt', () => {
     await pinTimezoneUtc(paths)
     const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)
     const store = await SessionStore.start(paths, yesterday)
-    await store.appendLine({ ts: yesterday.toISOString(), role: 'user', content: 'Hi.' })
+    await store.appendLine(paths, { ts: yesterday.toISOString(), role: 'user', content: 'Hi.' })
     const dateString = yesterday.toISOString().slice(0, 10)
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: join(store.dir, 'summary.md'),
       meta: {
         id: newId('doc'),
@@ -581,8 +583,8 @@ describe('assembleSystemPrompt', () => {
     await pinTimezoneUtc(paths)
     const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)
     const store = await SessionStore.start(paths, yesterday)
-    await store.appendLine({ ts: yesterday.toISOString(), role: 'user', content: 'Hi.' })
-    await writeDocumentAtomic({
+    await store.appendLine(paths, { ts: yesterday.toISOString(), role: 'user', content: 'Hi.' })
+    await writeDocumentAtomic(paths.files, {
       path: join(store.dir, 'summary.md'),
       meta: {
         id: newId('doc'),
@@ -616,8 +618,8 @@ describe('assembleSystemPrompt', () => {
     await pinTimezoneUtc(paths)
     const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)
     const store = await SessionStore.start(paths, yesterday)
-    await store.appendLine({ ts: yesterday.toISOString(), role: 'user', content: 'Hi.' })
-    await writeDocumentAtomic({
+    await store.appendLine(paths, { ts: yesterday.toISOString(), role: 'user', content: 'Hi.' })
+    await writeDocumentAtomic(paths.files, {
       path: join(store.dir, 'summary.md'),
       meta: {
         id: newId('doc'),
@@ -645,12 +647,12 @@ describe('assembleSystemPrompt', () => {
     // guided onboarding flow instead).
     async function markNotFirstSession(): Promise<void> {
       const store = await SessionStore.start(paths, new Date('2026-08-01T00:00:00.000Z'))
-      await store.appendLine({
+      await store.appendLine(paths, {
         ts: '2026-08-01T00:00:00.000Z',
         role: 'user',
         content: 'An earlier session.',
       })
-      await writeDocumentAtomic({
+      await writeDocumentAtomic(paths.files, {
         path: join(store.dir, 'summary.md'),
         meta: { id: newId('doc') },
         body: 'A quiet day.\n',
@@ -660,23 +662,27 @@ describe('assembleSystemPrompt', () => {
     it("renders a commitment with the person's own words, never the bracket", async () => {
       await pinTimezoneUtc(paths)
       await markNotFirstSession()
-      await recordCommitment(paths, {
-        label: 'Start swimming again',
-        flavor: 'plan',
-        sessionId: 'session_test',
-        timing: {
-          words: 'come summer',
-          anchor: '2026-08-13T09:00:00.000Z',
-          interpretation: {
-            statedPrecision: 'period',
-            gloss:
-              'Summer where they live, Bangalore, runs roughly February to May, so this points at early 2027.',
-            bracketFrom: '2027-02-01',
-            bracketTo: '2027-05-31',
-            interpretationConfidence: 'medium',
+      await recordCommitment(
+        paths,
+        {
+          label: 'Start swimming again',
+          flavor: 'plan',
+          sessionId: 'session_test',
+          timing: {
+            words: 'come summer',
+            anchor: '2026-08-13T09:00:00.000Z',
+            interpretation: {
+              statedPrecision: 'period',
+              gloss:
+                'Summer where they live, Bangalore, runs roughly February to May, so this points at early 2027.',
+              bracketFrom: '2027-02-01',
+              bracketTo: '2027-05-31',
+              interpretationConfidence: 'medium',
+            },
           },
         },
-      })
+        new Date(),
+      )
 
       const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
       // 2027-01-10 sits inside the period lead window (eligible from
@@ -706,11 +712,15 @@ describe('assembleSystemPrompt', () => {
       // that and never reaches this standing, always-rendered section.
       await pinTimezoneUtc(paths)
       await markNotFirstSession()
-      await recordCommitment(paths, {
-        label: 'Do something, someday',
-        flavor: 'errand',
-        sessionId: 'session_test',
-      })
+      await recordCommitment(
+        paths,
+        {
+          label: 'Do something, someday',
+          flavor: 'errand',
+          sessionId: 'session_test',
+        },
+        new Date(),
+      )
 
       const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
       const prompt = await assembleSystemPrompt(engine, testConfig())
@@ -724,16 +734,20 @@ describe('assembleSystemPrompt', () => {
     it('states that a recorded commitment is not evidence the thing happened', async () => {
       await pinTimezoneUtc(paths)
       await markNotFirstSession()
-      await recordCommitment(paths, {
-        label: 'Call the dentist',
-        flavor: 'errand',
-        sessionId: 'session_test',
-        timing: {
-          words: 'today',
-          anchor: '2026-08-14T09:00:00.000Z',
-          resolved: { from: '2026-08-14', to: '2026-08-14', statedPrecision: 'day' },
+      await recordCommitment(
+        paths,
+        {
+          label: 'Call the dentist',
+          flavor: 'errand',
+          sessionId: 'session_test',
+          timing: {
+            words: 'today',
+            anchor: '2026-08-14T09:00:00.000Z',
+            resolved: { from: '2026-08-14', to: '2026-08-14', statedPrecision: 'day' },
+          },
         },
-      })
+        new Date(),
+      )
 
       const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
       const prompt = await assembleSystemPrompt(
@@ -765,22 +779,26 @@ describe('assembleSystemPrompt', () => {
     it('renders byte-identical across two different clock reads that both keep the same commitment eligible', async () => {
       await pinTimezoneUtc(paths)
       await markNotFirstSession()
-      await recordCommitment(paths, {
-        label: 'Start swimming again',
-        flavor: 'plan',
-        sessionId: 'session_test',
-        timing: {
-          words: 'come summer',
-          anchor: '2026-08-13T09:00:00.000Z',
-          interpretation: {
-            statedPrecision: 'period',
-            gloss: 'Summer where they live runs roughly February to May.',
-            bracketFrom: '2027-02-01',
-            bracketTo: '2027-05-31',
-            interpretationConfidence: 'medium',
+      await recordCommitment(
+        paths,
+        {
+          label: 'Start swimming again',
+          flavor: 'plan',
+          sessionId: 'session_test',
+          timing: {
+            words: 'come summer',
+            anchor: '2026-08-13T09:00:00.000Z',
+            interpretation: {
+              statedPrecision: 'period',
+              gloss: 'Summer where they live runs roughly February to May.',
+              bracketFrom: '2027-02-01',
+              bracketTo: '2027-05-31',
+              interpretationConfidence: 'medium',
+            },
           },
         },
-      })
+        new Date(),
+      )
 
       const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
       // Both dates fall inside the same eligible window (2027-01-02 onward);
@@ -816,7 +834,7 @@ describe('assembleSystemPrompt', () => {
     // conversation (which would replace every normal section, including
     // People, with the guided onboarding flow instead).
     const store = await SessionStore.start(paths, new Date())
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: join(store.dir, 'summary.md'),
       meta: { id: newId('doc') },
       body: 'A prior session.\n',
@@ -846,7 +864,7 @@ describe('assembleSystemPrompt', () => {
   })
 
   it('states the timezone in a Time section near the top, with no clock in it', async () => {
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: paths.constitution,
       meta: { id: newId('doc') },
       body: 'The user prefers direct, unflinching honesty over comfort.\n',
@@ -855,7 +873,7 @@ describe('assembleSystemPrompt', () => {
     // the normal optional-section rendering applies here rather than the
     // first-conversation flow, and "## Constitution" actually renders.
     const arcPath = join(paths.arcsDir, 'marathon.md')
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: arcPath,
       meta: { id: newId('doc'), name: 'Marathon Training', status: 'active' },
       body: 'Training for the fall marathon.\n',
@@ -1092,7 +1110,7 @@ describe('assembleSystemPrompt', () => {
         dreamId: 'dream_a',
         insights: [makeInsight({ id: 'ins_hidden1' })],
       })
-      const profile = await loadProfile(paths)
+      const profile = await loadProfile(paths, 'UTC')
       await writeProfile(paths, {
         meta: { ...profile.meta, dreams: { promptSection: false } },
         body: profile.body,
@@ -1231,7 +1249,7 @@ describe('assembleSystemPrompt', () => {
           label: 'Any Arc',
         },
       ])
-      await writeDocumentAtomic({
+      await writeDocumentAtomic(paths.files, {
         path: paths.journaling,
         meta: { id: newId('doc'), kind: 'journaling', updated: '2026-08-01T00:00:00.000Z' },
         body: 'Gratitude, three times a week.\n',
@@ -1331,8 +1349,12 @@ describe('assembleSystemPrompt', () => {
     it('omits the First conversation section once a session has been reflected', async () => {
       const startedAt = new Date(Date.now() - 24 * 60 * 60 * 1000)
       const store = await SessionStore.start(paths, startedAt)
-      await store.appendLine({ ts: startedAt.toISOString(), role: 'user', content: 'Hello.' })
-      await writeDocumentAtomic({
+      await store.appendLine(paths, {
+        ts: startedAt.toISOString(),
+        role: 'user',
+        content: 'Hello.',
+      })
+      await writeDocumentAtomic(paths.files, {
         path: join(store.dir, 'summary.md'),
         meta: { id: newId('doc') },
         body: 'A first, brief hello.\n',
@@ -1348,7 +1370,7 @@ describe('assembleSystemPrompt', () => {
 
     it('omits the First conversation section when an arc already exists, even with no reflected sessions', async () => {
       const arcPath = join(paths.arcsDir, 'marathon.md')
-      await writeDocumentAtomic({
+      await writeDocumentAtomic(paths.files, {
         path: arcPath,
         meta: { id: newId('doc'), name: 'Marathon Training', status: 'active' },
         body: 'Training for the fall marathon.\n',
@@ -1412,7 +1434,7 @@ describe('assembleSystemPrompt', () => {
 
   it('never contains an em dash character', async () => {
     const arcPath = join(paths.arcsDir, 'marathon.md')
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: arcPath,
       meta: { id: newId('doc'), name: 'Marathon Training', status: 'active' },
       body: 'Training for the fall marathon.\n',
@@ -1439,8 +1461,8 @@ describe('assembleSystemPrompt', () => {
   it('renders each recent session id so the model can pass one to read_transcript', async () => {
     const startedAt = new Date('2026-08-15T09:00:00.000Z')
     const store = await SessionStore.start(paths, startedAt, 'UTC')
-    await store.appendLine({ ts: startedAt.toISOString(), role: 'user', content: 'Hello.' })
-    await writeDocumentAtomic({
+    await store.appendLine(paths, { ts: startedAt.toISOString(), role: 'user', content: 'Hello.' })
+    await writeDocumentAtomic(paths.files, {
       path: join(store.dir, 'summary.md'),
       meta: {
         id: newId('doc'),
@@ -1484,8 +1506,8 @@ describe('assembleSystemPrompt', () => {
     // out of "## Recent sessions" and the first assertion below fails.
     const startedAt = new Date('2020-01-01T09:00:00.000Z')
     const store = await SessionStore.start(paths, startedAt, 'UTC')
-    await store.appendLine({ ts: startedAt.toISOString(), role: 'user', content: 'Hello.' })
-    await writeDocumentAtomic({
+    await store.appendLine(paths, { ts: startedAt.toISOString(), role: 'user', content: 'Hello.' })
+    await writeDocumentAtomic(paths.files, {
       path: join(store.dir, 'summary.md'),
       meta: {
         id: newId('doc'),
@@ -1735,7 +1757,7 @@ describe('assembleSystemPrompt', () => {
     // omission rather than by the section actually working there.
     it('renders during a non-first session too', async () => {
       const arcPath = join(paths.arcsDir, 'marathon.md')
-      await writeDocumentAtomic({
+      await writeDocumentAtomic(paths.files, {
         path: arcPath,
         meta: { id: newId('doc'), name: 'Marathon Training', status: 'active' },
         body: 'Training for the fall marathon.\n',
@@ -1790,8 +1812,8 @@ describe('assembleSystemPrompt budget', () => {
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'openreverie-context-budget-'))
-    paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
   })
 
   afterEach(async () => {
@@ -1806,7 +1828,7 @@ describe('assembleSystemPrompt budget', () => {
     const docId = newId('doc')
     const sentinel = 'THE SENTINEL SENTENCE THAT IS NEVER SHOWN'
     const body = `${'a'.repeat(6000)}\n\n${'b'.repeat(1000)}\n\n${sentinel}`
-    await writeDocumentAtomic({ path: paths.constitution, meta: { id: docId }, body })
+    await writeDocumentAtomic(paths.files, { path: paths.constitution, meta: { id: docId }, body })
     await appendGraph(paths, [
       {
         ts: '2026-08-01T00:00:00.000Z',
@@ -1831,7 +1853,7 @@ describe('assembleSystemPrompt budget', () => {
   })
 
   it('leaves a short constitution uncapped and with no truncation marker', async () => {
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: paths.constitution,
       meta: { id: newId('doc') },
       body: 'The user prefers direct, unflinching honesty.\n',
@@ -1856,7 +1878,7 @@ describe('assembleSystemPrompt budget', () => {
   })
 
   it('clips each realm first line to 160 characters', async () => {
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: join(paths.realmsDir, 'fitness.md'),
       meta: { id: newId('doc'), name: 'Fitness' },
       body: `${'x'.repeat(200)}\n`,
@@ -1903,7 +1925,7 @@ describe('assembleSystemPrompt budget', () => {
       const touched = new Date(baseDate.getTime() - (32 - i) * 24 * 60 * 60 * 1000)
         .toISOString()
         .slice(0, 10)
-      await writeDocumentAtomic({
+      await writeDocumentAtomic(paths.files, {
         path: arcPath,
         meta: {
           id: newId('doc'),
@@ -1946,7 +1968,7 @@ describe('assembleSystemPrompt budget', () => {
     for (let i = 0; i < 20; i++) {
       const name = `${longName} ${String(i).padStart(2, '0')}`
       const arcPath = join(paths.arcsDir, `long-arc-${i}.md`)
-      await writeDocumentAtomic({
+      await writeDocumentAtomic(paths.files, {
         path: arcPath,
         meta: {
           id: newId('doc'),
@@ -1978,7 +2000,7 @@ describe('assembleSystemPrompt budget', () => {
   })
   it('shows no arcs marker when under the cap, and orders undated arcs last', async () => {
     const datedPath = join(paths.arcsDir, 'touched.md')
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: datedPath,
       meta: { id: newId('doc'), name: 'Touched Arc', status: 'active', updated: '2026-08-10' },
       body: 'Touched.\n',
@@ -2027,7 +2049,7 @@ describe('assembleSystemPrompt budget', () => {
   it('caps an over-long daily rollup and hands back its docId', async () => {
     const docId = newId('doc')
     const sentinel = 'THE ROLLUP SENTINEL'
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: join(paths.rollupsDailyDir, '2026-08-10.md'),
       meta: { id: docId, date: '2026-08-10' },
       body: `${'c'.repeat(2500)}\n\n${sentinel}`,
@@ -2056,7 +2078,7 @@ describe('assembleSystemPrompt budget', () => {
     const store = await SessionStore.start(paths, new Date(Date.now() - 24 * 60 * 60 * 1000))
     const docId = newId('doc')
     const sentinel = 'THE SUMMARY SENTINEL'
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: join(store.dir, 'summary.md'),
       meta: { id: docId },
       body: `${'d'.repeat(2000)}\n\n${sentinel}`,
@@ -2079,8 +2101,8 @@ describe('assembleSystemPrompt rollup shelf', () => {
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'openreverie-context-shelf-'))
-    paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
   })
 
   afterEach(async () => {
@@ -2103,13 +2125,13 @@ describe('assembleSystemPrompt rollup shelf', () => {
       const week = `2026-W${String(w).padStart(2, '0')}`
       const docId = newId('doc')
       ids.push(docId)
-      await writeDocumentAtomic({
+      await writeDocumentAtomic(paths.files, {
         path: join(paths.rollupsWeeklyDir, `${week}.md`),
         meta: { id: docId, kind: 'rollup_weekly', week },
         body: `Week ${w} content that must never be preloaded.\n`,
       })
     }
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: join(paths.rollupsDailyDir, '2026-08-10.md'),
       meta: { id: newId('doc'), date: '2026-08-10' },
       body: 'A steady day.\n',
@@ -2159,14 +2181,14 @@ describe('assembleSystemPrompt rollup shelf', () => {
 
     for (let w = 19; w <= 33; w++) {
       const week = `2026-W${String(w).padStart(2, '0')}`
-      await writeDocumentAtomic({
+      await writeDocumentAtomic(paths.files, {
         path: join(paths.rollupsWeeklyDir, `${week}.md`),
         meta: { id: newId('doc'), kind: 'rollup_weekly', week },
         body: `Week ${w} content.\n`,
       })
     }
     for (const date of ['2026-08-09', '2026-08-10']) {
-      await writeDocumentAtomic({
+      await writeDocumentAtomic(paths.files, {
         path: join(paths.rollupsDailyDir, `${date}.md`),
         meta: { id: newId('doc'), date },
         body: 'A steady day.\n',

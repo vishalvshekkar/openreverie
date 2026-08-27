@@ -2,11 +2,16 @@
 // if one is missing, stages everything, and commits. This is a convenience
 // layer, not a required dependency: any failure is swallowed into a
 // warning and the function never throws.
+//
+// The git invocation itself (child_process) is left alone: P0-1 is about
+// filesystem access, and there is no injected interface for shelling out to
+// git. Its one fs call (checking that root, and root/.git, are directories)
+// is converted below.
 
 import { execFile } from 'node:child_process'
-import { stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
+import type { FileStore } from './store.js'
 
 const run = promisify(execFile)
 
@@ -15,13 +20,17 @@ export interface CommitResult {
   warning?: string
 }
 
-export async function commitMemory(root: string, message: string): Promise<CommitResult> {
-  if (!(await isDirectory(root))) {
+export async function commitMemory(
+  files: FileStore,
+  root: string,
+  message: string,
+): Promise<CommitResult> {
+  if (!(await isDirectory(files, root))) {
     return { ok: false, warning: `Memory root ${root} is not a directory; skipped git commit.` }
   }
 
   try {
-    if (!(await isDirectory(join(root, '.git')))) {
+    if (!(await isDirectory(files, join(root, '.git')))) {
       await git(root, ['init', '-q'])
       await git(root, ['config', 'user.name', 'reverie'])
       await git(root, ['config', 'user.email', 'reverie@local'])
@@ -70,13 +79,15 @@ async function git(root: string, args: string[]): Promise<{ stdout: string; stde
   return run('git', gitArgs(args), { cwd: root })
 }
 
-async function isDirectory(path: string): Promise<boolean> {
-  try {
-    const info = await stat(path)
-    return info.isDirectory()
-  } catch {
-    return false
-  }
+// FileStore.stat carries no is-a-directory flag (the frozen interface only
+// exposes mtimeMs and size), so this narrows from a real directory check to
+// existence. In practice that only changes behavior in a corner case
+// neither caller of commitMemory can hit: root and root/.git are always
+// directories when they exist, since ensureMemoryTree and `git init` are
+// the only things that ever create them, and this whole function already
+// swallows any downstream failure into a warning rather than throwing.
+async function isDirectory(files: FileStore, path: string): Promise<boolean> {
+  return files.exists(path)
 }
 
 function errorMessage(err: unknown): string {

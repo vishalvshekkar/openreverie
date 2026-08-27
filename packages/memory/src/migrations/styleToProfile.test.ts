@@ -2,17 +2,18 @@ import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { nodeStores } from '../nodeStore.js'
 import { ensureMemoryTree, memoryPaths } from '../paths.js'
 import { loadProfile, writeProfile } from '../profile.js'
 import { styleToProfile } from './styleToProfile.js'
 
 async function makeContext(configText: string) {
   const root = await mkdtemp(join(tmpdir(), 'reverie-migrate-'))
-  const paths = memoryPaths(join(root, 'memory'))
-  await ensureMemoryTree(paths)
+  const paths = memoryPaths(join(root, 'memory'), nodeStores())
+  await ensureMemoryTree(paths, 'UTC')
   const configPath = join(root, 'config.toml')
   await writeFile(configPath, configText, 'utf8')
-  return { paths, configPath }
+  return { paths, configPath, timezone: 'UTC' }
 }
 
 const CONFIG_WITH_STYLE = `memoryDir = "/tmp/does-not-matter"
@@ -51,7 +52,7 @@ describe('style-to-profile migration', () => {
     const result = await styleToProfile.apply(ctx, { dryRun: false })
     expect(result.applied).toBe(true)
 
-    const profile = await loadProfile(ctx.paths)
+    const profile = await loadProfile(ctx.paths, ctx.timezone)
     expect(profile.meta.style).toEqual({
       engagement: 'leading',
       tone: 'snarky',
@@ -66,7 +67,7 @@ describe('style-to-profile migration', () => {
   // Case 2: config has no style table and the profile already has style.
   it('is a no-op and reports already done', async () => {
     const ctx = await makeContext(CONFIG_WITHOUT_STYLE)
-    const profile = await loadProfile(ctx.paths)
+    const profile = await loadProfile(ctx.paths, ctx.timezone)
     await writeProfile(ctx.paths, {
       ...profile,
       meta: { ...profile.meta, style: { tone: 'direct' } },
@@ -81,14 +82,14 @@ describe('style-to-profile migration', () => {
   // anyway, and the step says which values it kept and which it discarded.
   it('keeps the profile values and says which config values it discarded', async () => {
     const ctx = await makeContext(CONFIG_WITH_STYLE)
-    const profile = await loadProfile(ctx.paths)
+    const profile = await loadProfile(ctx.paths, ctx.timezone)
     await writeProfile(ctx.paths, {
       ...profile,
       meta: { ...profile.meta, style: { tone: 'direct' } },
     })
 
     const result = await styleToProfile.apply(ctx, { dryRun: false })
-    const merged = await loadProfile(ctx.paths)
+    const merged = await loadProfile(ctx.paths, ctx.timezone)
     expect(merged.meta.style?.tone).toBe('direct')
     expect(merged.meta.style?.engagement).toBe('leading')
     const reported = [result.summary, ...result.details].join(' ')

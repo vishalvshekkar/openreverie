@@ -2,11 +2,10 @@
 // make up one user's memory. Everything here is derived from a single root
 // path so the rest of the engine never hardcodes a folder name.
 
-import { access, appendFile, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { newId, writeDocumentAtomic } from './documents.js'
 import { starterProfileDocument } from './profile.js'
-import { systemTimeZone } from './time.js'
+import type { AppendOnlyStore, FileStore, MemoryStores } from './store.js'
 
 export interface MemoryPaths {
   root: string
@@ -26,9 +25,17 @@ export interface MemoryPaths {
   indexDb: string
   dreamsDir: string
   dreamLog: string
+  files: FileStore
+  logs: AppendOnlyStore
 }
 
-export function memoryPaths(root: string): MemoryPaths {
+// `stores` is required, not defaulted, because store.ts (which FileStore
+// and AppendOnlyStore come from) imports nothing and so cannot construct a
+// default implementation for this function to fall back to. Every caller
+// passes one explicitly; nodeStore.ts's nodeStores() is what self-hosted
+// callers (cli, server, tests) pass. See
+// docs/superpowers/specs/2026-08-27-hostable-engine-design.md, P0-1.
+export function memoryPaths(root: string, stores: MemoryStores): MemoryPaths {
   return {
     root,
     constitution: join(root, 'constitution.md'),
@@ -47,13 +54,15 @@ export function memoryPaths(root: string): MemoryPaths {
     indexDb: join(root, 'index.db'),
     dreamsDir: join(root, 'dreams'),
     dreamLog: join(root, 'dreams', 'log.jsonl'),
+    files: stores.files,
+    logs: stores.logs,
   }
 }
 
 const CONSTITUTION_STARTER = 'This constitution is empty. It grows as we talk.\n'
 
-export async function ensureMemoryTree(paths: MemoryPaths): Promise<void> {
-  await mkdir(paths.root, { recursive: true })
+export async function ensureMemoryTree(paths: MemoryPaths, timezone: string): Promise<void> {
+  await paths.files.mkdir(paths.root)
   for (const dir of [
     paths.realmsDir,
     paths.arcsDir,
@@ -64,12 +73,12 @@ export async function ensureMemoryTree(paths: MemoryPaths): Promise<void> {
     paths.journalDir,
     paths.dreamsDir,
   ]) {
-    await mkdir(dir, { recursive: true })
+    await paths.files.mkdir(dir)
   }
 
-  const constitutionExists = await pathExists(paths.constitution)
+  const constitutionExists = await paths.files.exists(paths.constitution)
   if (!constitutionExists) {
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: paths.constitution,
       meta: { id: newId('doc') },
       body: CONSTITUTION_STARTER,
@@ -78,13 +87,16 @@ export async function ensureMemoryTree(paths: MemoryPaths): Promise<void> {
 
   // Unlike the constitution's starter (an empty sentence, since a person's
   // identity is unknown when a folder is created), the profile starter is
-  // not empty: it carries the timezone of the machine reverie is running
-  // on, marked as a system default rather than a fact the person
-  // confirmed. That is what gives the per-message time stamp something to
-  // render from in the very first session.
-  const profileExists = await pathExists(paths.profile)
+  // not empty: it carries the timezone the caller passed in, marked as a
+  // system default rather than a fact the person confirmed. That is what
+  // gives the per-message time stamp something to render from in the very
+  // first session. The caller decides that zone, not this function: a
+  // filesystem-free host has no ambient zone to guess from at all (see
+  // time.ts's systemTimeZone comment), so ensureMemoryTree takes one
+  // rather than reading Intl itself.
+  const profileExists = await paths.files.exists(paths.profile)
   if (!profileExists) {
-    await writeDocumentAtomic(starterProfileDocument(paths.profile, systemTimeZone()))
+    await writeDocumentAtomic(paths.files, starterProfileDocument(paths.profile, timezone))
   }
 
   // Seed .gitignore to exclude the SQLite index, atomic-write temp files,
@@ -97,7 +109,13 @@ export async function ensureMemoryTree(paths: MemoryPaths): Promise<void> {
   // deletion leaves the working tree reporting a pending removal forever
   // after. Ignoring the lock declaratively here, rather than reordering the
   // release, also covers a crashed run that leaves a stale lock behind.
-  await ensureGitignoreLine(paths.root, DREAM_LOCK_IGNORE_LINE)
+  //
+  // Skipped entirely when the store has no versioning capability: this is
+  // git plumbing, not something a host with no git (a Durable Object) has
+  // any use for, so there is nothing to seed.
+  if (paths.files.capabilities.versioning) {
+    await ensureGitignoreLine(paths.files, paths.root, DREAM_LOCK_IGNORE_LINE)
+  }
 }
 
 const DREAM_LOCK_IGNORE_LINE = 'dreams/.lock'
@@ -107,25 +125,26 @@ const DREAM_LOCK_IGNORE_LINE = 'dreams/.lock'
 // existing line already matches it exactly, so a folder created before
 // this rule existed picks it up on the next open without ever touching,
 // reordering, or duplicating anything already there.
-async function ensureGitignoreLine(root: string, line: string): Promise<void> {
+//
+// .gitignore is git plumbing, not a log: it is read whole and rewritten
+// whole (through FileStore, not AppendOnlyStore), which is why this lives
+// in paths.ts rather than being folded into one of the four log modules.
+async function ensureGitignoreLine(files: FileStore, root: string, line: string): Promise<void> {
   const gitignorePath = join(root, '.gitignore')
-  const gitignoreExists = await pathExists(gitignorePath)
+  const gitignoreExists = await files.exists(gitignorePath)
   if (!gitignoreExists) {
-    await writeFile(gitignorePath, `index.db\n*.tmp-*\n${line}\n`, 'utf8')
+    await files.writeFile(gitignorePath, `index.db\n*.tmp-*\n${line}\n`)
     return
   }
-  const existing = await readFile(gitignorePath, 'utf8')
+  const existing = await files.readFile(gitignorePath)
   const alreadyPresent = existing.split('\n').some((row) => row.trim() === line)
   if (alreadyPresent) return
   const separator = existing.length > 0 && !existing.endsWith('\n') ? '\n' : ''
-  await appendFile(gitignorePath, `${separator}${line}\n`, 'utf8')
-}
-
-async function pathExists(path: string): Promise<boolean> {
-  try {
-    await access(path)
-    return true
-  } catch {
-    return false
-  }
+  // No AppendOnlyStore.appendFile equivalent here on purpose: .gitignore is
+  // not a log (see the comment above this function), and FileStore has no
+  // append primitive of its own, so an append becomes an explicit
+  // read-then-writeFile. FileStore.writeFile is atomic (temp file, then
+  // rename), which the original appendFile call was not; the bytes it
+  // produces are identical, only the transient temp file is new.
+  await files.writeFile(gitignorePath, `${existing}${separator}${line}\n`)
 }

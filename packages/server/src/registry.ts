@@ -62,6 +62,16 @@ export interface LiveSessionRegistryOptions {
   maxReplayBytes?: number
   scheduler?: RegistryScheduler
   dreamTrigger?: () => Promise<unknown>
+  // A fire-and-forget promise handed to Node's event loop keeps running on
+  // its own. On Cloudflare Workers it does not: once the request that
+  // started it returns a response, the isolate can be torn down and the
+  // promise cancelled mid-flight, which would cut off a turn or greeting
+  // for someone whose connection drops. This hook is where a host extends
+  // that promise's lifetime past the request. Cloudflare passes
+  // ctx.waitUntil. The default below keeps today's Node behavior exactly:
+  // fire and forget, with no added catch, so a rejection still surfaces
+  // as an unhandled rejection rather than being silently swallowed.
+  runBackground?: (work: Promise<unknown>) => void
 }
 
 export interface RegistryScheduler {
@@ -111,6 +121,7 @@ export class LiveSessionRegistry {
   private readonly cancelSweep: () => void
   private readonly cancelDreamTrigger: () => void
   private readonly dreamTrigger: (() => Promise<unknown>) | undefined
+  private readonly runBackground: (work: Promise<unknown>) => void
   private readonly live = new Map<string, LiveSession>()
   private readonly tombstones = new Map<string, Tombstone>()
   private closed = false
@@ -127,6 +138,11 @@ export class LiveSessionRegistry {
     this.maxReplayEvents = options.maxReplayEvents ?? DEFAULT_REGISTRY_LIMITS.maxReplayEvents
     this.maxReplayBytes = options.maxReplayBytes ?? DEFAULT_REGISTRY_LIMITS.maxReplayBytes
     this.dreamTrigger = options.dreamTrigger
+    // Same posture as `void work` would give: nothing is attached to
+    // `work`, so a rejection surfaces as an unhandled rejection exactly as
+    // it did before this hook existed. Only a host that actually needs to
+    // extend the promise's lifetime (Workers' ctx.waitUntil) overrides this.
+    this.runBackground = options.runBackground ?? ((work) => void work)
     const scheduler = options.scheduler ?? nodeIntervalScheduler
     this.cancelSweep = scheduler.schedule(() => {
       if (!this.closed) this.sweep()
@@ -198,6 +214,10 @@ export class LiveSessionRegistry {
       live.lastActivity = this.now()
       this.notify(live)
     })
+    // create() returns below before the greeting finishes streaming, the
+    // same detached shape as runTurn: routed through runBackground so a
+    // host can keep it alive past this request.
+    this.runBackground(live.greeting)
     return {
       ...live.public,
       initialGreetingStreamUrl: `/api/v1/sessions/${encodeURIComponent(agent.sessionId)}/events`,
@@ -243,7 +263,13 @@ export class LiveSessionRegistry {
     }
     live.turns.set(turnId, turn)
     live.activeTurnId = turnId
-    void this.runTurn(live, turnId, turn, body.message)
+    // Detached on purpose: the caller below only subscribes to replay, it
+    // does not drive completion. Handed to runBackground rather than a
+    // bare `void` so a host can keep the turn running past this request:
+    // on Cloudflare Workers a bare `void` promise is cancelled once the
+    // response is sent, which would cut a person off mid-turn if their
+    // connection drops.
+    this.runBackground(this.runTurn(live, turnId, turn, body.message))
     yield* this.replayOrSubscribe(live, turn, after ?? turn.startSeq - 1)
   }
 

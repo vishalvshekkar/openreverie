@@ -8,6 +8,7 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { commitMemory, gitArgs } from './gitSync.js'
+import { nodeStores } from './nodeStore.js'
 
 const run = promisify(execFile)
 
@@ -18,6 +19,7 @@ async function revCount(dir: string): Promise<number> {
 
 describe('commitMemory', () => {
   let dir: string
+  const files = nodeStores().files
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'openreverie-gitsync-'))
@@ -30,7 +32,7 @@ describe('commitMemory', () => {
   it('initializes a repo and makes the first commit', async () => {
     await writeFile(join(dir, 'note.md'), 'first note\n', 'utf8')
 
-    const result = await commitMemory(dir, 'initial commit')
+    const result = await commitMemory(files, dir, 'initial commit')
 
     expect(result).toEqual({ ok: true })
     expect(await revCount(dir)).toBe(1)
@@ -38,9 +40,9 @@ describe('commitMemory', () => {
 
   it('is ok when a second call has nothing new to commit', async () => {
     await writeFile(join(dir, 'note.md'), 'first note\n', 'utf8')
-    await commitMemory(dir, 'initial commit')
+    await commitMemory(files, dir, 'initial commit')
 
-    const result = await commitMemory(dir, 'nothing changed')
+    const result = await commitMemory(files, dir, 'nothing changed')
 
     expect(result).toEqual({ ok: true })
     expect(await revCount(dir)).toBe(1)
@@ -48,10 +50,10 @@ describe('commitMemory', () => {
 
   it('commits again when a file changes', async () => {
     await writeFile(join(dir, 'note.md'), 'first note\n', 'utf8')
-    await commitMemory(dir, 'initial commit')
+    await commitMemory(files, dir, 'initial commit')
 
     await writeFile(join(dir, 'note.md'), 'updated note\n', 'utf8')
-    const result = await commitMemory(dir, 'second commit')
+    const result = await commitMemory(files, dir, 'second commit')
 
     expect(result).toEqual({ ok: true })
     expect(await revCount(dir)).toBe(2)
@@ -60,7 +62,7 @@ describe('commitMemory', () => {
   it('returns ok false with a warning when the root does not exist', async () => {
     const notADir = join(dir, 'missing-root')
 
-    const result = await commitMemory(notADir, 'irrelevant')
+    const result = await commitMemory(files, notADir, 'irrelevant')
 
     expect(result.ok).toBe(false)
     expect(result.warning).toBeTruthy()
@@ -70,7 +72,7 @@ describe('commitMemory', () => {
     const filePath = join(dir, 'not-a-dir')
     await writeFile(filePath, 'this is a file, not a memory root\n', 'utf8')
 
-    const result = await commitMemory(filePath, 'irrelevant')
+    const result = await commitMemory(files, filePath, 'irrelevant')
 
     expect(result.ok).toBe(false)
     expect(result.warning).toBeTruthy()
@@ -81,7 +83,7 @@ describe('commitMemory', () => {
     // with "invalid gitfile format" instead of succeeding.
     await writeFile(join(dir, '.git'), 'not a real git dir\n', 'utf8')
 
-    const result = await commitMemory(dir, 'irrelevant')
+    const result = await commitMemory(files, dir, 'irrelevant')
 
     expect(result.ok).toBe(false)
     expect(result.warning).toBeTruthy()
@@ -94,7 +96,7 @@ describe('commitMemory', () => {
     await run('git', ['init', '-q'], { cwd: dir, env })
     await writeFile(join(dir, 'note.md'), 'test note\n', 'utf8')
 
-    const result = await commitMemory(dir, 'user-init commit')
+    const result = await commitMemory(files, dir, 'user-init commit')
 
     expect(result).toEqual({ ok: true })
     expect(await revCount(dir)).toBe(1)

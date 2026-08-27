@@ -63,7 +63,10 @@ const BASELINE_RECALL_AT_5_FLOOR = 0.83
 const FTS_REGRESSION_CLUSTER = ['q11', 'q12']
 
 function embedFn(provider: BagOfWordsEmbeddingProvider): EmbedFn {
-  return (texts: string[]) => provider.embed(EVAL_MODEL, texts)
+  return async (texts: string[]) => {
+    const { vectors } = await provider.embed(EVAL_MODEL, texts)
+    return vectors
+  }
 }
 
 describe('retrieval eval metric correctness', () => {
@@ -138,7 +141,13 @@ describe('retrieval eval (fixture corpus)', () => {
     embeddings = new BagOfWordsEmbeddingProvider()
 
     for (const fixture of evalFixtureDocuments()) {
-      await index.upsertDocument(fixture.doc, fixture.kind, embedFn(embeddings))
+      await index.upsertDocument(
+        fixture.doc,
+        fixture.kind,
+        embedFn(embeddings),
+        EVAL_MODEL,
+        '2026-01-01T00:00:00.000Z',
+      )
     }
 
     results = await runRetrievalEval(index, embeddings, EVAL_MODEL, EVAL_QUERIES)

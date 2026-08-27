@@ -9,10 +9,12 @@ import {
   readDocument,
   writeDocumentAtomic,
 } from './documents.js'
+import { nodeStores } from './nodeStore.js'
 import { ensureMemoryTree, memoryPaths } from './paths.js'
 
 describe('documents', () => {
   let dir: string
+  const files = nodeStores().files
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'openreverie-memory-'))
@@ -39,8 +41,8 @@ describe('documents', () => {
       meta: { id: newId('doc'), title: 'A note' },
       body: 'This is the body of the note.\n',
     }
-    await writeDocumentAtomic(doc)
-    const read = await readDocument(path)
+    await writeDocumentAtomic(files, doc)
+    const read = await readDocument(files, path)
     expect(read.path).toBe(path)
     expect(read.meta).toEqual(doc.meta)
     expect(read.body).toBe(doc.body)
@@ -54,8 +56,8 @@ describe('documents', () => {
       meta: { id: newId('doc') },
       body: inputBody,
     }
-    await writeDocumentAtomic(doc)
-    const read = await readDocument(path)
+    await writeDocumentAtomic(files, doc)
+    const read = await readDocument(files, path)
     expect(read.body).toBe(`${inputBody}\n`)
   })
 
@@ -67,8 +69,8 @@ describe('documents', () => {
       meta: { id: newId('doc') },
       body: inputBody,
     }
-    await writeDocumentAtomic(doc)
-    const read = await readDocument(path)
+    await writeDocumentAtomic(files, doc)
+    const read = await readDocument(files, path)
     expect(read.body).toBe('This is the body with multiple newlines\n')
   })
 
@@ -79,7 +81,7 @@ describe('documents', () => {
       meta: { id: newId('doc') },
       body: 'body text',
     }
-    await writeDocumentAtomic(doc)
+    await writeDocumentAtomic(files, doc)
     const entries = await readdir(dir)
     expect(entries).toEqual(['note.md'])
     expect(entries.some((e) => e.includes('.tmp-'))).toBe(false)
@@ -88,13 +90,13 @@ describe('documents', () => {
   it('rejects a write when meta lacks an id', async () => {
     const path = join(dir, 'note.md')
     const doc = { path, meta: {}, body: 'body' } as unknown as Document
-    await expect(writeDocumentAtomic(doc)).rejects.toThrow()
+    await expect(writeDocumentAtomic(files, doc)).rejects.toThrow()
   })
 
   it('throws a plain error naming the path when frontmatter lacks id', async () => {
     const path = join(dir, 'bad.md')
     await writeFile(path, '---\ntitle: no id here\n---\nbody\n', 'utf8')
-    await expect(readDocument(path)).rejects.toThrow(path)
+    await expect(readDocument(files, path)).rejects.toThrow(path)
   })
 
   it('throws an error naming the path when the YAML frontmatter itself is malformed', async () => {
@@ -103,17 +105,17 @@ describe('documents', () => {
     // parser throws here with no file path in its own message, so
     // readDocument must attribute it.
     await writeFile(path, '---\nname: [unterminated\n---\nbody\n', 'utf8')
-    await expect(readDocument(path)).rejects.toThrow(path)
+    await expect(readDocument(files, path)).rejects.toThrow(path)
   })
 
   it('listDocuments returns sorted docs and ignores non-md files', async () => {
     const pathB = join(dir, 'b.md')
     const pathA = join(dir, 'a.md')
-    await writeDocumentAtomic({ path: pathB, meta: { id: newId('doc') }, body: 'b body' })
-    await writeDocumentAtomic({ path: pathA, meta: { id: newId('doc') }, body: 'a body' })
+    await writeDocumentAtomic(files, { path: pathB, meta: { id: newId('doc') }, body: 'b body' })
+    await writeDocumentAtomic(files, { path: pathA, meta: { id: newId('doc') }, body: 'a body' })
     await writeFile(join(dir, 'notes.txt'), 'ignore me', 'utf8')
 
-    const docs = await listDocuments(dir)
+    const docs = await listDocuments(files, dir)
     expect(docs.map((d) => d.path)).toEqual([pathA, pathB])
     expect(docs.every((d) => typeof d.meta.id === 'string')).toBe(true)
   })
@@ -121,11 +123,11 @@ describe('documents', () => {
   it('listDocuments skips a file it cannot parse and reports it via onSkip, instead of throwing', async () => {
     const goodPath = join(dir, 'good.md')
     const brokenPath = join(dir, 'broken.md')
-    await writeDocumentAtomic({ path: goodPath, meta: { id: newId('doc') }, body: 'fine' })
+    await writeDocumentAtomic(files, { path: goodPath, meta: { id: newId('doc') }, body: 'fine' })
     await writeFile(brokenPath, '---\nname: [unterminated\n---\nbody\n', 'utf8')
 
     const skipped: { path: string; reason: string }[] = []
-    const docs = await listDocuments(dir, (path, reason) => skipped.push({ path, reason }))
+    const docs = await listDocuments(files, dir, (path, reason) => skipped.push({ path, reason }))
 
     expect(docs.map((d) => d.path)).toEqual([goodPath])
     expect(skipped).toHaveLength(1)
@@ -136,10 +138,10 @@ describe('documents', () => {
   it('listDocuments with no onSkip still skips unreadable files silently rather than throwing', async () => {
     const goodPath = join(dir, 'good.md')
     const brokenPath = join(dir, 'broken.md')
-    await writeDocumentAtomic({ path: goodPath, meta: { id: newId('doc') }, body: 'fine' })
+    await writeDocumentAtomic(files, { path: goodPath, meta: { id: newId('doc') }, body: 'fine' })
     await writeFile(brokenPath, '---\ntitle: no id here\n---\nbody\n', 'utf8')
 
-    const docs = await listDocuments(dir)
+    const docs = await listDocuments(files, dir)
     expect(docs.map((d) => d.path)).toEqual([goodPath])
   })
 })
@@ -156,7 +158,7 @@ describe('paths and ensureMemoryTree', () => {
   })
 
   it('memoryPaths derives all expected paths under root', () => {
-    const paths = memoryPaths(dir)
+    const paths = memoryPaths(dir, nodeStores())
     expect(paths.root).toBe(dir)
     expect(paths.constitution).toBe(join(dir, 'constitution.md'))
     expect(paths.realmsDir).toBe(join(dir, 'realms'))
@@ -171,10 +173,10 @@ describe('paths and ensureMemoryTree', () => {
   })
 
   it('creates all directories and seeds constitution.md once', async () => {
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
 
-    const constitution = await readDocument(paths.constitution)
+    const constitution = await readDocument(paths.files, paths.constitution)
     expect(typeof constitution.meta.id).toBe('string')
     expect(constitution.body).toContain('This constitution is empty. It grows as we talk.')
 
@@ -192,19 +194,19 @@ describe('paths and ensureMemoryTree', () => {
   })
 
   it('is idempotent and does not reseed an existing constitution', async () => {
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
-    const first = await readDocument(paths.constitution)
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
+    const first = await readDocument(paths.files, paths.constitution)
 
-    await ensureMemoryTree(paths)
-    const second = await readDocument(paths.constitution)
+    await ensureMemoryTree(paths, 'UTC')
+    const second = await readDocument(paths.files, paths.constitution)
 
     expect(second.meta.id).toBe(first.meta.id)
   })
 
   it('seeds .gitignore with index.db, *.tmp-*, and the dream lock', async () => {
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
 
     const gitignorePath = join(dir, '.gitignore')
     const content = await readFile(gitignorePath, 'utf8')
@@ -212,14 +214,14 @@ describe('paths and ensureMemoryTree', () => {
   })
 
   it('preserves a user-modified .gitignore, only appending the dream lock rule if missing', async () => {
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
 
     const gitignorePath = join(dir, '.gitignore')
     const customContent = 'custom user content\n'
     await writeFile(gitignorePath, customContent, 'utf8')
 
-    await ensureMemoryTree(paths)
+    await ensureMemoryTree(paths, 'UTC')
 
     const content = await readFile(gitignorePath, 'utf8')
     expect(content).toBe('custom user content\ndreams/.lock\n')

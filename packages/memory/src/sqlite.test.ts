@@ -19,7 +19,28 @@ function doc(overrides: Partial<Document> = {}): Document {
 
 function embedFn(): EmbedFn {
   const provider = new FakeEmbeddingProvider()
-  return (texts: string[]) => provider.embed('fake-model', texts)
+  return async (texts: string[]) => {
+    const { vectors } = await provider.embed('fake-model', texts)
+    return vectors
+  }
+}
+
+const FIXED_MTIME = '2026-01-01T00:00:00.000Z'
+
+// A thin wrapper matching upsertDocument's pre-P0-6 test call shape (doc,
+// kind, embed): embeddingModel and mtime default to fixed values so the
+// many existing calls below, none of which care about either, do not each
+// need their own. embeddingModel defaults to 'fake-model' to match what
+// embedFn's provider.embed call above actually uses.
+function upsertDoc(
+  index: MemoryIndex,
+  doc: Document,
+  kind: DocKind,
+  embed: EmbedFn,
+  embeddingModel = 'fake-model',
+  mtime = FIXED_MTIME,
+): Promise<void> {
+  return index.upsertDocument(doc, kind, embed, embeddingModel, mtime)
 }
 
 describe('MemoryIndex', () => {
@@ -46,7 +67,7 @@ describe('MemoryIndex', () => {
     })
 
     it('reuses an existing database on reopen, preserving data', async () => {
-      await index.upsertDocument(doc(), 'realm', embedFn())
+      await upsertDoc(index, doc(), 'realm', embedFn())
       index.close()
 
       const reopened = MemoryIndex.open(dbPath)
@@ -60,7 +81,7 @@ describe('MemoryIndex', () => {
 
   describe('upsertDocument and searchText', () => {
     it('finds an upserted document by text with a snippet', async () => {
-      await index.upsertDocument(doc(), 'realm', embedFn())
+      await upsertDoc(index, doc(), 'realm', embedFn())
 
       const hits = index.searchText('deadlines', 10)
       expect(hits.length).toBe(1)
@@ -79,11 +100,7 @@ describe('MemoryIndex', () => {
       // reach the caller as its full text, not that window.
       const filler = Array.from({ length: 16 }, (_, i) => `filler${i}`).join(' ')
       const body = `startmarker ${filler} targetword ${filler} endmarker`
-      await index.upsertDocument(
-        doc({ meta: { id: 'realm_full_chunk' }, body }),
-        'realm',
-        embedFn(),
-      )
+      await upsertDoc(index, doc({ meta: { id: 'realm_full_chunk' }, body }), 'realm', embedFn())
 
       const hits = index.searchText('targetword', 10)
       expect(hits.length).toBe(1)
@@ -93,7 +110,8 @@ describe('MemoryIndex', () => {
     })
 
     it('ranks a document mentioning the term repeatedly above one mentioning it once', async () => {
-      await index.upsertDocument(
+      await upsertDoc(
+        index,
         doc({
           meta: { id: 'realm_dense' },
           body: 'Marathon training. Marathon pace. Marathon nutrition and marathon recovery.',
@@ -101,7 +119,8 @@ describe('MemoryIndex', () => {
         'realm',
         embedFn(),
       )
-      await index.upsertDocument(
+      await upsertDoc(
+        index,
         doc({ meta: { id: 'realm_sparse' }, body: 'A brief mention of a marathon.' }),
         'realm',
         embedFn(),
@@ -114,14 +133,10 @@ describe('MemoryIndex', () => {
     })
 
     it('re-upsert with a changed body drops stale hits', async () => {
-      await index.upsertDocument(doc({ body: 'Talking about a guitar hobby.' }), 'realm', embedFn())
+      await upsertDoc(index, doc({ body: 'Talking about a guitar hobby.' }), 'realm', embedFn())
       expect(index.searchText('guitar', 10).length).toBe(1)
 
-      await index.upsertDocument(
-        doc({ body: 'Talking about a marathon instead.' }),
-        'realm',
-        embedFn(),
-      )
+      await upsertDoc(index, doc({ body: 'Talking about a marathon instead.' }), 'realm', embedFn())
 
       expect(index.searchText('guitar', 10).length).toBe(0)
       expect(index.searchText('marathon', 10).length).toBe(1)
@@ -144,7 +159,7 @@ describe('MemoryIndex', () => {
         body: 'A short summary paragraph.',
       })
 
-      await index.upsertDocument(summaryDoc, 'summary', embedFn())
+      await upsertDoc(index, summaryDoc, 'summary', embedFn())
 
       const anxiousHits = index.searchText('anxious', 10)
       expect(anxiousHits.length).toBe(1)
@@ -172,7 +187,7 @@ describe('MemoryIndex', () => {
         body: 'A short summary paragraph.',
       })
 
-      await index.upsertDocument(summaryDoc, 'summary', embedFn())
+      await upsertDoc(index, summaryDoc, 'summary', embedFn())
 
       // searchText's snippet is the chunk's own verbatim text, so it
       // carries both the match and the date anchor together regardless of
@@ -210,7 +225,7 @@ describe('MemoryIndex', () => {
         body: 'A short summary paragraph.',
       })
 
-      await index.upsertDocument(summaryDoc, 'summary', embedFn())
+      await upsertDoc(index, summaryDoc, 'summary', embedFn())
 
       const hits = index.searchText('walk', 10)
       expect(hits.length).toBe(1)
@@ -220,7 +235,7 @@ describe('MemoryIndex', () => {
     })
 
     it('removeDocument deletes the document and its chunks', async () => {
-      await index.upsertDocument(doc(), 'realm', embedFn())
+      await upsertDoc(index, doc(), 'realm', embedFn())
       expect(index.searchText('work', 10).length).toBe(1)
 
       index.removeDocument('realm_1')
@@ -229,7 +244,8 @@ describe('MemoryIndex', () => {
     })
 
     it('searchText tolerates an empty query and punctuation without throwing', async () => {
-      await index.upsertDocument(
+      await upsertDoc(
+        index,
         doc({ body: "Don't forget the foo-bar release notes." }),
         'realm',
         embedFn(),
@@ -242,12 +258,14 @@ describe('MemoryIndex', () => {
     })
 
     it('searchText applies a kinds filter at the SQL level', async () => {
-      await index.upsertDocument(
+      await upsertDoc(
+        index,
         doc({ meta: { id: 'realm_kite' }, body: 'A note about kite surfing.' }),
         'realm',
         embedFn(),
       )
-      await index.upsertDocument(
+      await upsertDoc(
+        index,
         doc({ meta: { id: 'summary_kite' }, body: 'A note about kite surfing.' }),
         'summary',
         embedFn(),
@@ -258,7 +276,8 @@ describe('MemoryIndex', () => {
     })
 
     it('searchText treats an explicit empty kinds list as matching nothing', async () => {
-      await index.upsertDocument(
+      await upsertDoc(
+        index,
         doc({ meta: { id: 'realm_kite2' }, body: 'A note about kite surfing.' }),
         'realm',
         embedFn(),
@@ -290,7 +309,7 @@ describe('MemoryIndex', () => {
         },
         body: 'A short summary paragraph.',
       })
-      await index.upsertDocument(summaryDoc, 'summary', embedFn())
+      await upsertDoc(index, summaryDoc, 'summary', embedFn())
 
       // 12 tokens, the length named in the plan.
       const query = 'What day and time is the Nightfall booking with Arjun actually for?'
@@ -300,7 +319,8 @@ describe('MemoryIndex', () => {
     })
 
     it('still ranks the document matching more OR-ed terms above one matching fewer', async () => {
-      await index.upsertDocument(
+      await upsertDoc(
+        index,
         doc({
           meta: { id: 'doc_more_terms' },
           body: 'Nightfall tickets booked with Arjun for Sunday night showtime plans.',
@@ -308,7 +328,8 @@ describe('MemoryIndex', () => {
         'realm',
         embedFn(),
       )
-      await index.upsertDocument(
+      await upsertDoc(
+        index,
         doc({ meta: { id: 'doc_fewer_terms' }, body: 'Arjun mentioned Nightfall once in passing.' }),
         'realm',
         embedFn(),
@@ -324,7 +345,8 @@ describe('MemoryIndex', () => {
     })
 
     it('a stopword-only or punctuation-only query does not throw and stays within the requested limit', async () => {
-      await index.upsertDocument(
+      await upsertDoc(
+        index,
         doc({ body: 'The quick brown fox and a fast dog were in the yard.' }),
         'realm',
         embedFn(),
@@ -348,20 +370,23 @@ describe('MemoryIndex', () => {
         },
         body: '',
       })
-      await index.upsertDocument(summaryDoc, 'summary', embedFn())
+      await upsertDoc(index, summaryDoc, 'summary', embedFn())
 
       const textHits = index.searchText('kayak trip notes', 10)
       expect(textHits.map((h) => h.seq).sort()).toEqual([0, 1])
 
       const provider = new FakeEmbeddingProvider()
-      const [queryVec] = await provider.embed('fake-model', ['kayak trip notes'])
+      const {
+        vectors: [queryVec],
+      } = await provider.embed('fake-model', ['kayak trip notes'])
       if (!queryVec) throw new Error('expected a query vector')
       const vectorHits = await index.searchVector(queryVec, 10)
       expect(vectorHits.map((h) => h.seq).sort()).toEqual([0, 1])
     })
 
     it('searchText treats a kinds value containing a quote as an ordinary bound value, not SQL syntax', async () => {
-      await index.upsertDocument(
+      await upsertDoc(
+        index,
         doc({ meta: { id: 'realm_kite3' }, body: 'A note about kite surfing.' }),
         'realm',
         embedFn(),
@@ -377,17 +402,20 @@ describe('MemoryIndex', () => {
     })
 
     it('stores a date span for dated kinds and nulls for living ones', async () => {
-      await index.upsertDocument(
+      await upsertDoc(
+        index,
         doc({ meta: { id: 'doc_daily', date: '2026-08-12' } }),
         'rollup_daily',
         embedFn(),
       )
-      await index.upsertDocument(
+      await upsertDoc(
+        index,
         doc({ meta: { id: 'doc_weekly', week: '2026-W33' } }),
         'rollup_weekly',
         embedFn(),
       )
-      await index.upsertDocument(
+      await upsertDoc(
+        index,
         doc({ meta: { id: 'doc_arc', opened: '2026-01-04', updated: '2026-08-12' } }),
         'arc',
         embedFn(),
@@ -407,7 +435,8 @@ describe('MemoryIndex', () => {
     })
 
     it('searchText carries the document date span on the hit for a dated document (A3)', async () => {
-      await index.upsertDocument(
+      await upsertDoc(
+        index,
         doc({
           meta: { id: 'doc_dated', date: '2026-08-12' },
           body: 'A dated summary about kayaking.',
@@ -430,7 +459,8 @@ describe('MemoryIndex', () => {
       // different dates, means a mutation that started deriving a span
       // from either field would have real values to fabricate a span out
       // of, and this test would catch it.
-      await index.upsertDocument(
+      await upsertDoc(
+        index,
         doc({
           meta: { id: 'doc_living', opened: '2026-06-01', updated: '2026-08-18' },
           body: 'A living arc page about kayaking.',
@@ -450,7 +480,8 @@ describe('MemoryIndex', () => {
   describe('removeDocumentsAtPath', () => {
     it('deletes any other row at the same path, keeping only the given id, so a path collision self-heals', async () => {
       const path = '/memory/realms/collide.md'
-      await index.upsertDocument(
+      await upsertDoc(
+        index,
         doc({
           meta: { id: 'realm_stale' },
           path,
@@ -459,7 +490,8 @@ describe('MemoryIndex', () => {
         'realm',
         embedFn(),
       )
-      await index.upsertDocument(
+      await upsertDoc(
+        index,
         doc({
           meta: { id: 'realm_fresh' },
           path,
@@ -485,7 +517,7 @@ describe('MemoryIndex', () => {
     })
 
     it('does nothing when the given id is the only row at the path', async () => {
-      await index.upsertDocument(doc(), 'realm', embedFn())
+      await upsertDoc(index, doc(), 'realm', embedFn())
 
       index.removeDocumentsAtPath('/memory/realms/work.md', 'realm_1')
 
@@ -495,7 +527,7 @@ describe('MemoryIndex', () => {
 
   describe('wipeAllDocuments', () => {
     it('clears documents, chunks, chunks_fts, and embeddings, leaving the index empty but usable', async () => {
-      await index.upsertDocument(doc(), 'realm', embedFn())
+      await upsertDoc(index, doc(), 'realm', embedFn())
       expect(index.searchText('work', 10).length).toBe(1)
 
       index.wipeAllDocuments()
@@ -503,13 +535,15 @@ describe('MemoryIndex', () => {
       expect(index.searchText('work', 10)).toEqual([])
 
       const provider = new FakeEmbeddingProvider()
-      const [queryVec] = await provider.embed('fake-model', ['work'])
+      const {
+        vectors: [queryVec],
+      } = await provider.embed('fake-model', ['work'])
       if (!queryVec) throw new Error('expected a query vector')
       expect(await index.searchVector(queryVec, 5)).toEqual([])
 
       // The index must still be usable after a wipe: the manual
       // chunks_fts 'rebuild' sync must not have broken future upserts.
-      await index.upsertDocument(doc(), 'realm', embedFn())
+      await upsertDoc(index, doc(), 'realm', embedFn())
       expect(index.searchText('work', 10).length).toBe(1)
     })
   })
@@ -517,22 +551,27 @@ describe('MemoryIndex', () => {
   describe('searchVector', () => {
     it('ranks an exact-text vector match above unrelated documents', async () => {
       const provider = new FakeEmbeddingProvider()
-      const embed = (texts: string[]) => provider.embed('fake-model', texts)
+      const embed = async (texts: string[]) => {
+        const { vectors } = await provider.embed('fake-model', texts)
+        return vectors
+      }
 
-      await index.upsertDocument(
+      await upsertDoc(
+        index,
         doc({ meta: { id: 'realm_a' }, body: 'The quick brown fox jumps over the lazy dog.' }),
         'realm',
         embed,
       )
-      await index.upsertDocument(
+      await upsertDoc(
+        index,
         doc({ meta: { id: 'realm_b' }, body: 'Completely unrelated content about tax filings.' }),
         'realm',
         embed,
       )
 
-      const [queryVec] = await provider.embed('fake-model', [
-        'The quick brown fox jumps over the lazy dog.',
-      ])
+      const {
+        vectors: [queryVec],
+      } = await provider.embed('fake-model', ['The quick brown fox jumps over the lazy dog.'])
       if (!queryVec) {
         throw new Error('expected a query vector')
       }
@@ -545,15 +584,20 @@ describe('MemoryIndex', () => {
 
     it('returns the chunk verbatim rather than truncating it at 200 characters', async () => {
       const provider = new FakeEmbeddingProvider()
-      const embed = (texts: string[]) => provider.embed('fake-model', texts)
+      const embed = async (texts: string[]) => {
+        const { vectors } = await provider.embed('fake-model', texts)
+        return vectors
+      }
 
       // Well past makeSnippet's old 200-character cutoff, and past that
       // cutoff with content that survives to the end, "trailingmarker".
       const filler = Array.from({ length: 40 }, (_, i) => `filler${i}`).join(' ')
       const body = `${filler} trailingmarker`
-      await index.upsertDocument(doc({ meta: { id: 'realm_long' }, body }), 'realm', embed)
+      await upsertDoc(index, doc({ meta: { id: 'realm_long' }, body }), 'realm', embed)
 
-      const [queryVec] = await provider.embed('fake-model', [body])
+      const {
+        vectors: [queryVec],
+      } = await provider.embed('fake-model', [body])
       if (!queryVec) {
         throw new Error('expected a query vector')
       }
@@ -568,22 +612,27 @@ describe('MemoryIndex', () => {
 
     it('applies a kinds filter at the SQL level', async () => {
       const provider = new FakeEmbeddingProvider()
-      const embed = (texts: string[]) => provider.embed('fake-model', texts)
+      const embed = async (texts: string[]) => {
+        const { vectors } = await provider.embed('fake-model', texts)
+        return vectors
+      }
 
-      await index.upsertDocument(
+      await upsertDoc(
+        index,
         doc({ meta: { id: 'realm_fox' }, body: 'The quick brown fox jumps over the lazy dog.' }),
         'realm',
         embed,
       )
-      await index.upsertDocument(
+      await upsertDoc(
+        index,
         doc({ meta: { id: 'summary_fox' }, body: 'The quick brown fox jumps over the lazy dog.' }),
         'summary',
         embed,
       )
 
-      const [queryVec] = await provider.embed('fake-model', [
-        'The quick brown fox jumps over the lazy dog.',
-      ])
+      const {
+        vectors: [queryVec],
+      } = await provider.embed('fake-model', ['The quick brown fox jumps over the lazy dog.'])
       if (!queryVec) {
         throw new Error('expected a query vector')
       }
@@ -592,19 +641,53 @@ describe('MemoryIndex', () => {
       expect(hits.map((h) => h.docId)).toEqual(['summary_fox'])
     })
 
+    it('rejects a stored vector whose dims does not match the query vector, rather than comparing a truncated prefix (P0-6)', async () => {
+      const embed8: EmbedFn = async (texts) => texts.map(() => [1, 0, 0, 0, 0, 0, 0, 0])
+      const embed4: EmbedFn = async (texts) => texts.map(() => [1, 0, 0, 0])
+
+      await upsertDoc(
+        index,
+        doc({ meta: { id: 'dims_8' }, body: 'Eight dimensional embedding model.' }),
+        'realm',
+        embed8,
+        'model-a-8dim',
+      )
+      await upsertDoc(
+        index,
+        doc({ meta: { id: 'dims_4' }, body: 'Four dimensional embedding model.' }),
+        'realm',
+        embed4,
+        'model-b-4dim',
+      )
+
+      // Shaped like the 8-dim model's output. Without the dims guard,
+      // cosineSimilarity's Math.min(a.length, b.length) would compare only
+      // the first four components of both vectors, and the 4-dim
+      // document's stored [1, 0, 0, 0] would score a perfect match against
+      // this query's own first four components, also [1, 0, 0, 0].
+      const queryVec = [1, 0, 0, 0, 0, 0, 0, 0]
+
+      const hits = await index.searchVector(queryVec, 5)
+      expect(hits.map((h) => h.docId)).toEqual(['dims_8'])
+    })
+
     it('treats an explicit empty kinds list as matching nothing', async () => {
       const provider = new FakeEmbeddingProvider()
-      const embed = (texts: string[]) => provider.embed('fake-model', texts)
+      const embed = async (texts: string[]) => {
+        const { vectors } = await provider.embed('fake-model', texts)
+        return vectors
+      }
 
-      await index.upsertDocument(
+      await upsertDoc(
+        index,
         doc({ meta: { id: 'realm_fox2' }, body: 'The quick brown fox jumps over the lazy dog.' }),
         'realm',
         embed,
       )
 
-      const [queryVec] = await provider.embed('fake-model', [
-        'The quick brown fox jumps over the lazy dog.',
-      ])
+      const {
+        vectors: [queryVec],
+      } = await provider.embed('fake-model', ['The quick brown fox jumps over the lazy dog.'])
       if (!queryVec) {
         throw new Error('expected a query vector')
       }
@@ -614,17 +697,21 @@ describe('MemoryIndex', () => {
 
     it('treats a kinds value containing a quote as an ordinary bound value, not SQL syntax', async () => {
       const provider = new FakeEmbeddingProvider()
-      const embed = (texts: string[]) => provider.embed('fake-model', texts)
+      const embed = async (texts: string[]) => {
+        const { vectors } = await provider.embed('fake-model', texts)
+        return vectors
+      }
 
-      await index.upsertDocument(
+      await upsertDoc(
+        index,
         doc({ meta: { id: 'realm_fox3' }, body: 'The quick brown fox jumps over the lazy dog.' }),
         'realm',
         embed,
       )
 
-      const [queryVec] = await provider.embed('fake-model', [
-        'The quick brown fox jumps over the lazy dog.',
-      ])
+      const {
+        vectors: [queryVec],
+      } = await provider.embed('fake-model', ['The quick brown fox jumps over the lazy dog.'])
       if (!queryVec) {
         throw new Error('expected a query vector')
       }
@@ -639,9 +726,13 @@ describe('MemoryIndex', () => {
 
     it('carries the document date span on the hit for a dated document, absent for a living one (A3)', async () => {
       const provider = new FakeEmbeddingProvider()
-      const embed = (texts: string[]) => provider.embed('fake-model', texts)
+      const embed = async (texts: string[]) => {
+        const { vectors } = await provider.embed('fake-model', texts)
+        return vectors
+      }
 
-      await index.upsertDocument(
+      await upsertDoc(
+        index,
         doc({
           meta: { id: 'doc_dated_vec', date: '2026-08-12' },
           body: 'A dated summary about rafting.',
@@ -649,13 +740,16 @@ describe('MemoryIndex', () => {
         'summary',
         embed,
       )
-      await index.upsertDocument(
+      await upsertDoc(
+        index,
         doc({ meta: { id: 'doc_living_vec' }, body: 'A living arc page about rafting.' }),
         'arc',
         embed,
       )
 
-      const [queryVec] = await provider.embed('fake-model', ['rafting'])
+      const {
+        vectors: [queryVec],
+      } = await provider.embed('fake-model', ['rafting'])
       if (!queryVec) {
         throw new Error('expected a query vector')
       }
@@ -873,7 +967,7 @@ describe('MemoryIndex', () => {
     })
 
     it('drops and recreates the derived document tables when the stored version is behind', async () => {
-      await index.upsertDocument(doc(), 'realm', embedFn())
+      await upsertDoc(index, doc(), 'realm', embedFn())
       expect(index.searchText('work', 10).length).toBeGreaterThan(0)
       index.close()
 

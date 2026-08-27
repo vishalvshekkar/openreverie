@@ -28,6 +28,7 @@ import {
   loadProfile,
   MemoryIndex,
   memoryPaths,
+  nodeStores,
   systemTimeZone,
 } from '@openreverie/memory'
 
@@ -161,7 +162,7 @@ export async function runDoctor(deps: DoctorDeps): Promise<number> {
       formatCheckLine('sqlite index', 'skip', 'config failed to load; cannot check the index'),
     )
   } else {
-    const indexPath = memoryPaths(config.memoryDir).indexDb
+    const indexPath = memoryPaths(config.memoryDir, nodeStores()).indexDb
     const exists = await deps.isFile(indexPath)
     if (!exists) {
       lines.push(formatCheckLine('sqlite index', 'fail', 'index.db missing; run: reverie reindex'))
@@ -277,13 +278,13 @@ export function buildRealDoctorDeps(configPath: string, write: (text: string) =>
     },
     openIndex: (path: string) => MemoryIndex.open(path),
     dreamStatus: async (config: ReverieConfig) => {
-      const paths = memoryPaths(config.memoryDir)
+      const paths = memoryPaths(config.memoryDir, nodeStores())
       // Mirrors MemoryEngine.timezone()'s own fallback, without opening an
       // engine: profile.md's confirmed timezone when there is one, the
       // system zone otherwise.
       let timezone = systemTimeZone()
       try {
-        const profile = await loadProfile(paths)
+        const profile = await loadProfile(paths, timezone)
         if (typeof profile.meta.timezone === 'string' && profile.meta.timezone.length > 0) {
           timezone = profile.meta.timezone
         }

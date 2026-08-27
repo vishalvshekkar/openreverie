@@ -15,7 +15,6 @@
 // migrate` is a no-op by a cheap set-membership check instead of every
 // migration re-inspecting the whole folder.
 
-import { appendFile, readFile } from 'node:fs/promises'
 import type { MemoryPaths } from '../paths.js'
 import { profileSeedMigration } from './profileSeed.js'
 import { styleToProfile } from './styleToProfile.js'
@@ -24,6 +23,13 @@ import { utcToLocalRollupsMigration } from './utcToLocalRollups.js'
 export interface MigrationContext {
   paths: MemoryPaths
   configPath: string
+  // The zone a migration seeds a brand-new profile.md with when one is
+  // missing (profile-seed) or reads an existing one under (style-to-profile
+  // calls loadProfile). `reverie migrate` is a CLI-only command, so the
+  // one construction site (packages/cli/src/migrate.ts) is the honest
+  // place to call systemTimeZone(); this package never reads it directly.
+  // See docs/superpowers/specs/2026-08-27-hostable-engine-design.md, P0-3.
+  timezone: string
 }
 
 export interface MigrationResult {
@@ -57,6 +63,10 @@ export interface MigrationStatus {
 
 export interface RunMigrationsOptions {
   dryRun: boolean
+  // Optional wall clock for the migrations.jsonl appliedAt stamp, defaulting
+  // to the real one. Same optional-with-real-default convention as
+  // EngineDeps.now.
+  now?: () => Date
 }
 
 // The ordered list of migrations `reverie migrate` iterates. Empty in this
@@ -70,18 +80,8 @@ export const migrations: Migration[] = [
 ]
 
 export async function readAppliedMigrationIds(paths: MemoryPaths): Promise<Set<string>> {
-  let raw: string
-  try {
-    raw = await readFile(paths.migrationsLog, 'utf8')
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-      return new Set()
-    }
-    throw err
-  }
-
+  const lines = await paths.logs.readAll(paths.migrationsLog)
   const ids = new Set<string>()
-  const lines = raw.split('\n')
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]
     if (line === undefined || line.trim() === '') {
@@ -107,7 +107,7 @@ export async function appendMigrationLog(
   paths: MemoryPaths,
   entry: MigrationLogEntry,
 ): Promise<void> {
-  await appendFile(paths.migrationsLog, `${JSON.stringify(entry)}\n`, 'utf8')
+  await paths.logs.appendLines(paths.migrationsLog, [JSON.stringify(entry)])
 }
 
 export async function listMigrations(ctx: MigrationContext): Promise<MigrationStatus[]> {
@@ -136,7 +136,7 @@ export async function runMigrations(
     if (!options.dryRun) {
       await appendMigrationLog(ctx.paths, {
         id: migration.id,
-        appliedAt: new Date().toISOString(),
+        appliedAt: (options.now?.() ?? new Date()).toISOString(),
       })
       result.applied = true
     }

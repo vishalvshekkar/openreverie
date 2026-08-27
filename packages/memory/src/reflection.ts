@@ -53,7 +53,7 @@ import {
 import { writeJournalingProtocol } from './journal.js'
 import type { MemoryPaths } from './paths.js'
 import { type ProfileMeta, type ProfileUpdates, profileUpdatesSchema } from './profile.js'
-import { localDateFromStored, renderStoredStamp, systemTimeZone } from './time.js'
+import { localDateFromStored, renderStoredStamp } from './time.js'
 import { SessionStore, type TranscriptLine } from './transcripts.js'
 import { PROSE_VOICE_RULE } from './voice.js'
 
@@ -930,12 +930,8 @@ export async function rewriteNarrative(
 // containment above is. A caller must not treat the absence of an onFailure
 // call as the absence of a failure.
 //
-// The first parameter is accepted for signature symmetry with the rest of
-// this module's public functions and for a possible future disk-backed
-// lookup; the current implementation resolves documents through
-// graphState and readDocument alone.
 export async function resolveNarratives(
-  _paths: MemoryPaths,
+  paths: MemoryPaths,
   graphState: GraphState,
   out: ReflectionOutput,
   chat: ChatProvider,
@@ -960,7 +956,7 @@ export async function resolveNarratives(
         .filter((a) => a.arcId === update.arcId)
         .map((a) => out.items[a.itemIndex]?.text)
         .filter((text): text is string => typeof text === 'string')
-      const currentDoc = await readDocument(node.doc)
+      const currentDoc = await readDocument(paths.files, node.doc)
       const result = await rewriteNarrative(chat, model, {
         name: node.label,
         currentBody: currentDoc.body,
@@ -988,7 +984,7 @@ export async function resolveNarratives(
       // ReflectionOutput carries per-item attribution only for arcs
       // (out.attributions). There is no equivalent for people, so a person's
       // pass two call gets no item texts; its note still says what changed.
-      const currentDoc = await readDocument(node.doc)
+      const currentDoc = await readDocument(paths.files, node.doc)
       const result = await rewriteNarrative(chat, model, {
         name: node.label,
         currentBody: currentDoc.body,
@@ -1026,13 +1022,13 @@ export async function applyReflection(
   narratives: Map<string, string>,
   materializeNew: (mintedItems: ReflectionItem[]) => Promise<void>,
   // The person's own timezone, for resolving a commitment's statedTime
-  // (see buildCommitmentTiming). Optional, defaulting to the machine's
-  // own zone: every real caller (MemoryEngine._doEndSession) passes
-  // this.timezone(), the one place engine.ts documents as deciding the
-  // profile.md fallback; this default exists only so the many existing
-  // tests that call applyReflection directly, with no commitments in
-  // play, do not all need updating to supply one.
-  timezone: string = systemTimeZone(),
+  // (see buildCommitmentTiming). Required, not defaulted to the machine's
+  // own zone: the one real caller (MemoryEngine._doEndSession) always
+  // passes this.timezone(), the one place engine.ts documents as deciding
+  // the profile.md fallback, and a default here would be a second, hidden
+  // place making that same decision. See time.ts's systemTimeZone comment
+  // for why this package never reads the ambient zone itself.
+  timezone: string,
 ): Promise<{
   summaryDoc: Document
   autoAsserted: number
@@ -1113,7 +1109,7 @@ export async function applyReflection(
 
   let constitutionWrite: PendingWrite | null = null
   if (out.constitutionUpdate !== null) {
-    const constitutionDoc = await readDocument(paths.constitution)
+    const constitutionDoc = await readDocument(paths.files, paths.constitution)
     constitutionWrite = {
       path: constitutionDoc.path,
       meta: { ...constitutionDoc.meta, updated: nowIso },
@@ -1132,7 +1128,7 @@ export async function applyReflection(
     if (!node?.doc) {
       continue
     }
-    const doc = await readDocument(node.doc)
+    const doc = await readDocument(paths.files, node.doc)
     narrativeWrites.push({ path: doc.path, meta: { ...doc.meta, updated: nowIso }, body })
   }
 
@@ -1154,11 +1150,11 @@ export async function applyReflection(
   await appendGraph(paths, graphRecords)
 
   for (const write of narrativeWrites) {
-    await writeDocumentAtomic(write)
+    await writeDocumentAtomic(paths.files, write)
   }
 
   if (constitutionWrite) {
-    await writeDocumentAtomic(constitutionWrite)
+    await writeDocumentAtomic(paths.files, constitutionWrite)
   }
 
   if (out.journalingUpdate !== null) {
@@ -1196,18 +1192,27 @@ export async function applyReflection(
     const matchId = liveCommitmentIdByLabel.get(commitment.label.toLowerCase())
     try {
       if (matchId !== undefined) {
-        await reviseCommitment(paths, matchId, {
-          label: commitment.label,
-          flavor: commitment.flavor,
-          ...(timing !== undefined ? { timing } : {}),
-        })
+        await reviseCommitment(
+          paths,
+          matchId,
+          {
+            label: commitment.label,
+            flavor: commitment.flavor,
+            ...(timing !== undefined ? { timing } : {}),
+          },
+          now,
+        )
       } else {
-        await recordCommitment(paths, {
-          label: commitment.label,
-          flavor: commitment.flavor,
-          sessionId,
-          ...(timing !== undefined ? { timing } : {}),
-        })
+        await recordCommitment(
+          paths,
+          {
+            label: commitment.label,
+            flavor: commitment.flavor,
+            sessionId,
+            ...(timing !== undefined ? { timing } : {}),
+          },
+          now,
+        )
       }
     } catch {
       // A malformed commitment must not abort the rest of reflection:
@@ -1238,12 +1243,17 @@ export async function applyReflection(
     const timing = buildCommitmentTiming(revision, new Date(anchor), timezone)
     const clearTiming = revision.clearTiming === true && timing === undefined
     try {
-      await reviseCommitment(paths, revision.commitmentId, {
-        ...(revision.label !== undefined ? { label: revision.label } : {}),
-        ...(revision.flavor !== undefined ? { flavor: revision.flavor } : {}),
-        ...(timing !== undefined ? { timing } : {}),
-        ...(clearTiming ? { clearTiming: true as const } : {}),
-      })
+      await reviseCommitment(
+        paths,
+        revision.commitmentId,
+        {
+          ...(revision.label !== undefined ? { label: revision.label } : {}),
+          ...(revision.flavor !== undefined ? { flavor: revision.flavor } : {}),
+          ...(timing !== undefined ? { timing } : {}),
+          ...(clearTiming ? { clearTiming: true as const } : {}),
+        },
+        now,
+      )
     } catch {
       // See the comment above: dropped silently, session still reflects.
     }
@@ -1256,13 +1266,13 @@ export async function applyReflection(
   // the rest of this session's reflection.
   for (const resolution of out.commitmentResolutions ?? []) {
     try {
-      await resolveCommitment(paths, resolution.commitmentId, resolution.outcome)
+      await resolveCommitment(paths, resolution.commitmentId, resolution.outcome, now)
     } catch {
       // See the comment above: dropped silently, session still reflects.
     }
   }
 
-  await writeDocumentAtomic({
+  await writeDocumentAtomic(paths.files, {
     path: summaryPath,
     meta: {
       id: newId('doc'),
@@ -1273,7 +1283,7 @@ export async function applyReflection(
     },
     body: out.summary,
   })
-  const summaryDoc = await readDocument(summaryPath)
+  const summaryDoc = await readDocument(paths.files, summaryPath)
 
   return { summaryDoc, autoAsserted, mintedItems }
 }

@@ -15,7 +15,9 @@ import {
   listMigrations,
   type MigrationContext,
   memoryPaths,
+  nodeStores,
   runMigrations,
+  systemTimeZone,
 } from '@openreverie/memory'
 
 export interface MigrateDeps {
@@ -48,13 +50,19 @@ export async function runMigrate(args: string[], deps: MigrateDeps): Promise<num
     return 1
   }
 
-  const paths = memoryPaths(memoryDir)
+  const paths = memoryPaths(memoryDir, nodeStores())
   if (!(await pathIsDirectory(paths.root))) {
     deps.write(`No memory folder found at ${paths.root}. Run: reverie setup\n`)
     return 1
   }
 
-  const ctx: MigrationContext = { paths, configPath: deps.configPath }
+  // `reverie migrate` genuinely runs on the person's own machine, so the
+  // system zone is an honest default here, the same reasoning that keeps
+  // cli/src/doctor.ts's own systemTimeZone() call. Only a migration that
+  // seeds a brand-new profile.md (profile-seed) or reads an existing one
+  // under it (style-to-profile) ever uses this value; see
+  // docs/superpowers/specs/2026-08-27-hostable-engine-design.md, P0-3.
+  const ctx: MigrationContext = { paths, configPath: deps.configPath, timezone: systemTimeZone() }
 
   if (list) {
     const statuses = await listMigrations(ctx)

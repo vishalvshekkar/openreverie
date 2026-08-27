@@ -444,6 +444,54 @@ item ships, remove it from here and record it in `ROADMAP.md`'s Done narrative.
   - Trigger: roughly one to three years of daily use, per section 9's own estimate.
   - Size: large.
 
+- **No proactive warning when a corpus holds vectors from more than one embedding model.** P0-6
+  (`docs/superpowers/specs/2026-08-27-hostable-engine-design.md`) gave the `embeddings` table
+  `model` and `dims` columns, and `MemoryIndex.searchVector` now rejects a stored row whose `dims`
+  does not match the current query vector rather than comparing a truncated prefix of two
+  incompatible vector spaces. That stops a wrong answer; it does not tell the person anything. If
+  someone changes `embeddingModel` in their config without also deleting `index.db`, older
+  documents keep their old vectors, `reindexAll` only runs when `INDEX_SCHEMA_VERSION` itself
+  bumps, and search silently returns fewer results for old documents from then on, the same way an
+  empty result already fails silently elsewhere in this codebase. Nothing surfaces that the corpus
+  is now mixed, or suggests `reverie reindex`.
+  - Why deferred: not stated. Out of scope for the task that added the `model`/`dims` columns and
+    the read-time dims rejection; that task's brief asked only that a mismatch be "detectable" in
+    the schema and "rejected... rather than compared" at query time, both of which are done.
+  - Where: `packages/memory/src/sqlite.ts` (`MemoryIndex.searchVector`'s dims-rejection comment,
+    and `upsertDocument`'s `model`/`dims` columns), `packages/memory/src/engine.ts` (`EngineDeps.embeddingModel`,
+    threaded into every `upsertDocument` call). Design source:
+    `docs/superpowers/specs/2026-08-27-hostable-engine-design.md`, P0-6.
+  - Trigger: not stated. A real person changing their configured embedding model and noticing
+    degraded recall would be the natural discovery path; `reverie doctor` (already the place that
+    reports the search index schema version, per v0.6.0) is the natural place to add a check like
+    `SELECT DISTINCT model FROM embeddings` and warn when it returns more than one row.
+  - Size: small (a `doctor` check plus a warning message); larger if it should also compare the
+    corpus's recorded model(s) against `EngineDeps.embeddingModel` on every `MemoryEngine.open`/`fromPaths`
+    call, which would need to decide what to do about it beyond warning (auto-reindex, refuse to
+    start, or leave it to the person).
+
+- **The dream RNG seed is deterministic within one pinned-clock request, so two dreams triggered
+  in the same request would draw the identical seed.** P0-3 (`docs/superpowers/specs/2026-08-27-hostable-engine-design.md`)
+  moved `maybeDream` and `dreamNow`'s `rngSeed` from a raw `Date.now() >>> 0` read to
+  `this.now().getTime() >>> 0`, so the seed now comes from the injected clock rather than the
+  ambient one. That was the task: stop the engine from reading the machine's clock, not add a real
+  entropy source. Inside a Cloudflare Durable Object, `Date.now()` is pinned for the life of one
+  request, which is exactly why the injection was needed for correctness (a repeated real clock
+  read would drift, not repeat) and exactly why it now has this side effect: a host that opens the
+  engine once per request with `deps.now` fixed to the request's start time, and somehow triggers
+  two dream runs inside that one request, draws the same `rngSeed` for both, and therefore the same
+  seed-picking and walk order.
+  - Why deferred: not stated. The task's own scope note said only that the RNG seed sites "ARE in
+    scope" for clock injection, with no mention of entropy uniqueness across calls; folding that in
+    would have gone beyond "stop reading the ambient clock" into a different guarantee.
+  - Where: `packages/memory/src/engine.ts`, the two `const rngSeed = this.now().getTime() >>> 0`
+    lines in `maybeDream` and `dreamNow`. Design source:
+    `docs/superpowers/specs/2026-08-27-hostable-engine-design.md`, P0-3.
+  - Trigger: Reverie Cloud actually running two dream attempts inside one Durable Object request
+    with a pinned clock, once that hosting path exists.
+  - Size: small. An optional injected entropy source (or a counter mixed into the seed) alongside
+    `EngineDeps.now`, defaulting to today's behavior when not supplied.
+
 - **Entities never get a maintained page, so they stay outside the document index and outside
   `search_memory`'s document lane.** Entities (books, films, companies, places) get a graph node
   only. The node lane can find them by name; the document lane cannot find them by content, and
@@ -1010,6 +1058,60 @@ design conversation first.
   - Where: `docs/superpowers/specs/2026-08-13-openreverie-design.md`, sections 2 and 12.
   - Trigger: not stated.
   - Size: large (per-adapter work is contained; the interface and contract tests already exist).
+
+- **Token usage metering, plan quotas, and a usage ledger.** P0-4
+  (`docs/superpowers/specs/2026-08-27-hostable-engine-design.md`) gave `ChatResult` an optional
+  `usage` field, `ChatEvent` a `usage` variant, and `EmbeddingProvider.embed` an `EmbedResult`
+  carrying `usage` alongside the vectors, so a token count now exists at the one place every
+  model call in this system passes through. Nothing in openreverie itself reads that number for
+  billing or limits: `AgentSession`'s two streaming loops (`packages/core/src/agent.ts`)
+  explicitly discard a `usage` `ChatEvent`, with a comment saying why, rather than acting on it or
+  forwarding it as an `AgentEvent`.
+  - Why deferred: "We are not building metering. Reverie Cloud wraps the provider in its own
+    `ChatProvider` that checks a usage ledger before delegating. The engine stays unaware, which
+    is the point of the choke point." This is a different codebase's feature, not a piece of
+    openreverie left unfinished: Reverie Cloud is a separate repository, and its own
+    `ChatProvider`/`EmbeddingProvider` decorators are meant to observe the `usage` this task
+    exposes and act on it, without openreverie's engine ever needing to know a ledger exists.
+  - Where: `docs/superpowers/specs/2026-08-27-hostable-engine-design.md`, P0-4;
+    `packages/providers/src/types.ts` (`Usage`, `ChatResult.usage`, the `ChatEvent` `usage`
+    variant, `EmbedResult`); `packages/providers/src/openai.ts` (`toUsage`, `stream_options:
+    { include_usage: true }`, per-batch embedding usage summed in `OpenAiEmbeddingProvider.embed`);
+    `packages/core/src/agent.ts` (the explicit no-op `usage` branches in `runGreeting` and
+    `runTurn`).
+  - Trigger: not stated. The Reverie Cloud repository actually being built out against this
+    interface is the natural discovery path, since that is the codebase this item belongs to.
+  - Size: large, and out of this repository's scope entirely: it belongs to Reverie Cloud, not to
+    openreverie.
+
+- **P1-1's shared HTTP core has no node builtin imports of its own, but two things it calls still
+  do.** P1-1 (`docs/superpowers/specs/2026-08-27-hostable-engine-design.md`) made
+  `packages/server/src/http-core.ts` transport-agnostic: `createFetchApp` and everything it calls
+  inside that file import nothing from `node:*`. Two of its dependencies were out of scope for
+  that task and were left as they were. `./api.js`'s `encodeCursor`, `decodeCursor`, and
+  `makeGraphSnapshot` import `node:buffer` and `node:crypto` directly. And `dreamFeedbackVerdicts`
+  in `http-core.ts` calls `@openreverie/memory`'s `memoryPaths`/`readDreamLog`, which reads the
+  dream log through `paths.logs.readAll`, an `AppendOnlyStore` presently implemented only by
+  `nodeStores()` in `packages/memory/src/memoryStore.ts`, which is `node:fs`-backed. A Workers,
+  Bun, or Deno host running `createFetchApp` still needs whatever those two paths need at runtime.
+  - Why deferred: `packages/server/src/api.ts` and `packages/memory/**` were both outside this
+    task's file ownership (a concurrent task owned `packages/memory/src/engine.ts` and
+    `packages/server/src/registry.ts`, and `api.ts` was assigned to neither task), and Cloudflare
+    Workers' `nodejs_compat` flag already covers `node:buffer`/`node:crypto` (`Buffer`,
+    `createHash`) at no cost to Reverie Cloud, so widening this task's scope to eliminate them was
+    not worth it.
+  - Where the thinking already lives: `docs/superpowers/specs/2026-08-27-hostable-engine-design.md`,
+    P1-1; the comment above `dreamFeedbackVerdicts` in `packages/server/src/http-core.ts`;
+    `packages/server/src/api.ts`; `packages/memory/src/memoryStore.ts` (`nodeStores`) and
+    `packages/memory/src/store.ts` (`AppendOnlyStore`).
+  - Trigger: not stated. A concrete one would be Reverie Cloud, or a self-hosted Bun or Deno run,
+    actually needing `encodeCursor`/`decodeCursor`/`makeGraphSnapshot` or the dream feedback
+    verdict lookup to run somewhere `node:buffer`, `node:crypto`, or `node:fs` are unavailable and
+    uncompensated by a compatibility layer.
+  - Size: small for `api.ts` (its two base64url/hex helpers can reuse the pattern
+    `http-core.ts`'s own `HashProvider` already established). Larger for the `@openreverie/memory`
+    piece, since it means a non-`node:fs` `AppendOnlyStore` implementation, which is really the
+    "Alternate deployment targets" item below, not a separate one.
 
 - **Alternate deployment targets.** Cloudflare (Workers, D1 or Durable Objects storage,
   Vectorize) and VPS packaging. The storage layer is behind interfaces for exactly this reason,
@@ -1590,6 +1692,53 @@ help welcome" section. Read [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](A
     have to be re-made for the new pairs.
   - Size: small to re-validate, larger if it means adding a genuine second visual channel such as
     node shape.
+
+- **Three modules in `packages/memory/src` still import `node:fs/promises` directly after P0-1
+  put filesystem access behind `FileStore`/`AppendOnlyStore`.** `dreamSchedule.ts` (the dream file
+  lock, `flag: 'wx'` exclusive create with a stale-lock takeover on `readFile`/`rm`/`writeFile`),
+  `migrations/styleToProfile.ts` (three calls reading and rewriting `config.toml`), and
+  `gitSync.ts` (one `stat` call, narrowed to `FileStore.exists` rather than converted, see below).
+  None of the three is a gap in the P0-1 cut; each has a concrete reason the frozen interfaces do
+  not fit. `sqlite.ts` was a fourth module in this item; P0-2 (same spec) gave `MemoryIndex` an
+  injected `SqlDatabase` and moved its `fileMtime` stat call out to `engine.ts`, whose caller
+  already holds `paths.files`, so `sqlite.ts` no longer imports any node builtin and is out of
+  this item as of that change.
+  - Status update, 2026-08-27: `dreamSchedule.ts`'s reason changed. A review that day found the
+    design spec's claim, quoted below, was false as shipped: `capabilities.locking` was defined on
+    `FileStore` but read nowhere, so the lock ran unconditionally even where it was meant to be
+    disabled. `acquireDreamLock`/`releaseDreamLock` now check `paths.files.capabilities.locking`
+    first and return immediately when it is false (acquire always succeeds, release is a no-op),
+    with no `node:fs` call reached on that path, proven by a test that gives them an in-memory
+    store whose root is not a real directory and asserts they resolve rather than reject with
+    ENOENT. The module still imports `node:fs/promises`, now genuinely only for the
+    locking-enabled branch (self-hosted CLI/server, two OS processes sharing one folder), which is
+    the same "no exclusive-create primitive in `FileStore`" reason `styleToProfile.ts` and
+    `gitSync.ts` already had below, not a gap still to close.
+  - Why deferred: quoting the design spec
+    (`docs/superpowers/specs/2026-08-27-hostable-engine-design.md`, "What we checked and are
+    deliberately not doing"): "The dream file lock does not need removing, only disabling, since a
+    Durable Object is single-threaded. `capabilities.locking` covers it." `FileStore` has no
+    exclusive-create primitive for `dreamSchedule.ts`'s `flag: 'wx'` lock semantics, so disabling
+    the lock under `capabilities.locking` (now actually wired, see above) is the fix rather than
+    adding one. `styleToProfile.ts`'s `config.toml` lives outside the memory folder (it is
+    infrastructure, not `MemoryPaths`-scoped) and is written `mode: 0o600` because it holds the
+    API key; `FileStore.writeFile` carries no permission parameter, so routing it through
+    `FileStore` would silently drop that permission. `gitSync.ts`'s `commitMemory` was
+    scoped by this task to "leave the git invocation alone, only convert its one fs call"; its
+    `stat`-based `isDirectory` check was narrowed to `FileStore.exists` (a real behavior change,
+    noted in the code, in the one pathological case where `root` or `.git` exists as a plain file
+    rather than a directory) rather than adding a directory-type primitive to the frozen
+    interface.
+  - Where: `packages/memory/src/dreamSchedule.ts`, `packages/memory/src/migrations/styleToProfile.ts`,
+    `packages/memory/src/gitSync.ts`. Design source:
+    `docs/superpowers/specs/2026-08-27-hostable-engine-design.md`, section P0-1, and its "What we
+    checked and are deliberately not doing" list.
+  - Trigger: `config.toml` handling ported to a host with no filesystem (`styleToProfile.ts`); not
+    stated for `gitSync.ts`; `dreamSchedule.ts` needs no further trigger, since its part of this
+    item shipped on 2026-08-27.
+  - Size: not stated for `styleToProfile.ts`, since a faithful conversion needs either a
+    permission-aware `FileStore` variant or a separate host-config interface that does not exist
+    yet; not stated for `gitSync.ts`.
 
 ## 6. Decided against, with a trigger to revisit
 

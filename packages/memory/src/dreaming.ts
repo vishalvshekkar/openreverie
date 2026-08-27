@@ -1,6 +1,5 @@
 // The dream pipeline. Exploration here; outputs and writes in this same
 // module (see runDream below, added with the output stage).
-import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { ChatMessage, ChatProvider, ToolCall, ToolDefinition } from '@openreverie/providers'
 import { z } from 'zod'
@@ -511,7 +510,13 @@ function dropFlagged(
 export async function runDream(args: RunDreamArgs): Promise<DreamRunResult> {
   const events: Record<string, unknown>[] = []
   const record = (event: Record<string, unknown>): void => {
-    events.push({ ts: new Date().toISOString(), ...event })
+    // args.now, not a fresh Date() read: this file's own model_call
+    // durationMs entries below are the one place elapsed wall-clock time
+    // (Date.now() start/end deltas) genuinely matters, and stay untouched.
+    // A process.jsonl event timestamp is different: it is a date written
+    // to disk, so it goes through the same injected instant every other
+    // date this dream run produces uses.
+    events.push({ ts: args.now.toISOString(), ...event })
   }
 
   for (const seed of args.seeds) {
@@ -700,9 +705,9 @@ export async function runDream(args: RunDreamArgs): Promise<DreamRunResult> {
   const dreamId = newId('dream')
   const localDate = formatLocalDate(args.now, args.timezone)
   const dir = join(args.paths.dreamsDir, `${localDate}-${dreamId}`)
-  await mkdir(dir, { recursive: true })
+  await args.paths.files.mkdir(dir)
   if (narrative !== undefined) {
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(args.paths.files, {
       path: join(dir, 'dream.md'),
       meta: {
         id: newId('doc'),
@@ -716,7 +721,7 @@ export async function runDream(args: RunDreamArgs): Promise<DreamRunResult> {
       body: narrative,
     })
   }
-  await writeDocumentAtomic({
+  await writeDocumentAtomic(args.paths.files, {
     path: join(dir, 'insight.md'),
     meta: {
       id: newId('doc'),
@@ -731,10 +736,16 @@ export async function runDream(args: RunDreamArgs): Promise<DreamRunResult> {
     },
     body: survivors.map((i) => `## ${i.headline} (${i.id})\n\n${i.claim}`).join('\n\n'),
   })
-  await writeFile(
+  // process.jsonl is written once and never modified afterward, like every
+  // other dream artifact (see the module comment on dreams/<date>-<id>/ in
+  // AGENTS.md), but it is not a log module's append-only file: it is
+  // written whole, in one shot, after the dream pipeline finishes, so it
+  // goes through FileStore.writeFile rather than AppendOnlyStore. That
+  // makes this write atomic where the old plain writeFile was not: the
+  // bytes on disk are identical, only a transient temp file is new.
+  await args.paths.files.writeFile(
     join(dir, 'process.jsonl'),
     `${events.map((e) => JSON.stringify(e)).join('\n')}\n`,
-    'utf8',
   )
   await appendDreamLog(args.paths, [
     {

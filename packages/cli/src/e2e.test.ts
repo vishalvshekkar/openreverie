@@ -32,6 +32,7 @@ import {
   MemoryEngine,
   type MemoryPaths,
   memoryPaths,
+  nodeStores,
   readDocument,
   writeProfile,
 } from '@openreverie/memory'
@@ -72,8 +73,8 @@ let dir: string
 
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'openreverie-e2e-'))
-  await ensureMemoryTree(memoryPaths(dir))
-  await pinTimezoneUtc(memoryPaths(dir))
+  await ensureMemoryTree(memoryPaths(dir, nodeStores()), 'UTC')
+  await pinTimezoneUtc(memoryPaths(dir, nodeStores()))
 })
 
 afterEach(async () => {
@@ -101,11 +102,12 @@ function fakeDeps(chat: FakeChatProvider): EngineDeps {
     embeddings: new FakeEmbeddingProvider(),
     reflectionModel: 'm',
     embeddingModel: 'm',
+    timezone: 'UTC',
   }
 }
 
 async function pinTimezoneUtc(paths: MemoryPaths): Promise<void> {
-  const profile = await loadProfile(paths)
+  const profile = await loadProfile(paths, 'UTC')
   await writeProfile(paths, {
     meta: { ...profile.meta, timezone: 'UTC', timezoneSource: 'user-confirmed' },
     body: profile.body,
@@ -113,7 +115,11 @@ async function pinTimezoneUtc(paths: MemoryPaths): Promise<void> {
 }
 
 function transcriptPath(date: string, sessionId: string): string {
-  return join(memoryPaths(dir).sessionsDir, `${date}-${sessionId}`, 'transcript.jsonl')
+  return join(
+    memoryPaths(dir, nodeStores()).sessionsDir,
+    `${date}-${sessionId}`,
+    'transcript.jsonl',
+  )
 }
 
 async function runPastDay(
@@ -204,14 +210,20 @@ describe('end-to-end harness', () => {
       await engine.runMaintenance(MAINTENANCE_NOW)
       expect(engine.warnings).toEqual([])
 
-      const paths = memoryPaths(dir)
-      const dailyOne = await readDocument(join(paths.rollupsDailyDir, `${DAY_ONE_DATE}.md`))
-      const dailyTwo = await readDocument(join(paths.rollupsDailyDir, `${DAY_TWO_DATE}.md`))
+      const paths = memoryPaths(dir, nodeStores())
+      const dailyOne = await readDocument(
+        paths.files,
+        join(paths.rollupsDailyDir, `${DAY_ONE_DATE}.md`),
+      )
+      const dailyTwo = await readDocument(
+        paths.files,
+        join(paths.rollupsDailyDir, `${DAY_TWO_DATE}.md`),
+      )
       expect(dailyOne.body.trim()).toBe(dayOneRollupText)
       expect(dailyTwo.body.trim()).toBe(dayTwoRollupText)
 
       // Constitution is still readable through the documents API.
-      const constitutionDoc = await readDocument(paths.constitution)
+      const constitutionDoc = await readDocument(paths.files, paths.constitution)
       expect(typeof constitutionDoc.body).toBe('string')
       expect(constitutionDoc.body.length).toBeGreaterThan(0)
 

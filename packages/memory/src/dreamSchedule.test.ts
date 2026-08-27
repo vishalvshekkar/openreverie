@@ -11,6 +11,8 @@ import {
   periodFor,
   releaseDreamLock,
 } from './dreamSchedule.js'
+import { memoryStores } from './memoryStore.js'
+import { nodeStores } from './nodeStore.js'
 import { ensureMemoryTree, type MemoryPaths, memoryPaths } from './paths.js'
 
 // 2026-08-24 is a Monday. 18:30 UTC on the 24th is already the 25th in Tokyo.
@@ -65,8 +67,8 @@ describe('dream lock', () => {
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'openreverie-dreamschedule-'))
-    paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
   })
 
   afterEach(async () => {
@@ -98,5 +100,28 @@ describe('dream lock', () => {
       'utf8',
     )
     expect(await acquireDreamLock(paths, NOW)).toBe(false)
+  })
+})
+
+describe('dream lock, capabilities.locking disabled', () => {
+  it('acquire always succeeds, twice in a row, and release is a no-op, without touching the filesystem', async () => {
+    // memoryStores' root ('/reverie-hostless') is not a real directory on
+    // this machine, and ensureMemoryTree is deliberately not called here.
+    // If acquireDreamLock reached node:fs/promises' writeFile with
+    // flag: 'wx' on this path, it would reject with ENOENT (no such
+    // directory), not resolve. A resolved true here is only possible
+    // because the capabilities.locking guard returns before any node:fs
+    // call happens, exactly as it does inside a Durable Object, which has
+    // no filesystem to reach at all.
+    const paths = memoryPaths(
+      '/reverie-hostless',
+      memoryStores({ versioning: true, locking: false }),
+    )
+    await expect(acquireDreamLock(paths, NOW)).resolves.toBe(true)
+    // A real lock would make the second call lose (see "first acquire
+    // wins, second loses" above). With locking off there is no lock to
+    // lose to, so both calls succeed.
+    await expect(acquireDreamLock(paths, NOW)).resolves.toBe(true)
+    await expect(releaseDreamLock(paths)).resolves.toBeUndefined()
   })
 })

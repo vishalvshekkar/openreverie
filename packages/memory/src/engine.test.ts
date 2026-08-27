@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 import {
   type EmbeddingProvider,
+  type EmbedResult,
   FakeChatProvider,
   FakeEmbeddingProvider,
 } from '@openreverie/providers'
@@ -14,6 +15,7 @@ import { recordCommitment, resolveCommitment } from './commitments.js'
 import { listDocuments, newId, readDocument, writeDocumentAtomic } from './documents.js'
 import { type EngineDeps, MemoryEngine } from './engine.js'
 import { appendGraph, readGraph } from './graph.js'
+import { nodeStores } from './nodeStore.js'
 import { ensureMemoryTree, type MemoryPaths, memoryPaths } from './paths.js'
 import { loadProfile, writeProfile } from './profile.js'
 import { appendProposals, type Proposal, pendingProposals } from './proposals.js'
@@ -98,7 +100,7 @@ describe('rmWithRetry', () => {
 const execFileAsync = promisify(execFile)
 
 async function pinTimezoneUtc(paths: MemoryPaths): Promise<void> {
-  const profile = await loadProfile(paths)
+  const profile = await loadProfile(paths, 'UTC')
   await writeProfile(paths, {
     meta: { ...profile.meta, timezone: 'UTC', timezoneSource: 'user-confirmed' },
     body: profile.body,
@@ -127,6 +129,7 @@ function fakeDeps(chat: FakeChatProvider): EngineDeps {
     embeddings: new FakeEmbeddingProvider(),
     reflectionModel: 'fake-reflect',
     embeddingModel: 'fake-embed',
+    timezone: 'UTC',
   }
 }
 
@@ -137,10 +140,52 @@ function fakeDeps(chat: FakeChatProvider): EngineDeps {
 class ThrowingEmbeddingProvider implements EmbeddingProvider {
   readonly name = 'throwing'
 
-  async embed(_model: string, _texts: string[]): Promise<number[][]> {
+  async embed(_model: string, _texts: string[]): Promise<EmbedResult> {
     throw new Error('embeddings unavailable')
   }
 }
+
+describe('MemoryEngine.open timezone validation', () => {
+  let dir: string
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-timezone-'))
+  })
+
+  afterEach(async () => {
+    await rmWithRetry(dir)
+  })
+
+  // The self-hosted path always passes systemTimeZone(), which is never
+  // empty, but the check has to exist for the hosted caller P0-3 was built
+  // for regardless, and this proves open() itself rejects a malformed
+  // deps.timezone rather than letting it reach Intl deep inside
+  // ensureMemoryTree or startSession.
+  it('rejects a deps.timezone that is not a recognized IANA zone', async () => {
+    await expect(
+      MemoryEngine.open(
+        dir,
+        { ...fakeDeps(new FakeChatProvider([])), timezone: 'Not/AZone' },
+        { maintenance: false },
+      ),
+    ).rejects.toThrow('deps.timezone is not a valid IANA timezone')
+  })
+
+  // Named separately from the malformed-string case above on purpose: this
+  // project has a recorded incident (AGENTS.md, 2026-08-24) of a guard
+  // whose tests covered a field being ABSENT but never PRESENT AND EMPTY.
+  // isValidIanaTimeZone already treats '' as invalid, but that behavior is
+  // only real if something here exercises it against this exact call path.
+  it('rejects an empty-string deps.timezone', async () => {
+    await expect(
+      MemoryEngine.open(
+        dir,
+        { ...fakeDeps(new FakeChatProvider([])), timezone: '' },
+        { maintenance: false },
+      ),
+    ).rejects.toThrow('deps.timezone is not a valid IANA timezone')
+  })
+})
 
 describe('MemoryEngine', () => {
   describe('public read projections', () => {
@@ -150,12 +195,12 @@ describe('MemoryEngine', () => {
 
     beforeEach(async () => {
       dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-public-projections-'))
-      paths = memoryPaths(dir)
-      await ensureMemoryTree(paths)
+      paths = memoryPaths(dir, nodeStores())
+      await ensureMemoryTree(paths, 'UTC')
       await pinTimezoneUtc(paths)
       personPageId = newId('doc')
       const personPagePath = join(paths.peopleDir, 'mina.md')
-      await writeDocumentAtomic({
+      await writeDocumentAtomic(paths.files, {
         path: personPagePath,
         meta: { id: personPageId, name: 'Mina', updated: '2026-08-14T12:00:00.000Z' },
         body: 'Mina is a person in this fixture.\n',
@@ -265,7 +310,7 @@ describe('MemoryEngine', () => {
 
     it('opens provider-free projections without maintenance work when maintenance is false', async () => {
       const session = await SessionStore.start(paths, new Date('2026-08-14T12:00:00.000Z'))
-      await session.appendLine({
+      await session.appendLine(paths, {
         ts: '2026-08-14T12:00:00.000Z',
         role: 'user',
         content: 'This stale session must not be reflected while browsing records.',
@@ -275,7 +320,13 @@ describe('MemoryEngine', () => {
 
       const engine = await MemoryEngine.open(
         paths.root,
-        { chat, embeddings, reflectionModel: 'reflection', embeddingModel: 'embeddings' },
+        {
+          chat,
+          embeddings,
+          reflectionModel: 'reflection',
+          embeddingModel: 'embeddings',
+          timezone: 'UTC',
+        },
         { maintenance: false },
       )
 
@@ -296,7 +347,7 @@ describe('MemoryEngine', () => {
 
     beforeEach(async () => {
       dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-'))
-      paths = memoryPaths(dir)
+      paths = memoryPaths(dir, nodeStores())
     })
 
     afterEach(async () => {
@@ -306,11 +357,11 @@ describe('MemoryEngine', () => {
     it('captures a session, reflects it, and produces a rebuildable, searchable index with git history', async () => {
       // Pre-seed an arc and its realm so the scripted reflection can
       // attribute an item to it with high confidence.
-      await ensureMemoryTree(paths)
+      await ensureMemoryTree(paths, 'UTC')
       await pinTimezoneUtc(paths)
       const arcDocId = newId('doc')
       const arcDocPath = join(paths.arcsDir, 'health.md')
-      await writeDocumentAtomic({
+      await writeDocumentAtomic(paths.files, {
         path: arcDocPath,
         meta: { id: arcDocId, name: 'Health', status: 'active' },
         body: 'Original arc narrative.\n',
@@ -389,7 +440,7 @@ describe('MemoryEngine', () => {
         paths.sessionsDir,
         `${formatLocalDate(startedAt, engine.timezone())}-${sessionId}`,
       )
-      const summaryDoc = await readDocument(join(sessionDir, 'summary.md'))
+      const summaryDoc = await readDocument(paths.files, join(sessionDir, 'summary.md'))
       expect(summaryDoc.body).toBe(`${scriptedReflection.summary}\n`)
       const items = summaryDoc.meta.items as ReflectionItem[]
       // The two reflected items plus the live-captured journaling item.
@@ -474,8 +525,8 @@ describe('MemoryEngine', () => {
 
     beforeEach(async () => {
       dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-maint-'))
-      paths = memoryPaths(dir)
-      await ensureMemoryTree(paths)
+      paths = memoryPaths(dir, nodeStores())
+      await ensureMemoryTree(paths, 'UTC')
       await pinTimezoneUtc(paths)
     })
 
@@ -495,7 +546,7 @@ describe('MemoryEngine', () => {
       // A session from two days ago that crashed before reflection ran:
       // transcript on disk, no summary.md.
       const staleStore = await SessionStore.start(paths, twoDaysAgo)
-      await staleStore.appendLine({
+      await staleStore.appendLine(paths, {
         ts: twoDaysAgo.toISOString(),
         role: 'user',
         content: 'A stale session about work stress that never got reflected.',
@@ -504,7 +555,7 @@ describe('MemoryEngine', () => {
       // Yesterday: already reflected (has a summary), but no daily rollup
       // has been built for that date yet.
       const yesterdayStore = await SessionStore.start(paths, yesterday)
-      await yesterdayStore.appendLine({
+      await yesterdayStore.appendLine(paths, {
         ts: yesterday.toISOString(),
         role: 'user',
         content: 'A quiet evening, already reflected on directly.',
@@ -517,6 +568,7 @@ describe('MemoryEngine', () => {
         yesterday,
         new Map(),
         async () => {},
+        'UTC',
       )
 
       // Enough scripted replies for: the stale session's reflection call,
@@ -540,15 +592,22 @@ describe('MemoryEngine', () => {
 
       const staleDate = formatLocalDate(twoDaysAgo, 'UTC')
       const staleSummary = await readDocument(
+        paths.files,
         join(paths.sessionsDir, `${staleDate}-${staleStore.sessionId}`, 'summary.md'),
       )
       expect(staleSummary.body.length).toBeGreaterThan(0)
 
-      const staleDaily = await readDocument(join(paths.rollupsDailyDir, `${staleDate}.md`))
+      const staleDaily = await readDocument(
+        paths.files,
+        join(paths.rollupsDailyDir, `${staleDate}.md`),
+      )
       expect(staleDaily.body.length).toBeGreaterThan(0)
 
       const yesterdayDate = formatLocalDate(yesterday, 'UTC')
-      const yesterdayDaily = await readDocument(join(paths.rollupsDailyDir, `${yesterdayDate}.md`))
+      const yesterdayDaily = await readDocument(
+        paths.files,
+        join(paths.rollupsDailyDir, `${yesterdayDate}.md`),
+      )
       expect(yesterdayDaily.body.length).toBeGreaterThan(0)
 
       await engine.close()
@@ -567,7 +626,7 @@ describe('MemoryEngine', () => {
       // An empty scripted chat provider means either LLM call would throw
       // "scripted results exhausted", which is exactly what this guards.
       const store = await SessionStore.start(paths, yesterday)
-      await store.appendLine({
+      await store.appendLine(paths, {
         ts: yesterday.toISOString(),
         role: 'assistant',
         content: 'Good to see you.',
@@ -580,7 +639,7 @@ describe('MemoryEngine', () => {
 
       const yesterdayDate = formatLocalDate(yesterday, 'UTC')
       await expect(
-        readDocument(join(paths.rollupsDailyDir, `${yesterdayDate}.md`)),
+        readDocument(paths.files, join(paths.rollupsDailyDir, `${yesterdayDate}.md`)),
       ).rejects.toThrow()
 
       const sessions = await SessionStore.listSessions(paths)
@@ -598,8 +657,8 @@ describe('MemoryEngine', () => {
 
     beforeEach(async () => {
       dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-empty-'))
-      paths = memoryPaths(dir)
-      await ensureMemoryTree(paths)
+      paths = memoryPaths(dir, nodeStores())
+      await ensureMemoryTree(paths, 'UTC')
       await pinTimezoneUtc(paths)
     })
 
@@ -613,7 +672,7 @@ describe('MemoryEngine', () => {
 
       const now = new Date()
       const store = await SessionStore.start(paths, now)
-      await store.appendLine({
+      await store.appendLine(paths, {
         ts: now.toISOString(),
         role: 'assistant',
         content: 'Good to see you.',
@@ -627,7 +686,7 @@ describe('MemoryEngine', () => {
       await engine.runMaintenance(now)
       expect(chat.requests).toHaveLength(0)
 
-      const summary = await readDocument(join(store.dir, 'summary.md'))
+      const summary = await readDocument(paths.files, join(store.dir, 'summary.md'))
       expect(summary.meta.skipped).toBe(true)
       expect(typeof summary.meta.reason).toBe('string')
 
@@ -642,17 +701,17 @@ describe('MemoryEngine', () => {
 
       const now = new Date()
       const store = await SessionStore.start(paths, now)
-      await store.appendLine({
+      await store.appendLine(paths, {
         ts: now.toISOString(),
         role: 'assistant',
         content: 'Good to see you.',
       })
-      await store.appendLine({ ts: now.toISOString(), role: 'user', content: 'Hi.' })
+      await store.appendLine(paths, { ts: now.toISOString(), role: 'user', content: 'Hi.' })
 
       await engine.runMaintenance(now)
 
       expect(chat.requests).toHaveLength(1)
-      const summary = await readDocument(join(store.dir, 'summary.md'))
+      const summary = await readDocument(paths.files, join(store.dir, 'summary.md'))
       expect(summary.meta.skipped).toBeUndefined()
       expect(summary.body.trim()).toBe('Said hello back.')
 
@@ -665,7 +724,7 @@ describe('MemoryEngine', () => {
 
       const now = new Date()
       const store = await SessionStore.start(paths, now)
-      await store.appendLine({
+      await store.appendLine(paths, {
         ts: now.toISOString(),
         role: 'assistant',
         content: 'Good to see you.',
@@ -673,7 +732,7 @@ describe('MemoryEngine', () => {
 
       await engine.runMaintenance(now)
 
-      const skippedSummary = await readDocument(join(store.dir, 'summary.md'))
+      const skippedSummary = await readDocument(paths.files, join(store.dir, 'summary.md'))
       const skippedDocId = skippedSummary.meta.id as string
 
       // The fake embedding provider returns a nonzero, if weak, cosine
@@ -719,8 +778,8 @@ describe('MemoryEngine', () => {
 
     beforeEach(async () => {
       dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-proposals-'))
-      paths = memoryPaths(dir)
-      await ensureMemoryTree(paths)
+      paths = memoryPaths(dir, nodeStores())
+      await ensureMemoryTree(paths, 'UTC')
       await pinTimezoneUtc(paths)
       engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
     })
@@ -740,7 +799,7 @@ describe('MemoryEngine', () => {
         payload: { name: 'Marathon Training', realm: 'Fitness', itemIds: [itemId] },
         source: 'session_seed',
       }
-      await appendProposals(paths, [proposal])
+      await appendProposals(paths, [proposal], 'UTC')
 
       await engine.resolveProposal(proposal.id, 'accepted')
 
@@ -766,12 +825,12 @@ describe('MemoryEngine', () => {
       })
 
       if (!arcNode.doc || !realmNode.doc) throw new Error('expected doc paths on both nodes')
-      const arcDoc = await readDocument(arcNode.doc)
+      const arcDoc = await readDocument(paths.files, arcNode.doc)
       expect(arcDoc.meta.status).toBe('active')
       expect(arcDoc.meta.realm).toBe(realmNode.id)
       expect(arcDoc.body).toBe('This arc is new. It grows as we talk.\n')
 
-      const realmDoc = await readDocument(realmNode.doc)
+      const realmDoc = await readDocument(paths.files, realmNode.doc)
       expect(realmDoc.body).toBe('This realm is new. It grows as we talk.\n')
 
       expect((await engine.listArcs()).rows.some((n) => n.id === arcNode.id)).toBe(true)
@@ -787,7 +846,7 @@ describe('MemoryEngine', () => {
         payload: { name: 'Marathon Training', realm: 'Fitness', itemIds: [newId('item')] },
         source: 'session_one',
       }
-      await appendProposals(paths, [first])
+      await appendProposals(paths, [first], 'UTC')
       await engine.resolveProposal(first.id, 'accepted')
 
       const graphAfterFirst = await readGraph(paths)
@@ -804,7 +863,7 @@ describe('MemoryEngine', () => {
         payload: { name: 'Marathon Training', realm: realmNode.id, itemIds: [newId('item')] },
         source: 'session_two',
       }
-      await appendProposals(paths, [second])
+      await appendProposals(paths, [second], 'UTC')
       await engine.resolveProposal(second.id, 'accepted')
 
       const graph = await readGraph(paths)
@@ -818,7 +877,7 @@ describe('MemoryEngine', () => {
       )
       expect(arcNodes).toHaveLength(2)
 
-      const arcDocs = await listDocuments(paths.arcsDir)
+      const arcDocs = await listDocuments(paths.files, paths.arcsDir)
       const filenames = arcDocs.map((d) => d.path.split('/').pop())
       expect(filenames).toContain('marathon-training.md')
       expect(filenames).toContain('marathon-training-2.md')
@@ -838,6 +897,7 @@ describe('MemoryEngine', () => {
         embeddings: new ThrowingEmbeddingProvider(),
         reflectionModel: 'fake-reflect',
         embeddingModel: 'fake-embed',
+        timezone: 'UTC',
       })
 
       const itemId = newId('item')
@@ -849,7 +909,7 @@ describe('MemoryEngine', () => {
         payload: { name: 'Marathon Training', realm: 'Fitness', itemIds: [itemId] },
         source: 'session_seed',
       }
-      await appendProposals(paths, [proposal])
+      await appendProposals(paths, [proposal], 'UTC')
 
       await expect(engine.resolveProposal(proposal.id, 'accepted')).resolves.toBeUndefined()
 
@@ -875,7 +935,7 @@ describe('MemoryEngine', () => {
         confidence: 1,
       })
 
-      const arcDoc = await readDocument(arcNode.doc)
+      const arcDoc = await readDocument(paths.files, arcNode.doc)
       expect(arcDoc.body).toBe('This arc is new. It grows as we talk.\n')
     })
 
@@ -889,7 +949,7 @@ describe('MemoryEngine', () => {
         payload: { name: 'Sam', itemIds: [itemId] },
         source: 'session_seed',
       }
-      await appendProposals(paths, [proposal])
+      await appendProposals(paths, [proposal], 'UTC')
 
       await engine.resolveProposal(proposal.id, 'accepted')
 
@@ -908,7 +968,7 @@ describe('MemoryEngine', () => {
         confidence: 1,
       })
 
-      const personDoc = await readDocument(personNode.doc)
+      const personDoc = await readDocument(paths.files, personNode.doc)
       expect(personDoc.path).toBe(join(paths.peopleDir, 'sam.md'))
       expect(personDoc.meta.name).toBe('Sam')
       expect(personDoc.meta.node).toBe(personNode.id)
@@ -931,6 +991,7 @@ describe('MemoryEngine', () => {
         embeddings: new ThrowingEmbeddingProvider(),
         reflectionModel: 'fake-reflect',
         embeddingModel: 'fake-embed',
+        timezone: 'UTC',
       })
 
       const itemId = newId('item')
@@ -942,7 +1003,7 @@ describe('MemoryEngine', () => {
         payload: { name: 'Sam', itemIds: [itemId] },
         source: 'session_seed',
       }
-      await appendProposals(paths, [proposal])
+      await appendProposals(paths, [proposal], 'UTC')
 
       await expect(engine.resolveProposal(proposal.id, 'accepted')).resolves.toBeUndefined()
 
@@ -963,7 +1024,7 @@ describe('MemoryEngine', () => {
         confidence: 1,
       })
 
-      const personDoc = await readDocument(personNode.doc)
+      const personDoc = await readDocument(paths.files, personNode.doc)
       expect(personDoc.body).toBe('This page is new. It grows as we talk.\n')
     })
 
@@ -977,7 +1038,7 @@ describe('MemoryEngine', () => {
         payload: { name: 'Sam', itemIds: [firstItemId] },
         source: 'session_one',
       }
-      await appendProposals(paths, [first])
+      await appendProposals(paths, [first], 'UTC')
       await engine.resolveProposal(first.id, 'accepted')
 
       const secondItemId = newId('item')
@@ -989,7 +1050,7 @@ describe('MemoryEngine', () => {
         payload: { name: 'Sam', itemIds: [secondItemId] },
         source: 'session_two',
       }
-      await appendProposals(paths, [second])
+      await appendProposals(paths, [second], 'UTC')
       await engine.resolveProposal(second.id, 'accepted')
 
       const graph = await readGraph(paths)
@@ -1004,8 +1065,8 @@ describe('MemoryEngine', () => {
       }
       expect(firstNode.doc).not.toBe(secondNode.doc)
 
-      const firstDoc = await readDocument(firstNode.doc)
-      const secondDoc = await readDocument(secondNode.doc)
+      const firstDoc = await readDocument(paths.files, firstNode.doc)
+      const secondDoc = await readDocument(paths.files, secondNode.doc)
       expect(firstDoc.path).toBe(join(paths.peopleDir, 'sam.md'))
       expect(secondDoc.path).toBe(join(paths.peopleDir, 'sam-2.md'))
       expect(firstDoc.body).toBe('This page is new. It grows as we talk.\n')
@@ -1033,7 +1094,7 @@ describe('MemoryEngine', () => {
         payload: { edge: 'part_of', from: fromId, to: toId, confidence: 0.42 },
         source: 'session_seed',
       }
-      await appendProposals(paths, [proposal])
+      await appendProposals(paths, [proposal], 'UTC')
 
       await engine.resolveProposal(proposal.id, 'accepted')
 
@@ -1056,7 +1117,7 @@ describe('MemoryEngine', () => {
         payload: { name: 'Ghost Arc', realm: 'Ghost Realm', itemIds: [newId('item')] },
         source: 'session_seed',
       }
-      await appendProposals(paths, [proposal])
+      await appendProposals(paths, [proposal], 'UTC')
 
       await engine.resolveProposal(proposal.id, 'rejected')
 
@@ -1067,7 +1128,7 @@ describe('MemoryEngine', () => {
       expect([...graph.nodes.values()].some((n) => n.label === 'Ghost Arc')).toBe(false)
       expect([...graph.nodes.values()].some((n) => n.label === 'Ghost Realm')).toBe(false)
 
-      const arcDocs = await listDocuments(paths.arcsDir)
+      const arcDocs = await listDocuments(paths.files, paths.arcsDir)
       expect(arcDocs.some((d) => d.meta.name === 'Ghost Arc')).toBe(false)
     })
   })
@@ -1078,8 +1139,8 @@ describe('MemoryEngine', () => {
 
     beforeEach(async () => {
       dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-save-by-default-'))
-      paths = memoryPaths(dir)
-      await ensureMemoryTree(paths)
+      paths = memoryPaths(dir, nodeStores())
+      await ensureMemoryTree(paths, 'UTC')
       await pinTimezoneUtc(paths)
     })
 
@@ -1118,7 +1179,7 @@ describe('MemoryEngine', () => {
       )
       if (!arcNode?.doc) throw new Error('expected an arc node with a doc pointer')
 
-      const arcDoc = await readDocument(arcNode.doc)
+      const arcDoc = await readDocument(paths.files, arcNode.doc)
       expect(arcDoc.body).toBe(
         'Training for a marathon this fall, starting with long weekend runs.\n',
       )
@@ -1184,7 +1245,7 @@ describe('MemoryEngine', () => {
       )
       if (!personNode?.doc) throw new Error('expected a person node with a doc pointer')
 
-      const personDoc = await readDocument(personNode.doc)
+      const personDoc = await readDocument(paths.files, personNode.doc)
       expect(personDoc.body).toBe('Sam is a running partner who joins for weekend long runs.\n')
       expect(personDoc.meta.name).toBe('Sam')
       expect(personDoc.meta.node).toBe(personNode.id)
@@ -1240,7 +1301,7 @@ describe('MemoryEngine', () => {
       )
       if (!arcNode?.doc) throw new Error('expected an arc node with a doc pointer')
 
-      const arcDoc = await readDocument(arcNode.doc)
+      const arcDoc = await readDocument(paths.files, arcNode.doc)
       expect(arcDoc.body).toBe('This arc is new. It grows as we talk.\n')
 
       await engine.close()
@@ -1277,7 +1338,7 @@ describe('MemoryEngine', () => {
       )
       if (!personNode?.doc) throw new Error('expected a person node with a doc pointer')
 
-      const personDoc = await readDocument(personNode.doc)
+      const personDoc = await readDocument(paths.files, personNode.doc)
       expect(personDoc.body).toBe('This page is new. It grows as we talk.\n')
 
       await engine.close()
@@ -1322,7 +1383,7 @@ describe('MemoryEngine', () => {
         payload: { name: 'Legacy Arc', realm: 'Legacy Realm', itemIds: [newId('item')] },
         source: 'session_legacy',
       }
-      await appendProposals(paths, [proposal])
+      await appendProposals(paths, [proposal], 'UTC')
 
       const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
 
@@ -1366,7 +1427,7 @@ describe('MemoryEngine', () => {
         payload: { name: 'Legacy Person', itemIds: [personItemId] },
         source: 'session_legacy',
       }
-      await appendProposals(paths, [arcProposal, personProposal])
+      await appendProposals(paths, [arcProposal, personProposal], 'UTC')
 
       const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
 
@@ -1404,7 +1465,7 @@ describe('MemoryEngine', () => {
         payload: { name: 'Good Arc', realm: 'Some Realm', itemIds: [newId('item')] },
         source: 'session_legacy',
       }
-      await appendProposals(paths, [malformed, good])
+      await appendProposals(paths, [malformed, good], 'UTC')
 
       const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
 
@@ -1435,7 +1496,7 @@ describe('MemoryEngine', () => {
         payload: { name: 'Malformed Arc', realm: 'Some Realm' },
         source: 'session_legacy',
       }
-      await appendProposals(paths, [malformed])
+      await appendProposals(paths, [malformed], 'UTC')
 
       const first = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
       await first.close()
@@ -1450,7 +1511,7 @@ describe('MemoryEngine', () => {
       // Not a malformed payload (valid JSON, wrong shape): a truncated line
       // that is not valid JSON at all, the kind appendFile's lack of crash
       // atomicity or a synced, hand-edited folder can produce.
-      await ensureMemoryTree(paths)
+      await ensureMemoryTree(paths, 'UTC')
       await pinTimezoneUtc(paths)
       await writeFile(paths.proposals, '{"id":"prop_broken","kind":"new_arc"\n', 'utf8')
 
@@ -1466,7 +1527,7 @@ describe('MemoryEngine', () => {
     })
 
     it('a genuinely corrupt proposal queue does not block a second open() either, so reindex keeps working', async () => {
-      await ensureMemoryTree(paths)
+      await ensureMemoryTree(paths, 'UTC')
       await pinTimezoneUtc(paths)
       await writeFile(paths.proposals, '{"id":"prop_broken","kind":"new_arc"\n', 'utf8')
 
@@ -1520,7 +1581,7 @@ describe('MemoryEngine', () => {
       // that cached graphState, not a fresh readGraph. Seeding after open()
       // would leave the arcUpdate below unable to resolve arc_health at all.
       const arcDocPath = join(paths.arcsDir, 'health.md')
-      await writeDocumentAtomic({
+      await writeDocumentAtomic(paths.files, {
         path: arcDocPath,
         meta: { id: newId('doc'), name: 'Health', status: 'active' },
         body: 'Training log:\n- Ran a 5k last week.\n',
@@ -1566,7 +1627,7 @@ describe('MemoryEngine', () => {
       })
       await engine.endSession(sessionId)
 
-      const arcDoc = await readDocument(arcDocPath)
+      const arcDoc = await readDocument(paths.files, arcDocPath)
       expect(arcDoc.body).toBe(rewrittenBody)
       // What was already on the page before this session carries forward.
       expect(arcDoc.body).toContain('Ran a 5k last week')
@@ -1625,7 +1686,7 @@ describe('MemoryEngine', () => {
         paths.sessionsDir,
         `${formatLocalDate(new Date(), engine.timezone())}-${sessionId}`,
       )
-      await expect(readDocument(join(sessionDir, 'summary.md'))).rejects.toThrow()
+      await expect(readDocument(paths.files, join(sessionDir, 'summary.md'))).rejects.toThrow()
 
       const graph = await readGraph(paths)
       expect([...graph.nodes.values()].some((n) => n.label === 'Marathon Training')).toBe(false)
@@ -1634,7 +1695,7 @@ describe('MemoryEngine', () => {
       // sessionId (still unreflected, since summary.md never landed) now
       // succeeds and actually creates the arc.
       await engine.endSession(sessionId)
-      const summaryDoc = await readDocument(join(sessionDir, 'summary.md'))
+      const summaryDoc = await readDocument(paths.files, join(sessionDir, 'summary.md'))
       expect(summaryDoc.body.length).toBeGreaterThan(0)
       const graphAfterRetry = await readGraph(paths)
       expect([...graphAfterRetry.nodes.values()].some((n) => n.label === 'Marathon Training')).toBe(
@@ -1651,7 +1712,7 @@ describe('MemoryEngine', () => {
       )
 
       const staleStore = await SessionStore.start(paths, twoDaysAgo)
-      await staleStore.appendLine({
+      await staleStore.appendLine(paths, {
         ts: twoDaysAgo.toISOString(),
         role: 'user',
         content: 'Went for a long run, training for a marathon this fall.',
@@ -1696,7 +1757,7 @@ describe('MemoryEngine', () => {
         paths.sessionsDir,
         `${formatLocalDate(twoDaysAgo, 'UTC')}-${staleStore.sessionId}`,
       )
-      await expect(readDocument(join(staleSessionDir, 'summary.md'))).rejects.toThrow()
+      await expect(readDocument(paths.files, join(staleSessionDir, 'summary.md'))).rejects.toThrow()
 
       const graph = await readGraph(paths)
       expect([...graph.nodes.values()].some((n) => n.label === 'Marathon Training')).toBe(false)
@@ -1707,7 +1768,7 @@ describe('MemoryEngine', () => {
       await engine.runMaintenance()
 
       expect(engine.warnings).toEqual([])
-      const summaryDoc = await readDocument(join(staleSessionDir, 'summary.md'))
+      const summaryDoc = await readDocument(paths.files, join(staleSessionDir, 'summary.md'))
       expect(summaryDoc.body.length).toBeGreaterThan(0)
       const graphAfterRetry = await readGraph(paths)
       expect([...graphAfterRetry.nodes.values()].some((n) => n.label === 'Marathon Training')).toBe(
@@ -1724,8 +1785,8 @@ describe('MemoryEngine', () => {
 
     beforeEach(async () => {
       dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-nodes-'))
-      paths = memoryPaths(dir)
-      await ensureMemoryTree(paths)
+      paths = memoryPaths(dir, nodeStores())
+      await ensureMemoryTree(paths, 'UTC')
       await pinTimezoneUtc(paths)
     })
 
@@ -1912,7 +1973,7 @@ describe('MemoryEngine', () => {
       // Priya from the first session goes stale.
       expect(promotedNode.id).toBe(priyaNode.id)
 
-      const personDoc = await readDocument(promotedNode.doc)
+      const personDoc = await readDocument(paths.files, promotedNode.doc)
       expect(personDoc.body).toBe(`${promotedNarrative}\n`)
       expect(personDoc.meta.node).toBe(priyaNode.id)
 
@@ -1967,7 +2028,7 @@ describe('MemoryEngine', () => {
       const priyaNode = graph.nodes.get('person_priya')
       if (!priyaNode?.doc)
         throw new Error('expected Priya to be promoted despite zero item indexes')
-      const personDoc = await readDocument(priyaNode.doc)
+      const personDoc = await readDocument(paths.files, priyaNode.doc)
       expect(personDoc.body).toBe('Priya matters.\n')
 
       await engine.close()
@@ -1975,7 +2036,7 @@ describe('MemoryEngine', () => {
 
     it('drops a pagePromotions entry targeting a person who already has a page, instead of writing a second page', async () => {
       const personDocPath = join(paths.peopleDir, 'priya.md')
-      await writeDocumentAtomic({
+      await writeDocumentAtomic(paths.files, {
         path: personDocPath,
         meta: { id: newId('doc'), name: 'Priya', node: 'person_priya' },
         body: 'Original Priya page.\n',
@@ -2013,7 +2074,7 @@ describe('MemoryEngine', () => {
       })
       await engine.endSession(sessionId)
 
-      const personDoc = await readDocument(personDocPath)
+      const personDoc = await readDocument(paths.files, personDocPath)
       expect(personDoc.body).toBe('Original Priya page.\n')
 
       await engine.close()
@@ -2096,7 +2157,7 @@ describe('MemoryEngine', () => {
       )
       expect(personNodes).toHaveLength(1)
 
-      const personPages = await listDocuments(paths.peopleDir)
+      const personPages = await listDocuments(paths.files, paths.peopleDir)
       expect(personPages).toHaveLength(1)
 
       await engine.close()
@@ -2248,7 +2309,7 @@ describe('MemoryEngine', () => {
 
     it('resolves a newPersons entry that relists an already-paged known person by attaching items, not writing a second page', async () => {
       const personDocPath = join(paths.peopleDir, 'priya.md')
-      await writeDocumentAtomic({
+      await writeDocumentAtomic(paths.files, {
         path: personDocPath,
         meta: { id: newId('doc'), name: 'Priya', node: 'person_priya' },
         body: 'Original Priya page.\n',
@@ -2288,7 +2349,7 @@ describe('MemoryEngine', () => {
       })
       await engine.endSession(sessionId)
 
-      const personDoc = await readDocument(personDocPath)
+      const personDoc = await readDocument(paths.files, personDocPath)
       expect(personDoc.body).toBe('Original Priya page.\n')
 
       const graph = await readGraph(paths)
@@ -2387,6 +2448,7 @@ describe('MemoryEngine', () => {
       await expect(engine.endSession(sessionId)).resolves.toBeUndefined()
 
       const summaryDoc = await readDocument(
+        paths.files,
         join(
           paths.sessionsDir,
           `${formatLocalDate(new Date(), engine.timezone())}-${sessionId}`,
@@ -2398,7 +2460,7 @@ describe('MemoryEngine', () => {
       const graph = await readGraph(paths)
       const promotedNode = graph.nodes.get('person_priya')
       if (!promotedNode?.doc) throw new Error('expected the promotion to have landed')
-      const personDoc = await readDocument(promotedNode.doc)
+      const personDoc = await readDocument(paths.files, promotedNode.doc)
       expect(personDoc.body).toBe('Priya, promoted this session.\n')
 
       await engine.close()
@@ -2411,8 +2473,8 @@ describe('MemoryEngine', () => {
 
     beforeEach(async () => {
       dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-commitments-'))
-      paths = memoryPaths(dir)
-      await ensureMemoryTree(paths)
+      paths = memoryPaths(dir, nodeStores())
+      await ensureMemoryTree(paths, 'UTC')
       await pinTimezoneUtc(paths)
     })
 
@@ -2437,8 +2499,8 @@ describe('MemoryEngine', () => {
     // green.
     async function resolvedDateFor(zone: string): Promise<string | undefined> {
       const runDir = await mkdtemp(join(tmpdir(), 'openreverie-engine-commitments-tz-'))
-      const runPaths = memoryPaths(runDir)
-      await ensureMemoryTree(runPaths)
+      const runPaths = memoryPaths(runDir, nodeStores())
+      await ensureMemoryTree(runPaths, 'UTC')
       await pinTimezoneUtc(runPaths)
       const out: ReflectionOutput = {
         ...emptyReflectionOutput('A late-night reminder.'),
@@ -2530,8 +2592,8 @@ describe('MemoryEngine', () => {
 
     beforeEach(async () => {
       dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-people-'))
-      paths = memoryPaths(dir)
-      await ensureMemoryTree(paths)
+      paths = memoryPaths(dir, nodeStores())
+      await ensureMemoryTree(paths, 'UTC')
       await pinTimezoneUtc(paths)
       engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
     })
@@ -2544,7 +2606,7 @@ describe('MemoryEngine', () => {
     it('reindexAll walks peopleDir and indexes person pages under kind person', async () => {
       const personDocId = newId('doc')
       const personDocPath = join(paths.peopleDir, 'sam.md')
-      await writeDocumentAtomic({
+      await writeDocumentAtomic(paths.files, {
         path: personDocPath,
         meta: { id: personDocId, name: 'Sam' },
         body: 'Sam is a close friend who shows up in a lot of stories about kayaking.\n',
@@ -2566,8 +2628,8 @@ describe('MemoryEngine', () => {
 
     beforeEach(async () => {
       dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-docid-'))
-      paths = memoryPaths(dir)
-      await ensureMemoryTree(paths)
+      paths = memoryPaths(dir, nodeStores())
+      await ensureMemoryTree(paths, 'UTC')
       await pinTimezoneUtc(paths)
     })
 
@@ -2578,7 +2640,7 @@ describe('MemoryEngine', () => {
     it('resolves a doc path to its document id, and carries docId on graph nodes that have a doc but not on ones that do not', async () => {
       const arcDocId = newId('doc')
       const arcDocPath = join(paths.arcsDir, 'health.md')
-      await writeDocumentAtomic({
+      await writeDocumentAtomic(paths.files, {
         path: arcDocPath,
         meta: { id: arcDocId, name: 'Health', status: 'active' },
         body: 'Original arc narrative.\n',
@@ -2640,8 +2702,8 @@ describe('MemoryEngine', () => {
 
     beforeEach(async () => {
       dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-idempotent-'))
-      paths = memoryPaths(dir)
-      await ensureMemoryTree(paths)
+      paths = memoryPaths(dir, nodeStores())
+      await ensureMemoryTree(paths, 'UTC')
       await pinTimezoneUtc(paths)
     })
 
@@ -2703,8 +2765,8 @@ describe('MemoryEngine', () => {
 
     beforeEach(async () => {
       dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-corrupt-'))
-      paths = memoryPaths(dir)
-      await ensureMemoryTree(paths)
+      paths = memoryPaths(dir, nodeStores())
+      await ensureMemoryTree(paths, 'UTC')
       await pinTimezoneUtc(paths)
     })
 
@@ -2738,7 +2800,7 @@ describe('MemoryEngine', () => {
       const corruptPath = join(paths.arcsDir, 'broken.md')
       await writeFile(corruptPath, '---\nname: [unterminated\n---\nbody\n', 'utf8')
 
-      await expect(readDocument(corruptPath)).rejects.toThrow(corruptPath)
+      await expect(readDocument(paths.files, corruptPath)).rejects.toThrow(corruptPath)
     })
   })
 
@@ -2748,8 +2810,8 @@ describe('MemoryEngine', () => {
 
     beforeEach(async () => {
       dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-reindex-'))
-      paths = memoryPaths(dir)
-      await ensureMemoryTree(paths)
+      paths = memoryPaths(dir, nodeStores())
+      await ensureMemoryTree(paths, 'UTC')
       await pinTimezoneUtc(paths)
     })
 
@@ -2760,7 +2822,7 @@ describe('MemoryEngine', () => {
     it('drops rows for documents whose source file was deleted, not just upserts current ones', async () => {
       const tempRealmDocId = newId('doc')
       const tempRealmPath = join(paths.realmsDir, 'temp-realm.md')
-      await writeDocumentAtomic({
+      await writeDocumentAtomic(paths.files, {
         path: tempRealmPath,
         meta: { id: tempRealmDocId, name: 'Temp Realm' },
         body: 'A realm about kayaking expeditions.\n',
@@ -2792,8 +2854,8 @@ describe('MemoryEngine', () => {
 
     beforeEach(async () => {
       dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-context-'))
-      paths = memoryPaths(dir)
-      await ensureMemoryTree(paths)
+      paths = memoryPaths(dir, nodeStores())
+      await ensureMemoryTree(paths, 'UTC')
       await pinTimezoneUtc(paths)
     })
 
@@ -2806,12 +2868,12 @@ describe('MemoryEngine', () => {
       const dormantArcId = 'arc_dormant'
       const activeArcPath = join(paths.arcsDir, 'active-arc.md')
       const dormantArcPath = join(paths.arcsDir, 'dormant-arc.md')
-      await writeDocumentAtomic({
+      await writeDocumentAtomic(paths.files, {
         path: activeArcPath,
         meta: { id: newId('doc'), name: 'Active Arc', status: 'active' },
         body: 'Still going.\n',
       })
-      await writeDocumentAtomic({
+      await writeDocumentAtomic(paths.files, {
         path: dormantArcPath,
         meta: { id: newId('doc'), name: 'Dormant Arc', status: 'dormant' },
         body: 'On pause.\n',
@@ -2851,7 +2913,7 @@ describe('MemoryEngine', () => {
         payload: { edge: 'part_of', from: newId('item'), to: activeArcId, confidence: 0.5 },
         source: 'session_seed',
       }
-      await appendProposals(paths, [proposal])
+      await appendProposals(paths, [proposal], 'UTC')
 
       const context = await engine.sessionContext()
 
@@ -2892,8 +2954,8 @@ describe('MemoryEngine', () => {
 
     beforeEach(async () => {
       dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-people-context-'))
-      paths = memoryPaths(dir)
-      await ensureMemoryTree(paths)
+      paths = memoryPaths(dir, nodeStores())
+      await ensureMemoryTree(paths, 'UTC')
       await pinTimezoneUtc(paths)
     })
 
@@ -2903,7 +2965,7 @@ describe('MemoryEngine', () => {
 
     it('includes every person node, marking whether each one has a page', async () => {
       const pagedPath = join(paths.peopleDir, 'priya.md')
-      await writeDocumentAtomic({
+      await writeDocumentAtomic(paths.files, {
         path: pagedPath,
         meta: { id: newId('doc'), name: 'Priya', node: 'person_paged', opened: '2026-08-01' },
         body: 'This page is new. It grows as we talk.\n',
@@ -3045,8 +3107,8 @@ describe('MemoryEngine', () => {
     it('pulls intention item texts out of recent session summaries, skipping other kinds', async () => {
       const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)
       const store = await SessionStore.start(paths, yesterday)
-      await store.appendLine({ ts: yesterday.toISOString(), role: 'user', content: 'Hi.' })
-      await writeDocumentAtomic({
+      await store.appendLine(paths, { ts: yesterday.toISOString(), role: 'user', content: 'Hi.' })
+      await writeDocumentAtomic(paths.files, {
         path: join(store.dir, 'summary.md'),
         meta: {
           id: newId('doc'),
@@ -3071,8 +3133,8 @@ describe('MemoryEngine', () => {
     it("carries an intention item's stated eventTime into recentIntentions when present", async () => {
       const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)
       const store = await SessionStore.start(paths, yesterday)
-      await store.appendLine({ ts: yesterday.toISOString(), role: 'user', content: 'Hi.' })
-      await writeDocumentAtomic({
+      await store.appendLine(paths, { ts: yesterday.toISOString(), role: 'user', content: 'Hi.' })
+      await writeDocumentAtomic(paths.files, {
         path: join(store.dir, 'summary.md'),
         meta: {
           id: newId('doc'),
@@ -3113,8 +3175,8 @@ describe('MemoryEngine', () => {
       // the write-site fixes alone cannot cover.
       const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)
       const store = await SessionStore.start(paths, yesterday)
-      await store.appendLine({ ts: yesterday.toISOString(), role: 'user', content: 'Hi.' })
-      await writeDocumentAtomic({
+      await store.appendLine(paths, { ts: yesterday.toISOString(), role: 'user', content: 'Hi.' })
+      await writeDocumentAtomic(paths.files, {
         path: join(store.dir, 'summary.md'),
         meta: {
           id: newId('doc'),
@@ -3187,7 +3249,7 @@ describe('MemoryEngine', () => {
           `${formatLocalDate(startedAt, engine.timezone())}-${sessionId}`,
           'summary.md',
         )
-        const summaryDoc = await readDocument(summaryPath)
+        const summaryDoc = await readDocument(paths.files, summaryPath)
         const items = summaryDoc.meta.items as { text: string; eventTime?: string }[]
         const item = items.find((i) => i.text === 'See Nightfall with Arjun, unstated time')
         expect(item).toBeDefined()
@@ -3218,8 +3280,8 @@ describe('MemoryEngine', () => {
     it('tolerates a hand-written summary.md with no items key at all, in the same recentSummaries window', async () => {
       const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)
       const store = await SessionStore.start(paths, yesterday)
-      await store.appendLine({ ts: yesterday.toISOString(), role: 'user', content: 'Hi.' })
-      await writeDocumentAtomic({
+      await store.appendLine(paths, { ts: yesterday.toISOString(), role: 'user', content: 'Hi.' })
+      await writeDocumentAtomic(paths.files, {
         path: join(store.dir, 'summary.md'),
         meta: { id: newId('doc') },
         body: 'A quiet day, written by hand.\n',
@@ -3240,8 +3302,8 @@ describe('MemoryEngine', () => {
 
     beforeEach(async () => {
       dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-commitment-timing-'))
-      paths = memoryPaths(dir)
-      await ensureMemoryTree(paths)
+      paths = memoryPaths(dir, nodeStores())
+      await ensureMemoryTree(paths, 'UTC')
       await pinTimezoneUtc(paths)
     })
 
@@ -3284,8 +3346,8 @@ describe('MemoryEngine', () => {
 
     beforeEach(async () => {
       dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-commitments-context-'))
-      paths = memoryPaths(dir)
-      await ensureMemoryTree(paths)
+      paths = memoryPaths(dir, nodeStores())
+      await ensureMemoryTree(paths, 'UTC')
       await pinTimezoneUtc(paths)
     })
 
@@ -3294,22 +3356,26 @@ describe('MemoryEngine', () => {
     })
 
     it('carries an eligible commitment with its own words, the local date it was said, and its gloss, with no field to carry a bracket', async () => {
-      await recordCommitment(paths, {
-        label: 'Start swimming again',
-        flavor: 'plan',
-        sessionId: 'session_test',
-        timing: {
-          words: 'come summer',
-          anchor: '2026-08-13T09:00:00.000Z',
-          interpretation: {
-            statedPrecision: 'period',
-            gloss: 'Summer where they live runs roughly February to May.',
-            bracketFrom: '2027-02-01',
-            bracketTo: '2027-05-31',
-            interpretationConfidence: 'medium',
+      await recordCommitment(
+        paths,
+        {
+          label: 'Start swimming again',
+          flavor: 'plan',
+          sessionId: 'session_test',
+          timing: {
+            words: 'come summer',
+            anchor: '2026-08-13T09:00:00.000Z',
+            interpretation: {
+              statedPrecision: 'period',
+              gloss: 'Summer where they live runs roughly February to May.',
+              bracketFrom: '2027-02-01',
+              bracketTo: '2027-05-31',
+              interpretationConfidence: 'medium',
+            },
           },
         },
-      })
+        new Date(),
+      )
 
       const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
       // 2027-01-10 is inside the period lead window (30 days before the
@@ -3335,26 +3401,30 @@ describe('MemoryEngine', () => {
       // anchor directly": both would print 2026-08-13. Pinning a non-UTC
       // zone and crossing the local day boundary is the only way to make
       // the two implementations disagree.
-      const profile = await loadProfile(paths)
+      const profile = await loadProfile(paths, 'UTC')
       await writeProfile(paths, {
         meta: { ...profile.meta, timezone: 'Asia/Kolkata', timezoneSource: 'user-confirmed' },
         body: profile.body,
       })
-      await recordCommitment(paths, {
-        label: 'Call the dentist',
-        flavor: 'errand',
-        sessionId: 'session_test',
-        // A resolved window is required for eligibility (Important 8): an
-        // unresolved, unglossed timing has no bracket to be eligible
-        // through. 2026-08-14 is the local day the commitment is said on
-        // (the property this test is actually about), and also the local
-        // "today" of the sessionContext call below, so the window is open.
-        timing: {
-          words: 'tomorrow',
-          anchor: '2026-08-13T20:30:00.000Z',
-          resolved: { from: '2026-08-14', to: '2026-08-14', statedPrecision: 'day' },
+      await recordCommitment(
+        paths,
+        {
+          label: 'Call the dentist',
+          flavor: 'errand',
+          sessionId: 'session_test',
+          // A resolved window is required for eligibility (Important 8): an
+          // unresolved, unglossed timing has no bracket to be eligible
+          // through. 2026-08-14 is the local day the commitment is said on
+          // (the property this test is actually about), and also the local
+          // "today" of the sessionContext call below, so the window is open.
+          timing: {
+            words: 'tomorrow',
+            anchor: '2026-08-13T20:30:00.000Z',
+            resolved: { from: '2026-08-14', to: '2026-08-14', statedPrecision: 'day' },
+          },
         },
-      })
+        new Date(),
+      )
 
       const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
       const context = await engine.sessionContext(new Date('2026-08-14T00:00:00.000Z'))
@@ -3373,11 +3443,15 @@ describe('MemoryEngine', () => {
       // Nothing else in the live companion surfaces it either (see
       // BACKLOG.md): it stays invisible to the live conversation, though
       // reflection still sees it, uncapped, at session end.
-      await recordCommitment(paths, {
-        label: 'Do something, someday',
-        flavor: 'errand',
-        sessionId: 'session_test',
-      })
+      await recordCommitment(
+        paths,
+        {
+          label: 'Do something, someday',
+          flavor: 'errand',
+          sessionId: 'session_test',
+        },
+        new Date(),
+      )
 
       const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
       const context = await engine.sessionContext()
@@ -3388,22 +3462,26 @@ describe('MemoryEngine', () => {
     })
 
     it('excludes a commitment not yet inside its eligible window', async () => {
-      await recordCommitment(paths, {
-        label: 'Start swimming again',
-        flavor: 'plan',
-        sessionId: 'session_test',
-        timing: {
-          words: 'come summer',
-          anchor: '2026-08-13T09:00:00.000Z',
-          interpretation: {
-            statedPrecision: 'period',
-            gloss: 'Summer where they live runs roughly February to May.',
-            bracketFrom: '2027-02-01',
-            bracketTo: '2027-05-31',
-            interpretationConfidence: 'medium',
+      await recordCommitment(
+        paths,
+        {
+          label: 'Start swimming again',
+          flavor: 'plan',
+          sessionId: 'session_test',
+          timing: {
+            words: 'come summer',
+            anchor: '2026-08-13T09:00:00.000Z',
+            interpretation: {
+              statedPrecision: 'period',
+              gloss: 'Summer where they live runs roughly February to May.',
+              bracketFrom: '2027-02-01',
+              bracketTo: '2027-05-31',
+              interpretationConfidence: 'medium',
+            },
           },
         },
-      })
+        new Date(),
+      )
 
       const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
       const context = await engine.sessionContext(new Date('2026-09-01T00:00:00.000Z'))
@@ -3418,17 +3496,21 @@ describe('MemoryEngine', () => {
       // exercises the quiet filter: an untimed commitment would be
       // excluded anyway (see the untimed test above), which would make
       // this pass for the wrong reason.
-      const recorded = await recordCommitment(paths, {
-        label: 'Call the dentist',
-        flavor: 'errand',
-        sessionId: 'session_test',
-        timing: {
-          words: 'today',
-          anchor: '2026-08-14T09:00:00.000Z',
-          resolved: { from: '2026-08-14', to: '2026-08-14', statedPrecision: 'day' },
+      const recorded = await recordCommitment(
+        paths,
+        {
+          label: 'Call the dentist',
+          flavor: 'errand',
+          sessionId: 'session_test',
+          timing: {
+            words: 'today',
+            anchor: '2026-08-14T09:00:00.000Z',
+            resolved: { from: '2026-08-14', to: '2026-08-14', statedPrecision: 'day' },
+          },
         },
-      })
-      await resolveCommitment(paths, recorded.id, 'quiet')
+        new Date(),
+      )
+      await resolveCommitment(paths, recorded.id, 'quiet', new Date())
 
       const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
       const context = await engine.sessionContext(new Date('2026-08-14T00:00:00.000Z'))
@@ -3442,17 +3524,21 @@ describe('MemoryEngine', () => {
       // Critical 1: the allow-list fix. A resolved commitment must not
       // keep loading into the prompt after the model has recorded an
       // outcome for it.
-      const recorded = await recordCommitment(paths, {
-        label: 'Call the dentist',
-        flavor: 'errand',
-        sessionId: 'session_test',
-        timing: {
-          words: 'today',
-          anchor: '2026-08-14T09:00:00.000Z',
-          resolved: { from: '2026-08-14', to: '2026-08-14', statedPrecision: 'day' },
+      const recorded = await recordCommitment(
+        paths,
+        {
+          label: 'Call the dentist',
+          flavor: 'errand',
+          sessionId: 'session_test',
+          timing: {
+            words: 'today',
+            anchor: '2026-08-14T09:00:00.000Z',
+            resolved: { from: '2026-08-14', to: '2026-08-14', statedPrecision: 'day' },
+          },
         },
-      })
-      await resolveCommitment(paths, recorded.id, 'done')
+        new Date(),
+      )
+      await resolveCommitment(paths, recorded.id, 'done', new Date())
 
       const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
       const context = await engine.sessionContext(new Date('2026-08-14T00:00:00.000Z'))
@@ -3469,8 +3555,8 @@ describe('MemoryEngine', () => {
 
     beforeEach(async () => {
       dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-recent-'))
-      paths = memoryPaths(dir)
-      await ensureMemoryTree(paths)
+      paths = memoryPaths(dir, nodeStores())
+      await ensureMemoryTree(paths, 'UTC')
       await pinTimezoneUtc(paths)
     })
 
@@ -3480,8 +3566,8 @@ describe('MemoryEngine', () => {
 
     async function reflectedSessionOn(date: Date, body: string): Promise<void> {
       const store = await SessionStore.start(paths, date)
-      await store.appendLine({ ts: date.toISOString(), role: 'user', content: body })
-      await writeDocumentAtomic({
+      await store.appendLine(paths, { ts: date.toISOString(), role: 'user', content: body })
+      await writeDocumentAtomic(paths.files, {
         path: join(store.dir, 'summary.md'),
         meta: { id: newId('doc') },
         body: `${body}\n`,
@@ -3560,7 +3646,7 @@ describe('MemoryEngine', () => {
         Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - 2),
       )
       const store = await SessionStore.start(paths, twoDaysAgo)
-      await store.appendLine({
+      await store.appendLine(paths, {
         ts: twoDaysAgo.toISOString(),
         role: 'user',
         content: 'Never reflected.',
@@ -3589,7 +3675,7 @@ describe('MemoryEngine', () => {
       // so this test fails if listSessions or the recentSummaries filter
       // ever stops reading the skipped flag it depends on.
       const store = await SessionStore.start(paths, twoDaysAgo)
-      await store.appendLine({
+      await store.appendLine(paths, {
         ts: twoDaysAgo.toISOString(),
         role: 'assistant',
         content: 'Good to see you.',
@@ -3610,8 +3696,8 @@ describe('MemoryEngine', () => {
 
     beforeEach(async () => {
       dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-firstsession-'))
-      paths = memoryPaths(dir)
-      await ensureMemoryTree(paths)
+      paths = memoryPaths(dir, nodeStores())
+      await ensureMemoryTree(paths, 'UTC')
       await pinTimezoneUtc(paths)
     })
 
@@ -3690,7 +3776,7 @@ describe('MemoryEngine', () => {
 
     it('is false when an arc exists, even a dormant one, with no reflected sessions', async () => {
       const dormantArcPath = join(paths.arcsDir, 'dormant-arc.md')
-      await writeDocumentAtomic({
+      await writeDocumentAtomic(paths.files, {
         path: dormantArcPath,
         meta: { id: newId('doc'), name: 'Dormant Arc', status: 'dormant' },
         body: 'On pause.\n',
@@ -3722,7 +3808,7 @@ describe('MemoryEngine', () => {
 
     beforeEach(async () => {
       dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-journalctx-'))
-      paths = memoryPaths(dir)
+      paths = memoryPaths(dir, nodeStores())
     })
 
     afterEach(async () => {
@@ -3759,7 +3845,7 @@ describe('MemoryEngine', () => {
     it('holds the trimmed journaling.md body when mode is journal and the file exists', async () => {
       const chat = new FakeChatProvider([])
       const engine = await MemoryEngine.open(dir, fakeDeps(chat))
-      await writeDocumentAtomic({
+      await writeDocumentAtomic(paths.files, {
         path: paths.journaling,
         meta: { id: 'doc_01JZZZ', kind: 'journaling', updated: '2026-08-16T21:04:00.000Z' },
         body: 'Gratitude, three times a week.\n',
@@ -3777,8 +3863,8 @@ describe('MemoryEngine', () => {
 
     beforeEach(async () => {
       dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-warnings-'))
-      paths = memoryPaths(dir)
-      await ensureMemoryTree(paths)
+      paths = memoryPaths(dir, nodeStores())
+      await ensureMemoryTree(paths, 'UTC')
       await pinTimezoneUtc(paths)
     })
 
@@ -3839,14 +3925,14 @@ describe('MemoryEngine', () => {
       // Create two stale sessions AFTER breaking git, so they will be
       // reflected in the next runMaintenance call with git broken.
       const staleStore1 = await SessionStore.start(paths, threeDaysAgo)
-      await staleStore1.appendLine({
+      await staleStore1.appendLine(paths, {
         ts: threeDaysAgo.toISOString(),
         role: 'user',
         content: 'First stale session.',
       })
 
       const staleStore2 = await SessionStore.start(paths, twoDaysAgo)
-      await staleStore2.appendLine({
+      await staleStore2.appendLine(paths, {
         ts: twoDaysAgo.toISOString(),
         role: 'user',
         content: 'Second stale session.',
@@ -3905,7 +3991,7 @@ describe('MemoryEngine', () => {
     // the arc, rather than being dropped or left untested.
     it('reflects a session and records a warning naming the arc when its page was hand-deleted before endSession runs', async () => {
       const arcDocPath = join(paths.arcsDir, 'health.md')
-      await writeDocumentAtomic({
+      await writeDocumentAtomic(paths.files, {
         path: arcDocPath,
         meta: { id: newId('doc'), name: 'Health' },
         body: 'Original arc narrative.\n',
@@ -3962,7 +4048,7 @@ describe('MemoryEngine', () => {
 
     beforeEach(async () => {
       forgetDir = await mkdtemp(join(tmpdir(), 'openreverie-engine-forget-'))
-      forgetPaths = memoryPaths(forgetDir)
+      forgetPaths = memoryPaths(forgetDir, nodeStores())
     })
 
     afterEach(async () => {
@@ -3970,7 +4056,7 @@ describe('MemoryEngine', () => {
     })
 
     it('retracts requested nodes and edges: foldGraph drops them, and the tool reports what actually changed', async () => {
-      await ensureMemoryTree(forgetPaths)
+      await ensureMemoryTree(forgetPaths, 'UTC')
       await appendGraph(forgetPaths, [
         {
           ts: '2026-08-01T00:00:00.000Z',
@@ -4014,7 +4100,7 @@ describe('MemoryEngine', () => {
     })
 
     it('preserves history: the original assert lines stay in graph.jsonl alongside the new retract lines', async () => {
-      await ensureMemoryTree(forgetPaths)
+      await ensureMemoryTree(forgetPaths, 'UTC')
       await appendGraph(forgetPaths, [
         {
           ts: '2026-08-01T00:00:00.000Z',
@@ -4040,10 +4126,10 @@ describe('MemoryEngine', () => {
     })
 
     it('rejects a document rewrite with an empty or whitespace-only body, changing nothing on disk', async () => {
-      await ensureMemoryTree(forgetPaths)
+      await ensureMemoryTree(forgetPaths, 'UTC')
       const docId = newId('doc')
       const docPath = join(forgetPaths.arcsDir, 'marathon.md')
-      await writeDocumentAtomic({
+      await writeDocumentAtomic(forgetPaths.files, {
         path: docPath,
         meta: { id: docId, name: 'Marathon training', status: 'active' },
         body: 'Training for the spring marathon.\n',
@@ -4055,17 +4141,17 @@ describe('MemoryEngine', () => {
         engine.forget({ what: 'the marathon plan', documents: [{ docId, body: '   \n  ' }] }),
       ).rejects.toThrow(/empty|whitespace/)
 
-      const stillThere = await readDocument(docPath)
+      const stillThere = await readDocument(forgetPaths.files, docPath)
       expect(stillThere.body).toBe('Training for the spring marathon.\n')
 
       await engine.close()
     })
 
     it('rewrites a document atomically when the new body is real content', async () => {
-      await ensureMemoryTree(forgetPaths)
+      await ensureMemoryTree(forgetPaths, 'UTC')
       const docId = newId('doc')
       const docPath = join(forgetPaths.arcsDir, 'marathon.md')
-      await writeDocumentAtomic({
+      await writeDocumentAtomic(forgetPaths.files, {
         path: docPath,
         meta: { id: docId, name: 'Marathon training', status: 'active' },
         body: 'Training for the spring marathon, with a friend named Alex.\n',
@@ -4078,14 +4164,14 @@ describe('MemoryEngine', () => {
       })
 
       expect(result.rewrittenDocuments).toEqual([docPath])
-      const rewritten = await readDocument(docPath)
+      const rewritten = await readDocument(forgetPaths.files, docPath)
       expect(rewritten.body).toBe('Training for the spring marathon.\n')
 
       await engine.close()
     })
 
     it('never writes to a transcript or a session summary', async () => {
-      await ensureMemoryTree(forgetPaths)
+      await ensureMemoryTree(forgetPaths, 'UTC')
       await appendGraph(forgetPaths, [
         {
           ts: '2026-08-01T00:00:00.000Z',
@@ -4116,7 +4202,9 @@ describe('MemoryEngine', () => {
 
       const after = await readFile(transcriptPath, 'utf8')
       expect(after).toBe(before)
-      await expect(readDocument(join(sessionDir, 'summary.md'))).rejects.toThrow()
+      await expect(
+        readDocument(forgetPaths.files, join(sessionDir, 'summary.md')),
+      ).rejects.toThrow()
 
       await engine.close()
     })
@@ -4130,13 +4218,13 @@ describe('MemoryEngine', () => {
       // kindForDocumentPath's guard: a caller with a real, resolvable
       // docId for one of them must still be refused, not silently allowed
       // because the id happened to resolve.
-      await ensureMemoryTree(forgetPaths)
+      await ensureMemoryTree(forgetPaths, 'UTC')
 
       const summaryId = newId('doc')
       const summaryDir = join(forgetPaths.sessionsDir, '2026-08-01-session_fake')
       await mkdir(summaryDir, { recursive: true })
       const summaryPath = join(summaryDir, 'summary.md')
-      await writeDocumentAtomic({
+      await writeDocumentAtomic(forgetPaths.files, {
         path: summaryPath,
         meta: { id: summaryId, session: 'session_fake' },
         body: 'What actually happened in this session.\n',
@@ -4144,7 +4232,7 @@ describe('MemoryEngine', () => {
 
       const rollupId = newId('doc')
       const rollupPath = join(forgetPaths.rollupsDailyDir, '2026-08-01.md')
-      await writeDocumentAtomic({
+      await writeDocumentAtomic(forgetPaths.files, {
         path: rollupPath,
         meta: { id: rollupId, date: '2026-08-01' },
         body: 'The daily rollup for that date.\n',
@@ -4169,16 +4257,16 @@ describe('MemoryEngine', () => {
         engine.forget({ what: 'the rollup', documents: [{ docId: rollupId, body: 'rewritten' }] }),
       ).rejects.toThrow(/not a document kind/)
 
-      const summaryAfter = await readDocument(summaryPath)
+      const summaryAfter = await readDocument(forgetPaths.files, summaryPath)
       expect(summaryAfter.body).toBe('What actually happened in this session.\n')
-      const rollupAfter = await readDocument(rollupPath)
+      const rollupAfter = await readDocument(forgetPaths.files, rollupPath)
       expect(rollupAfter.body).toBe('The daily rollup for that date.\n')
 
       await engine.close()
     })
 
     it('commits the change with message "forget: <what>"', async () => {
-      await ensureMemoryTree(forgetPaths)
+      await ensureMemoryTree(forgetPaths, 'UTC')
       await appendGraph(forgetPaths, [
         {
           ts: '2026-08-01T00:00:00.000Z',
@@ -4207,8 +4295,8 @@ describe('MemoryEngine', () => {
 
     beforeEach(async () => {
       dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-journal-'))
-      paths = memoryPaths(dir)
-      await ensureMemoryTree(paths)
+      paths = memoryPaths(dir, nodeStores())
+      await ensureMemoryTree(paths, 'UTC')
     })
 
     afterEach(async () => {
@@ -4216,7 +4304,7 @@ describe('MemoryEngine', () => {
     })
 
     it('walkAllDocuments (via listPublicDocuments) includes a hand-written journal entry', async () => {
-      await writeDocumentAtomic({
+      await writeDocumentAtomic(paths.files, {
         path: join(paths.journalDir, '2026-08-16-doc_01JZZZ.md'),
         meta: {
           id: 'doc_01JZZZ',
@@ -4240,7 +4328,7 @@ describe('MemoryEngine', () => {
     })
 
     it('walkAllDocuments includes journaling.md, once it exists, with kind journaling', async () => {
-      await writeDocumentAtomic({
+      await writeDocumentAtomic(paths.files, {
         path: paths.journaling,
         meta: { id: 'doc_01JZZZ2', kind: 'journaling', updated: '2026-08-16T21:04:00.000Z' },
         body: 'Gratitude, three times a week.\n',
@@ -4261,7 +4349,7 @@ describe('MemoryEngine', () => {
     })
 
     it('a journal row without a name-worthy title reports method and entryDate as its own fields, not folded into title', async () => {
-      await writeDocumentAtomic({
+      await writeDocumentAtomic(paths.files, {
         path: join(paths.journalDir, '2026-08-16-doc_01JZZZ.md'),
         meta: {
           id: 'doc_01JZZZ',
@@ -4284,7 +4372,7 @@ describe('MemoryEngine', () => {
 
     it('a journal row carries a short excerpt of its body, truncated', async () => {
       const longFirstLine = 'A'.repeat(200)
-      await writeDocumentAtomic({
+      await writeDocumentAtomic(paths.files, {
         path: join(paths.journalDir, '2026-08-16-doc_01JZZZ.md'),
         meta: {
           id: 'doc_01JZZZ',
@@ -4321,8 +4409,8 @@ describe('MemoryEngine', () => {
 
     beforeEach(async () => {
       dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-dream-'))
-      paths = memoryPaths(dir)
-      await ensureMemoryTree(paths)
+      paths = memoryPaths(dir, nodeStores())
+      await ensureMemoryTree(paths, 'UTC')
     })
 
     afterEach(async () => {
@@ -4332,7 +4420,7 @@ describe('MemoryEngine', () => {
     it('serves a dream directory that has only insight.md, with no dream.md, without throwing', async () => {
       const dreamDir = join(paths.dreamsDir, '2026-08-20-dream_a')
       await mkdir(dreamDir, { recursive: true })
-      await writeDocumentAtomic({
+      await writeDocumentAtomic(paths.files, {
         path: join(dreamDir, 'insight.md'),
         meta: { id: 'doc_01JZDREAM1', date: '2026-08-20' },
         body: 'An insight with no accompanying narrative.\n',
@@ -4353,12 +4441,12 @@ describe('MemoryEngine', () => {
     it('never serves dreams/log.jsonl, dreams/.lock, or a dream directory process.jsonl as documents', async () => {
       const dreamDir = join(paths.dreamsDir, '2026-08-21-dream_b')
       await mkdir(dreamDir, { recursive: true })
-      await writeDocumentAtomic({
+      await writeDocumentAtomic(paths.files, {
         path: join(dreamDir, 'dream.md'),
         meta: { id: 'doc_01JZDREAM2', date: '2026-08-21' },
         body: 'A dream narrative.\n',
       })
-      await writeDocumentAtomic({
+      await writeDocumentAtomic(paths.files, {
         path: join(dreamDir, 'insight.md'),
         meta: { id: 'doc_01JZDREAM3', date: '2026-08-21' },
         body: 'A dream insight.\n',
@@ -4432,8 +4520,8 @@ describe('buildReflectionContext people and entities wiring', () => {
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-people-'))
-    paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
     await pinTimezoneUtc(paths)
   })
 
@@ -4509,7 +4597,7 @@ describe('buildReflectionContext people and entities wiring', () => {
 
   it('marks a known person with a page differently from one without, in the prompt built by the engine', async () => {
     const personDocPath = join(paths.peopleDir, 'alex.md')
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: personDocPath,
       meta: { id: newId('doc'), name: 'Alex', node: 'person_alex' },
       body: 'Alex has a page already.\n',
@@ -4622,7 +4710,7 @@ describe('MemoryEngine profile', () => {
     expect(engine.timezone()).toBe('Asia/Kolkata')
     expect(engine.timezoneSource()).toBe('user-confirmed')
 
-    const onDisk = await loadProfile(memoryPaths(dir))
+    const onDisk = await loadProfile(memoryPaths(dir, nodeStores()), 'UTC')
     expect(onDisk.meta.timezone).toBe('Asia/Kolkata')
     expect(onDisk.meta.timezoneSource).toBe('user-confirmed')
 
@@ -4644,10 +4732,10 @@ describe('MemoryEngine profile', () => {
   })
 
   it('updateProfile keeps unrelated frontmatter keys that were already in the file', async () => {
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
     await pinTimezoneUtc(paths)
-    const seeded = await loadProfile(paths)
+    const seeded = await loadProfile(paths, 'UTC')
     await writeProfile(paths, { meta: { ...seeded.meta, pronouns: 'she/her' }, body: seeded.body })
 
     const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])), {
@@ -4655,7 +4743,7 @@ describe('MemoryEngine profile', () => {
     })
     await engine.updateProfile({ timezone: 'Europe/Berlin' })
 
-    const onDisk = await loadProfile(paths)
+    const onDisk = await loadProfile(paths, 'UTC')
     expect(onDisk.meta.pronouns).toBe('she/her')
     expect(onDisk.meta.timezone).toBe('Europe/Berlin')
 
@@ -4669,8 +4757,8 @@ describe('profile writes', () => {
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-profile-writes-'))
-    paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
   })
 
   afterEach(async () => {
@@ -4779,8 +4867,8 @@ describe('local day boundaries', () => {
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-localday-'))
-    paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
   })
 
   afterEach(async () => {
@@ -4796,12 +4884,12 @@ describe('local day boundaries', () => {
     const now = new Date('2026-08-16T20:00:00.000Z')
 
     const store = await SessionStore.start(paths, new Date('2026-08-16T09:00:00.000Z'), 'UTC')
-    await store.appendLine({
+    await store.appendLine(paths, {
       ts: '2026-08-16T09:00:00.000Z',
       role: 'user',
       content: 'A good Sunday.',
     })
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: join(store.dir, 'summary.md'),
       meta: {
         id: newId('doc'),
@@ -4825,8 +4913,12 @@ describe('local day boundaries', () => {
 
     await engine.runMaintenance(now)
 
-    await expect(readDocument(join(paths.rollupsDailyDir, '2026-08-16.md'))).resolves.toBeDefined()
-    await expect(readDocument(join(paths.rollupsWeeklyDir, '2026-W33.md'))).resolves.toBeDefined()
+    await expect(
+      readDocument(paths.files, join(paths.rollupsDailyDir, '2026-08-16.md')),
+    ).resolves.toBeDefined()
+    await expect(
+      readDocument(paths.files, join(paths.rollupsWeeklyDir, '2026-W33.md')),
+    ).resolves.toBeDefined()
 
     await engine.close()
   })
@@ -4838,12 +4930,12 @@ describe('local day boundaries', () => {
     const now = new Date('2026-08-16T20:00:00.000Z')
 
     const store = await SessionStore.start(paths, new Date('2026-08-10T09:00:00.000Z'), 'UTC')
-    await store.appendLine({
+    await store.appendLine(paths, {
       ts: '2026-08-10T09:00:00.000Z',
       role: 'user',
       content: 'Monday.',
     })
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: join(store.dir, 'summary.md'),
       meta: {
         id: newId('doc'),
@@ -4888,8 +4980,8 @@ describe('a session whose logical date differs from its directory prefix', () =>
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-divergent-'))
-    paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
     await pinTimezoneUtc(paths)
   })
 
@@ -4900,13 +4992,13 @@ describe('a session whose logical date differs from its directory prefix', () =>
   // The directory is 2026-08-15-<id>; the summary inside it says 2026-08-16.
   async function seedDivergentSession(summaryBody: string): Promise<string> {
     const store = await SessionStore.start(paths, new Date('2026-08-15T21:00:00Z'), 'UTC')
-    await store.appendLine({
+    await store.appendLine(paths, {
       ts: '2026-08-15T21:00:00.000Z',
       utcOffsetMinutes: 330,
       role: 'user',
       content: 'Late one.',
     })
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: join(store.dir, 'summary.md'),
       meta: {
         id: newId('doc'),
@@ -4943,12 +5035,14 @@ describe('a session whose logical date differs from its directory prefix', () =>
 
     expect(doc.body.trim()).toBe('A quiet late night.')
 
-    await expect(readDocument(join(paths.rollupsDailyDir, '2026-08-16.md'))).resolves.toBeDefined()
+    await expect(
+      readDocument(paths.files, join(paths.rollupsDailyDir, '2026-08-16.md')),
+    ).resolves.toBeDefined()
   })
 
   it('a skipped summary is written into the existing directory, never into a second one', async () => {
     const store = await SessionStore.start(paths, new Date('2026-08-15T21:00:00Z'), 'UTC')
-    await store.appendLine({
+    await store.appendLine(paths, {
       ts: '2026-08-15T21:00:00.000Z',
       utcOffsetMinutes: 330,
       role: 'assistant',
@@ -4964,7 +5058,7 @@ describe('a session whose logical date differs from its directory prefix', () =>
     const dirs = entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name)
     expect(dirs).toEqual([`2026-08-15-${store.sessionId}`])
 
-    const summary = await readDocument(join(store.dir, 'summary.md'))
+    const summary = await readDocument(paths.files, join(store.dir, 'summary.md'))
     expect(summary.meta.skipped).toBe(true)
     expect(summary.meta.date).toBe('2026-08-16')
 
@@ -4978,8 +5072,8 @@ describe('reflection profileUpdates', () => {
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-profileupdates-'))
-    paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
     await pinTimezoneUtc(paths)
   })
 
@@ -5009,7 +5103,7 @@ describe('reflection profileUpdates', () => {
 
     expect(engine.timezone()).toBe('Europe/Berlin')
     expect(engine.timezoneSource()).toBe('user-confirmed')
-    const onDisk = await loadProfile(paths)
+    const onDisk = await loadProfile(paths, 'UTC')
     expect(onDisk.meta.timezone).toBe('Europe/Berlin')
 
     await engine.close()
@@ -5044,10 +5138,10 @@ describe('reflection profileUpdates', () => {
 describe('index schema migration', () => {
   it('rebuilds the index from the folder instead of leaving it empty', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'openreverie-migration-'))
-    const paths = memoryPaths(dir)
+    const paths = memoryPaths(dir, nodeStores())
 
     let engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: join(paths.realmsDir, 'fitness.md'),
       meta: { id: 'doc_migration_realm', name: 'Fitness' },
       body: 'Kayaking on the lake every Sunday morning.\n',
@@ -5074,11 +5168,11 @@ describe('index schema migration', () => {
 describe('listArcs and listRealms', () => {
   it('returns docId, real status from frontmatter, and no filesystem path', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'openreverie-listings-'))
-    const paths = memoryPaths(dir)
+    const paths = memoryPaths(dir, nodeStores())
     await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([]))).then((e) => e.close())
 
     const activeArcPath = join(paths.arcsDir, 'marathon.md')
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: activeArcPath,
       meta: {
         id: 'doc_arc_active',
@@ -5089,13 +5183,13 @@ describe('listArcs and listRealms', () => {
       body: 'Training for the fall marathon.\n',
     })
     const closedArcPath = join(paths.arcsDir, 'move.md')
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: closedArcPath,
       meta: { id: 'doc_arc_closed', name: 'Moving House', status: 'closed', updated: '2026-03-02' },
       body: 'The move is done.\n',
     })
     const realmPath = join(paths.realmsDir, 'fitness.md')
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: realmPath,
       meta: { id: 'doc_realm', name: 'Fitness' },
       body: 'Running, lifting, sleep.\n',
@@ -5196,7 +5290,7 @@ describe('listArcs and listRealms', () => {
 
   it('pages arcs with a stable total order', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'openreverie-listings-page-'))
-    const paths = memoryPaths(dir)
+    const paths = memoryPaths(dir, nodeStores())
     await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([]))).then((e) => e.close())
 
     for (let i = 0; i < 5; i++) {
@@ -5235,14 +5329,14 @@ describe('listArcs and listRealms', () => {
 
 describe('listPeople and listEntities', () => {
   async function seedPeople(dir: string, count: number, pagedCount: number): Promise<void> {
-    const paths = memoryPaths(dir)
+    const paths = memoryPaths(dir, nodeStores())
     await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([]))).then((e) => e.close())
     for (let i = 0; i < count; i++) {
       const hasPage = i < pagedCount
       let personPath: string | undefined
       if (hasPage) {
         personPath = join(paths.peopleDir, `person-${i}.md`)
-        await writeDocumentAtomic({
+        await writeDocumentAtomic(paths.files, {
           path: personPath,
           meta: { id: `doc_person_${i}`, name: `Person ${i}`, node: `person_${i}` },
           body: `Person ${i} has a page.\n`,
@@ -5300,7 +5394,7 @@ describe('listPeople and listEntities', () => {
 
   it('pages through every person exactly once, in an order stable across rebuilds', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'openreverie-people-paging-'))
-    const paths = memoryPaths(dir)
+    const paths = memoryPaths(dir, nodeStores())
     await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([]))).then((e) => e.close())
 
     // 45 people, of which five share an identical ts. Without the id
@@ -5348,7 +5442,7 @@ describe('listPeople and listEntities', () => {
 
   it('lists entities with no page fields at all', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'openreverie-entities-'))
-    const paths = memoryPaths(dir)
+    const paths = memoryPaths(dir, nodeStores())
     await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([]))).then((e) => e.close())
 
     for (let i = 0; i < 3; i++) {
@@ -5385,11 +5479,11 @@ describe('listPeople and listEntities', () => {
 describe('search node lane', () => {
   it('finds a person with no page by name and gives back an id, not a docId', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'openreverie-node-lane-'))
-    const paths = memoryPaths(dir)
+    const paths = memoryPaths(dir, nodeStores())
     await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([]))).then((e) => e.close())
 
     const pagedPath = join(paths.peopleDir, 'priya.md')
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: pagedPath,
       meta: { id: 'doc_priya', name: 'Priya', node: 'person_priya' },
       body: 'Priya runs the reading group.\n',
@@ -5437,12 +5531,12 @@ describe('search node lane', () => {
 describe('reflection receives the full constitution', () => {
   it('the reflection prompt carries the whole constitution body, sentinel included', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'openreverie-reflect-full-'))
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
 
     const sentinel = 'THE SENTINEL SENTENCE THAT MUST SURVIVE REFLECTION'
     const body = `${'p'.repeat(12000)}\n\n${sentinel}`
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: paths.constitution,
       meta: { id: newId('doc') },
       body,
@@ -5493,8 +5587,8 @@ describe('session mode', () => {
   }> {
     const root = await mkdtemp(join(tmpdir(), 'openreverie-engine-session-mode-'))
     roots.push(root)
-    const paths = memoryPaths(root)
-    await ensureMemoryTree(paths)
+    const paths = memoryPaths(root, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
     const deps = fakeDeps(
       new FakeChatProvider([
         { text: JSON.stringify(emptyReflectionOutput('A session.')), toolCalls: [] },
@@ -5747,5 +5841,129 @@ describe('updateJournalingProtocol', () => {
     const hits = (await engine.search('Gratitude, three times a week')).documents
     expect(hits.some((hit) => hit.kind === 'journaling')).toBe(true)
     await engine.close()
+  })
+})
+
+// P0-3 (docs/superpowers/specs/2026-08-27-hostable-engine-design.md): the
+// engine must never read the ambient timezone or wall clock, since inside
+// a Cloudflare Durable Object Intl.DateTimeFormat().resolvedOptions().timeZone
+// always resolves to 'UTC' and Date.now() is pinned for the life of one
+// request. Both zones below (Pacific/Kiritimati, UTC+14, and Pacific/Midway,
+// UTC-11) are chosen because they sit 25 hours apart: at any single instant
+// they are on different calendar days from each other, so this cannot pass
+// by coincidence with whatever zone the test runner itself happens to be
+// in, the failure mode AGENTS.md records from 2026-08-25.
+describe('MemoryEngine clock and timezone injection (P0-3)', () => {
+  let dir: string
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'openreverie-p0-3-'))
+  })
+
+  afterEach(async () => {
+    await rmWithRetry(dir)
+  })
+
+  it('names a new session directory by the local day of the injected zone, and two far-apart zones land on different calendar days from the identical pinned instant', async () => {
+    const pinnedNow = new Date('2026-08-27T23:30:00.000Z')
+    const chat = new FakeChatProvider([])
+
+    const kiritimatiRoot = join(dir, 'kiritimati')
+    const midwayRoot = join(dir, 'midway')
+
+    const kiritimatiEngine = await MemoryEngine.open(kiritimatiRoot, {
+      ...fakeDeps(chat),
+      timezone: 'Pacific/Kiritimati',
+      now: () => pinnedNow,
+    })
+    const midwayEngine = await MemoryEngine.open(midwayRoot, {
+      ...fakeDeps(chat),
+      timezone: 'Pacific/Midway',
+      now: () => pinnedNow,
+    })
+
+    try {
+      // Neither startSession() call passes a `now` argument: this only
+      // proves the injected clock and zone if the default routes through
+      // deps.now/deps.timezone rather than a fresh new Date() and Intl read.
+      const kiritimatiSessionId = await kiritimatiEngine.startSession()
+      const midwaySessionId = await midwayEngine.startSession()
+
+      const kiritimatiEntries = await readdir(memoryPaths(kiritimatiRoot, nodeStores()).sessionsDir)
+      const midwayEntries = await readdir(memoryPaths(midwayRoot, nodeStores()).sessionsDir)
+
+      const kiritimatiEntry = kiritimatiEntries.find((name) => name.includes(kiritimatiSessionId))
+      const midwayEntry = midwayEntries.find((name) => name.includes(midwaySessionId))
+      if (!kiritimatiEntry || !midwayEntry) {
+        throw new Error('expected a session directory for each engine')
+      }
+
+      expect(kiritimatiEntry.slice(0, 10)).toBe(formatLocalDate(pinnedNow, 'Pacific/Kiritimati'))
+      expect(midwayEntry.slice(0, 10)).toBe(formatLocalDate(pinnedNow, 'Pacific/Midway'))
+      expect(formatLocalDate(pinnedNow, 'Pacific/Kiritimati')).toBe('2026-08-28')
+      expect(formatLocalDate(pinnedNow, 'Pacific/Midway')).toBe('2026-08-27')
+      expect(kiritimatiEntry.slice(0, 10)).not.toBe(midwayEntry.slice(0, 10))
+    } finally {
+      await kiritimatiEngine.close()
+      await midwayEngine.close()
+    }
+  })
+
+  it('draws the dream RNG seed from the injected clock, never from a fresh Date.now() read', async () => {
+    const pinnedNow = new Date('2026-08-27T12:00:00.000Z')
+    const chat = new FakeChatProvider([])
+    const engine = await MemoryEngine.open(dir, {
+      ...fakeDeps(chat),
+      timezone: 'UTC',
+      now: () => pinnedNow,
+      dreamingModel: 'fake-dream',
+      dreaming: {
+        enabled: true,
+        cadence: 'daily',
+        triggers: { afterSession: false, onStart: false, serverTimer: false },
+        maxToolCalls: 10,
+      },
+    })
+    try {
+      // dryRun: true reaches the rngSeed line (both maybeDream and
+      // dreamNow compute it before any due-ness gate that dryRun would
+      // trip) without touching the chat provider or the dream lock, so a
+      // spy on the real clock is the whole test.
+      const dateNowSpy = vi.spyOn(Date, 'now')
+      await engine.dreamNow({ dryRun: true })
+      expect(dateNowSpy).not.toHaveBeenCalled()
+      dateNowSpy.mockRestore()
+    } finally {
+      await engine.close()
+    }
+  })
+
+  it("engine.timezone() falls back to deps.timezone, not the machine's own zone, when profile.md carries none", async () => {
+    // The profile.md rewrite has to happen BEFORE MemoryEngine.open, not
+    // against an already-open engine: profileCache is read once at
+    // construction (fromPaths's loadProfile call) and never refreshed by a
+    // writeProfile call this test makes directly, so mutating the file
+    // under a live engine would silently test the stale in-memory cache
+    // instead of the fallback this test is named for.
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
+    const seeded = await loadProfile(paths, 'UTC')
+    // Strips the timezone ensureMemoryTree just seeded, the same shape a
+    // hand-edited or pre-P0-3 profile.md can be in. profileMetaSchema
+    // accepts this (see profile.test.ts: "accepts a document with no
+    // timezone at all").
+    const { timezone: _dropped, timezoneSource: _droppedSource, ...rest } = seeded.meta
+    await writeProfile(paths, { meta: rest, body: seeded.body })
+
+    const chat = new FakeChatProvider([])
+    const engine = await MemoryEngine.open(dir, {
+      ...fakeDeps(chat),
+      timezone: 'Pacific/Kiritimati',
+    })
+    try {
+      expect(engine.timezone()).toBe('Pacific/Kiritimati')
+    } finally {
+      await engine.close()
+    }
   })
 })

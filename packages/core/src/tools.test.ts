@@ -8,6 +8,7 @@ import {
   MemoryEngine,
   memoryPaths,
   newId,
+  nodeStores,
   readCommitments,
   readDocument,
   readDreamLog,
@@ -34,6 +35,7 @@ function fakeDeps(chat: FakeChatProvider = new FakeChatProvider([])): EngineDeps
     embeddings: new FakeEmbeddingProvider(),
     reflectionModel: 'fake-reflect',
     embeddingModel: 'fake-embed',
+    timezone: 'UTC',
   }
 }
 
@@ -286,7 +288,7 @@ describe('dispatchTool', () => {
   })
 
   it('graph_query maps nodeId to the right underlying field for each kind', async () => {
-    const paths = memoryPaths(dir)
+    const paths = memoryPaths(dir, nodeStores())
     await MemoryEngine.open(dir, fakeDeps()).then((e) => e.close())
 
     await appendGraph(paths, [
@@ -381,12 +383,12 @@ describe('dispatchTool', () => {
   })
 
   it('read_document returns {meta, body} for a real document and an error for a missing one', async () => {
-    const paths = memoryPaths(dir)
+    const paths = memoryPaths(dir, nodeStores())
     const docId = newId('doc')
     const docPath = join(paths.arcsDir, 'health.md')
 
     const engine = await MemoryEngine.open(dir, fakeDeps())
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: docPath,
       meta: { id: docId, name: 'Health', status: 'active' },
       body: 'Original arc narrative.\n',
@@ -459,13 +461,13 @@ describe('dispatchTool', () => {
 
     await engine.endSession(sessionId)
 
-    const paths = memoryPaths(dir)
+    const paths = memoryPaths(dir, nodeStores())
     const summaryPath = join(
       paths.sessionsDir,
       `${formatLocalDate(startedAt, engine.timezone())}-${sessionId}`,
       'summary.md',
     )
-    const summaryDoc = await readDocument(summaryPath)
+    const summaryDoc = await readDocument(paths.files, summaryPath)
     const items = summaryDoc.meta.items as { text: string; kind: string }[]
     expect(
       items.some((i) => i.text === 'Wants to try pottery classes' && i.kind === 'intention'),
@@ -526,13 +528,13 @@ describe('dispatchTool', () => {
 
       await engine.endSession(sessionId)
 
-      const paths = memoryPaths(dir)
+      const paths = memoryPaths(dir, nodeStores())
       const summaryPath = join(
         paths.sessionsDir,
         `${formatLocalDate(startedAt, engine.timezone())}-${sessionId}`,
         'summary.md',
       )
-      const summaryDoc = await readDocument(summaryPath)
+      const summaryDoc = await readDocument(paths.files, summaryPath)
       const items = summaryDoc.meta.items as { text: string; eventTime?: string }[]
       const item = items.find((i) => i.text === 'Went out for a walk')
       expect(item).toBeDefined()
@@ -589,7 +591,7 @@ describe('dispatchTool', () => {
       )
       expect(JSON.parse(result).ok).toBe(true)
 
-      const live = await readCommitments(memoryPaths(dir))
+      const live = await readCommitments(memoryPaths(dir, nodeStores()))
       expect(live).toHaveLength(1)
       expect(live[0]?.label).toBe('See Nightfall with Arjun')
       expect(live[0]?.flavor).toBe('plan')
@@ -624,7 +626,7 @@ describe('dispatchTool', () => {
       )
       expect(JSON.parse(result).error).toBeDefined()
 
-      const live = await readCommitments(memoryPaths(dir))
+      const live = await readCommitments(memoryPaths(dir, nodeStores()))
       expect(live).toHaveLength(0)
 
       await engine.close()
@@ -646,7 +648,7 @@ describe('dispatchTool', () => {
         }),
       )
 
-      const live = await readCommitments(memoryPaths(dir))
+      const live = await readCommitments(memoryPaths(dir, nodeStores()))
       expect(live[0]?.timing?.resolved).toBeDefined()
       expect(live[0]?.timing?.interpretation).toBeUndefined()
 
@@ -665,7 +667,7 @@ describe('dispatchTool', () => {
         }),
       )
 
-      const live = await readCommitments(memoryPaths(dir))
+      const live = await readCommitments(memoryPaths(dir, nodeStores()))
       expect(live[0]?.timing?.words).toBe('next friday')
       expect(live[0]?.timing?.anchor).toBeDefined()
       expect(live[0]?.timing?.resolved).toBeUndefined()
@@ -685,7 +687,7 @@ describe('dispatchTool', () => {
           commitment: { label: 'See Nightfall with Arjun', flavor: 'plan', statedTime: 'sunday' },
         }),
       )
-      const [recorded] = await readCommitments(memoryPaths(dir))
+      const [recorded] = await readCommitments(memoryPaths(dir, nodeStores()))
       if (!recorded) throw new Error('expected a recorded commitment')
 
       const result = await dispatchTool(
@@ -697,7 +699,7 @@ describe('dispatchTool', () => {
       )
       expect(JSON.parse(result).ok).toBe(true)
 
-      const live = await readCommitments(memoryPaths(dir))
+      const live = await readCommitments(memoryPaths(dir, nodeStores()))
       expect(live).toHaveLength(1)
       expect(live[0]?.id).toBe(recorded.id)
       expect(live[0]?.timing?.words).toBe('sunday the 23rd')
@@ -733,7 +735,7 @@ describe('dispatchTool', () => {
         sessionId,
         call('remember', { commitment: { label: 'Return the library book', flavor: 'errand' } }),
       )
-      const [recorded] = await readCommitments(memoryPaths(dir))
+      const [recorded] = await readCommitments(memoryPaths(dir, nodeStores()))
       if (!recorded) throw new Error('expected a recorded commitment')
 
       const result = await dispatchTool(
@@ -745,7 +747,7 @@ describe('dispatchTool', () => {
       )
       expect(JSON.parse(result).ok).toBe(true)
 
-      const live = await readCommitments(memoryPaths(dir))
+      const live = await readCommitments(memoryPaths(dir, nodeStores()))
       expect(live[0]?.state).toBe('done')
 
       await engine.close()
@@ -834,7 +836,7 @@ describe('dispatchTool', () => {
   })
 
   it('list_arcs and list_realms return cheap orientation lists', async () => {
-    const paths = memoryPaths(dir)
+    const paths = memoryPaths(dir, nodeStores())
     await MemoryEngine.open(dir, fakeDeps()).then((e) => e.close())
 
     await appendGraph(paths, [
@@ -1040,12 +1042,12 @@ describe('dispatchTool', () => {
     })
 
     it('records feedback against a real insight with source fixed to tool', async () => {
-      const paths = memoryPaths(dir)
+      const paths = memoryPaths(dir, nodeStores())
       await MemoryEngine.open(dir, fakeDeps()).then((e) => e.close())
 
       const dreamDir = join(paths.dreamsDir, '2026-08-01-dream_test1')
       await mkdir(dreamDir, { recursive: true })
-      await writeDocumentAtomic({
+      await writeDocumentAtomic(paths.files, {
         path: join(dreamDir, 'insight.md'),
         meta: {
           id: 'doc_insight_1',
@@ -1136,7 +1138,7 @@ describe('dispatchTool', () => {
 })
 
 it('list_people and list_entities page through nodes the prompt could not show', async () => {
-  const paths = memoryPaths(dir)
+  const paths = memoryPaths(dir, nodeStores())
   await MemoryEngine.open(dir, fakeDeps()).then((e) => e.close())
 
   for (let i = 0; i < 3; i++) {
@@ -1188,17 +1190,17 @@ it('list_people and list_entities page through nodes the prompt could not show',
 })
 
 it('list_arcs filters by status and pages, and its description matches what it returns', async () => {
-  const paths = memoryPaths(dir)
+  const paths = memoryPaths(dir, nodeStores())
   await MemoryEngine.open(dir, fakeDeps()).then((e) => e.close())
 
   const openPath = join(paths.arcsDir, 'open.md')
-  await writeDocumentAtomic({
+  await writeDocumentAtomic(paths.files, {
     path: openPath,
     meta: { id: 'doc_open_arc', name: 'Open Arc', status: 'active', updated: '2026-08-10' },
     body: 'Still going.\n',
   })
   const donePath = join(paths.arcsDir, 'done.md')
-  await writeDocumentAtomic({
+  await writeDocumentAtomic(paths.files, {
     path: donePath,
     meta: { id: 'doc_done_arc', name: 'Done Arc', status: 'closed', updated: '2026-02-02' },
     body: 'Finished.\n',

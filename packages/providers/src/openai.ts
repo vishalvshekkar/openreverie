@@ -10,9 +10,11 @@ import type {
   ChatRequest,
   ChatResult,
   EmbeddingProvider,
+  EmbedResult,
   FetchLike,
   ToolCall,
   ToolDefinition,
+  Usage,
 } from './types.js'
 import { ProviderUnavailableError } from './types.js'
 
@@ -41,6 +43,11 @@ interface OpenAiMessage {
   tool_call_id?: string
 }
 
+interface OpenAiUsage {
+  prompt_tokens: number
+  completion_tokens: number
+}
+
 interface OpenAiCompletionResponse {
   choices?: Array<{
     message?: {
@@ -49,6 +56,7 @@ interface OpenAiCompletionResponse {
       tool_calls?: OpenAiToolCall[] | null
     }
   }>
+  usage?: OpenAiUsage
 }
 
 interface OpenAiStreamToolCallDelta {
@@ -65,6 +73,16 @@ interface OpenAiStreamChunk {
     }
     finish_reason?: string | null
   }>
+  // Present only on the final chunk, and only because buildRequestBody
+  // sends stream_options: { include_usage: true }. Every earlier chunk
+  // still carries this key with value null (OpenAI's own shape), so a
+  // check for the key merely being present would fire on every chunk;
+  // callers must check for a non-null value instead.
+  usage?: OpenAiUsage | null
+}
+
+function toUsage(model: string, usage: OpenAiUsage): Usage {
+  return { model, inputTokens: usage.prompt_tokens, outputTokens: usage.completion_tokens }
 }
 
 function toOpenAiMessages(req: ChatRequest): OpenAiMessage[] {
@@ -115,6 +133,10 @@ function buildRequestBody(
     messages: toOpenAiMessages(req),
     stream,
   }
+  // OpenAI only includes a usage chunk in the SSE stream when this is set,
+  // and only accepts the field at all on a streaming request: sending it
+  // with stream: false is a 400. Gated on the stream flag, not always on.
+  if (stream) body.stream_options = { include_usage: true }
   const tools = toOpenAiTools(req.tools)
   if (tools) body.tools = tools
   if (req.temperature !== undefined && !dropTemperature) body.temperature = req.temperature
@@ -157,7 +179,7 @@ function isUnsupportedTemperatureError(status: number, bodyText: string): boolea
   return parsed.error?.param === 'temperature'
 }
 
-async function parseCompletion(res: Response): Promise<ChatResult> {
+async function parseCompletion(res: Response, model: string): Promise<ChatResult> {
   const data = (await res.json()) as OpenAiCompletionResponse
   const message = data.choices?.[0]?.message
   if (!message) {
@@ -168,7 +190,11 @@ async function parseCompletion(res: Response): Promise<ChatResult> {
     name: tc.function.name,
     arguments: tc.function.arguments,
   }))
-  return { text: message.content ?? '', toolCalls }
+  const result: ChatResult = { text: message.content ?? '', toolCalls }
+  if (data.usage) {
+    result.usage = toUsage(model, data.usage)
+  }
+  return result
 }
 
 const NETWORK_ERROR_CODES = new Set([
@@ -226,7 +252,7 @@ export class OpenAiChatProvider implements ChatProvider {
       headers: authHeaders(this.apiKey),
       body: JSON.stringify(buildRequestBody(req, false)),
     })
-    if (res.ok) return parseCompletion(res)
+    if (res.ok) return parseCompletion(res, req.model)
 
     const bodyText = await res.text()
 
@@ -247,7 +273,7 @@ export class OpenAiChatProvider implements ChatProvider {
         body: JSON.stringify(buildRequestBody(req, false, true)),
       })
       await requireOk(retryRes)
-      const result = await parseCompletion(retryRes)
+      const result = await parseCompletion(retryRes, req.model)
       return {
         ...result,
         warnings: [
@@ -307,6 +333,17 @@ export class OpenAiChatProvider implements ChatProvider {
         return true
       }
       const chunk = JSON.parse(payload) as OpenAiStreamChunk
+      // Checked before the `!choice` guard below: the chunk carrying usage
+      // is the one OpenAI sends with an empty choices array (stream_options:
+      // { include_usage: true } adds one extra chunk after the content is
+      // already finished, not fields on an existing content chunk), so a
+      // check placed after that guard would see this chunk as having no
+      // choice and drop it entirely. Every earlier chunk carries `usage:
+      // null` rather than omitting the key, so this must check for a
+      // non-null value, not merely for the key's presence.
+      if (chunk.usage != null) {
+        yield { type: 'usage', usage: toUsage(req.model, chunk.usage) }
+      }
       const choice = chunk.choices?.[0]
       if (!choice) return false
 
@@ -366,6 +403,7 @@ export class OpenAiChatProvider implements ChatProvider {
 
 interface OpenAiEmbeddingResponse {
   data: Array<{ embedding: number[]; index: number }>
+  usage?: { prompt_tokens: number; total_tokens: number }
 }
 
 const EMBEDDING_BATCH_SIZE = 100
@@ -382,17 +420,34 @@ export class OpenAiEmbeddingProvider implements EmbeddingProvider {
     this.fetchImpl = fetchImpl
   }
 
-  async embed(model: string, texts: string[]): Promise<number[][]> {
-    const results: number[][] = []
+  async embed(model: string, texts: string[]): Promise<EmbedResult> {
+    const vectors: number[][] = []
+    // Summed across every batch, not just reported from the first: a
+    // request over EMBEDDING_BATCH_SIZE texts fans out into more than one
+    // HTTP call, and a usage total that only reflects one of them would be
+    // a fabricated count presented as the whole, not a smaller true count.
+    let inputTokens = 0
+    let everyBatchReportedUsage = true
     for (let i = 0; i < texts.length; i += EMBEDDING_BATCH_SIZE) {
       const batch = texts.slice(i, i + EMBEDDING_BATCH_SIZE)
-      const batchResults = await this.embedBatch(model, batch)
-      results.push(...batchResults)
+      const batchResult = await this.embedBatch(model, batch)
+      vectors.push(...batchResult.vectors)
+      if (batchResult.usage) {
+        inputTokens += batchResult.usage.inputTokens
+      } else {
+        everyBatchReportedUsage = false
+      }
     }
-    return results
+    // A partial sum is worse than no number at all: omit usage entirely
+    // rather than report a total that silently excludes a batch the
+    // response did not carry usage for.
+    if (everyBatchReportedUsage) {
+      return { vectors, usage: { model, inputTokens, outputTokens: 0 } }
+    }
+    return { vectors }
   }
 
-  private async embedBatch(model: string, texts: string[]): Promise<number[][]> {
+  private async embedBatch(model: string, texts: string[]): Promise<EmbedResult> {
     const res = await requestOpenAi(this.fetchImpl, `${this.baseUrl}/embeddings`, {
       method: 'POST',
       headers: authHeaders(this.apiKey),
@@ -400,6 +455,14 @@ export class OpenAiEmbeddingProvider implements EmbeddingProvider {
     })
     await requireOk(res)
     const data = (await res.json()) as OpenAiEmbeddingResponse
-    return [...data.data].sort((a, b) => a.index - b.index).map((item) => item.embedding)
+    const vectors = [...data.data].sort((a, b) => a.index - b.index).map((item) => item.embedding)
+    // Embeddings have no completion, so outputTokens is always 0: this is
+    // a fact about what an embedding call is, not a gap in what OpenAI
+    // reports (its embeddings usage object never has a completion_tokens
+    // field at all).
+    if (data.usage) {
+      return { vectors, usage: { model, inputTokens: data.usage.prompt_tokens, outputTokens: 0 } }
+    }
+    return { vectors }
   }
 }

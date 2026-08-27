@@ -11,7 +11,6 @@
 // of callbacks that would make the split harder to follow than the
 // original single file. Everything here needs only paths, or graphState,
 // or both, never the engine instance.
-import { readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { type Document, readDocument } from './documents.js'
 import type { DreamInsight } from './dreaming.js'
@@ -83,12 +82,14 @@ export function collectDreamCandidates(
   return [...nodeCandidates, ...docCandidates]
 }
 
+// FileStore.readdir returns names only, not Dirent, so the isDirectory()
+// filter this used to have is dropped: dreamsDir only ever holds dream
+// directories, and a stray entry would fail the date-prefix regex below
+// the same way it always would have.
 export async function existingDreamDates(paths: MemoryPaths): Promise<string[]> {
   let entries: string[]
   try {
-    entries = (await readdir(paths.dreamsDir, { withFileTypes: true }))
-      .filter((e) => e.isDirectory())
-      .map((e) => e.name)
+    entries = await paths.files.readdir(paths.dreamsDir)
   } catch {
     entries = []
   }
@@ -116,11 +117,11 @@ export async function reflectedSessionCount(paths: MemoryPaths): Promise<number>
 // a missing or malformed insight.md is reported as zero insights, never
 // thrown.
 export async function listDreamSummaries(paths: MemoryPaths): Promise<DreamSummary[]> {
+  // Same reasoning as existingDreamDates above: no Dirent, so no
+  // isDirectory() filter.
   let entries: string[]
   try {
-    entries = (await readdir(paths.dreamsDir, { withFileTypes: true }))
-      .filter((e) => e.isDirectory())
-      .map((e) => e.name)
+    entries = await paths.files.readdir(paths.dreamsDir)
   } catch {
     entries = []
   }
@@ -133,14 +134,14 @@ export async function listDreamSummaries(paths: MemoryPaths): Promise<DreamSumma
     const dir = join(paths.dreamsDir, name)
     let hasNarrative = true
     try {
-      await readDocument(join(dir, 'dream.md'))
+      await readDocument(paths.files, join(dir, 'dream.md'))
     } catch {
       hasNarrative = false
     }
     let period = date
     let insightCount = 0
     try {
-      const insightDoc = await readDocument(join(dir, 'insight.md'))
+      const insightDoc = await readDocument(paths.files, join(dir, 'insight.md'))
       if (typeof insightDoc.meta.period === 'string') period = insightDoc.meta.period
       if (Array.isArray(insightDoc.meta.insights)) {
         insightCount = insightDoc.meta.insights.length
@@ -172,19 +173,19 @@ export async function readDreamById(
   if (!summary) return null
   let insights: Document
   try {
-    insights = await readDocument(join(summary.dir, 'insight.md'))
+    insights = await readDocument(paths.files, join(summary.dir, 'insight.md'))
   } catch {
     return null
   }
   let narrative: Document | undefined
   try {
-    narrative = await readDocument(join(summary.dir, 'dream.md'))
+    narrative = await readDocument(paths.files, join(summary.dir, 'dream.md'))
   } catch {
     narrative = undefined
   }
   let processLog = ''
   try {
-    processLog = await readFile(join(summary.dir, 'process.jsonl'), 'utf8')
+    processLog = await paths.files.readFile(join(summary.dir, 'process.jsonl'))
   } catch {
     processLog = ''
   }
@@ -198,11 +199,12 @@ export async function readDreamById(
 export async function recordDreamFeedback(
   paths: MemoryPaths,
   args: { insightId: string; verdict: DreamVerdict; note?: string; source: 'ui' | 'tool' },
+  now: Date,
 ): Promise<boolean> {
   for (const summary of await listDreamSummaries(paths)) {
     let insightDoc: Document
     try {
-      insightDoc = await readDocument(join(summary.dir, 'insight.md'))
+      insightDoc = await readDocument(paths.files, join(summary.dir, 'insight.md'))
     } catch {
       continue
     }
@@ -212,7 +214,7 @@ export async function recordDreamFeedback(
     if (!insights.some((insight) => insight.id === args.insightId)) continue
     await appendDreamLog(paths, [
       {
-        ts: new Date().toISOString(),
+        ts: now.toISOString(),
         type: 'feedback',
         insight: args.insightId,
         dream: summary.dreamId,
@@ -226,8 +228,12 @@ export async function recordDreamFeedback(
   return false
 }
 
-export async function markDreamMentioned(paths: MemoryPaths, dreamId: string): Promise<void> {
-  await appendDreamLog(paths, [{ ts: new Date().toISOString(), type: 'mentioned', dream: dreamId }])
+export async function markDreamMentioned(
+  paths: MemoryPaths,
+  dreamId: string,
+  now: Date,
+): Promise<void> {
+  await appendDreamLog(paths, [{ ts: now.toISOString(), type: 'mentioned', dream: dreamId }])
 }
 
 // What past dreams already covered, so a new one does not repeat them: each
@@ -243,7 +249,7 @@ export async function buildRecentDreamDigest(
   for (const summary of recent) {
     let insightDoc: Document
     try {
-      insightDoc = await readDocument(join(summary.dir, 'insight.md'))
+      insightDoc = await readDocument(paths.files, join(summary.dir, 'insight.md'))
     } catch {
       continue
     }

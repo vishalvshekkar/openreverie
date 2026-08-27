@@ -11,6 +11,7 @@ import {
   type MemoryPaths,
   memoryPaths,
   newId,
+  nodeStores,
   SessionStore,
   writeDocumentAtomic,
 } from '@openreverie/memory'
@@ -65,6 +66,7 @@ function fakeDeps(): EngineDeps {
     embeddings: new FakeEmbeddingProvider(),
     reflectionModel: 'fake-reflect',
     embeddingModel: 'fake-embed',
+    timezone: 'UTC',
   }
 }
 
@@ -106,8 +108,8 @@ describe('DocKind indexing and web API wiring', () => {
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'openreverie-doc-kinds-'))
-    paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
   })
 
   afterEach(async () => {
@@ -118,7 +120,7 @@ describe('DocKind indexing and web API wiring', () => {
     const seeded: { kind: DocKind; docId: string }[] = []
 
     const constitutionId = newId('doc')
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: paths.constitution,
       meta: { id: constitutionId },
       body: 'The constitution body.\n',
@@ -126,7 +128,7 @@ describe('DocKind indexing and web API wiring', () => {
     seeded.push({ kind: 'constitution', docId: constitutionId })
 
     const realmId = newId('doc')
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: join(paths.realmsDir, 'fitness.md'),
       meta: { id: realmId, name: 'Fitness' },
       body: 'Running and lifting.\n',
@@ -134,7 +136,7 @@ describe('DocKind indexing and web API wiring', () => {
     seeded.push({ kind: 'realm', docId: realmId })
 
     const arcId = newId('doc')
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: join(paths.arcsDir, 'marathon.md'),
       meta: { id: arcId, name: 'Marathon', status: 'active' },
       body: 'Training for the fall marathon.\n',
@@ -142,7 +144,7 @@ describe('DocKind indexing and web API wiring', () => {
     seeded.push({ kind: 'arc', docId: arcId })
 
     const personId = newId('doc')
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: join(paths.peopleDir, 'priya.md'),
       meta: { id: personId, name: 'Priya' },
       body: 'Priya runs the reading group.\n',
@@ -150,7 +152,7 @@ describe('DocKind indexing and web API wiring', () => {
     seeded.push({ kind: 'person', docId: personId })
 
     const dailyId = newId('doc')
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: join(paths.rollupsDailyDir, '2026-08-10.md'),
       meta: { id: dailyId, date: '2026-08-10' },
       body: 'A steady day.\n',
@@ -158,7 +160,7 @@ describe('DocKind indexing and web API wiring', () => {
     seeded.push({ kind: 'rollup_daily', docId: dailyId })
 
     const weeklyId = newId('doc')
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: join(paths.rollupsWeeklyDir, '2026-W33.md'),
       meta: { id: weeklyId, week: '2026-W33' },
       body: 'The week in brief.\n',
@@ -167,7 +169,7 @@ describe('DocKind indexing and web API wiring', () => {
 
     const store = await SessionStore.start(paths, new Date('2026-08-10T00:00:00.000Z'))
     const summaryId = newId('doc')
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: join(store.dir, 'summary.md'),
       meta: { id: summaryId },
       body: 'A session summary.\n',
@@ -175,7 +177,7 @@ describe('DocKind indexing and web API wiring', () => {
     seeded.push({ kind: 'summary', docId: summaryId })
 
     const journalEntryId = newId('doc')
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: join(paths.journalDir, `2026-08-10-${journalEntryId}.md`),
       meta: {
         id: journalEntryId,
@@ -188,7 +190,7 @@ describe('DocKind indexing and web API wiring', () => {
     seeded.push({ kind: 'journal', docId: journalEntryId })
 
     const journalingId = newId('doc')
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: paths.journaling,
       meta: { id: journalingId },
       body: 'Once a week, gratitude journaling, hang back.\n',
@@ -199,7 +201,7 @@ describe('DocKind indexing and web API wiring', () => {
     await mkdir(dreamDir, { recursive: true })
 
     const dreamId = newId('doc')
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: join(dreamDir, 'dream.md'),
       meta: { id: dreamId, date: '2026-08-24' },
       body: 'A dream narrative.\n',
@@ -207,7 +209,7 @@ describe('DocKind indexing and web API wiring', () => {
     seeded.push({ kind: 'dream', docId: dreamId })
 
     const dreamInsightId = newId('doc')
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: join(dreamDir, 'insight.md'),
       meta: { id: dreamInsightId, date: '2026-08-24' },
       body: 'A dream insight.\n',

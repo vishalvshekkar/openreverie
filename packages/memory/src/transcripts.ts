@@ -5,24 +5,19 @@
 // deletes a line once it is written. There is deliberately no delete or
 // rewrite API here.
 
-import type { FileHandle } from 'node:fs/promises'
-import {
-  access,
-  appendFile,
-  mkdir,
-  open,
-  readdir,
-  readFile,
-  rename,
-  writeFile,
-} from 'node:fs/promises'
 import { join } from 'node:path'
 import type { ToolCall } from '@openreverie/providers'
-import { decodeTime, ulid } from 'ulid'
+import { decodeTime } from 'ulid'
 import { z } from 'zod'
 import { newId, readDocument } from './documents.js'
 import type { MemoryPaths } from './paths.js'
 import { formatLocalDate, localDateFromStored } from './time.js'
+
+// This module does two kinds of filesystem work. transcript.jsonl is a
+// true append-only log (created once by SessionStore.start, appended to by
+// appendLine, never rewritten) and stays on paths.logs throughout. Every
+// other file a session directory holds (session.json, and the directory
+// itself) is read and written whole, so those go through paths.files.
 
 export interface TranscriptLine {
   // A UTC instant, ISO 8601: record time, when this line was written down.
@@ -104,8 +99,11 @@ export class SessionStore {
   static async start(paths: MemoryPaths, now: Date, timezone = 'UTC'): Promise<SessionStore> {
     const sessionId = newId('session')
     const dir = join(paths.sessionsDir, `${formatLocalDate(now, timezone)}-${sessionId}`)
-    await mkdir(dir, { recursive: true })
-    await appendFile(join(dir, TRANSCRIPT_FILE), '', 'utf8')
+    await paths.files.mkdir(dir)
+    // create(), not appendLines with an empty array: the point is to make
+    // an empty transcript.jsonl exist so a reader never has to distinguish
+    // "session not started" from "session started, nothing said yet".
+    await paths.logs.create(join(dir, TRANSCRIPT_FILE))
     return new SessionStore(sessionId, dir)
   }
 
@@ -114,14 +112,13 @@ export class SessionStore {
     return new SessionStore(sessionId, dir)
   }
 
-  async appendLine(line: TranscriptLine): Promise<void> {
-    await appendFile(join(this.dir, TRANSCRIPT_FILE), `${JSON.stringify(line)}\n`, 'utf8')
+  async appendLine(paths: MemoryPaths, line: TranscriptLine): Promise<void> {
+    await paths.logs.appendLines(join(this.dir, TRANSCRIPT_FILE), [JSON.stringify(line)])
   }
 
   static async readTranscript(paths: MemoryPaths, sessionId: string): Promise<TranscriptLine[]> {
     const dir = await findSessionDir(paths, sessionId)
-    const raw = await readFile(join(dir, TRANSCRIPT_FILE), 'utf8')
-    const lines = raw.split('\n')
+    const lines = await paths.logs.readAll(join(dir, TRANSCRIPT_FILE))
     const result: TranscriptLine[] = []
 
     // A crash during append can leave a partial final line. This is silently
@@ -185,12 +182,14 @@ export class SessionStore {
     return result
   }
 
+  // Routed through FileStore.writeFile, which now owns the exact
+  // temp-file-then-rename dance this used to do inline
+  // (`${target}.tmp-${ulid()}` then rename); the bytes on disk and the
+  // temp file's name are unchanged.
   static async writeMeta(paths: MemoryPaths, sessionId: string, meta: SessionMeta): Promise<void> {
     const dir = await findSessionDir(paths, sessionId)
     const target = join(dir, SESSION_META_FILE)
-    const tmpPath = `${target}.tmp-${ulid()}`
-    await writeFile(tmpPath, `${JSON.stringify(meta)}\n`, 'utf8')
-    await rename(tmpPath, target)
+    await paths.files.writeFile(target, `${JSON.stringify(meta)}\n`)
   }
 
   // A missing file, an unreadable one, and one that fails to parse all mean
@@ -204,7 +203,7 @@ export class SessionStore {
     }
     let raw: string
     try {
-      raw = await readFile(join(dir, SESSION_META_FILE), 'utf8')
+      raw = await paths.files.readFile(join(dir, SESSION_META_FILE))
     } catch {
       return undefined
     }
@@ -233,7 +232,7 @@ export class SessionStore {
     sessionId: string,
   ): Promise<TranscriptLine | undefined> {
     const dir = await findSessionDir(paths, sessionId)
-    return readFirstTranscriptLine(dir)
+    return readFirstTranscriptLine(paths, dir)
   }
 
   static async listSessions(paths: MemoryPaths): Promise<
@@ -245,11 +244,14 @@ export class SessionStore {
       skipped: boolean
     }[]
   > {
-    const entries = await readdir(paths.sessionsDir, { withFileTypes: true })
-    const dirNames = entries
-      .filter((entry) => entry.isDirectory())
-      .map((entry) => entry.name)
-      .sort()
+    // FileStore.readdir returns entry names only, not Dirent, so there is
+    // no isDirectory() to filter on here anymore. That filter is dropped
+    // rather than replaced: sessionsDir only ever holds session
+    // directories in a well-formed memory folder, and a stray non-directory
+    // entry would fail SESSION_DIR_PATTERN below or fall through the same
+    // try/catch tolerance every read here already has, so behavior for a
+    // well-formed folder is unchanged.
+    const dirNames = (await paths.files.readdir(paths.sessionsDir)).sort()
 
     const sessions: {
       sessionId: string
@@ -265,13 +267,13 @@ export class SessionStore {
       const sessionId = match[2] as string
       const sessionDirPath = join(paths.sessionsDir, dirName)
       const summaryPath = join(sessionDirPath, SUMMARY_FILE)
-      const reflected = await pathExists(summaryPath)
+      const reflected = await paths.files.exists(summaryPath)
 
       let skipped = false
       let summaryDate: string | undefined
       if (reflected) {
         try {
-          const doc = await readDocument(summaryPath)
+          const doc = await readDocument(paths.files, summaryPath)
           skipped = doc.meta.skipped === true
           if (typeof doc.meta.date === 'string') summaryDate = doc.meta.date
         } catch {
@@ -293,7 +295,7 @@ export class SessionStore {
       if (summaryDate !== undefined) {
         date = summaryDate
       } else {
-        const first = await readFirstTranscriptLine(sessionDirPath)
+        const first = await readFirstTranscriptLine(paths, sessionDirPath)
         if (first !== undefined && typeof first.utcOffsetMinutes === 'number') {
           date = localDateFromStored(first.ts, first.utcOffsetMinutes)
         }
@@ -321,43 +323,47 @@ function createdAtForSession(sessionId: string, fallback: string): string {
 }
 
 async function findSessionDir(paths: MemoryPaths, sessionId: string): Promise<string> {
-  const entries = await readdir(paths.sessionsDir, { withFileTypes: true })
-  const match = entries.find((entry) => entry.isDirectory() && entry.name.endsWith(`-${sessionId}`))
+  // See the comment in listSessions: FileStore.readdir gives names only, so
+  // the isDirectory() filter this used to have is dropped, not replaced.
+  // Gated on SESSION_DIR_PATTERN, the same gate listSessions already uses,
+  // rather than the bare endsWith it used to be: without it, a stray
+  // non-directory entry in sessionsDir whose name happens to end with
+  // `-${sessionId}` (nothing else in this folder is meant to live there,
+  // but nothing used to stop it from matching either) would resolve as if
+  // it were that session's own directory. This is the fail-closed shape
+  // AGENTS.md asks for on a closed set of states: an entry that is not
+  // shaped like a session directory can never match, not "matches unless
+  // proven otherwise."
+  const entries = await paths.files.readdir(paths.sessionsDir)
+  const match = entries.find(
+    (name) => SESSION_DIR_PATTERN.test(name) && name.endsWith(`-${sessionId}`),
+  )
   if (!match) {
     throw new Error(`No session directory found for ${sessionId} in ${paths.sessionsDir}.`)
   }
-  return join(paths.sessionsDir, match.name)
+  return join(paths.sessionsDir, match)
 }
 
-const FIRST_LINE_CHUNK_BYTES = 8192
-
-// One handle, one chunk, split at the first newline, one JSON.parse, handle
-// closed. 8 KB is more than enough for a first line. Anything unreadable,
-// unparseable, or absent comes back as undefined rather than throwing: the
-// caller's job is to fall back, not to fail.
-async function readFirstTranscriptLine(dir: string): Promise<TranscriptLine | undefined> {
-  let handle: FileHandle | undefined
+// A bounded read of just the first record, through AppendOnlyStore.readRange
+// rather than the whole transcript. This is the reason readRange exists at
+// all (see store.ts): deriving one session's logical local day at
+// listSessions time must not cost reading every line of every transcript
+// ever written. The Node implementation (nodeStore.ts) satisfies this with
+// a real bounded chunk read; the one behavior delta from the old inline
+// implementation is that a first line longer than the old 8 KB chunk used
+// to silently fail to parse and fall back to the directory-prefix date,
+// where the chunked readRange now keeps reading until it has one full line.
+// That was never a decision, just an artifact of a fixed single read, so
+// it is not preserved.
+async function readFirstTranscriptLine(
+  paths: MemoryPaths,
+  dir: string,
+): Promise<TranscriptLine | undefined> {
   try {
-    handle = await open(join(dir, TRANSCRIPT_FILE), 'r')
-    const buffer = Buffer.alloc(FIRST_LINE_CHUNK_BYTES)
-    const { bytesRead } = await handle.read(buffer, 0, FIRST_LINE_CHUNK_BYTES, 0)
-    const text = buffer.subarray(0, bytesRead).toString('utf8')
-    const newline = text.indexOf('\n')
-    const first = newline >= 0 ? text.slice(0, newline) : text
-    if (first.trim().length === 0) return undefined
+    const [first] = await paths.logs.readRange(join(dir, TRANSCRIPT_FILE), 0, 1)
+    if (first === undefined || first.trim().length === 0) return undefined
     return JSON.parse(first) as TranscriptLine
   } catch {
     return undefined
-  } finally {
-    await handle?.close()
-  }
-}
-
-async function pathExists(path: string): Promise<boolean> {
-  try {
-    await access(path)
-    return true
-  } catch {
-    return false
   }
 }

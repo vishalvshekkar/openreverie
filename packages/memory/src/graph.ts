@@ -9,7 +9,6 @@
 // retract does not cascade to its edges; edges pointing at a missing node
 // are left dangling and callers skip them when they matter.
 
-import { appendFile, readFile } from 'node:fs/promises'
 import { z } from 'zod'
 import type { ResolvedWindow } from './commitmentTime.js'
 import type { MemoryPaths } from './paths.js'
@@ -297,8 +296,8 @@ export async function appendGraph(paths: MemoryPaths, records: GraphRecord[]): P
       throw new Error(`Cannot append graph record at index ${i}: ${validation.error}`)
     }
   }
-  const lines = records.map((record) => `${JSON.stringify(record)}\n`).join('')
-  await appendFile(paths.graphLog, lines, 'utf8')
+  const lines = records.map((record) => JSON.stringify(record))
+  await paths.logs.appendLines(paths.graphLog, lines)
 }
 
 interface GraphLogLine {
@@ -306,19 +305,14 @@ interface GraphLogLine {
   sourceLine: number
 }
 
-async function readGraphLines(graphLog: string): Promise<GraphLogLine[]> {
-  let raw: string
-  try {
-    raw = await readFile(graphLog, 'utf8')
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-      return []
-    }
-    throw err
-  }
-
+// sourceLine numbers lines by their index in the split file content (1
+// based), which readAll's own contract preserves: it only drops the one
+// trailing empty string that a trailing newline produces, never an
+// interior blank line, so a blank line here still consumes a line number
+// exactly as it did when this function read and split the file itself.
+async function readGraphLines(paths: MemoryPaths): Promise<GraphLogLine[]> {
+  const lines = await paths.logs.readAll(paths.graphLog)
   const records: GraphLogLine[] = []
-  const lines = raw.split('\n')
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]
     if (line === undefined || line.trim() === '') {
@@ -329,12 +323,12 @@ async function readGraphLines(graphLog: string): Promise<GraphLogLine[]> {
       parsed = JSON.parse(line)
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
-      throw new Error(`Graph log ${graphLog} line ${i + 1} is not valid JSON: ${message}`)
+      throw new Error(`Graph log ${paths.graphLog} line ${i + 1} is not valid JSON: ${message}`)
     }
 
     const validation = parseGraphRecord(parsed)
     if (!validation.success || !validation.data) {
-      throw new Error(`Graph log ${graphLog} line ${i + 1}: ${validation.error}`)
+      throw new Error(`Graph log ${paths.graphLog} line ${i + 1}: ${validation.error}`)
     }
     records.push({ record: validation.data, sourceLine: i + 1 })
   }
@@ -343,11 +337,11 @@ async function readGraphLines(graphLog: string): Promise<GraphLogLine[]> {
 }
 
 export async function readGraphRecords(paths: MemoryPaths): Promise<SequencedGraphRecord[]> {
-  const lines = await readGraphLines(paths.graphLog)
+  const lines = await readGraphLines(paths)
   return lines.map(({ record, sourceLine }) => ({ sequence: sourceLine, record }))
 }
 
 export async function readGraph(paths: MemoryPaths): Promise<GraphState> {
-  const lines = await readGraphLines(paths.graphLog)
+  const lines = await readGraphLines(paths)
   return foldGraph(lines.map(({ record }) => record))
 }

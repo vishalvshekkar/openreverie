@@ -265,7 +265,18 @@ export const MODE_OPTIONS: readonly (readonly [string, string])[] = [
   ['journal', 'Structured written reflection.'],
 ]
 
-export function Conversations({ api }: { api: AppApi }): JSX.Element {
+export function Conversations({
+  api,
+  preAuthenticated = false,
+}: {
+  api: AppApi
+  // Set by App when the host has already established the session (Reverie
+  // Cloud). Skips the self-hosted token exchange below entirely, rather
+  // than relying on the absence of a ?token= URL param, so an unrelated
+  // query param the host happens to use never gets misread as a bootstrap
+  // token.
+  preAuthenticated?: boolean
+}): JSX.Element {
   const [state, dispatch] = useReducer(sessionReducer, initialChatState)
   const [sessions, setSessions] = useState<Session[]>([])
   const [sessionsError, setSessionsError] = useState<string | null>(null)
@@ -325,22 +336,27 @@ export function Conversations({ api }: { api: AppApi }): JSX.Element {
   // cookie being set and comes back unauthenticated. The token is scrubbed
   // from the URL immediately, before the await, rather than after: a slow or
   // hung bootstrap should not leave a credential sitting in the address bar.
+  //
+  // A pre-authenticated host skips this whole step: there is no token to
+  // read and no cookie to exchange for, the session already exists.
   useEffect(() => {
     void (async () => {
-      const token = new URLSearchParams(window.location.search).get('token')
-      if (token) {
-        window.history.replaceState({}, '', window.location.pathname)
-        try {
-          await api.bootstrap(token)
-        } catch {
-          // Bootstrap is best effort at the token-exchange step itself. A
-          // failure here still falls through to refreshSessions below, whose
-          // own error state (and retry control) is what the person sees.
+      if (!preAuthenticated) {
+        const token = new URLSearchParams(window.location.search).get('token')
+        if (token) {
+          window.history.replaceState({}, '', window.location.pathname)
+          try {
+            await api.bootstrap(token)
+          } catch {
+            // Bootstrap is best effort at the token-exchange step itself. A
+            // failure here still falls through to refreshSessions below, whose
+            // own error state (and retry control) is what the person sees.
+          }
         }
       }
       await refreshSessions()
     })()
-  }, [api, refreshSessions])
+  }, [api, refreshSessions, preAuthenticated])
 
   useEffect(() => {
     void (async () => {

@@ -13,6 +13,7 @@ import {
   writeJournalEntry,
   writeJournalingProtocol,
 } from './journal.js'
+import { nodeStores } from './nodeStore.js'
 import { ensureMemoryTree, type MemoryPaths, memoryPaths } from './paths.js'
 import type { TranscriptLine } from './transcripts.js'
 
@@ -22,8 +23,8 @@ describe('journal entry filename and frontmatter', () => {
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'openreverie-journal-'))
-    paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
   })
 
   afterEach(async () => {
@@ -87,7 +88,7 @@ describe('journal entry filename and frontmatter', () => {
       session: 'session_01JAAA',
       body: 'An old page, imported today.\n',
     })
-    const read = await readDocument(written.path)
+    const read = await readDocument(paths.files, written.path)
     expect(read.meta.entryDate).toBe('2019-03-14')
     expect(read.meta.recordedAt).toBe('2026-08-16T21:04:00.000Z')
     expect(read.meta.entryDate).not.toBe(read.meta.recordedAt)
@@ -248,8 +249,8 @@ describe('journaling.md protocol read and write', () => {
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'openreverie-journaling-'))
-    paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
   })
 
   afterEach(async () => {
@@ -262,7 +263,7 @@ describe('journaling.md protocol read and write', () => {
   })
 
   it('readJournalingProtocol returns the trimmed body when journaling.md exists', async () => {
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: paths.journaling,
       meta: { id: 'doc_01JZZZ', kind: 'journaling', updated: '2026-08-16T21:04:00.000Z' },
       body: '  Gratitude, three times a week.  \n\n',
@@ -277,7 +278,7 @@ describe('journaling.md protocol read and write', () => {
   })
 
   it('readJournalingProtocolIfPresent returns the body when present', async () => {
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: paths.journaling,
       meta: { id: 'doc_01JZZZ', kind: 'journaling', updated: '2026-08-16T21:04:00.000Z' },
       body: 'Examen, most evenings.\n',

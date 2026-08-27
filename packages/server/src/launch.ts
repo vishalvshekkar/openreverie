@@ -1,12 +1,13 @@
 import type { RequestListener, Server } from 'node:http'
 import { buildPersona, type ReverieConfig, resolveDreamingModel } from '@openreverie/core'
-import type { EngineDeps, MemoryEngine } from '@openreverie/memory'
+import { type EngineDeps, type MemoryEngine, systemTimeZone } from '@openreverie/memory'
 import {
   type ChatEvent,
   type ChatProvider,
   type ChatRequest,
   type ChatResult,
   type EmbeddingProvider,
+  type EmbedResult,
   type ProviderSelection,
   ProviderUnavailableError,
 } from '@openreverie/providers'
@@ -71,7 +72,10 @@ class UnavailableChatProvider implements ChatProvider {
 class UnavailableEmbeddingProvider implements EmbeddingProvider {
   readonly name = 'unavailable'
 
-  async embed(_model: string, _texts: string[]): Promise<number[][]> {
+  // Return type only, to satisfy EmbeddingProvider after providers'
+  // P0-4 usage change (2026-08-27): this always throws, so nothing about
+  // the resolved value actually changes.
+  async embed(_model: string, _texts: string[]): Promise<EmbedResult> {
     throw new ProviderUnavailableError()
   }
 }
@@ -114,6 +118,13 @@ export function createServerLauncher(deps: ServerLaunchDeps) {
         dreamingModel: resolveDreamingModel(config),
         dreaming: config.dreaming,
         dreamPersona: (style) => buildPersona(config.safety.mode, config.safety.resources, style),
+        // node:http's server genuinely runs on the person's own machine
+        // (or a self-hosted box they control), so the system zone is the
+        // honest default here. A host with no ambient zone (a Cloudflare
+        // Durable Object) never launches through this function; it builds
+        // an EngineDeps.timezone itself. See EngineDeps.timezone's own
+        // comment.
+        timezone: systemTimeZone(),
       },
       { maintenance: false },
     )

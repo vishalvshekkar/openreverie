@@ -464,6 +464,26 @@ describe('mount bootstrap ordering (the reload-to-see-sessions bug)', () => {
   })
 })
 
+describe('pre-authenticated host (Reverie Cloud)', () => {
+  it('skips the token bootstrap and goes straight to the session list when told it is already authenticated', async () => {
+    window.history.replaceState({}, '', '/?token=abc123')
+
+    render(<Conversations api={api as unknown as AppApi} preAuthenticated={true} />)
+
+    await waitFor(() => expect(api.listSessions).toHaveBeenCalledTimes(1))
+    expect(api.bootstrap).not.toHaveBeenCalled()
+  })
+
+  it('leaves a stray token query param in the URL untouched, since it was never read as a bootstrap token', async () => {
+    window.history.replaceState({}, '', '/?token=abc123')
+
+    render(<Conversations api={api as unknown as AppApi} preAuthenticated={true} />)
+
+    await waitFor(() => expect(api.listSessions).toHaveBeenCalledTimes(1))
+    expect(window.location.search).toBe('?token=abc123')
+  })
+})
+
 describe('session list failure', () => {
   it('shows a retry control when the session list fails to load, and recovers on retry', async () => {
     api.listSessions.mockReset()

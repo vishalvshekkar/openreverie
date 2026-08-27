@@ -11,6 +11,7 @@ import {
   selectCommitments,
 } from './commitments.js'
 import { appendGraph } from './graph.js'
+import { nodeStores } from './nodeStore.js'
 import { ensureMemoryTree, type MemoryPaths, memoryPaths } from './paths.js'
 
 const tempDirs: string[] = []
@@ -18,8 +19,8 @@ const tempDirs: string[] = []
 async function tempPaths(): Promise<MemoryPaths> {
   const dir = await mkdtemp(join(tmpdir(), 'openreverie-commitments-'))
   tempDirs.push(dir)
-  const paths = memoryPaths(dir)
-  await ensureMemoryTree(paths)
+  const paths = memoryPaths(dir, nodeStores())
+  await ensureMemoryTree(paths, 'UTC')
   return paths
 }
 
@@ -30,24 +31,33 @@ afterEach(async () => {
 describe('commitments', () => {
   it('revises a commitment in place while every version survives in the log', async () => {
     const paths = await tempPaths()
-    const created = await recordCommitment(paths, {
-      label: 'See Nightfall with Arjun',
-      flavor: 'plan',
-      sessionId: 'session_01A',
-      timing: {
-        words: 'friday',
-        anchor: '2026-08-18T10:00:00.000Z',
-        resolved: { from: '2026-08-21', to: '2026-08-21', statedPrecision: 'day' },
+    const created = await recordCommitment(
+      paths,
+      {
+        label: 'See Nightfall with Arjun',
+        flavor: 'plan',
+        sessionId: 'session_01A',
+        timing: {
+          words: 'friday',
+          anchor: '2026-08-18T10:00:00.000Z',
+          resolved: { from: '2026-08-21', to: '2026-08-21', statedPrecision: 'day' },
+        },
       },
-    })
+      new Date(),
+    )
 
-    await reviseCommitment(paths, created.id, {
-      timing: {
-        words: 'sunday the 23rd',
-        anchor: '2026-08-20T10:00:00.000Z',
-        resolved: { from: '2026-08-23', to: '2026-08-23', statedPrecision: 'day' },
+    await reviseCommitment(
+      paths,
+      created.id,
+      {
+        timing: {
+          words: 'sunday the 23rd',
+          anchor: '2026-08-20T10:00:00.000Z',
+          resolved: { from: '2026-08-23', to: '2026-08-23', statedPrecision: 'day' },
+        },
       },
-    })
+      new Date(),
+    )
 
     const live = await readCommitments(paths)
     expect(live).toHaveLength(1)
@@ -63,47 +73,60 @@ describe('commitments', () => {
 
   it('records an outcome without inventing one', async () => {
     const paths = await tempPaths()
-    const c = await recordCommitment(paths, {
-      label: 'File the tax paperwork',
-      flavor: 'errand',
-      sessionId: 's1',
-    })
-    await resolveCommitment(paths, c.id, 'done')
+    const c = await recordCommitment(
+      paths,
+      {
+        label: 'File the tax paperwork',
+        flavor: 'errand',
+        sessionId: 's1',
+      },
+      new Date(),
+    )
+    await resolveCommitment(paths, c.id, 'done', new Date())
     expect((await readCommitments(paths))[0]?.state).toBe('done')
   })
 
   it('appends a later interpretation without rewriting the first', async () => {
     const paths = await tempPaths()
-    const c = await recordCommitment(paths, {
-      label: 'Start swimming',
-      flavor: 'plan',
-      sessionId: 's1',
-      timing: {
-        words: 'come summer',
-        anchor: '2026-08-24T10:00:00.000Z',
-        interpretation: {
-          statedPrecision: 'vague',
-          gloss: 'Said in August 2026. Summer where they live runs roughly February to May.',
-          bracketFrom: '2027-02-01',
-          bracketTo: '2027-05-31',
-          interpretationConfidence: 'medium',
+    const c = await recordCommitment(
+      paths,
+      {
+        label: 'Start swimming',
+        flavor: 'plan',
+        sessionId: 's1',
+        timing: {
+          words: 'come summer',
+          anchor: '2026-08-24T10:00:00.000Z',
+          interpretation: {
+            statedPrecision: 'vague',
+            gloss: 'Said in August 2026. Summer where they live runs roughly February to May.',
+            bracketFrom: '2027-02-01',
+            bracketTo: '2027-05-31',
+            interpretationConfidence: 'medium',
+          },
         },
       },
-    })
+      new Date(),
+    )
 
-    await reviseCommitment(paths, c.id, {
-      timing: {
-        words: 'come summer',
-        anchor: '2027-01-15T10:00:00.000Z',
-        interpretation: {
-          statedPrecision: 'vague',
-          gloss: 'Re-read in January 2027, with that summer now weeks away.',
-          bracketFrom: '2027-02-01',
-          bracketTo: '2027-05-31',
-          interpretationConfidence: 'high',
+    await reviseCommitment(
+      paths,
+      c.id,
+      {
+        timing: {
+          words: 'come summer',
+          anchor: '2027-01-15T10:00:00.000Z',
+          interpretation: {
+            statedPrecision: 'vague',
+            gloss: 'Re-read in January 2027, with that summer now weeks away.',
+            bracketFrom: '2027-02-01',
+            bracketTo: '2027-05-31',
+            interpretationConfidence: 'high',
+          },
         },
       },
-    })
+      new Date(),
+    )
 
     // Spec section 3: the original gloss is testimony and is never
     // rewritten. What was understood, and when, stays legible in the log.
@@ -118,31 +141,39 @@ describe('commitments', () => {
   it('never carries both a stated window and an interpreted one', async () => {
     const paths = await tempPaths()
     await expect(
-      recordCommitment(paths, {
-        label: 'Start swimming',
-        flavor: 'plan',
-        sessionId: 's1',
-        timing: {
-          words: 'come summer',
-          anchor: '2026-08-24T10:00:00.000Z',
-          resolved: { from: '2027-02-01', to: '2027-05-31', statedPrecision: 'range' },
-          interpretation: {
-            statedPrecision: 'vague',
-            gloss: 'anything',
-            interpretationConfidence: 'low',
+      recordCommitment(
+        paths,
+        {
+          label: 'Start swimming',
+          flavor: 'plan',
+          sessionId: 's1',
+          timing: {
+            words: 'come summer',
+            anchor: '2026-08-24T10:00:00.000Z',
+            resolved: { from: '2027-02-01', to: '2027-05-31', statedPrecision: 'range' },
+            interpretation: {
+              statedPrecision: 'vague',
+              gloss: 'anything',
+              interpretationConfidence: 'low',
+            },
           },
         },
-      }),
+        new Date(),
+      ),
     ).rejects.toThrow()
   })
 
   it('readCommitments skips a commitment node once it has been retracted', async () => {
     const paths = await tempPaths()
-    const c = await recordCommitment(paths, {
-      label: 'Buy a birthday gift',
-      flavor: 'errand',
-      sessionId: 's1',
-    })
+    const c = await recordCommitment(
+      paths,
+      {
+        label: 'Buy a birthday gift',
+        flavor: 'errand',
+        sessionId: 's1',
+      },
+      new Date(),
+    )
     expect(await readCommitments(paths)).toHaveLength(1)
 
     // No public retract op exists on commitments.ts (none is in scope for

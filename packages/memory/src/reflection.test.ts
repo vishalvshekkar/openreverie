@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { recordCommitment } from './commitments.js'
 import { newId, readDocument, writeDocumentAtomic } from './documents.js'
 import { appendGraph, readGraph } from './graph.js'
+import { nodeStores } from './nodeStore.js'
 import { ensureMemoryTree, type MemoryPaths, memoryPaths } from './paths.js'
 import { pendingProposals } from './proposals.js'
 import {
@@ -275,8 +276,8 @@ describe('reflection', () => {
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'openreverie-memory-'))
-    paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
 
     sessionId = newId('session')
     sessionDir = join(paths.sessionsDir, `2026-08-13-${sessionId}`)
@@ -284,7 +285,7 @@ describe('reflection', () => {
 
     arcDocPath = join(paths.arcsDir, 'health.md')
     arcDocId = newId('doc')
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: arcDocPath,
       meta: { id: arcDocId, name: 'Health' },
       body: 'Original arc narrative.\n',
@@ -757,7 +758,7 @@ describe('reflection', () => {
       // left for the drop is that a realm is not a valid pass two target,
       // which is the actual rule this test exists to cover.
       const realmDocPath = join(paths.realmsDir, 'health.md')
-      await writeDocumentAtomic({
+      await writeDocumentAtomic(paths.files, {
         path: realmDocPath,
         meta: { id: newId('doc'), name: 'Health' },
         body: 'A realm page, not an arc or person page.\n',
@@ -828,7 +829,7 @@ describe('reflection', () => {
 
     it('drops the personUpdates entry for a person also named in newPersons this session', async () => {
       const personDocPath = join(paths.peopleDir, 'sam.md')
-      await writeDocumentAtomic({
+      await writeDocumentAtomic(paths.files, {
         path: personDocPath,
         meta: { id: newId('doc'), name: 'Sam' },
         body: 'Original person narrative.\n',
@@ -873,20 +874,20 @@ describe('reflection', () => {
       const out = emptyReflectionOutput('A session.')
       const narratives = new Map([['arc_health', 'Rewritten by pass two.']])
 
-      await applyReflection(paths, out, sessionId, [], now, narratives, noopMaterialize)
+      await applyReflection(paths, out, sessionId, [], now, narratives, noopMaterialize, 'UTC')
 
-      const arcDoc = await readDocument(arcDocPath)
+      const arcDoc = await readDocument(paths.files, arcDocPath)
       expect(arcDoc.body).toBe('Rewritten by pass two.\n')
       expect(arcDoc.meta.updated).toBe(now.toISOString())
     })
 
     it('leaves the arc document byte for byte unchanged when the narratives map has no entry for it', async () => {
       const out = emptyReflectionOutput('A session.')
-      const before = await readDocument(arcDocPath)
+      const before = await readDocument(paths.files, arcDocPath)
 
-      await applyReflection(paths, out, sessionId, [], now, new Map(), noopMaterialize)
+      await applyReflection(paths, out, sessionId, [], now, new Map(), noopMaterialize, 'UTC')
 
-      const after = await readDocument(arcDocPath)
+      const after = await readDocument(paths.files, arcDocPath)
       expect(after.body).toBe(before.body)
       expect(after.meta.updated).toBeUndefined()
     })
@@ -920,6 +921,7 @@ describe('reflection', () => {
         now,
         new Map(),
         noopMaterialize,
+        'UTC',
       )
 
       const runItem = result.mintedItems[0]
@@ -942,7 +944,7 @@ describe('reflection', () => {
       expect(items[1]?.kind).toBe('feeling')
       expect(items[1]?.ts).toBe(now.toISOString())
 
-      const onDisk = await readDocument(join(sessionDir, 'summary.md'))
+      const onDisk = await readDocument(paths.files, join(sessionDir, 'summary.md'))
       expect(onDisk.body).toBe(result.summaryDoc.body)
 
       // Graph: item nodes, from-edges, and every attribution asserted.
@@ -1005,7 +1007,7 @@ describe('reflection', () => {
         ],
       }
 
-      await applyReflection(paths, out, sessionId, [], now, new Map(), noopMaterialize)
+      await applyReflection(paths, out, sessionId, [], now, new Map(), noopMaterialize, 'UTC')
 
       const pending = await pendingProposals(paths)
       expect(pending).toHaveLength(0)
@@ -1018,9 +1020,9 @@ describe('reflection', () => {
         constitutionUpdate: 'Updated constitution body.',
       }
 
-      await applyReflection(paths, out, sessionId, [], now, new Map(), noopMaterialize)
+      await applyReflection(paths, out, sessionId, [], now, new Map(), noopMaterialize, 'UTC')
 
-      const constitutionDoc = await readDocument(paths.constitution)
+      const constitutionDoc = await readDocument(paths.files, paths.constitution)
       expect(constitutionDoc.body).toBe('Updated constitution body.\n')
       expect(constitutionDoc.meta.updated).toBe(now.toISOString())
     })
@@ -1052,13 +1054,14 @@ describe('reflection', () => {
         now,
         new Map(),
         noopMaterialize,
+        'UTC',
       )
 
       expect(result.summaryDoc.body).toBe('still nope\n')
       expect(result.summaryDoc.meta.items).toEqual([])
       expect(result.autoAsserted).toBe(0)
 
-      const onDisk = await readDocument(join(sessionDir, 'summary.md'))
+      const onDisk = await readDocument(paths.files, join(sessionDir, 'summary.md'))
       expect(onDisk.body).toBe('still nope\n')
     })
 
@@ -1085,6 +1088,7 @@ describe('reflection', () => {
         now,
         new Map(),
         noopMaterialize,
+        'UTC',
       )
 
       const items = result.summaryDoc.meta.items as ReflectionItem[]
@@ -1110,7 +1114,7 @@ describe('reflection', () => {
       await chmod(sessionDir, 0o500)
       try {
         await expect(
-          applyReflection(paths, out, sessionId, [], now, new Map(), noopMaterialize),
+          applyReflection(paths, out, sessionId, [], now, new Map(), noopMaterialize, 'UTC'),
         ).rejects.toThrow()
       } finally {
         await chmod(sessionDir, 0o700)
@@ -1120,7 +1124,7 @@ describe('reflection', () => {
       const itemNodes = [...graph.nodes.values()].filter((node) => node.type === 'item')
       expect(itemNodes).toHaveLength(1)
 
-      await expect(readDocument(join(sessionDir, 'summary.md'))).rejects.toThrow()
+      await expect(readDocument(paths.files, join(sessionDir, 'summary.md'))).rejects.toThrow()
     })
 
     it('runs materializeNew before the summary write, and leaves the session unreflected and retryable if it throws', async () => {
@@ -1135,7 +1139,7 @@ describe('reflection', () => {
       }
 
       await expect(
-        applyReflection(paths, out, sessionId, [], now, new Map(), failingMaterialize),
+        applyReflection(paths, out, sessionId, [], now, new Map(), failingMaterialize, 'UTC'),
       ).rejects.toThrow('materialization failed')
 
       // It was actually invoked, with the minted item, before the throw.
@@ -1149,12 +1153,12 @@ describe('reflection', () => {
       const itemNodes = [...graph.nodes.values()].filter((node) => node.type === 'item')
       expect(itemNodes).toHaveLength(1)
 
-      await expect(readDocument(join(sessionDir, 'summary.md'))).rejects.toThrow()
+      await expect(readDocument(paths.files, join(sessionDir, 'summary.md'))).rejects.toThrow()
     })
 
     it('writes the local date derived from the transcript first line, not the directory prefix', async () => {
       const store = await SessionStore.start(paths, new Date('2026-08-15T21:00:00Z'), 'UTC')
-      await store.appendLine({
+      await store.appendLine(paths, {
         ts: '2026-08-15T21:00:00.000Z',
         utcOffsetMinutes: 330,
         role: 'user',
@@ -1169,6 +1173,7 @@ describe('reflection', () => {
         new Date('2026-08-16T04:00:00.000Z'),
         new Map(),
         async () => {},
+        'UTC',
       )
 
       expect(summaryDoc.meta.date).toBe('2026-08-16')
@@ -1177,7 +1182,7 @@ describe('reflection', () => {
 
     it('falls back to the directory prefix when the first line carries no offset', async () => {
       const store = await SessionStore.start(paths, new Date('2026-08-15T21:00:00Z'), 'UTC')
-      await store.appendLine({
+      await store.appendLine(paths, {
         ts: '2026-08-15T21:00:00.000Z',
         role: 'user',
         content: 'A line written before offsets existed.',
@@ -1191,6 +1196,7 @@ describe('reflection', () => {
         new Date('2026-08-16T04:00:00.000Z'),
         new Map(),
         async () => {},
+        'UTC',
       )
 
       expect(summaryDoc.meta.date).toBe('2026-08-15')
@@ -1207,7 +1213,7 @@ describe('reflection', () => {
       expect(reflectionOutputSchema.safeParse(out).success).toBe(true)
 
       const store = await SessionStore.start(paths, new Date('2026-08-16T10:49:00Z'), 'UTC')
-      await store.appendLine({
+      await store.appendLine(paths, {
         ts: '2026-08-16T10:49:00.000Z',
         utcOffsetMinutes: 330,
         role: 'user',
@@ -1222,6 +1228,7 @@ describe('reflection', () => {
         new Date('2026-08-16T10:49:00.000Z'),
         new Map(),
         async () => {},
+        'UTC',
       )
 
       expect(mintedItems[0]?.eventTime).toBe('tonight at 7:25pm')
@@ -1262,7 +1269,7 @@ describe('reflection', () => {
       }
 
       const store = await SessionStore.start(paths, new Date('2026-08-16T10:49:00Z'), 'UTC')
-      await store.appendLine({
+      await store.appendLine(paths, {
         ts: '2026-08-16T10:49:00.000Z',
         utcOffsetMinutes: 330,
         role: 'user',
@@ -1277,6 +1284,7 @@ describe('reflection', () => {
         new Date('2026-08-16T10:49:00.000Z'),
         new Map(),
         async () => {},
+        'UTC',
       )
 
       expect(mintedItems[0]?.eventTime).toBeUndefined()
@@ -1292,8 +1300,17 @@ describe('reflection', () => {
       const index = MemoryIndex.open(dbPath)
       try {
         const provider = new FakeEmbeddingProvider()
-        const embed: EmbedFn = (texts: string[]) => provider.embed('fake-model', texts)
-        await index.upsertDocument(summaryDoc, 'summary', embed)
+        const embed: EmbedFn = async (texts: string[]) => {
+          const { vectors } = await provider.embed('fake-model', texts)
+          return vectors
+        }
+        await index.upsertDocument(
+          summaryDoc,
+          'summary',
+          embed,
+          'fake-model',
+          '2026-01-01T00:00:00.000Z',
+        )
 
         for (const term of ['empty', 'whitespace', 'absent']) {
           const hits = index.searchText(term, 10)
@@ -1320,8 +1337,9 @@ describe('reflection', () => {
         new Date('2026-08-16T21:00:00.000Z'),
         new Map(),
         noopMaterialize,
+        'UTC',
       )
-      const firstDoc = await readDocument(paths.journaling)
+      const firstDoc = await readDocument(paths.files, paths.journaling)
       expect(firstDoc.body.trim()).toBe('Gratitude, three times a week.')
 
       const secondSessionId = newId('session')
@@ -1339,16 +1357,26 @@ describe('reflection', () => {
         new Date('2026-08-17T10:00:00.000Z'),
         new Map(),
         noopMaterialize,
+        'UTC',
       )
-      const secondDoc = await readDocument(paths.journaling)
+      const secondDoc = await readDocument(paths.files, paths.journaling)
       expect(secondDoc.meta.id).toBe(firstDoc.meta.id)
       expect(secondDoc.body.trim()).toBe('Switched to the examen.')
     })
 
     it('leaves journaling.md untouched when journalingUpdate is null', async () => {
       const out = emptyReflectionOutput('An ordinary session, nothing about journaling.')
-      await applyReflection(paths, out, sessionId, [], new Date(), new Map(), noopMaterialize)
-      await expect(readDocument(paths.journaling)).rejects.toThrow()
+      await applyReflection(
+        paths,
+        out,
+        sessionId,
+        [],
+        new Date(),
+        new Map(),
+        noopMaterialize,
+        'UTC',
+      )
+      await expect(readDocument(paths.files, paths.journaling)).rejects.toThrow()
     })
   })
 
@@ -1396,7 +1424,7 @@ describe('reflection', () => {
       const raw = await reflectSession({ chat, model: 'test' }, swimTranscript, context)
       if ('degraded' in raw) throw new Error('expected a parsed reflection, not a degraded one')
 
-      await applyReflection(paths, raw, sessionId, [], now, new Map(), noopMaterialize)
+      await applyReflection(paths, raw, sessionId, [], now, new Map(), noopMaterialize, 'UTC')
 
       const graph = await readGraph(paths)
       const commitmentNode = [...graph.nodes.values()].find((node) => node.type === 'commitment')
@@ -1411,11 +1439,15 @@ describe('reflection', () => {
     })
 
     it('reflection wins over the live path: a same-session, same-label commitment is revised, not duplicated', async () => {
-      const live = await recordCommitment(paths, {
-        label: 'See Nightfall with Arjun',
-        flavor: 'plan',
-        sessionId,
-      })
+      const live = await recordCommitment(
+        paths,
+        {
+          label: 'See Nightfall with Arjun',
+          flavor: 'plan',
+          sessionId,
+        },
+        now,
+      )
 
       const out: ReflectionOutput = {
         ...emptyReflectionOutput('They confirmed the plan with Arjun.'),
@@ -1428,7 +1460,7 @@ describe('reflection', () => {
         ],
       }
 
-      await applyReflection(paths, out, sessionId, [], now, new Map(), noopMaterialize)
+      await applyReflection(paths, out, sessionId, [], now, new Map(), noopMaterialize, 'UTC')
 
       const graph = await readGraph(paths)
       const commitmentNodes = [...graph.nodes.values()].filter((node) => node.type === 'commitment')
@@ -1439,18 +1471,22 @@ describe('reflection', () => {
 
     it('does not duplicate a same-labelled commitment from a different session', async () => {
       const otherSessionId = newId('session')
-      await recordCommitment(paths, {
-        label: 'See Nightfall with Arjun',
-        flavor: 'plan',
-        sessionId: otherSessionId,
-      })
+      await recordCommitment(
+        paths,
+        {
+          label: 'See Nightfall with Arjun',
+          flavor: 'plan',
+          sessionId: otherSessionId,
+        },
+        now,
+      )
 
       const out: ReflectionOutput = {
         ...emptyReflectionOutput('A different session, coincidentally the same plan.'),
         commitments: [{ label: 'See Nightfall with Arjun', flavor: 'plan' }],
       }
 
-      await applyReflection(paths, out, sessionId, [], now, new Map(), noopMaterialize)
+      await applyReflection(paths, out, sessionId, [], now, new Map(), noopMaterialize, 'UTC')
 
       const graph = await readGraph(paths)
       const commitmentNodes = [...graph.nodes.values()].filter((node) => node.type === 'commitment')
@@ -1471,6 +1507,7 @@ describe('reflection', () => {
         now,
         new Map(),
         noopMaterialize,
+        'UTC',
       )
 
       expect(result.summaryDoc.body).toBe('A session that misremembered an id.\n')
@@ -1516,18 +1553,22 @@ describe('reflection', () => {
     })
 
     it('resolves a commitment through commitmentResolutions, the reflection-side backstop for resolution (Important 3)', async () => {
-      const live = await recordCommitment(paths, {
-        label: 'File the tax paperwork',
-        flavor: 'errand',
-        sessionId,
-      })
+      const live = await recordCommitment(
+        paths,
+        {
+          label: 'File the tax paperwork',
+          flavor: 'errand',
+          sessionId,
+        },
+        now,
+      )
 
       const out: ReflectionOutput = {
         ...emptyReflectionOutput('They filed the paperwork today.'),
         commitmentResolutions: [{ commitmentId: live.id, outcome: 'done' }],
       }
 
-      await applyReflection(paths, out, sessionId, [], now, new Map(), noopMaterialize)
+      await applyReflection(paths, out, sessionId, [], now, new Map(), noopMaterialize, 'UTC')
 
       const graph = await readGraph(paths)
       const commitmentNode = [...graph.nodes.values()].find((node) => node.type === 'commitment')
@@ -1548,6 +1589,7 @@ describe('reflection', () => {
         now,
         new Map(),
         noopMaterialize,
+        'UTC',
       )
 
       expect(result.summaryDoc.body).toBe('A session that misremembered an id.\n')
@@ -1559,7 +1601,7 @@ describe('reflection', () => {
         commitments: [{ label: 'Start swimming', flavor: 'plan', statedTime: '' }],
       }
 
-      await applyReflection(paths, out, sessionId, [], now, new Map(), noopMaterialize)
+      await applyReflection(paths, out, sessionId, [], now, new Map(), noopMaterialize, 'UTC')
 
       const graph = await readGraph(paths)
       const commitmentNode = [...graph.nodes.values()].find((node) => node.type === 'commitment')
@@ -1586,7 +1628,7 @@ describe('reflection', () => {
         ],
       }
 
-      await applyReflection(paths, out, sessionId, [], now, new Map(), noopMaterialize)
+      await applyReflection(paths, out, sessionId, [], now, new Map(), noopMaterialize, 'UTC')
 
       const graph = await readGraph(paths)
       const commitmentNode = [...graph.nodes.values()].find((node) => node.type === 'commitment')
@@ -1594,23 +1636,27 @@ describe('reflection', () => {
     })
 
     it('clears a stale timing on revision when clearTiming is set and no fresh statedTime replaces it (Important 6)', async () => {
-      const live = await recordCommitment(paths, {
-        label: 'See Nightfall with Arjun',
-        flavor: 'plan',
-        sessionId,
-        timing: {
-          words: 'friday',
-          anchor: '2026-08-13T09:00:00.000Z',
-          resolved: { from: '2026-08-14', to: '2026-08-14', statedPrecision: 'day' },
+      const live = await recordCommitment(
+        paths,
+        {
+          label: 'See Nightfall with Arjun',
+          flavor: 'plan',
+          sessionId,
+          timing: {
+            words: 'friday',
+            anchor: '2026-08-13T09:00:00.000Z',
+            resolved: { from: '2026-08-14', to: '2026-08-14', statedPrecision: 'day' },
+          },
         },
-      })
+        now,
+      )
 
       const out: ReflectionOutput = {
         ...emptyReflectionOutput('They are no longer sure when.'),
         commitmentRevisions: [{ commitmentId: live.id, clearTiming: true }],
       }
 
-      await applyReflection(paths, out, sessionId, [], now, new Map(), noopMaterialize)
+      await applyReflection(paths, out, sessionId, [], now, new Map(), noopMaterialize, 'UTC')
 
       const graph = await readGraph(paths)
       const commitmentNode = [...graph.nodes.values()].find((node) => node.type === 'commitment')
@@ -1643,9 +1689,18 @@ describe('reflection', () => {
       )
       expect(firstNarratives.get('arc_health')).toBe(firstRewrittenBody)
 
-      await applyReflection(paths, firstOut, sessionId, [], now, firstNarratives, noopMaterialize)
+      await applyReflection(
+        paths,
+        firstOut,
+        sessionId,
+        [],
+        now,
+        firstNarratives,
+        noopMaterialize,
+        'UTC',
+      )
 
-      const afterFirst = await readDocument(arcDocPath)
+      const afterFirst = await readDocument(paths.files, arcDocPath)
       expect(afterFirst.body).toBe(firstRewrittenBody)
 
       // Second session, same arc. Pass two must see the body the first pass
@@ -1686,9 +1741,10 @@ describe('reflection', () => {
         now,
         secondNarratives,
         noopMaterialize,
+        'UTC',
       )
 
-      const afterSecond = await readDocument(arcDocPath)
+      const afterSecond = await readDocument(paths.files, arcDocPath)
       expect(afterSecond.body).toBe(secondRewrittenBody)
       expect(afterSecond.body).toContain('Ran a 5k to start marathon training')
       expect(afterSecond.body).toContain('Ran a 10k, building on the 5k')
@@ -1706,15 +1762,15 @@ describe('reflection', () => {
         { text: 'still not json', toolCalls: [] },
       ])
 
-      const before = await readDocument(arcDocPath)
+      const before = await readDocument(paths.files, arcDocPath)
 
       const graphState = await readGraph(paths)
       const narratives = await resolveNarratives(paths, graphState, out, chat, 'fake-model')
       expect(narratives.has('arc_health')).toBe(false)
 
-      await applyReflection(paths, out, sessionId, [], now, narratives, noopMaterialize)
+      await applyReflection(paths, out, sessionId, [], now, narratives, noopMaterialize, 'UTC')
 
-      const after = await readDocument(arcDocPath)
+      const after = await readDocument(paths.files, arcDocPath)
       expect(after.body).toBe(before.body)
       expect(after.meta.updated).toBeUndefined()
     })
@@ -1723,7 +1779,7 @@ describe('reflection', () => {
       const now = new Date('2026-08-13T10:00:00.000Z')
 
       const workDocPath = join(paths.arcsDir, 'work.md')
-      await writeDocumentAtomic({
+      await writeDocumentAtomic(paths.files, {
         path: workDocPath,
         meta: { id: newId('doc'), name: 'Work' },
         body: 'Original work narrative.\n',
@@ -1773,26 +1829,26 @@ describe('reflection', () => {
       expect(failures[0]?.id).toBe('arc_health')
       expect(failures[0]?.reason).toContain('ENOENT')
 
-      await applyReflection(paths, out, sessionId, [], now, narratives, noopMaterialize)
+      await applyReflection(paths, out, sessionId, [], now, narratives, noopMaterialize, 'UTC')
 
       // Reflection completed: summary.md exists, which is the only thing
       // SessionStore reads as "this session is reflected".
-      const summaryDoc = await readDocument(join(sessionDir, 'summary.md'))
+      const summaryDoc = await readDocument(paths.files, join(sessionDir, 'summary.md'))
       expect(summaryDoc.body).toBe(`${out.summary}\n`)
 
-      const workDoc = await readDocument(workDocPath)
+      const workDoc = await readDocument(paths.files, workDocPath)
       expect(workDoc.body).toBe('Rewritten work body.\n')
 
       // The failed document is untouched, not papered over: nothing here
       // recreated a fresh page at the path the person deleted.
-      await expect(readDocument(arcDocPath)).rejects.toThrow()
+      await expect(readDocument(paths.files, arcDocPath)).rejects.toThrow()
     })
 
     it('completes reflection when the chat provider throws mid pass two, still rewriting the other update and writing summary.md', async () => {
       const now = new Date('2026-08-13T10:00:00.000Z')
 
       const workDocPath = join(paths.arcsDir, 'work.md')
-      await writeDocumentAtomic({
+      await writeDocumentAtomic(paths.files, {
         path: workDocPath,
         meta: { id: newId('doc'), name: 'Work' },
         body: 'Original work narrative.\n',
@@ -1856,15 +1912,15 @@ describe('reflection', () => {
       expect(failures[0]?.id).toBe('arc_health')
       expect(failures[0]?.reason).toContain('429')
 
-      await applyReflection(paths, out, sessionId, [], now, narratives, noopMaterialize)
+      await applyReflection(paths, out, sessionId, [], now, narratives, noopMaterialize, 'UTC')
 
-      const summaryDoc = await readDocument(join(sessionDir, 'summary.md'))
+      const summaryDoc = await readDocument(paths.files, join(sessionDir, 'summary.md'))
       expect(summaryDoc.body).toBe(`${out.summary}\n`)
 
-      const healthDoc = await readDocument(arcDocPath)
+      const healthDoc = await readDocument(paths.files, arcDocPath)
       expect(healthDoc.body).toBe('Original arc narrative.\n')
 
-      const workDoc = await readDocument(workDocPath)
+      const workDoc = await readDocument(paths.files, workDocPath)
       expect(workDoc.body).toBe('Rewritten work body.\n')
     })
   })

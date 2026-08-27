@@ -2,6 +2,7 @@ import { appendFile, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/p
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { nodeStores } from './nodeStore.js'
 import { ensureMemoryTree, type MemoryPaths, memoryPaths } from './paths.js'
 import { SessionStore, type TranscriptLine } from './transcripts.js'
 
@@ -11,8 +12,8 @@ describe('SessionStore', () => {
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'openreverie-memory-'))
-    paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
   })
 
   afterEach(async () => {
@@ -52,7 +53,7 @@ describe('SessionStore', () => {
     ]
 
     for (const line of lines) {
-      await store.appendLine(line)
+      await store.appendLine(paths, line)
     }
 
     const read = await SessionStore.readTranscript(paths, store.sessionId)
@@ -70,7 +71,7 @@ describe('SessionStore', () => {
   it('open finds an existing session directory by id', async () => {
     const now = new Date('2026-08-13T21:04:11Z')
     const started = await SessionStore.start(paths, now)
-    await started.appendLine({ ts: now.toISOString(), role: 'user', content: 'hello' })
+    await started.appendLine(paths, { ts: now.toISOString(), role: 'user', content: 'hello' })
 
     const opened = await SessionStore.open(paths, started.sessionId)
     expect(opened.dir).toBe(started.dir)
@@ -89,7 +90,7 @@ describe('SessionStore', () => {
   it('listSessions reports reflected false before and true after summary.md is written', async () => {
     const now = new Date('2026-08-13T21:04:11Z')
     const store = await SessionStore.start(paths, now)
-    await store.appendLine({ ts: now.toISOString(), role: 'user', content: 'hello' })
+    await store.appendLine(paths, { ts: now.toISOString(), role: 'user', content: 'hello' })
 
     const before = await SessionStore.listSessions(paths)
     expect(before).toEqual([
@@ -172,6 +173,21 @@ describe('SessionStore', () => {
     )
   })
 
+  it('sessionDir never matches a stray entry that only happens to end with the session id', async () => {
+    // A plain file, not a session directory: no date prefix, so it fails
+    // SESSION_DIR_PATTERN even though its name ends with the exact same
+    // `-${sessionId}` suffix the real lookup matches on. Before this gate
+    // existed, FileStore.readdir gives names only (no Dirent to check
+    // isDirectory on), so a bare endsWith match would have resolved this
+    // file as if it were the session's own directory.
+    const rogueName = 'not-a-real-date-session_ROGUE123'
+    await writeFile(join(paths.sessionsDir, rogueName), 'not a session directory', 'utf8')
+
+    await expect(SessionStore.sessionDir(paths, 'session_ROGUE123')).rejects.toThrow(
+      'No session directory found for session_ROGUE123',
+    )
+  })
+
   it('listSessions reports skipped false for a summary with no skipped field at all', async () => {
     const now = new Date('2026-08-13T21:04:11Z')
     const store = await SessionStore.start(paths, now)
@@ -187,7 +203,7 @@ describe('SessionStore', () => {
     const store = await SessionStore.start(paths, now)
 
     const validLine = { ts: now.toISOString(), role: 'user' as const, content: 'hello' }
-    await store.appendLine(validLine)
+    await store.appendLine(paths, validLine)
 
     const transcriptFile = join(store.dir, 'transcript.jsonl')
     await appendFile(transcriptFile, '{"ts":"2026-08-13T21:04:12Z","role":"assistant","c', 'utf8')
@@ -243,7 +259,7 @@ describe('SessionStore', () => {
 
   it('reports the summary-derived date while still reporting the directory name it lives in', async () => {
     const store = await SessionStore.start(paths, new Date('2026-08-15T21:00:00Z'), 'UTC')
-    await store.appendLine({
+    await store.appendLine(paths, {
       ts: '2026-08-15T21:00:00.000Z',
       utcOffsetMinutes: 330,
       role: 'user',
@@ -269,7 +285,7 @@ describe('SessionStore', () => {
 
   it('derives an unreflected session date from the first transcript line, and falls back to the prefix without an offset', async () => {
     const withOffset = await SessionStore.start(paths, new Date('2026-08-15T21:00:00Z'), 'UTC')
-    await withOffset.appendLine({
+    await withOffset.appendLine(paths, {
       ts: '2026-08-15T21:00:00.000Z',
       utcOffsetMinutes: 330,
       role: 'user',
@@ -277,7 +293,7 @@ describe('SessionStore', () => {
     })
 
     const withoutOffset = await SessionStore.start(paths, new Date('2026-08-14T21:00:00Z'), 'UTC')
-    await withoutOffset.appendLine({
+    await withoutOffset.appendLine(paths, {
       ts: '2026-08-14T21:00:00.000Z',
       role: 'user',
       content: 'A line written before offsets existed.',
@@ -299,7 +315,7 @@ describe('SessionStore', () => {
   describe('synthetic lines', () => {
     it('round-trips a synthetic line through the store', async () => {
       const store = await SessionStore.start(paths, new Date('2026-08-17T10:00:00.000Z'))
-      await store.appendLine({
+      await store.appendLine(paths, {
         ts: '2026-08-17T10:00:01.000Z',
         role: 'user',
         content: '/mode listen',
@@ -312,7 +328,7 @@ describe('SessionStore', () => {
 
     it('leaves the key absent on a line the person actually typed', async () => {
       const store = await SessionStore.start(paths, new Date('2026-08-17T10:00:00.000Z'))
-      await store.appendLine({
+      await store.appendLine(paths, {
         ts: '2026-08-17T10:00:01.000Z',
         role: 'user',
         content: '/mode listen',
@@ -364,7 +380,11 @@ describe('SessionStore', () => {
 
     it('does not touch the transcript', async () => {
       const store = await SessionStore.start(paths, new Date('2026-08-17T10:00:00.000Z'))
-      await store.appendLine({ ts: '2026-08-17T10:00:01.000Z', role: 'user', content: 'hello' })
+      await store.appendLine(paths, {
+        ts: '2026-08-17T10:00:01.000Z',
+        role: 'user',
+        content: 'hello',
+      })
       const before = await readFile(join(store.dir, 'transcript.jsonl'), 'utf8')
       await SessionStore.writeMeta(paths, store.sessionId, { mode: 'listen' })
       await SessionStore.writeMeta(paths, store.sessionId, { mode: 'journal' })

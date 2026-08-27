@@ -31,6 +31,7 @@ import {
   type EngineDeps,
   MemoryEngine,
   memoryPaths,
+  nodeStores,
   resolveStyle,
   writeProfile,
 } from '@openreverie/memory'
@@ -1133,7 +1134,7 @@ describe('dream detail merges feedback verdicts from the dream log', () => {
   })
 
   it('attaches a verdict to the insight it belongs to, and no verdict to one never given feedback', async () => {
-    const paths = memoryPaths(memoryDir)
+    const paths = memoryPaths(memoryDir, nodeStores())
     await mkdir(paths.dreamsDir, { recursive: true })
     await appendDreamLog(paths, [
       {
@@ -1191,7 +1192,7 @@ describe('dream detail merges feedback verdicts from the dream log', () => {
     // A crash mid-append, or a hand-edited file, can leave dreams/log.jsonl
     // holding a line that is not valid JSON. Reading dream detail must still
     // succeed for a person in that state, just without any verdicts.
-    const paths = memoryPaths(memoryDir)
+    const paths = memoryPaths(memoryDir, nodeStores())
     await mkdir(paths.dreamsDir, { recursive: true })
     await writeFile(paths.dreamLog, 'not valid json\n', 'utf8')
 
@@ -1274,6 +1275,7 @@ describe('live session HTTP routes', () => {
       embeddings: new FakeEmbeddingProvider(),
       reflectionModel: 'fake-reflect',
       embeddingModel: 'fake-embed',
+      timezone: 'UTC',
     }
     engine = await MemoryEngine.open(memoryDir, deps, { maintenance: false })
     server = createServer()
@@ -1522,12 +1524,13 @@ describe('profile and settings endpoints', () => {
 
   async function boot(apiKey = 'test'): Promise<void> {
     memoryDir = await mkdtemp(join(tmpdir(), 'openreverie-profile-app-'))
-    profilePath = memoryPaths(memoryDir).profile
+    profilePath = memoryPaths(memoryDir, nodeStores()).profile
     const deps: EngineDeps = {
       chat: new FakeChatProvider([]),
       embeddings: new FakeEmbeddingProvider(),
       reflectionModel: 'fake-reflect',
       embeddingModel: 'fake-embed',
+      timezone: 'UTC',
     }
     engine = await MemoryEngine.open(memoryDir, deps, { maintenance: false })
     const config: ReverieConfig = { ...liveConfig(memoryDir), provider: { name: 'openai', apiKey } }
@@ -1629,7 +1632,7 @@ describe('profile and settings endpoints', () => {
     it('does not echo a hand-added key from profile.md', async () => {
       await engine.updateProfileSettings({ preferredName: 'Vish' })
       const current = engine.profile()
-      await writeProfile(memoryPaths(memoryDir), {
+      await writeProfile(memoryPaths(memoryDir, nodeStores()), {
         ...current,
         meta: { ...current.meta, favouriteTea: 'assam' },
       })
@@ -1762,6 +1765,7 @@ describe('the API key is never reachable', () => {
       embeddings: new FakeEmbeddingProvider(),
       reflectionModel: 'fake-reflect',
       embeddingModel: 'fake-embed',
+      timezone: 'UTC',
     }
     engine = await MemoryEngine.open(memoryDir, deps, { maintenance: false })
     sessionId = await engine.startSession(new Date('2026-08-15T09:00:00.000Z'))

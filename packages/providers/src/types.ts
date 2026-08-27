@@ -33,9 +33,23 @@ export interface ChatRequest {
   maxTokens?: number
 }
 
+// Token counts for one model call. Reverie Cloud bills on tokens, and this
+// is the only place in the system a count can come from: the model
+// provider is the one party that actually knows what it charged for.
+// `model` rides along because a single ChatProvider can be asked to serve
+// more than one model (ChatRequest.model varies per call), so a usage
+// number without the model it was measured against is not attributable to
+// anything.
+export interface Usage {
+  model: string
+  inputTokens: number
+  outputTokens: number
+}
+
 export type ChatEvent =
   | { type: 'text'; text: string }
   | { type: 'tool_call'; toolCall: ToolCall }
+  | { type: 'usage'; usage: Usage }
   | { type: 'done' }
 
 export interface ChatResult {
@@ -48,6 +62,13 @@ export interface ChatResult {
   // is the reason this field exists) can make an otherwise-silent provider
   // decision inspectable instead of invisible.
   warnings?: string[]
+  // Token counts for this call, when the provider can report them.
+  // Optional, the same way warnings is: a provider that cannot report
+  // usage (a fake in a test, a proxy that strips it) is still a valid
+  // ChatResult. Nothing in this package meters or enforces a limit on
+  // this number; it exists so a caller that wants to (Reverie Cloud's own
+  // ChatProvider wrapper) has somewhere to read it from.
+  usage?: Usage
 }
 
 export interface ChatProvider {
@@ -56,9 +77,24 @@ export interface ChatProvider {
   stream(req: ChatRequest): AsyncIterable<ChatEvent>
 }
 
+// The return shape for EmbeddingProvider.embed. `vectors` stays a bare
+// number[][] in the same order as the input texts, exactly what every
+// caller already destructures into a single vector or feeds straight to
+// an index. `usage` sits alongside it rather than the vectors and the
+// count being two separate return values, because they describe one
+// call and belong together; a named field beats a tuple here since
+// `result.vectors` at a call site says what it is without the reader
+// having to remember position. `usage` is optional for the same reason
+// ChatResult.usage is: a provider that cannot report it (a fake, a proxy
+// that strips it) still returns a valid EmbedResult.
+export interface EmbedResult {
+  vectors: number[][]
+  usage?: Usage
+}
+
 export interface EmbeddingProvider {
   readonly name: string
-  embed(model: string, texts: string[]): Promise<number[][]>
+  embed(model: string, texts: string[]): Promise<EmbedResult>
 }
 
 export class ProviderUnavailableError extends Error {

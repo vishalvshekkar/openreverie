@@ -48,6 +48,16 @@ function lockPath(paths: MemoryPaths): string {
 }
 
 export async function acquireDreamLock(paths: MemoryPaths, now: Date): Promise<boolean> {
+  // Not unsafe to skip, unnecessary: a Durable Object's input gate
+  // serializes every operation it runs, so nothing can interleave a second
+  // dream attempt while this one is in flight, and there is nothing for a
+  // lock to protect against. The lock exists for the self-hosted case,
+  // where the CLI and the server are two separate OS processes that can
+  // both reach for the same dreams/.lock file at once, which cannot happen
+  // inside one Durable Object. When the host says locking is off, acquiring
+  // always succeeds without touching the filesystem at all, so no node:fs
+  // call below is ever reached on that path.
+  if (!paths.files.capabilities.locking) return true
   const payload = JSON.stringify({ ts: now.toISOString(), pid: process.pid })
   try {
     await writeLock(lockPath(paths), payload, { encoding: 'utf8', flag: 'wx' })
@@ -80,5 +90,9 @@ export async function acquireDreamLock(paths: MemoryPaths, now: Date): Promise<b
 }
 
 export async function releaseDreamLock(paths: MemoryPaths): Promise<void> {
+  // Mirrors the guard in acquireDreamLock above: when locking is off, no
+  // lock was ever taken (acquire returned true without writing anything),
+  // so release has nothing to remove and stays a no-op with no node:fs call.
+  if (!paths.files.capabilities.locking) return
   await rmLock(lockPath(paths), { force: true })
 }

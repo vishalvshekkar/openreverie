@@ -181,7 +181,7 @@ export async function buildDailyRollup(deps: RollupDeps, date: string): Promise<
   const summaries: string[] = []
   for (const session of daySessions) {
     const summaryPath = join(deps.paths.sessionsDir, session.dirName, 'summary.md')
-    const summary = await readDocument(summaryPath)
+    const summary = await readDocument(deps.paths.files, summaryPath)
     summaries.push(summary.body.trim())
   }
 
@@ -192,12 +192,12 @@ export async function buildDailyRollup(deps: RollupDeps, date: string): Promise<
   })
 
   const path = join(deps.paths.rollupsDailyDir, `${date}.md`)
-  await writeDocumentAtomic({
+  await writeDocumentAtomic(deps.paths.files, {
     path,
     meta: { id: newId('doc'), kind: 'rollup_daily', date },
     body: result.text,
   })
-  return readDocument(path)
+  return readDocument(deps.paths.files, path)
 }
 
 /**
@@ -209,7 +209,7 @@ export async function buildDailyRollup(deps: RollupDeps, date: string): Promise<
  * pendingWeeklyRollups reported, which always have sources.
  */
 export async function buildWeeklyRollup(deps: RollupDeps, week: string): Promise<Document> {
-  const dailies = await listDocuments(deps.paths.rollupsDailyDir)
+  const dailies = await listDocuments(deps.paths.files, deps.paths.rollupsDailyDir)
   const weekDailies = dailies.filter(
     (doc) => typeof doc.meta.date === 'string' && isoWeekOf(doc.meta.date) === week,
   )
@@ -226,10 +226,10 @@ export async function buildWeeklyRollup(deps: RollupDeps, week: string): Promise
   })
 
   const path = join(deps.paths.rollupsWeeklyDir, `${week}.md`)
-  await writeDocumentAtomic({
+  await writeDocumentAtomic(deps.paths.files, {
     path,
     meta: { id: newId('doc'), kind: 'rollup_weekly', week },
     body: result.text,
   })
-  return readDocument(path)
+  return readDocument(deps.paths.files, path)
 }

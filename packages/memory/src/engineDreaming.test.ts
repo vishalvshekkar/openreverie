@@ -13,13 +13,14 @@ import type { DreamRunResult } from './dreaming.js'
 import { readDreamLog } from './dreamLog.js'
 import * as dreamSchedule from './dreamSchedule.js'
 import { type EngineDeps, MemoryEngine } from './engine.js'
+import { nodeStores } from './nodeStore.js'
 import { ensureMemoryTree, type MemoryPaths, memoryPaths } from './paths.js'
 import { loadProfile, writeProfile } from './profile.js'
 import type { ReflectionOutput } from './reflection.js'
 import { formatLocalDate } from './time.js'
 
 async function pinTimezoneUtc(paths: MemoryPaths): Promise<void> {
-  const profile = await loadProfile(paths)
+  const profile = await loadProfile(paths, 'UTC')
   await writeProfile(paths, {
     meta: { ...profile.meta, timezone: 'UTC', timezoneSource: 'user-confirmed' },
     body: profile.body,
@@ -95,8 +96,8 @@ async function openTestEngine(options: { dreaming?: EngineDeps['dreaming'] }): P
   script: FakeChatResult[]
 }> {
   const dir = await mkdtemp(join(tmpdir(), 'openreverie-dreaming-engine-'))
-  const paths = memoryPaths(dir)
-  await ensureMemoryTree(paths)
+  const paths = memoryPaths(dir, nodeStores())
+  await ensureMemoryTree(paths, 'UTC')
   await pinTimezoneUtc(paths)
   const script: FakeChatResult[] = []
   const chat = new FakeChatProvider(script)
@@ -107,6 +108,7 @@ async function openTestEngine(options: { dreaming?: EngineDeps['dreaming'] }): P
       embeddings: new FakeEmbeddingProvider(),
       reflectionModel: 'fake-reflect',
       embeddingModel: 'fake-embed',
+      timezone: 'UTC',
       dreamingModel: 'fake-dream',
       dreamPersona: () => 'DREAM_PERSONA',
       ...(options.dreaming !== undefined ? { dreaming: options.dreaming } : {}),
@@ -400,8 +402,8 @@ describe('MemoryEngine dreaming', () => {
     cleanups.push(async () => {
       await rm(dir, { recursive: true, force: true })
     })
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
     await pinTimezoneUtc(paths)
 
     const seedScript: FakeChatResult[] = []
@@ -413,6 +415,7 @@ describe('MemoryEngine dreaming', () => {
         embeddings: new FakeEmbeddingProvider(),
         reflectionModel: 'fake-reflect',
         embeddingModel: 'fake-embed',
+        timezone: 'UTC',
       },
       { maintenance: false },
     )
@@ -434,6 +437,7 @@ describe('MemoryEngine dreaming', () => {
         embeddings: new FakeEmbeddingProvider(),
         reflectionModel: 'fake-reflect',
         embeddingModel: 'fake-embed',
+        timezone: 'UTC',
         dreamingModel: 'fake-dream',
         dreamPersona: () => 'DREAM_PERSONA',
         dreaming: {
@@ -464,8 +468,8 @@ describe('MemoryEngine dreaming', () => {
     cleanups.push(async () => {
       await rm(dir, { recursive: true, force: true })
     })
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
     await pinTimezoneUtc(paths)
 
     const seedScript: FakeChatResult[] = []
@@ -477,6 +481,7 @@ describe('MemoryEngine dreaming', () => {
         embeddings: new FakeEmbeddingProvider(),
         reflectionModel: 'fake-reflect',
         embeddingModel: 'fake-embed',
+        timezone: 'UTC',
       },
       { maintenance: false },
     )
@@ -501,6 +506,7 @@ describe('MemoryEngine dreaming', () => {
       embeddings: new FakeEmbeddingProvider(),
       reflectionModel: 'fake-reflect',
       embeddingModel: 'fake-embed',
+      timezone: 'UTC',
       dreamingModel: 'fake-dream',
       dreamPersona: () => 'DREAM_PERSONA',
       dreaming: {
@@ -684,8 +690,8 @@ describe('MemoryEngine dreaming', () => {
   // recorded the same durable way any other failed attempt is.
   it('a missing dreamingModel fails loudly, with no fallback to reflectionModel, and records a failed attempt', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'openreverie-dreaming-nomodel-'))
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
     await pinTimezoneUtc(paths)
     const script: FakeChatResult[] = []
     const chat = new FakeChatProvider(script)
@@ -696,6 +702,7 @@ describe('MemoryEngine dreaming', () => {
         embeddings: new FakeEmbeddingProvider(),
         reflectionModel: 'fake-reflect',
         embeddingModel: 'fake-embed',
+        timezone: 'UTC',
         // dreamingModel deliberately omitted.
         dreamPersona: () => 'DREAM_PERSONA',
         dreaming: ENABLED_DREAMING,

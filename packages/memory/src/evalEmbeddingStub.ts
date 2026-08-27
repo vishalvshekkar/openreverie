@@ -17,7 +17,7 @@
 // crude but real approximation of semantic similarity, and it is what lets
 // this harness's vector-lane numbers be more than noise.
 
-import type { EmbeddingProvider } from '@openreverie/providers'
+import type { EmbeddingProvider, EmbedResult } from '@openreverie/providers'
 
 const DIMENSIONS = 64
 
@@ -99,24 +99,26 @@ function normalize(vector: number[]): number[] {
 export class BagOfWordsEmbeddingProvider implements EmbeddingProvider {
   readonly name = 'eval-bag-of-words-stub'
 
-  embed(_model: string, texts: string[]): Promise<number[][]> {
-    return Promise.resolve(
-      texts.map((text) => {
-        const tokens = tokenize(text)
-        // No content words at all (an empty chunk, or every word was a
-        // stopword): fall back to hashing the raw text so the call still
-        // returns a real vector rather than the zero vector, which
-        // cosineSimilarity treats as similarity 0 against everything.
-        const words = tokens.length > 0 ? tokens : [text]
-        const sum = new Array(DIMENSIONS).fill(0)
-        for (const word of words) {
-          const wordVector = tokenVector(word)
-          for (let i = 0; i < DIMENSIONS; i++) {
-            sum[i] += wordVector[i] ?? 0
-          }
+  // No `usage` on the returned EmbedResult: this stub never makes a
+  // network call, so there is no token count to report, the same as any
+  // other provider that cannot report usage.
+  embed(_model: string, texts: string[]): Promise<EmbedResult> {
+    const vectors = texts.map((text) => {
+      const tokens = tokenize(text)
+      // No content words at all (an empty chunk, or every word was a
+      // stopword): fall back to hashing the raw text so the call still
+      // returns a real vector rather than the zero vector, which
+      // cosineSimilarity treats as similarity 0 against everything.
+      const words = tokens.length > 0 ? tokens : [text]
+      const sum = new Array(DIMENSIONS).fill(0)
+      for (const word of words) {
+        const wordVector = tokenVector(word)
+        for (let i = 0; i < DIMENSIONS; i++) {
+          sum[i] += wordVector[i] ?? 0
         }
-        return normalize(sum)
-      }),
-    )
+      }
+      return normalize(sum)
+    })
+    return Promise.resolve({ vectors })
   }
 }

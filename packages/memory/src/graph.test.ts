@@ -14,6 +14,7 @@ import {
   readGraph,
   readGraphRecords,
 } from './graph.js'
+import { nodeStores } from './nodeStore.js'
 import { ensureMemoryTree, memoryPaths } from './paths.js'
 
 // NODE_TYPES/EDGE_TYPES are the single source of truth for the graph
@@ -189,8 +190,8 @@ describe('appendGraph and readGraph', () => {
   })
 
   it('round-trips records through a temp file', async () => {
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
 
     const records: GraphRecord[] = [
       { ts: '2026-08-01T00:00:00Z', op: 'assert', node: 'realm_1', type: 'realm', label: 'Work' },
@@ -212,8 +213,8 @@ describe('appendGraph and readGraph', () => {
   })
 
   it('appends across multiple calls, preserving order for fold', async () => {
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
 
     await appendGraph(paths, [
       { ts: '2026-08-01T00:00:00Z', op: 'assert', node: 'realm_1', type: 'realm', label: 'Work' },
@@ -227,8 +228,8 @@ describe('appendGraph and readGraph', () => {
   })
 
   it('retains every raw graph operation with its one-based append sequence', async () => {
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
     const assertNode: GraphRecord = {
       ts: '2026-08-01T00:00:00.000Z',
       op: 'assert',
@@ -247,8 +248,8 @@ describe('appendGraph and readGraph', () => {
   })
 
   it('returns empty state when the graph log does not exist yet', async () => {
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
 
     const state = await readGraph(paths)
     expect(state.nodes.size).toBe(0)
@@ -256,8 +257,8 @@ describe('appendGraph and readGraph', () => {
   })
 
   it('tolerates and skips blank lines', async () => {
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
 
     const line1 = JSON.stringify({
       ts: '2026-08-01T00:00:00Z',
@@ -273,8 +274,8 @@ describe('appendGraph and readGraph', () => {
   })
 
   it('throws with the line number when a line is not valid JSON', async () => {
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
 
     const line1 = JSON.stringify({
       ts: '2026-08-01T00:00:00Z',
@@ -289,8 +290,8 @@ describe('appendGraph and readGraph', () => {
   })
 
   it('throws with line number when a valid JSON line has invalid op value', async () => {
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
 
     const line1 = JSON.stringify({
       ts: '2026-08-01T00:00:00Z',
@@ -305,8 +306,8 @@ describe('appendGraph and readGraph', () => {
   })
 
   it('throws with line number when a valid JSON edge line is missing the "to" field', async () => {
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
 
     const line1 = JSON.stringify({
       ts: '2026-08-01T00:00:00Z',
@@ -322,8 +323,8 @@ describe('appendGraph and readGraph', () => {
   })
 
   it('throws and writes nothing when appending a record with confidence out of the 0-1 range', async () => {
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
 
     const badRecords: GraphRecord[] = [
       {
@@ -344,8 +345,8 @@ describe('appendGraph and readGraph', () => {
   })
 
   it('throws and writes nothing when appending a record matching neither node nor edge shape', async () => {
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
 
     const wrongShape = {
       ts: '2026-08-01T00:00:00Z',
@@ -361,8 +362,8 @@ describe('appendGraph and readGraph', () => {
   })
 
   it('round-trips a commitment node and a waits_on edge through the log', async () => {
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
 
     await appendGraph(paths, [
       {

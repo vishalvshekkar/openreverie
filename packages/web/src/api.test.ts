@@ -412,6 +412,34 @@ describe('ApiClient request and NDJSON parsing', () => {
   })
 })
 
+describe('ApiClient base URL configuration', () => {
+  const fetchMock = vi.fn()
+
+  beforeEach(() => {
+    fetchMock.mockReset()
+    fetchMock.mockResolvedValue(jsonResponse({ data: [minaRow], meta: { nextCursor: null } }))
+    vi.stubGlobal('fetch', fetchMock)
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('requests a bare same-origin path when no base URL is configured, exactly as today', async () => {
+    const client = new ApiClient()
+    await client.listDocuments()
+    const [url] = fetchMock.mock.calls[0] ?? []
+    expect(url).toBe('/api/v1/documents')
+  })
+
+  it('prefixes the request with a configured base URL', async () => {
+    const client = new ApiClient('https://api.reverie.example')
+    await client.listDocuments()
+    const [url] = fetchMock.mock.calls[0] ?? []
+    expect(url).toBe('https://api.reverie.example/api/v1/documents')
+  })
+})
+
 describe('transcriptLineSchema synthetic', () => {
   it('accepts a synthetic line and a line without the key', () => {
     const base = { lineSequence: 1, ts: '2026-08-17T10:00:00.000Z', role: 'user', content: 'hi' }

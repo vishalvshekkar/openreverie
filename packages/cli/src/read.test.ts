@@ -7,6 +7,7 @@ import {
   ensureMemoryTree,
   memoryPaths,
   newId,
+  nodeStores,
   writeDocumentAtomic,
 } from '@openreverie/memory'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -47,19 +48,19 @@ describe('runRead', () => {
   })
 
   it('lists the constitution, arcs, realms, and people with no arguments', async () => {
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
-    await writeDocumentAtomic({
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
+    await writeDocumentAtomic(paths.files, {
       path: join(paths.arcsDir, 'marathon.md'),
       meta: { id: newId('doc'), name: 'Marathon training', status: 'active' },
       body: 'Training for the spring marathon.\n',
     })
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: join(paths.realmsDir, 'health.md'),
       meta: { id: newId('doc'), name: 'Health' },
       body: 'A realm about health.\n',
     })
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: join(paths.peopleDir, 'alex.md'),
       meta: {
         id: newId('doc'),
@@ -82,8 +83,8 @@ describe('runRead', () => {
   })
 
   it('prints the constitution header and full body', async () => {
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
 
     const output: string[] = []
     const exitCode = await runRead(['constitution'], fakeDeps(dir, output))
@@ -95,9 +96,9 @@ describe('runRead', () => {
   })
 
   it('matches an arc by a case-insensitive substring of its name', async () => {
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
-    await writeDocumentAtomic({
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
+    await writeDocumentAtomic(paths.files, {
       path: join(paths.arcsDir, 'marathon.md'),
       meta: { id: newId('doc'), name: 'Marathon training', status: 'active' },
       body: 'Training for the spring marathon.\n',
@@ -114,9 +115,9 @@ describe('runRead', () => {
   })
 
   it('lists candidates and exits non-zero when a name is ambiguous', async () => {
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
-    await writeDocumentAtomic({
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
+    await writeDocumentAtomic(paths.files, {
       path: join(paths.peopleDir, 'alex-smith.md'),
       meta: {
         id: newId('doc'),
@@ -126,7 +127,7 @@ describe('runRead', () => {
       },
       body: 'This page is new. It grows as we talk.\n',
     })
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: join(paths.peopleDir, 'alexis-park.md'),
       meta: {
         id: newId('doc'),
@@ -147,8 +148,8 @@ describe('runRead', () => {
   })
 
   it('reports plainly and exits non-zero when nothing matches', async () => {
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
 
     const output: string[] = []
     const exitCode = await runRead(['arc', 'does not exist'], fakeDeps(dir, output))
@@ -158,9 +159,9 @@ describe('runRead', () => {
   })
 
   it('searches all three kinds for a bare name and prints the one unambiguous match', async () => {
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
-    await writeDocumentAtomic({
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
+    await writeDocumentAtomic(paths.files, {
       path: join(paths.realmsDir, 'health.md'),
       meta: { id: newId('doc'), name: 'Health' },
       body: 'A realm about health.\n',
@@ -174,9 +175,9 @@ describe('runRead', () => {
   })
 
   it('completes with no provider and no API key present in the environment', async () => {
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
-    await writeDocumentAtomic({
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
+    await writeDocumentAtomic(paths.files, {
       path: join(paths.arcsDir, 'marathon.md'),
       meta: { id: newId('doc'), name: 'Marathon training', status: 'active' },
       body: 'Training for the spring marathon.\n',
@@ -195,8 +196,8 @@ describe('runRead', () => {
   })
 
   it('colors the header when colorEnabled is true and stays plain when false', async () => {
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
 
     const colored: string[] = []
     await runRead(['constitution'], fakeDeps(dir, colored, true))
@@ -224,9 +225,9 @@ describe('runRead', () => {
   })
 
   it('shows an empty people section instead of crashing when a memory folder predates the people directory', async () => {
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
-    await writeDocumentAtomic({
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
+    await writeDocumentAtomic(paths.files, {
       path: join(paths.arcsDir, 'marathon.md'),
       meta: { id: newId('doc'), name: 'Marathon training', status: 'active' },
       body: 'Training for the spring marathon.\n',
@@ -290,8 +291,8 @@ describe('runRead', () => {
   })
 
   it('reports a genuinely empty but existing memory folder as (none yet), exit 0, not as a missing folder', async () => {
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
 
     const output: string[] = []
     const exitCode = await runRead([], fakeDeps(dir, output))
@@ -305,8 +306,8 @@ describe('runRead', () => {
   })
 
   it('names the file and the reason, not "run setup", when constitution.md exists but fails to parse as a document', async () => {
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
     // A person hand-editing their own memory folder can produce frontmatter
     // with no id. That is a real, expected way for this file to be broken,
     // and is a different problem than the folder not existing.
@@ -323,15 +324,15 @@ describe('runRead', () => {
     expect(joined.toLowerCase()).toContain('no id')
   })
 
-  // Before this fix, loadCandidates called listDocuments(dir) with no
+  // Before this fix, loadCandidates called listDocuments(paths.files, dir) with no
   // onSkip: a hand-edited arcs/grief.md with broken frontmatter would drop
   // out of the array silently, and "reverie read" would list the person's
   // arcs with grief simply absent, no different from a memory that never
   // had one.
   it('reports a broken arc file plainly in the overview listing, instead of omitting it as if it did not exist', async () => {
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
-    await writeDocumentAtomic({
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
+    await writeDocumentAtomic(paths.files, {
       path: join(paths.arcsDir, 'marathon.md'),
       meta: { id: newId('doc'), name: 'Marathon training', status: 'active' },
       body: 'Training for the spring marathon.\n',
@@ -354,8 +355,8 @@ describe('runRead', () => {
   // asks for the exact broken page by name and, before this fix, got told
   // "no arc found" about a file sitting right there on disk.
   it('reports the broken file plainly for a named lookup, instead of saying no arc was found', async () => {
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
     await writeFile(join(paths.arcsDir, 'grief.md'), '---\nname: Grief\n---\nBody text.\n', 'utf8')
 
     const output: string[] = []
@@ -370,8 +371,8 @@ describe('runRead', () => {
 
   // Same case again through the bare, search-all-kinds path (no kind given).
   it('reports the broken file plainly for a bare search-all-kinds lookup, instead of saying nothing matched', async () => {
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
     await writeFile(join(paths.peopleDir, 'sam.md'), '---\nname: Sam\n---\nBody text.\n', 'utf8')
 
     const output: string[] = []
@@ -385,14 +386,14 @@ describe('runRead', () => {
   })
 
   it('finds a bare name that matches both an arc and a person, and reports it as ambiguous across kinds', async () => {
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
-    await writeDocumentAtomic({
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
+    await writeDocumentAtomic(paths.files, {
       path: join(paths.arcsDir, 'phoenix.md'),
       meta: { id: newId('doc'), name: 'Phoenix', status: 'active' },
       body: 'An arc named Phoenix.\n',
     })
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: join(paths.peopleDir, 'phoenix.md'),
       meta: {
         id: newId('doc'),
@@ -414,9 +415,9 @@ describe('runRead', () => {
   })
 
   it('lists a node-only person (no page yet) alongside paged people in the overview', async () => {
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
-    await writeDocumentAtomic({
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
+    await writeDocumentAtomic(paths.files, {
       path: join(paths.peopleDir, 'alex.md'),
       meta: { id: newId('doc'), name: 'Alex', node: 'person_paged', opened: '2026-08-01' },
       body: 'This page is new. It grows as we talk.\n',
@@ -454,8 +455,8 @@ describe('runRead', () => {
   // the graph, right after the same class of dishonesty had already been
   // fixed once for a broken file on disk.
   it('reports a node-only person as known with no page, instead of claiming not found', async () => {
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
     await appendGraph(paths, [
       {
         ts: '2026-08-01T00:00:00.000Z',
@@ -477,8 +478,8 @@ describe('runRead', () => {
   })
 
   it('reports a node-only person as known through the bare, kindless search too', async () => {
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
     await appendGraph(paths, [
       {
         ts: '2026-08-01T00:00:00.000Z',
@@ -500,8 +501,8 @@ describe('runRead', () => {
   })
 
   it('reports "No person found" for a name that matches nothing at all, paged or node-only', async () => {
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
 
     const output: string[] = []
     const exitCode = await runRead(['person', 'nobody'], fakeDeps(dir, output))
@@ -511,8 +512,8 @@ describe('runRead', () => {
   })
 
   it('lists entities in the overview and looks one up by name, plainly noting entities have no page', async () => {
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
     await appendGraph(paths, [
       {
         ts: '2026-08-01T00:00:00.000Z',
@@ -536,8 +537,8 @@ describe('runRead', () => {
   })
 
   it('reports "No entity found" for an entity name that matches nothing', async () => {
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
 
     const output: string[] = []
     const exitCode = await runRead(['entity', 'nothing-here'], fakeDeps(dir, output))
@@ -547,8 +548,8 @@ describe('runRead', () => {
   })
 
   it('does not crash and treats a missing or corrupt graph log as empty', async () => {
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
     // No graph.jsonl written at all: ensureMemoryTree does not guarantee
     // the file exists until something is appended to it.
 

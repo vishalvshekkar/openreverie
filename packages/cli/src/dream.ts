@@ -19,6 +19,7 @@ import {
   type DreamSummary,
   foldDreamLog,
   memoryPaths,
+  nodeStores,
   readDreamLog,
 } from '@openreverie/memory'
 
@@ -136,7 +137,7 @@ async function runList(engine: DreamEngine, write: (line: string) => void): Prom
 // not shown; --show must still work, just without that annotation.
 async function feedbackVerdicts(config: ReverieConfig): Promise<Map<string, string>> {
   try {
-    const paths = memoryPaths(config.memoryDir)
+    const paths = memoryPaths(config.memoryDir, nodeStores())
     const records = await readDreamLog(paths)
     const state = foldDreamLog(records)
     const verdicts = new Map<string, string>()

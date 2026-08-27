@@ -4,11 +4,79 @@
 // exist only in this database; a fresh index can always be rebuilt from
 // the markdown files and the graph log.
 
-import { stat } from 'node:fs/promises'
 import Database from 'better-sqlite3'
 import { documentDateSpan } from './dateSpan.js'
 import type { Document } from './documents.js'
 import type { EdgeType, GraphEdge, GraphNode, GraphState, NodeType } from './graph.js'
+
+// The database seam MemoryIndex runs against. better-sqlite3's own
+// Database/Statement classes already satisfy this shape (see static open
+// below), so the self-hosted path pays nothing for the indirection. A host
+// with no filesystem and no native modules, such as a Cloudflare Durable
+// Object, implements this over ctx.storage.sql instead and calls
+// MemoryIndex.fromDatabase. See
+// docs/superpowers/specs/2026-08-27-hostable-engine-design.md, P0-2.
+export interface SqlStatement {
+  // Returns { changes, lastInsertRowid } rather than void because
+  // upsertDocument reads lastInsertRowid to link a freshly inserted chunks
+  // row to its chunks_fts and embeddings rows. Dropping that return value
+  // would break chunk indexing silently: every chunk would still get
+  // inserted, but with no way to attach its FTS or embedding row to the
+  // right chunk id.
+  run(...params: unknown[]): { changes: number; lastInsertRowid: number | bigint }
+  get(...params: unknown[]): unknown | undefined
+  all(...params: unknown[]): unknown[]
+}
+
+export interface SqlDatabase {
+  prepare(sql: string): SqlStatement
+  exec(sql: string): void
+  // Synchronous only, matching the five call sites below: Durable Objects
+  // forbid explicit BEGIN/COMMIT and offer only ctx.storage.transactionSync,
+  // which cannot await. If a transaction body in this file ever needs an
+  // await inside it, this seam is the wrong shape for it.
+  transaction<T>(fn: () => T): () => T
+  // Named for the one pragma the engine uses (user_version) rather than
+  // exposing a general pragma() method: re-exporting a better-sqlite3-ism
+  // here would force the Durable Object implementation to invent one of
+  // its own for a single integer.
+  getUserVersion(): number
+  setUserVersion(version: number): void
+  close(): void
+}
+
+// Wraps a better-sqlite3 Database so it satisfies SqlDatabase. better-sqlite3's
+// own Statement already matches SqlStatement structurally (run returns
+// { changes, lastInsertRowid }, get and all are untyped), so prepare and
+// exec pass straight through; only the pragma-based user_version calls need
+// a named method here.
+class BetterSqliteAdapter implements SqlDatabase {
+  constructor(private readonly db: Database.Database) {}
+
+  prepare(sql: string): SqlStatement {
+    return this.db.prepare(sql)
+  }
+
+  exec(sql: string): void {
+    this.db.exec(sql)
+  }
+
+  transaction<T>(fn: () => T): () => T {
+    return this.db.transaction(fn)
+  }
+
+  getUserVersion(): number {
+    return Number(this.db.pragma('user_version', { simple: true }) ?? 0)
+  }
+
+  setUserVersion(version: number): void {
+    this.db.pragma(`user_version = ${version}`)
+  }
+
+  close(): void {
+    this.db.close()
+  }
+}
 
 // The closed set of document kinds, kept as a const array so the
 // table-driven wiring test (packages/core/src/docKinds.test.ts) can
@@ -93,7 +161,14 @@ const MAX_CHUNK_CHARS = 1200
 // Bumped whenever the derived document tables change shape. On open, an
 // index.db carrying a lower version has those tables dropped and recreated,
 // and MemoryEngine.open rebuilds them from the memory folder.
-export const INDEX_SCHEMA_VERSION = 2
+//
+// 3: embeddings gained model and dims columns (P0-6,
+// docs/superpowers/specs/2026-08-27-hostable-engine-design.md). The
+// version-mismatch path already drops and recreates the embeddings table
+// along with the rest, so no hand-written ALTER TABLE migration is needed:
+// every row is re-derived from the folder on the same reindexAll() that
+// already runs whenever schemaRebuilt is true.
+export const INDEX_SCHEMA_VERSION = 3
 
 interface DocumentRow {
   docId: string
@@ -119,16 +194,24 @@ interface EdgeRow {
 }
 
 export class MemoryIndex {
-  private readonly db: Database.Database
+  private readonly db: SqlDatabase
   readonly schemaRebuilt: boolean
 
-  private constructor(db: Database.Database) {
+  private constructor(db: SqlDatabase) {
     this.db = db
     this.schemaRebuilt = this.initSchema()
   }
 
+  // The self-hosted path: unchanged for callers that pass a file path and
+  // want better-sqlite3 to own it.
   static open(dbPath: string): MemoryIndex {
     const db = new Database(dbPath)
+    return new MemoryIndex(new BetterSqliteAdapter(db))
+  }
+
+  // For a caller that already holds a SqlDatabase, such as a Durable
+  // Object's own wrapper over ctx.storage.sql.
+  static fromDatabase(db: SqlDatabase): MemoryIndex {
     return new MemoryIndex(db)
   }
 
@@ -152,7 +235,7 @@ export class MemoryIndex {
   // apart. Without that check every brand-new memory folder would report a
   // migration that never happened.
   private initSchema(): boolean {
-    const storedVersion = Number(this.db.pragma('user_version', { simple: true }) ?? 0)
+    const storedVersion = this.db.getUserVersion()
     if (storedVersion >= INDEX_SCHEMA_VERSION) {
       this.createTables()
       return false
@@ -176,7 +259,7 @@ export class MemoryIndex {
     }
 
     this.createTables()
-    this.db.pragma(`user_version = ${INDEX_SCHEMA_VERSION}`)
+    this.db.setUserVersion(INDEX_SCHEMA_VERSION)
     return hadDocuments
   }
 
@@ -206,7 +289,9 @@ export class MemoryIndex {
 
       CREATE TABLE IF NOT EXISTS embeddings (
         chunk_id INTEGER PRIMARY KEY,
-        vector BLOB NOT NULL
+        vector BLOB NOT NULL,
+        model TEXT NOT NULL,
+        dims INTEGER NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS nodes (
@@ -229,11 +314,25 @@ export class MemoryIndex {
     `)
   }
 
-  async upsertDocument(doc: Document, kind: DocKind, embed: EmbedFn): Promise<void> {
+  // embeddingModel and mtime are the caller's responsibility, not this
+  // class's: embeddingModel is threaded through from EngineDeps so each
+  // embeddings row records the model that produced its vector (P0-6, see
+  // the comment on searchVector), and mtime used to be computed in here
+  // with a direct node:fs/promises stat call before this class held a
+  // SqlDatabase instead of a FileStore. The caller (engine.ts) already
+  // holds paths.files and can stat the document itself, and MemoryIndex
+  // must not import node builtins at all: see P0-2,
+  // docs/superpowers/specs/2026-08-27-hostable-engine-design.md.
+  async upsertDocument(
+    doc: Document,
+    kind: DocKind,
+    embed: EmbedFn,
+    embeddingModel: string,
+    mtime: string,
+  ): Promise<void> {
     const docId = doc.meta.id
     const texts = buildChunks(doc)
     const vectors = texts.length > 0 ? await embed(texts) : []
-    const mtime = await fileMtime(doc.path)
     // Null for living documents (the constitution, and realm, arc and person
     // pages) by design, so an after/before filter never excludes them. See
     // dateSpan.ts for why no date is better than a wrong one here.
@@ -258,7 +357,7 @@ export class MemoryIndex {
       const insertChunk = this.db.prepare('INSERT INTO chunks (doc_id, seq, text) VALUES (?, ?, ?)')
       const insertFts = this.db.prepare('INSERT INTO chunks_fts (rowid, text) VALUES (?, ?)')
       const insertEmbedding = this.db.prepare(
-        'INSERT INTO embeddings (chunk_id, vector) VALUES (?, ?)',
+        'INSERT INTO embeddings (chunk_id, vector, model, dims) VALUES (?, ?, ?, ?)',
       )
 
       texts.forEach((text, seq) => {
@@ -267,7 +366,7 @@ export class MemoryIndex {
         insertFts.run(chunkId, text)
         const vector = vectors[seq]
         if (vector) {
-          insertEmbedding.run(chunkId, vectorToBlob(vector))
+          insertEmbedding.run(chunkId, vectorToBlob(vector), embeddingModel, vector.length)
         }
       })
     })
@@ -437,7 +536,7 @@ export class MemoryIndex {
       return []
     }
     const predicates: string[] = []
-    const params: (string | DocKind)[] = []
+    const params: (string | number | DocKind)[] = []
     if (kinds) {
       predicates.push(`d.kind IN (${kinds.map(() => '?').join(', ')})`)
       params.push(...kinds)
@@ -450,6 +549,30 @@ export class MemoryIndex {
       predicates.push(dates.sql.replace(/^AND /, ''))
       params.push(...dates.params)
     }
+    // A stored vector whose dims does not match queryVec's own length is
+    // rejected here, at read time, rather than compared. cosineSimilarity
+    // walks both vectors to Math.min(a.length, b.length), so two vectors
+    // from different embedding models (P0-6: embeddings.model, dims) would
+    // otherwise still produce a number, silently, over whatever prefix
+    // they happen to share. That number is not a similarity score; it is
+    // noise that would rank a stale vector from a since-changed embedding
+    // model alongside genuinely comparable ones, and the person would have
+    // no way to tell the difference from the results alone.
+    //
+    // This is an allow-list, not a deny-list (AGENTS.md's fail-closed
+    // rule): only rows whose dims this query can actually use are
+    // admitted, so a dims value nobody has reasoned about yet is excluded
+    // by construction rather than compared and hoped to be harmless. The
+    // check is on dims, not on the recorded model name, because dims
+    // mismatch is what breaks cosineSimilarity; two different model names
+    // that happen to produce the same dims are not what this guard exists
+    // to catch, and rejecting compatible-length vectors on a model-name
+    // difference alone would need a stronger reason than this task states.
+    // model is still recorded on every row (see upsertDocument) so a
+    // future maintenance pass can report which embedding models a corpus
+    // actually contains.
+    predicates.push('e.dims = ?')
+    params.push(queryVec.length)
     const whereClause = predicates.length > 0 ? `WHERE ${predicates.join(' AND ')}` : ''
     const rows = this.db
       .prepare(
@@ -664,19 +787,6 @@ function paragraphChunks(body: string): string[] {
     chunks.push(current)
   }
   return chunks
-}
-
-// The document's own file modification time, so a reindex from the same
-// folder produces the same `mtime` value rather than the wall-clock time
-// of the reindex run. Falls back to the current time if the file cannot
-// be stat'd (a document not yet flushed to disk, or a test fixture path).
-async function fileMtime(path: string): Promise<string> {
-  try {
-    const stats = await stat(path)
-    return stats.mtime.toISOString()
-  } catch {
-    return new Date().toISOString()
-  }
 }
 
 // docDate anchors eventTime, when present, to the record this item came

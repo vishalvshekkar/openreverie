@@ -13,7 +13,14 @@ import {
   type StyleConfig,
   saveConfig,
 } from '@openreverie/core'
-import { ensureMemoryTree, loadProfile, memoryPaths, writeProfile } from '@openreverie/memory'
+import {
+  ensureMemoryTree,
+  loadProfile,
+  memoryPaths,
+  nodeStores,
+  systemTimeZone,
+  writeProfile,
+} from '@openreverie/memory'
 
 export interface SetupIo {
   question(prompt: string): Promise<string>
@@ -250,9 +257,13 @@ export async function runSetup(io: SetupIo, configPath?: string): Promise<void> 
   // means the seeding finds a file and skips. Then load, merge, and write
   // back, never write fresh, because a rerun on an existing folder would
   // otherwise discard every other field the person has.
-  const paths = memoryPaths(memoryDir)
-  await ensureMemoryTree(paths)
-  const profile = await loadProfile(paths)
+  const paths = memoryPaths(memoryDir, nodeStores())
+  // reverie setup genuinely runs on the person's own machine, so the
+  // system zone is the honest default here, seeding profile.md the same
+  // way ensureMemoryTree always has.
+  const timezone = systemTimeZone()
+  await ensureMemoryTree(paths, timezone)
+  const profile = await loadProfile(paths, timezone)
   await writeProfile(paths, {
     ...profile,
     meta: { ...profile.meta, style: { ...(profile.meta.style ?? {}), ...style } },

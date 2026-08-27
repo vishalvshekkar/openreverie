@@ -108,7 +108,16 @@ class ViewBoundary extends Component<{ children: ReactNode }, { failed: boolean 
   }
 }
 
-export function App({ api }: { api: AppApi }) {
+export function App({
+  api,
+  preAuthenticated = false,
+}: {
+  api: AppApi
+  // Told to us by the host (Reverie Cloud's gateway has already established
+  // the session before this app loads). Self-hosted never sets it, so the
+  // default here is what keeps self-hosted behavior exactly as it is today.
+  preAuthenticated?: boolean
+}) {
   const [view, setView] = useState<ViewId>(() =>
     typeof window === 'undefined' ? 'conversations' : viewFromHash(window.location.hash),
   )
@@ -154,7 +163,7 @@ export function App({ api }: { api: AppApi }) {
       <div className="stage">
         <div hidden={view !== 'conversations'} style={{ height: '100%', minHeight: 0 }}>
           <ViewBoundary>
-            <Conversations api={api} />
+            <Conversations api={api} preAuthenticated={preAuthenticated} />
           </ViewBoundary>
         </div>
         {view === 'atlas' && (

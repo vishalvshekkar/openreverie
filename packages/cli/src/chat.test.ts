@@ -10,6 +10,7 @@ import {
   MemoryEngine,
   memoryPaths,
   newId,
+  nodeStores,
   readDocument,
   writeDocumentAtomic,
 } from '@openreverie/memory'
@@ -46,6 +47,7 @@ function fakeDeps(chat: FakeChatProvider): EngineDeps {
     embeddings: new FakeEmbeddingProvider(),
     reflectionModel: 'fake-reflect',
     embeddingModel: 'fake-embed',
+    timezone: 'UTC',
   }
 }
 
@@ -314,6 +316,7 @@ describe('runChat', () => {
     const summaries = await sessionSummaryFiles(dir)
     expect(summaries).toHaveLength(1)
     const summary = await readDocument(
+      nodeStores().files,
       path.join(dir, 'sessions', summaries[0] as string, 'summary.md'),
     )
     expect(summary.meta.skipped).toBe(true)
@@ -372,11 +375,11 @@ describe('runChat', () => {
   // page and proposes a genuinely new arc, whose page write into the now
   // read-only arcsDir is what throws.
   it('still prints a warning recorded earlier in reflection when reflection later fails outright on /bye', async () => {
-    const paths = memoryPaths(dir)
-    await ensureMemoryTree(paths)
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
 
     const arcDocPath = path.join(paths.arcsDir, 'health.md')
-    await writeDocumentAtomic({
+    await writeDocumentAtomic(paths.files, {
       path: arcDocPath,
       meta: { id: newId('doc'), name: 'Health' },
       body: 'Original arc narrative.\n',
@@ -1425,19 +1428,19 @@ describe('countMemoryDocuments', () => {
   it('counts the constitution plus every realm, arc, and person document', async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'openreverie-count-'))
     try {
-      const paths = memoryPaths(dir)
-      await ensureMemoryTree(paths)
-      await writeDocumentAtomic({
+      const paths = memoryPaths(dir, nodeStores())
+      await ensureMemoryTree(paths, 'UTC')
+      await writeDocumentAtomic(paths.files, {
         path: path.join(paths.realmsDir, 'health.md'),
         meta: { id: newId('doc'), name: 'Health' },
         body: 'A realm.\n',
       })
-      await writeDocumentAtomic({
+      await writeDocumentAtomic(paths.files, {
         path: path.join(paths.arcsDir, 'checkup.md'),
         meta: { id: newId('doc'), name: 'Checkup', status: 'active' },
         body: 'An arc.\n',
       })
-      await writeDocumentAtomic({
+      await writeDocumentAtomic(paths.files, {
         path: path.join(paths.peopleDir, 'alex.md'),
         meta: {
           id: newId('doc'),
@@ -1458,12 +1461,12 @@ describe('countMemoryDocuments', () => {
   it('does not count a skipped session summary, matching what reindex actually indexes', async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'openreverie-count-skip-'))
     try {
-      const paths = memoryPaths(dir)
-      await ensureMemoryTree(paths)
+      const paths = memoryPaths(dir, nodeStores())
+      await ensureMemoryTree(paths, 'UTC')
 
       const reflectedDir = path.join(paths.sessionsDir, '2026-08-01-session_reflected')
       await mkdir(reflectedDir, { recursive: true })
-      await writeDocumentAtomic({
+      await writeDocumentAtomic(paths.files, {
         path: path.join(reflectedDir, 'summary.md'),
         meta: {
           id: newId('doc'),
@@ -1476,7 +1479,7 @@ describe('countMemoryDocuments', () => {
 
       const skippedDir = path.join(paths.sessionsDir, '2026-08-02-session_skipped')
       await mkdir(skippedDir, { recursive: true })
-      await writeDocumentAtomic({
+      await writeDocumentAtomic(paths.files, {
         path: path.join(skippedDir, 'summary.md'),
         meta: {
           id: newId('doc'),
@@ -2138,6 +2141,7 @@ describe('runChat status line', () => {
         embeddings: new FakeEmbeddingProvider(),
         reflectionModel: 'fake-reflect',
         embeddingModel: 'fake-embed',
+        timezone: 'UTC',
       })
       const config = testConfig(dir)
       const { io, output } = scriptedIo(['/bye'])

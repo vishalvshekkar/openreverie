@@ -357,6 +357,15 @@ export class AgentSession {
         if (event.type === 'text' && event.text.length > 0) {
           text += event.text
           yield { type: 'text', text: event.text }
+        } else if (event.type === 'usage') {
+          // Deliberately not forwarded as an AgentEvent, and deliberately
+          // not lumped into the text branch above: a hosted deployment's
+          // usage ledger is a ChatProvider decorator sitting below this
+          // session (it wraps the real provider and sees every ChatEvent,
+          // including this one, before this loop ever runs), so nothing
+          // here needs the number. Named explicitly so a usage event can
+          // never fall through unhandled and never reaches the caller as
+          // chat text either.
         }
       }
     } catch {
@@ -410,6 +419,12 @@ export class AgentSession {
             }
           } else if (event.type === 'tool_call') {
             toolCalls.push(event.toolCall)
+          } else if (event.type === 'usage') {
+            // See the identical branch in runGreeting above: usage
+            // accounting belongs to a ChatProvider wrapper below this
+            // session, not to the agent loop. Named explicitly so this
+            // never silently falls through and never reaches the caller
+            // as chat text.
           }
         }
       } catch (err) {

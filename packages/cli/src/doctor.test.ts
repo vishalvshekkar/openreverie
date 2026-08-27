@@ -2,7 +2,7 @@ import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ReverieConfig } from '@openreverie/core'
-import { ensureMemoryTree, MemoryIndex, memoryPaths } from '@openreverie/memory'
+import { ensureMemoryTree, MemoryIndex, memoryPaths, nodeStores } from '@openreverie/memory'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { type DoctorDeps, formatCheckLine, runDoctor } from './doctor.js'
 
@@ -447,7 +447,7 @@ describe('runDoctor against a real filesystem', () => {
       const configPath = join(dir, 'config.toml')
       await writeFile(configPath, 'placeholder, loadConfig is faked below', 'utf8')
       const memoryDir = join(dir, 'memory')
-      await ensureMemoryTree(memoryPaths(memoryDir))
+      await ensureMemoryTree(memoryPaths(memoryDir, nodeStores()), 'UTC')
       const config = baseConfig(memoryDir)
       let output = ''
 
@@ -482,7 +482,7 @@ describe('runDoctor against a real filesystem', () => {
 
       expect(exitCode).toBe(1)
       expect(output).toContain('index.db missing; run: reverie reindex')
-      await expect(stat(memoryPaths(memoryDir).indexDb)).rejects.toThrow()
+      await expect(stat(memoryPaths(memoryDir, nodeStores()).indexDb)).rejects.toThrow()
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

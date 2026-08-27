@@ -147,7 +147,13 @@ export async function searchMemory(
     filters?.after,
     filters?.before,
   )
-  const [queryVector] = await embeddings.embed(embeddingModel, [query])
+  // Usage from this call is discarded here, not accounted for: retrieval
+  // has no ledger to report to, and a hosted deployment's own
+  // EmbeddingProvider wrapper (the equivalent of the ChatProvider one
+  // described in providers/src/types.ts) already saw it before this
+  // function's embeddings argument was ever called.
+  const { vectors } = await embeddings.embed(embeddingModel, [query])
+  const [queryVector] = vectors
   const vectorHits = queryVector
     ? await index.searchVector(
         queryVector,
