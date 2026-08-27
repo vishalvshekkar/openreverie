@@ -102,6 +102,43 @@ describe('ensureMemoryTree', () => {
     expect(await noVersioningPaths.files.exists(noVersioningPaths.constitution)).toBe(true)
   })
 
+  // capabilities.versioning: false means "this host has no git" the same
+  // way it means "no .gitignore to seed" above. The root is created inside
+  // the in-memory store (via ensureMemoryTree's own paths.files.mkdir), so
+  // it reads as a real directory to commitMemory's own isDirectory check;
+  // the only thing standing between that and an actual `git` invocation
+  // against a path that does not exist on the real filesystem is the
+  // versioning guard. If that guard were gone, the real child_process call
+  // would fail against the fake root and get swallowed into a "git commit
+  // failed" warning, which is exactly the kind of warning that misstates
+  // its own cause: git was never applicable here, it did not try and fail.
+  //
+  // Falsified 2026-08-27: removed the `if (!files.capabilities.versioning)`
+  // guard at the top of commitMemory in gitSync.ts and reran this test. It
+  // failed because commitResult.ok was false and commitResult.warning was
+  // a "git commit failed: ..." string (the real git process could not find
+  // the fake root on disk), instead of the expected ok: true with no
+  // warning. The guard was then restored and this test passes again.
+  it('commitMemory does no git work and returns no warning when the store has no versioning capability', async () => {
+    const noVersioningRoot = '/no-versioning-root'
+    const noVersioningPaths = memoryPaths(
+      noVersioningRoot,
+      memoryStores({ versioning: false, locking: false }),
+    )
+    await ensureMemoryTree(noVersioningPaths, 'UTC')
+
+    const result = await commitMemory(
+      noVersioningPaths.files,
+      noVersioningPaths.root,
+      'test: no versioning',
+    )
+    expect(result.ok).toBe(true)
+    expect(result.warning).toBeUndefined()
+    // No .git ever appears in the store: proof no git work was attempted,
+    // not just that the returned result looks right.
+    expect(await noVersioningPaths.files.exists(join(noVersioningRoot, '.git'))).toBe(false)
+  })
+
   it('commitMemory leaves the working tree clean with a dream lock present', async () => {
     await ensureMemoryTree(paths, 'UTC')
     const lockPath = join(paths.dreamsDir, '.lock')

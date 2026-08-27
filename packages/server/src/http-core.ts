@@ -31,9 +31,8 @@ import {
   type DreamVerdict,
   EDGE_TYPES,
   foldDreamLog,
-  memoryPaths,
+  type MemoryPaths,
   NODE_TYPES,
-  nodeStores,
   type Profile,
   type ProfileSettingsPatch,
   type Proposal,
@@ -71,6 +70,14 @@ function byteLength(text: string): number {
 }
 
 export interface RecordEngine {
+  // The MemoryPaths this engine was built over. Required, not optional:
+  // the dream detail route reads feedback verdicts through this, and an
+  // optional member would let a fake or a host omit it and silently
+  // reproduce the bug this replaced (a route that returns 200 with every
+  // verdict dropped). Reading through the engine's own paths, rather than
+  // a separately constructed MemoryPaths, is what guarantees the verdicts
+  // come from the same stores as the rest of the record.
+  readonly memoryPaths: MemoryPaths
   listPublicDocuments(): Promise<PublicDocumentRow[]>
   getPublicDocument(docId: string): Promise<PublicDocument | null>
   listStoredSessions(): Promise<PublicSession[]>
@@ -278,6 +285,18 @@ interface HandleDeps {
   // nothing to serve (the common case for a Workers deployment), or a
   // node:fs backed implementation from the node adapter.
   serveStatic: ((sink: ResponseSink, pathname: string) => Promise<void>) | undefined
+  // Gates POST /api/v1/auth/bootstrap. Undefined means the route is not
+  // mounted at all: no match, no cookie, a plain 404 (or 401 first, if the
+  // caller is unauthenticated, since the route sits before the auth check
+  // only when it exists). This follows serveStatic's own shape: presence
+  // decides whether the feature exists, not a flag next to an
+  // always-mounted route. The node adapter always supplies this (built
+  // from its own deps.auth), so self-hosted behavior is unchanged; a
+  // Workers-style host that authenticates its own way simply never passes
+  // it, and never exposes an unauthenticated cookie-issuing endpoint by
+  // default. Only 'exchange' is needed here, not the full BootstrapAuth,
+  // since this route never calls authenticate().
+  bootstrap: Pick<BootstrapAuth, 'exchange'> | undefined
 }
 
 export async function handle(
@@ -285,17 +304,31 @@ export async function handle(
   sink: ResponseSink,
   deps: HandleDeps,
 ): Promise<void> {
-  const { engine, auth, canonical, proposalResolutionLocks, registry, config, hash, serveStatic } =
-    deps
+  const {
+    engine,
+    auth,
+    canonical,
+    proposalResolutionLocks,
+    registry,
+    config,
+    hash,
+    serveStatic,
+    bootstrap,
+  } = deps
   const parsed = parseRequestUrl(request)
   const path = decodePath(parsed.pathname)
   const method = request.method
 
-  if (path.length === 4 && path.join('/') === 'api/v1/auth/bootstrap' && method === 'POST') {
+  if (
+    bootstrap &&
+    path.length === 4 &&
+    path.join('/') === 'api/v1/auth/bootstrap' &&
+    method === 'POST'
+  ) {
     requireHost(request, canonical.host)
     const body = bootstrapSchema.safeParse(await readJson(request))
     if (!body.success) throw new ApiError(400, 'invalid_request', 'The request is invalid.')
-    const session = auth.exchange(body.data.token)
+    const session = bootstrap.exchange(body.data.token)
     sink.setHeader('set-cookie', `reverie_session=${session}; HttpOnly; SameSite=Strict; Path=/`)
     writePublicJson(sink, 200, bootstrapResponseSchema, { authenticated: true }, null)
     return
@@ -625,7 +658,7 @@ export async function handle(
     const dreamId = requiredId(path[3])
     const dream = await engine.readDream(dreamId)
     if (!dream) throw new ApiError(404, 'not_found', 'The requested resource was not found.')
-    const verdicts = await dreamFeedbackVerdicts(config)
+    const verdicts = await dreamFeedbackVerdicts(engine)
     writePublicJson(sink, 200, publicDreamDetailSchema, publicDreamDetail(dream, verdicts), null)
     return
   }
@@ -1004,22 +1037,31 @@ function publicDreamDetail(
 // insight.md itself: a written insight is a record, feedback on it is a
 // separate, later event. engine.readDream does not carry them, so this
 // reads the log directly the same way the CLI's `reverie dream --show`
-// already does. A missing config, or a log that fails to read or parse,
-// means verdicts are simply not shown: the dream detail response must
-// still succeed, just without that annotation.
+// already does, through readDreamLog and foldDreamLog: both host-agnostic
+// (they take a MemoryPaths and read through whatever AppendOnlyStore it
+// was built over, per P0-1).
 //
-// This calls into @openreverie/memory's own file-reading helpers
-// (memoryPaths, readDreamLog), which do read from node:fs under the hood.
-// That is a real, deeper node dependency this module does not eliminate:
-// it is inside @openreverie/memory, a package outside this task's scope
-// (see BACKLOG.md).
-async function dreamFeedbackVerdicts(
-  config: ReverieConfig | undefined,
-): Promise<Map<string, DreamVerdict>> {
-  if (!config) return new Map()
+// The MemoryPaths comes from engine.memoryPaths, not from a dependency
+// this function or its caller could be handed separately. This used to
+// take an optional MemoryPaths as a HandleDeps member, defaulted by the
+// node adapter (app.ts) from config when a caller did not supply one. That
+// had two problems: a host that forgot to pass the dep got the same
+// silent failure this was meant to fix (a 200 with every verdict
+// dropped), and nothing stopped a host from passing a MemoryPaths built
+// over different stores than its engine, which would read verdicts from
+// somewhere other than where the rest of the dream record comes from.
+// Reading through the engine's own paths makes both mistakes impossible:
+// there is only one MemoryPaths in play, the one the engine was already
+// built over, so every host gets verdicts and no host can wire them
+// inconsistently.
+//
+// The try below tolerates only what the CLI's own equivalent tolerates: a
+// dream log that has never been written, cannot be read, or fails to
+// parse. Any of those still means the dream detail response must succeed,
+// just without verdicts.
+async function dreamFeedbackVerdicts(engine: RecordEngine): Promise<Map<string, DreamVerdict>> {
   try {
-    const paths = memoryPaths(config.memoryDir, nodeStores())
-    const records = await readDreamLog(paths)
+    const records = await readDreamLog(engine.memoryPaths)
     const state = foldDreamLog(records)
     const verdicts = new Map<string, DreamVerdict>()
     for (const [insightId, record] of state.feedback) verdicts.set(insightId, record.verdict)
@@ -1496,6 +1538,15 @@ function writeError(sink: ResponseSink, error: ApiError): void {
 // deps.hash and deps.serveStatic are exactly the two seams item 4 and the
 // HashProvider comment above exist for: everything else needed to answer
 // an /api/v1 request is already Web-standard.
+//
+// deps.bootstrap is opt-in and absent by default here, unlike the node
+// adapter (app.ts), which always supplies it. A host that authenticates
+// its own way never gets an unauthenticated cookie-issuing endpoint unless
+// it deliberately asks for one. There is no equivalent memoryPaths dep:
+// deps.engine already carries a MemoryPaths (RecordEngine.memoryPaths),
+// and dreamFeedbackVerdicts reads through that, so every host gets dream
+// feedback verdicts read from the same stores as the rest of the record,
+// with nothing extra to wire up.
 export interface FetchAppDeps {
   engine: RecordEngine
   auth: BootstrapAuth
@@ -1505,6 +1556,7 @@ export interface FetchAppDeps {
   registry?: LiveSessionRegistry
   hash: HashProvider
   serveStatic?: (sink: ResponseSink, pathname: string) => Promise<void>
+  bootstrap?: Pick<BootstrapAuth, 'exchange'>
 }
 
 export function createFetchApp(deps: FetchAppDeps): (request: Request) => Promise<Response> {
@@ -1519,6 +1571,7 @@ export function createFetchApp(deps: FetchAppDeps): (request: Request) => Promis
     config: deps.config,
     hash: deps.hash,
     serveStatic: deps.serveStatic,
+    bootstrap: deps.bootstrap,
   }
   return (request: Request): Promise<Response> => {
     const sink = new WebResponseSink()

@@ -25,7 +25,21 @@ import { createLiveSessionRegistry } from './registry.js'
 // shim for other bundled CommonJS dependencies' own require() calls looks
 // up by that exact global name. A second top-level `const require` here
 // would collide with it in the bundled output.
-const nodeRequire = createRequire(import.meta.url)
+//
+// Built lazily, on first use, rather than as a module-scope const: this
+// whole file is an unrestricted `export *` barrel, so anything that reaches
+// createFetchApp by importing @openreverie/server also runs this module's
+// top level. import.meta.url is undefined in a Workers-style bundle, and
+// createRequire(undefined) throws immediately, which used to kill the
+// isolate before any handler ever ran, even for a caller that only wanted
+// the transport-agnostic core and would never touch resolveStaticDir at
+// all. Deferring construction to the one call site that actually needs it
+// means a host with no import.meta.url never pays for it.
+let cachedRequire: NodeRequire | undefined
+function nodeRequire(): NodeRequire {
+  if (!cachedRequire) cachedRequire = createRequire(import.meta.url)
+  return cachedRequire
+}
 
 async function isFile(path: string): Promise<boolean> {
   try {
@@ -58,7 +72,7 @@ export async function resolveStaticDir(
   if (await isFile(join(bundledAssets, 'index.html'))) {
     return bundledAssets
   }
-  const webPackage = nodeRequire.resolve('@openreverie/web/package.json')
+  const webPackage = nodeRequire().resolve('@openreverie/web/package.json')
   return join(dirname(webPackage), 'dist')
 }
 

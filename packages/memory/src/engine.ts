@@ -606,6 +606,18 @@ export class MemoryEngine implements DreamLookup {
     return this.deps.now?.() ?? new Date()
   }
 
+  // Read-only access to the paths this engine was built over. The field
+  // itself stays private; this getter exists because the HTTP layer
+  // (packages/server) needs to read the dream log through the exact same
+  // stores the engine was opened with, not a separately constructed
+  // MemoryPaths that could point somewhere else. Handing the HTTP layer a
+  // paths object built on its own would let the two diverge silently: the
+  // dream detail route could read verdicts from one store while every
+  // other field on the same response comes from another.
+  get memoryPaths(): MemoryPaths {
+    return this.paths
+  }
+
   private constructor(
     paths: MemoryPaths,
     deps: EngineDeps,

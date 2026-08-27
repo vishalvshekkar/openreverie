@@ -65,6 +65,12 @@ export function createApp(deps: CreateAppDeps): RequestListener {
     config: deps.config,
     hash: nodeHash,
     serveStatic: staticDir ? (sink, pathname) => serveStatic(sink, staticDir, pathname) : undefined,
+    // The node:http adapter is the self-hosted product itself, so the
+    // bootstrap-token cookie flow it has always exposed stays mounted
+    // unconditionally, built from the same deps.auth every other route
+    // authenticates against. See HandleDeps.bootstrap's own comment in
+    // http-core.ts for why createFetchApp does not do this by default.
+    bootstrap: deps.auth,
   }
   return (req, res) => {
     void handleNodeRequest(req, res, handleDeps).catch((error: unknown) => {

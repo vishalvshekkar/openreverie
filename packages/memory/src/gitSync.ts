@@ -7,6 +7,10 @@
 // filesystem access, and there is no injected interface for shelling out to
 // git. Its one fs call (checking that root, and root/.git, are directories)
 // is converted below.
+//
+// commitMemory itself is gated on FileStore.capabilities.versioning, so a
+// host with no git skips all of this entirely; see the comment at the top
+// of commitMemory for why the gate lives here rather than at each caller.
 
 import { execFile } from 'node:child_process'
 import { join } from 'node:path'
@@ -25,6 +29,29 @@ export async function commitMemory(
   root: string,
   message: string,
 ): Promise<CommitResult> {
+  // Gated on capabilities.versioning as the very first statement, before
+  // the isDirectory check below, so a host with no git (a machine with no
+  // filesystem at all) never pays for that storage query and never shells
+  // out to git. This mirrors the same flag's use in paths.ts to skip
+  // seeding .gitignore, and putting the guard here instead of at engine.ts's
+  // seven call sites means every one of them, plus any future caller, is
+  // covered by one check at the source rather than by seven people
+  // remembering to add it.
+  //
+  // Returns ok: true with no warning, not ok: false. A host with no
+  // versioning capability has nothing wrong with it: git auto-commit was
+  // never applicable there, the same way an unchanged working tree already
+  // returns ok: true below with no commit made. ok: false is reserved for
+  // an attempt that was made and failed. Every engine.ts call site only
+  // surfaces commitResult.warning when !commitResult.ok, so a false result
+  // here with no warning would still read silently, but it would also
+  // misreport a no-op as a failure to whatever future caller inspects `ok`
+  // on its own. Returning ok: true keeps that distinction honest without
+  // relying on nobody ever reading `ok` in isolation.
+  if (!files.capabilities.versioning) {
+    return { ok: true }
+  }
+
   if (!(await isDirectory(files, root))) {
     return { ok: false, warning: `Memory root ${root} is not a directory; skipped git commit.` }
   }

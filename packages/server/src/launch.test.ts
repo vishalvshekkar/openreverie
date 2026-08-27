@@ -6,11 +6,12 @@ import type { ReverieConfig } from '@openreverie/core'
 import type {
   DreamStatus,
   MemoryEngine,
+  MemoryPaths,
   Profile,
   ProfileSettingsPatch,
   StyleConfig,
 } from '@openreverie/memory'
-import { DEFAULT_STYLE } from '@openreverie/memory'
+import { DEFAULT_STYLE, memoryPaths, nodeStores } from '@openreverie/memory'
 import type { ChatProvider, EmbeddingProvider } from '@openreverie/providers'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, type RecordEngine } from './app.js'
@@ -18,6 +19,12 @@ import { createBootstrapAuth } from './auth.js'
 import { createServerLauncher, type ServerLaunchDeps } from './launch.js'
 
 class FakeEngine implements RecordEngine {
+  // No test in this file exercises dream detail's feedback-verdict merge
+  // (that is app.test.ts's job); this only needs to satisfy
+  // RecordEngine.memoryPaths with a real MemoryPaths, built over the same
+  // temp directory beforeEach already creates for the engine's config.
+  constructor(readonly memoryPaths: MemoryPaths) {}
+
   async listPublicDocuments() {
     return []
   }
@@ -127,7 +134,7 @@ describe('createServerLauncher', () => {
     await mkdir(staticDir)
     await writeFile(join(staticDir, 'index.html'), '<!doctype html><title>Reverie</title>')
     await writeFile(join(staticDir, 'app.js'), 'console.log("reverie")')
-    engine = new FakeEngine()
+    engine = new FakeEngine(memoryPaths(dir, nodeStores()))
     const chatFactory = vi.fn<(_: unknown) => ChatProvider>(() => {
       throw new Error('the API key is unavailable')
     })

@@ -10,6 +10,13 @@
 // generator test below can catch it, which is why it asserts on timing
 // via a gate promise rather than on the final body.
 import { createHash } from 'node:crypto'
+import {
+  appendDreamLog,
+  type Document,
+  type MemoryPaths,
+  memoryPaths,
+  memoryStores,
+} from '@openreverie/memory'
 import { describe, expect, it } from 'vitest'
 import type { BootstrapAuth } from './auth.js'
 import {
@@ -33,8 +40,18 @@ const auth: BootstrapAuth = {
   authenticate: (cookie) => cookie === validCookie,
 }
 
+// Every stub needs a memoryPaths now that RecordEngine.memoryPaths is
+// required. Tests that do not care about dream feedback verdicts get an
+// in-memory store nothing ever writes to; readDreamLog against it fails to
+// find a log, and dreamFeedbackVerdicts' own catch turns that into "no
+// verdicts yet". Tests that do care override it explicitly.
+function defaultStubPaths(): MemoryPaths {
+  return memoryPaths('/stub-memory-unused', memoryStores())
+}
+
 function stubEngine(overrides: Partial<RecordEngine> = {}): RecordEngine {
   return {
+    memoryPaths: defaultStubPaths(),
     listPublicDocuments: async () => [],
     getPublicDocument: async () => null,
     listStoredSessions: async () => [],
@@ -69,7 +86,11 @@ function stubEngine(overrides: Partial<RecordEngine> = {}): RecordEngine {
 }
 
 function buildApp(deps: Partial<FetchAppDeps> = {}): (request: Request) => Promise<Response> {
-  return createFetchApp({ engine: stubEngine(), auth, origin, hash, ...deps })
+  // bootstrap defaults to on here so the rest of this file's tests, which
+  // predate the opt-in gate, keep exercising the route they always did.
+  // The 'bootstrap route is opt-in' describe block below overrides this
+  // back to undefined to test the gate itself.
+  return createFetchApp({ engine: stubEngine(), auth, origin, hash, bootstrap: auth, ...deps })
 }
 
 function authedGet(path: string, extraHeaders: Record<string, string> = {}): Request {
@@ -258,5 +279,179 @@ describe('createFetchApp', () => {
       expect(returnCalled).toBe(true)
       gate.resolve()
     })
+  })
+})
+
+describe('bootstrap route is opt-in', () => {
+  // Undefined here is not the same as "the route is mounted but fails":
+  // these tests prove it is genuinely absent, by comparing its behavior
+  // directly against a path that has never existed
+  // (/api/v1/no-such-route), in both auth states, rather than trusting a
+  // bare status code.
+  function bootstrapRequest(extraHeaders: Record<string, string> = {}): Request {
+    return new Request(`${origin}/api/v1/auth/bootstrap`, {
+      method: 'POST',
+      headers: { host, 'content-type': 'application/json', ...extraHeaders },
+      body: JSON.stringify({ token: 'whatever' }),
+    })
+  }
+
+  function noSuchRouteRequest(extraHeaders: Record<string, string> = {}): Request {
+    return new Request(`${origin}/api/v1/no-such-route`, {
+      method: 'POST',
+      headers: { host, 'content-type': 'application/json', ...extraHeaders },
+      body: '{}',
+    })
+  }
+
+  it('mounts the route and issues a cookie exactly as before when a bootstrap dep is supplied', async () => {
+    const app = createFetchApp({ engine: stubEngine(), auth, origin, hash, bootstrap: auth })
+    const response = await app(bootstrapRequest())
+    expect(response.status).toBe(200)
+    expect(response.headers.get('set-cookie')).toContain('reverie_session=issued-session')
+    const body = (await response.json()) as { data: { authenticated: boolean } }
+    expect(body.data.authenticated).toBe(true)
+  })
+
+  it('without a bootstrap dep, an unauthenticated caller gets the same 401 as any other unauthenticated write, not a route-specific error', async () => {
+    const app = createFetchApp({ engine: stubEngine(), auth, origin, hash })
+    const response = await app(bootstrapRequest())
+    const control = await app(noSuchRouteRequest())
+    expect(response.status).toBe(401)
+    expect(response.status).toBe(control.status)
+    expect(await response.json()).toEqual(await control.json())
+    expect(response.headers.get('set-cookie')).toBeNull()
+  })
+
+  it('without a bootstrap dep, an authenticated caller gets the same 404 a genuinely unknown route gets, not an auth error that happens to look similar', async () => {
+    const app = createFetchApp({ engine: stubEngine(), auth, origin, hash })
+    const authedHeaders = { cookie: validCookie, origin }
+    const response = await app(bootstrapRequest(authedHeaders))
+    const control = await app(noSuchRouteRequest(authedHeaders))
+    expect(response.status).toBe(404)
+    expect(response.status).toBe(control.status)
+    expect(await response.json()).toEqual(await control.json())
+    expect(response.headers.get('set-cookie')).toBeNull()
+  })
+})
+
+describe("dream feedback verdicts are read through the engine's own memory paths", () => {
+  // http-core.ts used to build its own MemoryPaths here via
+  // memoryPaths(config.memoryDir, nodeStores()), no matter what store the
+  // host actually gave its engine. Now dreamFeedbackVerdicts reads through
+  // engine.memoryPaths, so there is no separate dep left to inject: the
+  // paths always come from whatever store the engine itself carries. This
+  // engine fixture never carries feedback through readDream (see
+  // http-core.ts's own comment on why); the point of these two tests is
+  // that the verdict comes from the engine's own memoryPaths, in-memory
+  // here, not a real filesystem this test never touches, and that two
+  // engines with different stores never bleed into each other.
+  function dreamEngine(paths: MemoryPaths): RecordEngine {
+    return stubEngine({
+      memoryPaths: paths,
+      readDream: async (dreamId) =>
+        dreamId === 'dream_full'
+          ? {
+              summary: {
+                dreamId: 'dream_full',
+                date: '2026-08-20',
+                period: '2026-08-20',
+                hasNarrative: false,
+                insightCount: 1,
+                dir: '/fake/dreams/dream_full',
+              },
+              insights: {
+                path: '/fake/dreams/dream_full/insight.md',
+                meta: {
+                  id: 'ins_doc',
+                  insights: [
+                    {
+                      id: 'ins_1',
+                      kind: 'pattern',
+                      headline: 'A recurring pattern',
+                      claim: 'Something happened more than once.',
+                      confidence: 0.7,
+                    },
+                  ],
+                },
+                body: '',
+              } as Document,
+              processLog: '',
+            }
+          : null,
+    })
+  }
+
+  it('surfaces a verdict recorded through the engine-supplied stores, with no real filesystem involved', async () => {
+    const paths = memoryPaths('/virtual-memory', memoryStores())
+    await appendDreamLog(paths, [
+      {
+        ts: '2026-08-22T00:00:00.000Z',
+        type: 'feedback',
+        insight: 'ins_1',
+        dream: 'dream_full',
+        verdict: 'right',
+        source: 'ui',
+      },
+    ])
+
+    const app = createFetchApp({ engine: dreamEngine(paths), auth, origin, hash })
+    const response = await app(authedGet('/api/v1/dreams/dream_full'))
+    expect(response.status).toBe(200)
+    const body = (await response.json()) as {
+      data: { insights: { insightId: string; verdict?: string }[] }
+    }
+    expect(body.data.insights).toEqual([
+      expect.objectContaining({ insightId: 'ins_1', verdict: 'right' }),
+    ])
+  })
+
+  it('reads verdicts from whichever store the calling engine carries, never a shared or ambient one', async () => {
+    // FetchAppDeps has no memoryPaths field to inject any more (removed
+    // with the dep this describe block is named for), so the only way
+    // this response's verdict could come from anywhere other than
+    // dreamEngine's own paths is a bug that reaches past deps.engine
+    // entirely, for example a module-level default or a stray
+    // memoryPaths(root, nodeStores()) construction like the one this
+    // change removed. Two engines, two distinct in-memory stores, one
+    // with the feedback recorded and one without, prove there is no such
+    // leak: each app's response reflects only the store its own engine
+    // was built over.
+    const pathsWithVerdict = memoryPaths('/virtual-memory-a', memoryStores())
+    await appendDreamLog(pathsWithVerdict, [
+      {
+        ts: '2026-08-22T00:00:00.000Z',
+        type: 'feedback',
+        insight: 'ins_1',
+        dream: 'dream_full',
+        verdict: 'right',
+        source: 'ui',
+      },
+    ])
+    const pathsWithoutVerdict = memoryPaths('/virtual-memory-b', memoryStores())
+
+    const appWithVerdict = createFetchApp({
+      engine: dreamEngine(pathsWithVerdict),
+      auth,
+      origin,
+      hash,
+    })
+    const appWithoutVerdict = createFetchApp({
+      engine: dreamEngine(pathsWithoutVerdict),
+      auth,
+      origin,
+      hash,
+    })
+
+    const withVerdict = await appWithVerdict(authedGet('/api/v1/dreams/dream_full'))
+    const withoutVerdict = await appWithoutVerdict(authedGet('/api/v1/dreams/dream_full'))
+    const bodyWithVerdict = (await withVerdict.json()) as {
+      data: { insights: { insightId: string; verdict?: string }[] }
+    }
+    const bodyWithoutVerdict = (await withoutVerdict.json()) as {
+      data: { insights: { insightId: string; verdict?: string }[] }
+    }
+    expect(bodyWithVerdict.data.insights[0]?.verdict).toBe('right')
+    expect(bodyWithoutVerdict.data.insights[0]?.verdict).toBeUndefined()
   })
 })

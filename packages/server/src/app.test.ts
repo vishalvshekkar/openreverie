@@ -15,6 +15,7 @@ import type {
   DreamSummary,
   DreamVerdict,
   GraphRecord,
+  MemoryPaths,
   Profile,
   ProfileSettingsPatch,
   PublicDocument,
@@ -61,6 +62,19 @@ const assistantLine: TranscriptLine = {
 }
 
 class FakeEngine implements RecordEngine {
+  // Most tests in this file never touch dream feedback verdicts, so the
+  // default points at a directory nothing ever writes to: readDreamLog
+  // fails to find it, dreamFeedbackVerdicts' own catch treats that as "no
+  // verdicts yet", same as before this file needed a real MemoryPaths at
+  // all. The "dream detail merges feedback verdicts" suite below passes
+  // its own paths, built over the same temp directory its dream log
+  // fixture is written to.
+  readonly memoryPaths: MemoryPaths
+
+  constructor(paths: MemoryPaths = memoryPaths('/fake/memory-not-a-real-directory', nodeStores())) {
+    this.memoryPaths = paths
+  }
+
   documents: PublicDocument[] = [
     {
       docId: 'doc_one',
@@ -1089,9 +1103,11 @@ describe('record browsing app', () => {
 describe('dream detail merges feedback verdicts from the dream log', () => {
   // engine.readDream never carries feedback (it lives only in the
   // append-only dream log, recorded later than the insight itself), so the
-  // dream detail route reads the log directly through config.memoryDir,
+  // dream detail route reads the log directly through engine.memoryPaths,
   // the same way `reverie dream --show` already does on the CLI side. This
-  // exercises that merge against a real dream log file, not a stub.
+  // exercises that merge against a real dream log file, not a stub, with
+  // FakeEngine's memoryPaths pointed at the same temp directory the
+  // fixture below writes into.
   let server: Server
   let memoryDir: string
   let engine: FakeEngine
@@ -1100,7 +1116,7 @@ describe('dream detail merges feedback verdicts from the dream log', () => {
 
   beforeEach(async () => {
     memoryDir = await mkdtemp(join(tmpdir(), 'openreverie-dream-verdict-'))
-    engine = new FakeEngine()
+    engine = new FakeEngine(memoryPaths(memoryDir, nodeStores()))
     const config: ReverieConfig = liveConfig(memoryDir)
     server = createServer()
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))

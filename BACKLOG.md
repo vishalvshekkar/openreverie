@@ -1084,34 +1084,34 @@ design conversation first.
   - Size: large, and out of this repository's scope entirely: it belongs to Reverie Cloud, not to
     openreverie.
 
-- **P1-1's shared HTTP core has no node builtin imports of its own, but two things it calls still
-  do.** P1-1 (`docs/superpowers/specs/2026-08-27-hostable-engine-design.md`) made
+- **P1-1's shared HTTP core has no node builtin imports of its own, but one thing it calls still
+  does.** P1-1 (`docs/superpowers/specs/2026-08-27-hostable-engine-design.md`) made
   `packages/server/src/http-core.ts` transport-agnostic: `createFetchApp` and everything it calls
-  inside that file import nothing from `node:*`. Two of its dependencies were out of scope for
-  that task and were left as they were. `./api.js`'s `encodeCursor`, `decodeCursor`, and
-  `makeGraphSnapshot` import `node:buffer` and `node:crypto` directly. And `dreamFeedbackVerdicts`
-  in `http-core.ts` calls `@openreverie/memory`'s `memoryPaths`/`readDreamLog`, which reads the
-  dream log through `paths.logs.readAll`, an `AppendOnlyStore` presently implemented only by
-  `nodeStores()` in `packages/memory/src/memoryStore.ts`, which is `node:fs`-backed. A Workers,
-  Bun, or Deno host running `createFetchApp` still needs whatever those two paths need at runtime.
-  - Why deferred: `packages/server/src/api.ts` and `packages/memory/**` were both outside this
-    task's file ownership (a concurrent task owned `packages/memory/src/engine.ts` and
-    `packages/server/src/registry.ts`, and `api.ts` was assigned to neither task), and Cloudflare
-    Workers' `nodejs_compat` flag already covers `node:buffer`/`node:crypto` (`Buffer`,
-    `createHash`) at no cost to Reverie Cloud, so widening this task's scope to eliminate them was
-    not worth it.
+  inside that file import nothing from `node:*`. One dependency was out of scope for that task and
+  was left as it was: `./api.js`'s `encodeCursor`, `decodeCursor`, and `makeGraphSnapshot` import
+  `node:buffer` and `node:crypto` directly. A Workers, Bun, or Deno host running `createFetchApp`
+  still needs those two node builtins at runtime, uncompensated by anything this module supplies.
+  (`dreamFeedbackVerdicts`'s matching gap, constructing `memoryPaths(config.memoryDir,
+  nodeStores())` itself instead of reading through whatever store the host actually gave its
+  engine, was closed on 2026-08-27. An injected `MemoryPaths` dep on `HandleDeps`/`FetchAppDeps`
+  was tried first and rejected on review: it reproduced the same silent-drop failure for a host
+  that forgot to pass it, and let a host pass a `MemoryPaths` built over different stores than its
+  own engine, so the two could read from different places with nothing to catch it. The fix that
+  landed instead reads through `RecordEngine.memoryPaths`, a required member backed by a new
+  `MemoryEngine.memoryPaths` getter: the HTTP layer never holds a separately constructed
+  `MemoryPaths` at all, so every host gets verdicts and no host can wire them inconsistently.)
+  - Why deferred: `packages/server/src/api.ts` was outside this task's file ownership (assigned to
+    neither of the two tasks running concurrently against this package), and Cloudflare Workers'
+    `nodejs_compat` flag already covers `node:buffer`/`node:crypto` (`Buffer`, `createHash`) at no
+    cost to Reverie Cloud, so widening this task's scope to eliminate them was not worth it.
   - Where the thinking already lives: `docs/superpowers/specs/2026-08-27-hostable-engine-design.md`,
-    P1-1; the comment above `dreamFeedbackVerdicts` in `packages/server/src/http-core.ts`;
-    `packages/server/src/api.ts`; `packages/memory/src/memoryStore.ts` (`nodeStores`) and
-    `packages/memory/src/store.ts` (`AppendOnlyStore`).
+    P1-1; the comment above `HashProvider` in `packages/server/src/http-core.ts`;
+    `packages/server/src/api.ts`.
   - Trigger: not stated. A concrete one would be Reverie Cloud, or a self-hosted Bun or Deno run,
-    actually needing `encodeCursor`/`decodeCursor`/`makeGraphSnapshot` or the dream feedback
-    verdict lookup to run somewhere `node:buffer`, `node:crypto`, or `node:fs` are unavailable and
-    uncompensated by a compatibility layer.
-  - Size: small for `api.ts` (its two base64url/hex helpers can reuse the pattern
-    `http-core.ts`'s own `HashProvider` already established). Larger for the `@openreverie/memory`
-    piece, since it means a non-`node:fs` `AppendOnlyStore` implementation, which is really the
-    "Alternate deployment targets" item below, not a separate one.
+    actually needing `encodeCursor`/`decodeCursor`/`makeGraphSnapshot` to run somewhere
+    `node:buffer` or `node:crypto` are unavailable and uncompensated by a compatibility layer.
+  - Size: small (its two base64url/hex helpers can reuse the pattern `http-core.ts`'s own
+    `HashProvider` already established).
 
 - **Alternate deployment targets.** Cloudflare (Workers, D1 or Durable Objects storage,
   Vectorize) and VPS packaging. The storage layer is behind interfaces for exactly this reason,
@@ -1692,6 +1692,29 @@ help welcome" section. Read [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](A
     have to be re-made for the new pairs.
   - Size: small to re-validate, larger if it means adding a genuine second visual channel such as
     node shape.
+
+- **`packages/memory/src/sqlite.ts` imports `better-sqlite3` at module scope, so a host with no
+  native modules survives only by a third party's implementation detail.** P0-2
+  (`docs/superpowers/specs/2026-08-27-hostable-engine-design.md`) gave `MemoryIndex` an injected
+  `SqlDatabase` and a `fromDatabase` entry point, so a host that cannot load a native module never
+  calls `MemoryIndex.open`. The top-level `import Database from 'better-sqlite3'` stays regardless,
+  and a bundler does evaluate its interop shim at startup. It does not fail today only because
+  better-sqlite3 itself defers loading its native `.node` binding until the `Database` constructor
+  runs. That is a guarantee owned by a dependency rather than by this codebase, and a future version
+  of it that loaded eagerly would turn a working host into one that dies before any handler runs.
+  Splitting the better-sqlite3 adapter into its own module the way `nodeStore.ts` split from
+  `store.ts` would make the guarantee ours.
+  - Why deferred: not stated beyond being explicitly out of scope for the round that raised it.
+    Measured working today by the downstream consumer that runs the engine without native modules,
+    and named by them as a note rather than a request.
+  - Where: `packages/memory/src/sqlite.ts` (the top-level `better-sqlite3` import, `MemoryIndex.open`,
+    and the adapter that wraps it), against the pattern in `packages/memory/src/store.ts` and
+    `nodeStore.ts`. Design source: `docs/superpowers/specs/2026-08-27-hostable-engine-design.md`,
+    P0-2, and the round two follow-up spec's "deliberately not doing" section.
+  - Trigger: a better-sqlite3 release that loads its native binding at import time, or any move to
+    make the engine's non-Node support a supported claim rather than a removed obstacle.
+  - Size: small. One module split plus moving `MemoryIndex.open` to it, with no behavior change for
+    self-hosted.
 
 - **Three modules in `packages/memory/src` still import `node:fs/promises` directly after P0-1
   put filesystem access behind `FileStore`/`AppendOnlyStore`.** `dreamSchedule.ts` (the dream file
