@@ -38,7 +38,37 @@ v0.7.3 is a repair release, and almost all of it came from one person using v0.7
 
 ## Current direction
 
-The commitments engine above is built and reachable through the terminal, changing what the companion knows and therefore what it says, per spec Section 8: that is the entire intended surface this round. It has no CLI command and no HTTP route of its own; nothing is currently being designed or planned for the next round. See [BACKLOG.md](BACKLOG.md) for what is not started, including the commitments engine's own deferred pieces (the real one-ask/permanent-silence mechanism, event-anchored `waitsOn` reactivation, the browser Record-section view, recurring commitments, and the rest) and the retrieval and documentation gaps recorded from the 2026-08-25 review.
+The commitments engine above is built and reachable through the terminal, changing what the companion knows and therefore what it says, per spec Section 8: that is the entire intended surface this round. It has no CLI command and no HTTP route of its own. See [BACKLOG.md](BACKLOG.md) for what is not started, including the commitments engine's own deferred pieces (the real one-ask/permanent-silence mechanism, event-anchored `waitsOn` reactivation, the browser Record-section view, recurring commitments, and the rest) and the retrieval and documentation gaps recorded from the 2026-08-25 review.
+
+The round in progress is a pure refactor with no user-visible change, unreleased as of 2026-08-27:
+making the engine able to run on a machine that is not a machine. It comes from a change request
+by Reverie Cloud, a separate hosted product that runs this engine inside a Cloudflare Durable
+Object, one object per user. The design and the full list of items live in
+[docs/superpowers/specs/2026-08-27-hostable-engine-design.md](docs/superpowers/specs/2026-08-27-hostable-engine-design.md).
+
+What it does: filesystem access in `packages/memory` now goes through two injected interfaces, a
+`FileStore` for whole-file reads and atomic writes and an `AppendOnlyStore` for logs, both hanging
+off `MemoryPaths` so almost no function signature changed. `MemoryIndex` takes an injected
+`SqlDatabase` rather than reaching for `better-sqlite3` itself, and `MemoryEngine.fromPaths` lets
+an engine be built from stores and a database rather than from a root path. Embedding rows now
+record the model and dimensions that produced them, so a model change is detectable instead of
+silently mixing incomparable vectors. The provider interfaces report token usage. The HTTP layer
+split into a transport-agnostic core over Web-standard `Request` and a thin `node:http` adapter,
+with `createApp` unchanged for self-hosted.
+
+Two parts of it are worth having regardless of the hosted product. The engine no longer reads the
+ambient timezone or wall clock: both are injected, which is what this project's own agent rules
+have required of time-dependent tests since three timezone-dependent failures in one day on
+2026-08-25, and the ambient reads were the remaining hole. And an in-memory `FileStore` makes the
+suite hermetic, with no temp directories.
+
+What has not happened: none of this has been run on Cloudflare. The seams exist and are covered by
+tests, including an engine built with in-memory stores and an in-memory database that writes a
+document, indexes it, and searches it back with no filesystem involved. But no Durable Object has
+ever constructed one, and whether `gray-matter` and the rest bundle cleanly under `nodejs_compat`
+is an open question assigned to Reverie Cloud's first spike. Three modules in `packages/memory`
+still import `node:fs` directly (the dream lock, the `config.toml` migration, and git sync), each
+for a stated reason recorded in [BACKLOG.md](BACKLOG.md).
 
 ## How work happens here
 
