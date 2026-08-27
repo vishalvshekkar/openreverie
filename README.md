@@ -173,8 +173,12 @@ self-hosted user runs behaves differently. Filesystem access, the SQLite handle,
 the wall clock are all injected rather than reached for, the HTTP layer split into a
 transport-agnostic core with the `node:http` server as a thin adapter over it, and providers now
 report token usage. Two parts of it are improvements here regardless: the engine no longer guesses
-your timezone from the machine, and the test suite can run with no temp directories. This has not
-been run on any runtime other than Node. See [ROADMAP.md](ROADMAP.md) for the full account.
+your timezone from the machine, and the test suite can run with no temp directories. The hosted
+product that asked for it has since run the engine on a real Cloudflare Workers runtime and
+verified the change set against its own build; that found one defect nothing here could catch, an
+import that killed the isolate before any handler ran, now fixed. Nobody has run it from this
+repository on anything but Node, and this suite cannot run that runtime, so the integration test
+for it lives downstream. See [ROADMAP.md](ROADMAP.md) for the full account.
 
 The sections above describe the conversation modes, journal mode, the browser interface, and the atlas in full, including their caveats. What follows is the rest of the inventory.
 
@@ -212,7 +216,7 @@ What does not exist yet:
 - Dreaming does not write anything to the graph, by design for v1. It produces prose and a log entry, never a node or an edge, so nothing it finds becomes a graph fact on its own.
 - The dream insights prompt section shows the most recent insights, not the most relevant ones to the current conversation, also by design for v1. There is no relevance ranking yet.
 - No transcript-level attribution for dream feedback, no consolidation across dreams, no dream series, no way to ask for a dream about something specific, and feedback does not change what gets selected for future dreams. All are recorded as later work in [docs/dreaming.md](docs/dreaming.md).
-- Running on any runtime other than Node. The refactor described above removes the assumptions that stopped it (no ambient filesystem, no native SQLite binding, no `node:http`, no system clock or timezone), but nothing has actually been run on Bun, Deno, or an edge runtime, so this is a removed obstacle rather than a capability.
+- Supported running on a runtime other than Node. The refactor described above removes the assumptions that stopped it (no ambient filesystem, no native SQLite binding, no `node:http`, no system clock or timezone), and the memory engine and the HTTP core have now been run on Cloudflare Workers, though by the hosted product built on this rather than from here. Bun and Deno remain untried by anyone. Nothing in this repository's own suite exercises a non-Node runtime, so this is a removed obstacle and a downstream report, not a capability this project tests or supports.
 - Providers other than OpenAI
 - Any deployment target beyond running it yourself (no Cloudflare or VPS packaging)
 - A view of pending legacy proposals in the browser. An earlier build listed them; the three section rework dropped that panel. The engine already materializes and resolves any leftover proposals silently the moment it opens, so there is normally nothing left to show, but if your memory folder still holds some there is now no way to see them in the interface

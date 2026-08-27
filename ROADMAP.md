@@ -62,13 +62,26 @@ have required of time-dependent tests since three timezone-dependent failures in
 2026-08-25, and the ambient reads were the remaining hole. And an in-memory `FileStore` makes the
 suite hermetic, with no temp directories.
 
-What has not happened: none of this has been run on Cloudflare. The seams exist and are covered by
-tests, including an engine built with in-memory stores and an in-memory database that writes a
-document, indexes it, and searches it back with no filesystem involved. But no Durable Object has
-ever constructed one, and whether `gray-matter` and the rest bundle cleanly under `nodejs_compat`
-is an open question assigned to Reverie Cloud's first spike. Three modules in `packages/memory`
-still import `node:fs` directly (the dream lock, the `config.toml` migration, and git sync), each
-for a stated reason recorded in [BACKLOG.md](BACKLOG.md).
+It has since been run, though not here. Reverie Cloud verified the whole change set against its
+own build rather than accepting the report, and ran the parts only a real runtime can answer on
+real `workerd`. Three things that were open are now settled: the engine constructs and opens
+inside a Durable Object with no filesystem, `gray-matter` bundles and its YAML path executes there
+(it was flagged because its main entry references `fs` for a helper this codebase never calls), and
+bundle size is not close to a limit. That round also found one defect nothing here could have
+caught: `packages/server`'s barrel built a `createRequire` at module scope, and since
+`import.meta.url` is undefined in that kind of bundle, importing the package killed the isolate
+before any handler ran. It is now built on first use. See
+[docs/superpowers/specs/2026-08-27-hostable-engine-followup-design.md](docs/superpowers/specs/2026-08-27-hostable-engine-followup-design.md)
+for that round and its three smaller fixes.
+
+What still has not happened: none of this has been run from this repository, on any runtime. The
+suite here cannot run `workerd`, so nothing in it will catch that startup defect coming back; the
+guard we can afford is a test that importing the package root does not evaluate `createRequire`,
+and the real integration test lives downstream. Bun and Deno remain untried by anyone. Three
+modules in `packages/memory` still import `node:fs` directly (the dream lock, the `config.toml`
+migration, and git sync), each for a stated reason recorded in [BACKLOG.md](BACKLOG.md), as does
+`sqlite.ts`'s top-level `better-sqlite3` import, which is safe today only because that package
+defers loading its native binding until its constructor runs.
 
 ## How work happens here
 
