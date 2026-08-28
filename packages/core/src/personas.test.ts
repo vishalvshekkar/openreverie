@@ -3,7 +3,14 @@ import { describe, expect, it } from 'vitest'
 import { type CrisisResource, defaultCrisisResources, type StyleConfig } from './config.js'
 import { EXPRESSIVE_WRITING_SAFETY_GATE } from './journaling.js'
 import { MODE_NAMES, MODES, type ModeName, modeOverrides, modeParagraph } from './modes.js'
-import { buildPersona, DEFAULT_DEPLOYMENT_CONTEXT, type PersonaOptions } from './personas.js'
+import {
+  buildDreamPersona,
+  buildPersona,
+  DEFAULT_DEPLOYMENT_CONTEXT,
+  DEFAULT_FIRST_CONVERSATION_DEPLOYMENT_CLAUSE,
+  type PersonaOptions,
+  resolveFirstConversationDeploymentClause,
+} from './personas.js'
 
 const resources: CrisisResource[] = [
   { label: '988 Suicide and Crisis Lifeline (US)', contact: 'Call or text 988' },
@@ -934,5 +941,96 @@ Resources to give immediately, by name and contact:
       )
       expect(a).toBe(b)
     })
+  })
+})
+
+describe('resolveFirstConversationDeploymentClause', () => {
+  it('returns firstConversationDeploymentClause verbatim when supplied, including an empty string', () => {
+    expect(
+      resolveFirstConversationDeploymentClause({
+        firstConversationDeploymentClause: 'A hosted welcome clause, verbatim.',
+      }),
+    ).toBe('A hosted welcome clause, verbatim.')
+    expect(
+      resolveFirstConversationDeploymentClause({ firstConversationDeploymentClause: '' }),
+    ).toBe('')
+  })
+
+  it('falls back to the default clause when neither field is supplied', () => {
+    expect(resolveFirstConversationDeploymentClause({})).toBe(
+      DEFAULT_FIRST_CONVERSATION_DEPLOYMENT_CLAUSE,
+    )
+  })
+
+  // THE IMPORTANT ONE: a host that replaced deploymentContext (the
+  // identity block's claim) without also supplying a welcome clause has
+  // told us the default deployment claim is false. Falling back to the
+  // default clause here would speak that false claim anyway, in the
+  // opening sentences of someone's first ever conversation. This is the
+  // defect the whole change exists to fix, so it must fail closed: no
+  // clause at all, not the default and not the host's second-person
+  // deploymentContext string either.
+  it('fails closed to the empty string when deploymentContext is supplied but firstConversationDeploymentClause is not', () => {
+    expect(
+      resolveFirstConversationDeploymentClause({
+        deploymentContext: 'A second-person claim that must not leak into the welcome.',
+      }),
+    ).toBe('')
+  })
+
+  it('honours firstConversationDeploymentClause independently of deploymentContext when both are supplied', () => {
+    expect(
+      resolveFirstConversationDeploymentClause({
+        deploymentContext: 'A second-person identity-block claim.',
+        firstConversationDeploymentClause: 'A third-person welcome clause.',
+      }),
+    ).toBe('A third-person welcome clause.')
+  })
+})
+
+describe('buildDreamPersona', () => {
+  const dreamMatrix: Array<{
+    mode: 'companion' | 'firewall'
+    style: StyleConfig
+    resources: CrisisResource[]
+  }> = [
+    { mode: 'companion', style: defaultStyle, resources: defaultCrisisResources },
+    {
+      mode: 'firewall',
+      style: { engagement: 'leading', tone: 'snarky', orientation: 'solutions' },
+      resources: [],
+    },
+    {
+      mode: 'companion',
+      style: { engagement: 'following', tone: 'formal', orientation: 'balanced' },
+      resources,
+    },
+  ]
+
+  it.each(dreamMatrix)(
+    'equals buildPersona(mode, resources, style, "general", undefined, options) for $mode',
+    ({ mode, style, resources: crisisResources }) => {
+      const options: PersonaOptions = { deploymentContext: 'A dreaming host claim.' }
+      const dreamPersona = buildDreamPersona(mode, crisisResources, options)
+      expect(dreamPersona(style)).toBe(
+        buildPersona(mode, crisisResources, style, 'general', undefined, options),
+      )
+    },
+  )
+
+  it('with no options, is byte-identical to the old three-argument buildPersona(mode, resources, style) call', () => {
+    const dreamPersona = buildDreamPersona('companion', defaultCrisisResources)
+    expect(dreamPersona(defaultStyle)).toBe(
+      buildPersona('companion', defaultCrisisResources, defaultStyle),
+    )
+  })
+
+  it('threads a supplied deploymentContext into the produced persona text', () => {
+    const dreamPersona = buildDreamPersona('companion', defaultCrisisResources, {
+      deploymentContext: 'A dreaming host claim that must reach the identity block.',
+    })
+    const text = dreamPersona(defaultStyle)
+    expect(text).toContain('A dreaming host claim that must reach the identity block.')
+    expect(text).not.toContain(DEFAULT_DEPLOYMENT_CONTEXT)
   })
 })

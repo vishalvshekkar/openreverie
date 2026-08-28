@@ -45,9 +45,9 @@ import type { ReverieConfig } from './config.js'
 import type { ModeName } from './modes.js'
 import {
   buildPersona,
-  DEFAULT_DEPLOYMENT_CONTEXT,
+  DEFAULT_FIRST_CONVERSATION_DEPLOYMENT_CLAUSE,
   type PersonaOptions,
-  resolveDeploymentContext,
+  resolveFirstConversationDeploymentClause,
 } from './personas.js'
 
 export async function assembleSystemPrompt(
@@ -79,7 +79,7 @@ export async function assembleSystemPrompt(
       timeSection(context),
       profileSection(profile),
       firstConversationSection(
-        resolveDeploymentContext(personaOptions),
+        resolveFirstConversationDeploymentClause(personaOptions),
         personaOptions.firstConversation,
       ),
     ]
@@ -108,30 +108,33 @@ export async function assembleSystemPrompt(
   return sections.join('\n\n')
 }
 
-// The deployment claim inside the welcome sentence, substitutable the same
-// way whatReverieIs (personas.ts) substitutes it in the identity block.
-// Kept as its own clause, separate from DEFAULT_DEPLOYMENT_CONTEXT
-// (personas.ts), whose wording addresses the model in second person ("You
-// run entirely..."); this one describes reverie in third person, the way
-// the welcome instruction already did, so it can sit inside the same
-// sentence as "it remembers what they tell it" without becoming ungrammatical.
-function firstConversationOpeningClause(deploymentContext: string): string {
+// The resolved welcome clause (personas.ts's
+// resolveFirstConversationDeploymentClause), woven into the welcome
+// sentence. Takes the already-resolved clause, not a deploymentContext:
+// PersonaOptions.deploymentContext is second person ("You run entirely
+// on..."), correct for the identity block (personas.ts's whatReverieIs)
+// but wrong here, where the surrounding sentence is third person and
+// addressed to the model as an instruction about what to say. The
+// resolver picks the default, a host's clause, or nothing at all;
+// this function only has to join whatever it was handed onto "it
+// remembers...".
+function firstConversationOpeningClause(clause: string): string {
   const remembers = `it remembers what they tell it so future conversations start with real context instead of from scratch.`
-  if (deploymentContext === DEFAULT_DEPLOYMENT_CONTEXT) {
-    return `reverie is private and runs entirely on their own machine, and ${remembers}`
+  if (clause === DEFAULT_FIRST_CONVERSATION_DEPLOYMENT_CLAUSE) {
+    return `${clause}, and ${remembers}`
   }
-  if (deploymentContext === '') {
+  if (clause === '') {
     return `${remembers.charAt(0).toUpperCase()}${remembers.slice(1)}`
   }
-  return `${deploymentContext} ${remembers.charAt(0).toUpperCase()}${remembers.slice(1)}`
+  return `${clause} ${remembers.charAt(0).toUpperCase()}${remembers.slice(1)}`
 }
 
 // The welcome and onboarding script, host-overridable via
 // PersonaOptions.firstConversation. Not exported: firstConversationSection
 // below is the only caller, and it is the one that decides whether the
 // default or a host's override applies.
-function defaultFirstConversationOpening(deploymentContext: string): string {
-  return `This is the very first conversation in this memory. Open with a short, warm welcome, two or three sentences: ${firstConversationOpeningClause(deploymentContext)} Include one clause making clear you are not a therapist, just so that is said plainly from the start.
+function defaultFirstConversationOpening(clause: string): string {
+  return `This is the very first conversation in this memory. Open with a short, warm welcome, two or three sentences: ${firstConversationOpeningClause(clause)} Include one clause making clear you are not a therapist, just so that is said plainly from the start.
 
 Then get to know them gently, one question at a time, waiting for their answer before moving to the next: first their name and how they would like to be addressed (pronouns included), then where they live and their timezone, then one thing currently going on in their life, small or large, whatever comes to mind first. Do not stack these into one message. Ask, wait, listen, then ask the next.`
 }
@@ -152,11 +155,12 @@ const FIRST_CONVERSATION_GUARDRAIL = `The memory is empty right now: there is no
 // that, guide a short, warm, unhurried onboarding.
 //
 // firstConversation, when supplied, replaces the welcome and onboarding
-// text wholesale; deploymentContext then does no work, because the host
-// wrote that whole opening and owns whatever it claims. The empty-memory
-// guardrail is appended either way and is never the host's to replace.
-function firstConversationSection(deploymentContext: string, firstConversation?: string): string {
-  const opening = firstConversation ?? defaultFirstConversationOpening(deploymentContext)
+// text wholesale; the resolved deployment clause then does no work,
+// because the host wrote that whole opening and owns whatever it claims.
+// The empty-memory guardrail is appended either way and is never the
+// host's to replace.
+function firstConversationSection(deploymentClause: string, firstConversation?: string): string {
+  const opening = firstConversation ?? defaultFirstConversationOpening(deploymentClause)
   return `## First conversation
 
 ${opening}

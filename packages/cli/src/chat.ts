@@ -7,7 +7,7 @@
 import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { ReverieConfig } from '@openreverie/core'
-import { AgentSession, buildPersona, resolveDreamingModel, toolLabel } from '@openreverie/core'
+import { AgentSession, buildDreamPersona, resolveDreamingModel, toolLabel } from '@openreverie/core'
 import type { EngineDeps, MemoryEngine } from '@openreverie/memory'
 import {
   listDocuments,
@@ -580,7 +580,7 @@ export async function openCliContext(deps: CliEngineDeps): Promise<CliContextRes
       embeddingModel: config.models.embeddings,
       dreamingModel: resolveDreamingModel(config),
       dreaming,
-      dreamPersona: (style) => buildPersona(config.safety.mode, config.safety.resources, style),
+      dreamPersona: buildDreamPersona(config.safety.mode, config.safety.resources),
       // The CLI genuinely runs on the person's own machine, so the system
       // zone is the honest default here; see EngineDeps.timezone's own
       // comment for why the engine itself may never read it.

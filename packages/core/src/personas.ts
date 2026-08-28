@@ -20,13 +20,31 @@ export type PersonaMode = 'companion' | 'firewall'
 export interface PersonaOptions {
   // Replaces the deployment claim in the identity block. Defaults to
   // DEFAULT_DEPLOYMENT_CONTEXT. An empty string omits the claim entirely.
+  // Second person ("You run entirely on the user's own machine..."): the
+  // identity block speaks to the model about itself. Do not feed this
+  // value into the first-conversation welcome, whose surrounding sentence
+  // is third person; see firstConversationDeploymentClause below, which
+  // exists precisely because the two registers cannot share one field.
   deploymentContext?: string
+  // Replaces the deployment clause inside the first-conversation welcome
+  // sentence (see firstConversationOpeningClause in context.ts), the one
+  // that today reads "reverie is private and runs entirely on their own
+  // machine". Third person, one or two complete sentences ending in a
+  // period, sized to sit as a clause before "it remembers what they tell
+  // it..." in the welcome instruction. Defaults to
+  // DEFAULT_FIRST_CONVERSATION_DEPLOYMENT_CLAUSE, but only when
+  // deploymentContext is also unset; see resolveFirstConversationDeploymentClause
+  // for why. An empty string omits the clause entirely. When
+  // firstConversation is supplied, this field does no work either, same
+  // as deploymentContext: the host wrote the whole opening.
+  firstConversationDeploymentClause?: string
   // Replaces the welcome and onboarding guidance shown on the very first
   // conversation (see firstConversationSection in context.ts). The
   // empty-memory guardrail in that section is always composed by the
-  // engine and cannot be replaced this way. When this is supplied,
-  // deploymentContext does not apply to it: the host wrote the whole
-  // opening and owns whatever it claims about deployment.
+  // engine and cannot be replaced this way. When this is supplied, neither
+  // deploymentContext nor firstConversationDeploymentClause does any work
+  // for it: the host wrote the whole opening and owns whatever it claims
+  // about deployment.
   firstConversation?: string
 }
 
@@ -41,12 +59,45 @@ export const DEFAULT_DEPLOYMENT_CONTEXT = `You run entirely on the user's own ma
 const REVERIE_PURPOSE = `Your purpose is to help the person you are talking with think, remember, and notice patterns in their own life over time. You hold what they have told you across sessions: the people in their life, the threads they are working through, the things they have decided and the things still open. You are not a blank page every time they open you. You are not a therapist, a doctor, or a crisis service, and you never present yourself as one. You do not diagnose, and you do not prescribe treatment. If someone needs clinical care, say so plainly and point them toward it; the ongoing work of that care is not yours to do.`
 
 // PersonaOptions.deploymentContext, resolved: the host's override if one
-// was supplied, DEFAULT_DEPLOYMENT_CONTEXT otherwise. Exported so
-// context.ts can resolve the identical value for firstConversationSection
-// without duplicating the default-picking logic, and so the two stay in
-// sync by construction rather than by convention.
+// was supplied, DEFAULT_DEPLOYMENT_CONTEXT otherwise. This resolves the
+// identity block's claim and nothing else. The first-conversation welcome
+// used to share this value and no longer does: it has its own resolver
+// below, in its own grammatical register and with a different default
+// rule. Exported as part of the host-facing surface, alongside
+// DEFAULT_DEPLOYMENT_CONTEXT, so a host can see what an unset field
+// resolves to without reimplementing the choice.
 export function resolveDeploymentContext(options: PersonaOptions): string {
   return options.deploymentContext ?? DEFAULT_DEPLOYMENT_CONTEXT
+}
+
+// The default deployment clause for the first-conversation welcome
+// sentence (context.ts's firstConversationOpeningClause). Third person,
+// unlike DEFAULT_DEPLOYMENT_CONTEXT above, so it reads naturally inside a
+// sentence about what reverie is going to do next rather than an
+// instruction addressed to the model. This exact text, without a trailing
+// ", and", is what today's byte-identical welcome sentence is built from;
+// firstConversationOpeningClause supplies the joining "and" itself.
+export const DEFAULT_FIRST_CONVERSATION_DEPLOYMENT_CLAUSE = `reverie is private and runs entirely on their own machine`
+
+// Resolves PersonaOptions.firstConversationDeploymentClause the same way
+// resolveDeploymentContext resolves deploymentContext, except the default
+// case is conditional rather than unconditional. That conditionality is
+// the whole point of this function, not an edge case of it: a host that
+// replaced deploymentContext (the identity block's claim about where the
+// software runs) without also supplying a welcome clause has told us the
+// default deployment claim is false. Falling back to
+// DEFAULT_FIRST_CONVERSATION_DEPLOYMENT_CLAUSE in that situation would
+// speak that false claim anyway, in the opening sentences of someone's
+// first ever conversation. So the third case fails closed: no clause at
+// all, rather than a default that contradicts what the host just told us.
+export function resolveFirstConversationDeploymentClause(options: PersonaOptions): string {
+  if (options.firstConversationDeploymentClause !== undefined) {
+    return options.firstConversationDeploymentClause
+  }
+  if (options.deploymentContext === undefined) {
+    return DEFAULT_FIRST_CONVERSATION_DEPLOYMENT_CLAUSE
+  }
+  return ''
 }
 
 // The identity sentence is unconditional; the deployment claim after it is
@@ -219,4 +270,25 @@ export function buildPersona(
     crisisSection(mode, resources),
   ].filter((section): section is string => section !== undefined)
   return sections.join('\n\n')
+}
+
+// Builds the persona function EngineDeps.dreamPersona expects
+// (packages/memory/src/engine.ts). Dreaming always renders the
+// general-mode persona regardless of the person's live chat mode: that
+// was already true at both existing call sites (packages/server/src/launch.ts
+// and packages/cli/src/chat.ts) before this factory existed, and is now
+// stated once here instead of duplicated at each one.
+//
+// This exists so a host that opens MemoryEngine directly, without going
+// through the cli or server launchers (a Cloudflare Durable Object, for
+// instance), gets its PersonaOptions into dream runs without hand-writing
+// the closure itself. packages/memory sits below packages/core in the
+// dependency order and cannot import buildPersona, so the engine cannot
+// compose this on its own; the host must build it here and pass it in.
+export function buildDreamPersona(
+  mode: PersonaMode,
+  resources: CrisisResource[],
+  options: PersonaOptions = {},
+): (style: StyleConfig) => string {
+  return (style) => buildPersona(mode, resources, style, 'general', undefined, options)
 }

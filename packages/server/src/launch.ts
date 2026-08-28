@@ -1,6 +1,6 @@
 import type { RequestListener, Server } from 'node:http'
 import {
-  buildPersona,
+  buildDreamPersona,
   type PersonaOptions,
   type ReverieConfig,
   resolveDreamingModel,
@@ -131,15 +131,7 @@ export function createServerLauncher(deps: ServerLaunchDeps) {
         embeddingModel: config.models.embeddings,
         dreamingModel: resolveDreamingModel(config),
         dreaming: config.dreaming,
-        dreamPersona: (style) =>
-          buildPersona(
-            config.safety.mode,
-            config.safety.resources,
-            style,
-            undefined,
-            undefined,
-            persona,
-          ),
+        dreamPersona: buildDreamPersona(config.safety.mode, config.safety.resources, persona),
         // node:http's server genuinely runs on the person's own machine
         // (or a self-hosted box they control), so the system zone is the
         // honest default here. A host with no ambient zone (a Cloudflare

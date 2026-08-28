@@ -1898,10 +1898,20 @@ The memory is empty right now: there is nothing to search, nothing to retrieve, 
       await engine.close()
     })
 
-    describe('deploymentContext reaches the first-conversation welcome specifically', () => {
+    describe('deploymentContext no longer reaches the first-conversation welcome', () => {
       const HOST_TEXT = `This runs on Example Hosting's infrastructure. Nothing you say trains a model; it is used only to generate this reply.`
 
-      it('a host-supplied deploymentContext appears in the First conversation section, and the default wording does not', async () => {
+      // THE IMPORTANT ONE: a host that replaced deploymentContext (the
+      // identity block's second-person claim) without also supplying
+      // firstConversationDeploymentClause has told us the default
+      // deployment claim is false. The welcome must carry neither the
+      // default claim ("reverie is private...") nor the host's
+      // second-person deploymentContext string: the former would be a lie
+      // the host just corrected, and the latter would be grammatically
+      // wrong there (second person spliced into a third-person
+      // instruction). It fails closed to no claim at all in the welcome,
+      // while the identity block still carries the host's text.
+      it('a host-supplied deploymentContext with no firstConversationDeploymentClause reaches the identity block but omits any deployment claim from the welcome', async () => {
         const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
         const options: PersonaOptions = { deploymentContext: HOST_TEXT }
         const prompt = await assembleSystemPrompt(
@@ -1913,19 +1923,23 @@ The memory is empty right now: there is nothing to search, nothing to retrieve, 
         )
 
         const firstConversation = prompt.slice(prompt.indexOf('## First conversation'))
-        expect(firstConversation).toContain(HOST_TEXT)
+        expect(firstConversation).not.toContain(HOST_TEXT)
         expect(firstConversation).not.toContain(
           'reverie is private and runs entirely on their own machine',
         )
-        // The identity block (personas.ts) is also overridden by the same
-        // option, on the same call: this is the fix for both places the
-        // original report named, exercised together in one prompt.
+        expect(firstConversation).toContain(
+          'Open with a short, warm welcome, two or three sentences: It remembers what they tell it so future conversations start with real context instead of from scratch. Include one clause',
+        )
+        // The identity block (personas.ts) is still overridden by the same
+        // option, on the same call: deploymentContext keeps doing its
+        // original job there, just not in the welcome any more.
+        expect(prompt).toContain(HOST_TEXT)
         expect(prompt).not.toContain(DEFAULT_DEPLOYMENT_CONTEXT)
 
         await engine.close()
       })
 
-      it('an empty deploymentContext omits the claim cleanly in the welcome sentence: no double space, no orphan punctuation, no dangling conjunction', async () => {
+      it('an empty deploymentContext also omits the claim cleanly in the welcome sentence: no double space, no orphan punctuation, no dangling conjunction', async () => {
         const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
         const options: PersonaOptions = { deploymentContext: '' }
         const prompt = await assembleSystemPrompt(
@@ -1946,6 +1960,124 @@ The memory is empty right now: there is nothing to search, nothing to retrieve, 
         expect(firstConversation).not.toContain('reverie is private')
 
         await engine.close()
+      })
+    })
+
+    describe('PersonaOptions.firstConversationDeploymentClause', () => {
+      const HOST_CLAUSE = `this instance runs entirely inside Example Hosting's own infrastructure`
+
+      it('renders in the welcome, joined to a capitalised "It remembers..." sentence', async () => {
+        const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+        const options: PersonaOptions = { firstConversationDeploymentClause: HOST_CLAUSE }
+        const prompt = await assembleSystemPrompt(
+          engine,
+          testConfig(),
+          'general',
+          () => new Date(),
+          options,
+        )
+
+        const firstConversation = prompt.slice(prompt.indexOf('## First conversation'))
+        expect(firstConversation).toContain(
+          `Open with a short, warm welcome, two or three sentences: ${HOST_CLAUSE} It remembers what they tell it so future conversations start with real context instead of from scratch. Include one clause`,
+        )
+
+        await engine.close()
+      })
+
+      it('an empty firstConversationDeploymentClause omits the clause cleanly: no double space, no orphan punctuation, no dangling conjunction', async () => {
+        const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+        const options: PersonaOptions = { firstConversationDeploymentClause: '' }
+        const prompt = await assembleSystemPrompt(
+          engine,
+          testConfig(),
+          'general',
+          () => new Date(),
+          options,
+        )
+
+        const firstConversation = prompt.slice(prompt.indexOf('## First conversation'))
+        expect(firstConversation).toContain(
+          'Open with a short, warm welcome, two or three sentences: It remembers what they tell it so future conversations start with real context instead of from scratch. Include one clause',
+        )
+        expect(firstConversation).not.toContain('  ')
+        expect(firstConversation).not.toContain(' .')
+        expect(firstConversation).not.toContain(' ,')
+        expect(firstConversation).not.toContain('reverie is private')
+
+        await engine.close()
+      })
+
+      it('is independent of deploymentContext: setting the clause alone still keeps the default identity claim in the identity block', async () => {
+        const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+        const options: PersonaOptions = { firstConversationDeploymentClause: HOST_CLAUSE }
+        const prompt = await assembleSystemPrompt(
+          engine,
+          testConfig(),
+          'general',
+          () => new Date(),
+          options,
+        )
+
+        const firstConversation = prompt.slice(prompt.indexOf('## First conversation'))
+        expect(firstConversation).toContain(HOST_CLAUSE)
+        const identityBlock = prompt.slice(0, prompt.indexOf('## First conversation'))
+        expect(identityBlock).toContain(DEFAULT_DEPLOYMENT_CONTEXT)
+
+        await engine.close()
+      })
+
+      it('does no work once firstConversation is supplied: the clause is not spliced into the host text', async () => {
+        const engine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+        const HOST_FIRST_CONVERSATION_TEXT = `Welcome them warmly in one sentence and ask only for a name to call them by.`
+        const options: PersonaOptions = {
+          firstConversation: HOST_FIRST_CONVERSATION_TEXT,
+          firstConversationDeploymentClause: HOST_CLAUSE,
+        }
+        const prompt = await assembleSystemPrompt(
+          engine,
+          testConfig(),
+          'general',
+          () => new Date(),
+          options,
+        )
+
+        const firstConversation = prompt.slice(prompt.indexOf('## First conversation'))
+        expect(firstConversation).toContain(HOST_FIRST_CONVERSATION_TEXT)
+        expect(firstConversation).not.toContain(HOST_CLAUSE)
+
+        await engine.close()
+      })
+
+      it('still appends the engine-composed empty-memory guardrail, identical to the default case', async () => {
+        const defaultEngine = await MemoryEngine.open(dir, fakeDeps(new FakeChatProvider([])))
+        const defaultPrompt = await assembleSystemPrompt(defaultEngine, testConfig())
+        await defaultEngine.close()
+
+        const dir2 = await mkdtemp(join(tmpdir(), 'openreverie-context-'))
+        try {
+          const paths2 = memoryPaths(dir2, nodeStores())
+          await ensureMemoryTree(paths2, 'UTC')
+          const engine = await MemoryEngine.open(dir2, fakeDeps(new FakeChatProvider([])))
+          const options: PersonaOptions = { firstConversationDeploymentClause: HOST_CLAUSE }
+          const prompt = await assembleSystemPrompt(
+            engine,
+            testConfig(),
+            'general',
+            () => new Date(),
+            options,
+          )
+
+          const guardrailMarker = 'The memory is empty right now'
+          const defaultGuardrail = defaultPrompt.slice(defaultPrompt.indexOf(guardrailMarker))
+          const overriddenGuardrail = prompt.slice(prompt.indexOf(guardrailMarker))
+          expect(overriddenGuardrail).toBe(defaultGuardrail)
+          expect(prompt).toContain('outranks the engagement setting')
+
+          await engine.close()
+        } finally {
+          await rm(dir2, { recursive: true, force: true })
+        }
       })
     })
 
