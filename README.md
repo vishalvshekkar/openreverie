@@ -175,10 +175,13 @@ transport-agnostic core with the `node:http` server as a thin adapter over it, a
 report token usage. Two parts of it are improvements here regardless: the engine no longer guesses
 your timezone from the machine, and the test suite can run with no temp directories. The hosted
 product that asked for it has since run the engine on a real Cloudflare Workers runtime and
-verified the change set against its own build; that found one defect nothing here could catch, an
-import that killed the isolate before any handler ran, now fixed. Nobody has run it from this
-repository on anything but Node, and this suite cannot run that runtime, so the integration test
-for it lives downstream. See [ROADMAP.md](ROADMAP.md) for the full account.
+verified the change set against its own build; that found an import that killed the isolate before
+any handler ran, then a canonical-origin validator that admitted only the loopback address. Both
+are fixed. The shared Fetch app now requires each host to choose whether authenticated native
+clients may omit `Origin`, while the self-hosted Node adapter keeps its existing browser-only
+requirement. Nobody has run it from this repository on anything but Node, and this suite cannot
+run that runtime, so the integration test for it lives downstream. See [ROADMAP.md](ROADMAP.md) for
+the full account.
 
 The sections above describe the conversation modes, journal mode, the browser interface, and the atlas in full, including their caveats. What follows is the rest of the inventory.
 

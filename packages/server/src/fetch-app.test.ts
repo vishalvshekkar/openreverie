@@ -90,13 +90,29 @@ function buildApp(deps: Partial<FetchAppDeps> = {}): (request: Request) => Promi
   // predate the opt-in gate, keep exercising the route they always did.
   // The 'bootstrap route is opt-in' describe block below overrides this
   // back to undefined to test the gate itself.
-  return createFetchApp({ engine: stubEngine(), auth, origin, hash, bootstrap: auth, ...deps })
+  return createFetchApp({
+    engine: stubEngine(),
+    auth,
+    origin,
+    hash,
+    bootstrap: auth,
+    writeOriginPolicy: 'allow-missing',
+    ...deps,
+  })
 }
 
 function authedGet(path: string, extraHeaders: Record<string, string> = {}): Request {
   return new Request(`${origin}${path}`, {
     method: 'GET',
     headers: { host, cookie: validCookie, ...extraHeaders },
+  })
+}
+
+function authedProfilePatch(extraHeaders: Record<string, string> = {}): Request {
+  return new Request(`${origin}/api/v1/profile`, {
+    method: 'PATCH',
+    headers: { host, cookie: validCookie, 'content-type': 'application/json', ...extraHeaders },
+    body: JSON.stringify({ preferredName: 'Vish' }),
   })
 }
 
@@ -109,6 +125,39 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
 }
 
 describe('createFetchApp', () => {
+  it.each([
+    ['https://example.com', 'example.com'],
+    ['http://localhost:3000', 'localhost:3000'],
+  ])(
+    'serves a matching public host for canonical origin %s',
+    async (canonicalOrigin, canonicalHost) => {
+      const app = buildApp({ origin: canonicalOrigin })
+      const response = await app(
+        new Request(`${canonicalOrigin}/api/v1/profile`, {
+          headers: { host: canonicalHost, cookie: validCookie },
+        }),
+      )
+
+      expect(response.status).toBe(200)
+    },
+  )
+
+  it.each([
+    'not-an-absolute-url',
+    'https://example.com/has-a-path',
+    'https://example.com/.',
+    'https://example.com/a/..',
+    'https://example.com/%2e',
+    'https://user:password@example.com',
+    'https://example.com?query=value',
+    'https://example.com?',
+    'https://example.com#fragment',
+    'https://example.com#',
+    'ftp://example.com',
+  ])('rejects canonical origin that is not an origin only: %s', (canonicalOrigin) => {
+    expect(() => buildApp({ origin: canonicalOrigin })).toThrow('canonicalOrigin must be an origin')
+  })
+
   it('answers a JSON route with the same envelope shape the node adapter produces', async () => {
     const app = buildApp()
     const response = await app(authedGet('/api/v1/profile'))
@@ -128,6 +177,26 @@ describe('createFetchApp', () => {
       code: 'not_found',
       message: 'The requested resource was not found.',
     })
+  })
+
+  it('allows an authenticated write without an Origin header', async () => {
+    const response = await buildApp()(authedProfilePatch())
+
+    expect(response.status).toBe(200)
+  })
+
+  it('rejects an authenticated write with a foreign Origin header', async () => {
+    const response = await buildApp()(authedProfilePatch({ origin: 'https://example.com' }))
+
+    expect(response.status).toBe(403)
+    expect(await response.json()).toMatchObject({ code: 'origin_forbidden' })
+  })
+
+  it('rejects an authenticated write with an empty Origin header', async () => {
+    const response = await buildApp()(authedProfilePatch({ origin: '' }))
+
+    expect(response.status).toBe(403)
+    expect(await response.json()).toMatchObject({ code: 'origin_forbidden' })
   })
 
   it('serves a 304 with a null body when if-none-match matches the graph snapshot etag', async () => {
@@ -305,7 +374,14 @@ describe('bootstrap route is opt-in', () => {
   }
 
   it('mounts the route and issues a cookie exactly as before when a bootstrap dep is supplied', async () => {
-    const app = createFetchApp({ engine: stubEngine(), auth, origin, hash, bootstrap: auth })
+    const app = createFetchApp({
+      engine: stubEngine(),
+      auth,
+      origin,
+      hash,
+      bootstrap: auth,
+      writeOriginPolicy: 'required',
+    })
     const response = await app(bootstrapRequest())
     expect(response.status).toBe(200)
     expect(response.headers.get('set-cookie')).toContain('reverie_session=issued-session')
@@ -314,7 +390,13 @@ describe('bootstrap route is opt-in', () => {
   })
 
   it('without a bootstrap dep, an unauthenticated caller gets the same 401 as any other unauthenticated write, not a route-specific error', async () => {
-    const app = createFetchApp({ engine: stubEngine(), auth, origin, hash })
+    const app = createFetchApp({
+      engine: stubEngine(),
+      auth,
+      origin,
+      hash,
+      writeOriginPolicy: 'required',
+    })
     const response = await app(bootstrapRequest())
     const control = await app(noSuchRouteRequest())
     expect(response.status).toBe(401)
@@ -324,7 +406,13 @@ describe('bootstrap route is opt-in', () => {
   })
 
   it('without a bootstrap dep, an authenticated caller gets the same 404 a genuinely unknown route gets, not an auth error that happens to look similar', async () => {
-    const app = createFetchApp({ engine: stubEngine(), auth, origin, hash })
+    const app = createFetchApp({
+      engine: stubEngine(),
+      auth,
+      origin,
+      hash,
+      writeOriginPolicy: 'required',
+    })
     const authedHeaders = { cookie: validCookie, origin }
     const response = await app(bootstrapRequest(authedHeaders))
     const control = await app(noSuchRouteRequest(authedHeaders))
@@ -395,7 +483,13 @@ describe("dream feedback verdicts are read through the engine's own memory paths
       },
     ])
 
-    const app = createFetchApp({ engine: dreamEngine(paths), auth, origin, hash })
+    const app = createFetchApp({
+      engine: dreamEngine(paths),
+      auth,
+      origin,
+      hash,
+      writeOriginPolicy: 'required',
+    })
     const response = await app(authedGet('/api/v1/dreams/dream_full'))
     expect(response.status).toBe(200)
     const body = (await response.json()) as {
@@ -435,12 +529,14 @@ describe("dream feedback verdicts are read through the engine's own memory paths
       auth,
       origin,
       hash,
+      writeOriginPolicy: 'required',
     })
     const appWithoutVerdict = createFetchApp({
       engine: dreamEngine(pathsWithoutVerdict),
       auth,
       origin,
       hash,
+      writeOriginPolicy: 'required',
     })
 
     const withVerdict = await appWithVerdict(authedGet('/api/v1/dreams/dream_full'))

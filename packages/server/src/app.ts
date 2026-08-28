@@ -60,6 +60,11 @@ export function createApp(deps: CreateAppDeps): RequestListener {
     engine: deps.engine,
     auth: deps.auth,
     canonical,
+    // Browsers are the only supported client of the self-hosted Node
+    // adapter today, so preserve its existing requirement. A Web-standard
+    // host must choose its policy explicitly when it constructs
+    // createFetchApp.
+    writeOriginPolicy: 'required',
     proposalResolutionLocks,
     registry: deps.registry,
     config: deps.config,

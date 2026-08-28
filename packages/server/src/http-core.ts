@@ -276,6 +276,7 @@ interface HandleDeps {
   engine: RecordEngine
   auth: BootstrapAuth
   canonical: CanonicalOrigin
+  writeOriginPolicy: 'required' | 'allow-missing'
   proposalResolutionLocks: Map<string, Promise<void>>
   registry: LiveSessionRegistry | undefined
   config: ReverieConfig | undefined
@@ -308,6 +309,7 @@ export async function handle(
     engine,
     auth,
     canonical,
+    writeOriginPolicy,
     proposalResolutionLocks,
     registry,
     config,
@@ -349,7 +351,7 @@ export async function handle(
   if (method === 'GET' || method === 'HEAD') {
     requireAuthenticatedRead(request, auth, canonical)
   } else {
-    requireAuthenticatedWrite(request, auth, canonical)
+    requireAuthenticatedWrite(request, auth, canonical, writeOriginPolicy)
   }
 
   if (method === 'GET' && path.length === 4 && path[2] === 'graph' && path[3] === 'snapshot') {
@@ -1098,14 +1100,19 @@ async function serializeProposalResolution<T>(
 }
 
 function parseCanonicalOrigin(origin: string): CanonicalOrigin {
-  const url = new URL(origin)
+  let url: URL
+  try {
+    url = new URL(origin)
+  } catch {
+    throw new Error('canonicalOrigin must be an origin only')
+  }
   if (
-    url.protocol !== 'http:' ||
-    url.hostname !== '127.0.0.1' ||
-    !url.port ||
-    url.pathname !== '/'
+    (url.protocol !== 'http:' && url.protocol !== 'https:') ||
+    url.username ||
+    url.password ||
+    !/^https?:\/\/[^/?#]+\/?$/i.test(origin)
   ) {
-    throw new Error('canonicalOrigin must be an http origin with an explicit port')
+    throw new Error('canonicalOrigin must be an origin only')
   }
   return { origin: url.origin, host: url.host }
 }
@@ -1185,9 +1192,14 @@ function requireAuthenticatedWrite(
   request: Request,
   auth: BootstrapAuth,
   canonical: CanonicalOrigin,
+  originPolicy: HandleDeps['writeOriginPolicy'],
 ): void {
   requireAuthenticatedRead(request, auth, canonical)
-  if (request.headers.get('origin') !== canonical.origin) {
+  const origin = request.headers.get('origin')
+  if (
+    (originPolicy === 'required' && origin === null) ||
+    (origin !== null && origin !== canonical.origin)
+  ) {
     throw new ApiError(403, 'origin_forbidden', 'Request origin is not allowed.')
   }
 }
@@ -1553,6 +1565,7 @@ export interface FetchAppDeps {
   config?: ReverieConfig
   canonicalOrigin?: string
   origin?: string
+  writeOriginPolicy: HandleDeps['writeOriginPolicy']
   registry?: LiveSessionRegistry
   hash: HashProvider
   serveStatic?: (sink: ResponseSink, pathname: string) => Promise<void>
@@ -1566,6 +1579,7 @@ export function createFetchApp(deps: FetchAppDeps): (request: Request) => Promis
     engine: deps.engine,
     auth: deps.auth,
     canonical,
+    writeOriginPolicy: deps.writeOriginPolicy,
     proposalResolutionLocks,
     registry: deps.registry,
     config: deps.config,

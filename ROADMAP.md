@@ -74,6 +74,13 @@ before any handler ran. It is now built on first use. See
 [docs/superpowers/specs/2026-08-27-hostable-engine-followup-design.md](docs/superpowers/specs/2026-08-27-hostable-engine-followup-design.md)
 for that round and its three smaller fixes.
 
+A later integration pass found that the shared server still treated its public canonical origin
+as the loopback address it binds to. It now accepts origin-only HTTP and HTTPS URLs for public
+hosts, including standard ports, while rejecting paths, credentials, queries, and fragments. A
+Fetch host must also choose whether authenticated writes may omit `Origin`; the Node adapter keeps
+requiring it, so self-hosted behavior is unchanged. The decision and its limits are recorded in
+[docs/superpowers/specs/2026-08-27-hostable-engine-canonical-origin-design.md](docs/superpowers/specs/2026-08-27-hostable-engine-canonical-origin-design.md).
+
 What still has not happened: none of this has been run from this repository, on any runtime. The
 suite here cannot run `workerd`, so nothing in it will catch that startup defect coming back; the
 guard we can afford is a test that importing the package root does not evaluate `createRequire`,
