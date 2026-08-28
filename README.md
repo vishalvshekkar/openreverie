@@ -181,19 +181,42 @@ repository still cannot run the Workers runtime, so that integration test remain
 [docs/releases/v0.8.0.md](docs/releases/v0.8.0.md) and [ROADMAP.md](ROADMAP.md) for the full
 account.
 
-A further round on top of v0.8.0 lets a host supply two pieces of the system prompt instead of
-both being hardcoded prose asserting the software runs on the person's own machine: the deployment
-claim in the identity block, and the welcome and onboarding script shown on someone's first
-conversation. An empty string for the deployment claim omits it entirely rather than leaving it
-behind as stray punctuation. Nothing else in the prompt is host-configurable yet; a general
-named-block override API over the rest of the prompt, and over tool descriptions, is not built, and
-is tracked under "A host-configurable prompt and tool-description surface" in
-[BACKLOG.md](BACKLOG.md). The empty-memory guardrail inside the first-conversation section stays
-engine-composed either way, because it is a true statement about engine state on a first
-conversation, not a preference a host could reasonably override. Self-hosted output is unaffected:
-`buildPersona` and `assembleSystemPrompt` produce the exact same text as before this round when a
-host supplies nothing. See `packages/core/src/personas.ts` (`PersonaOptions`,
-`DEFAULT_DEPLOYMENT_CONTEXT`) and `packages/core/src/context.ts` (`firstConversationSection`).
+A further round on top of v0.8.0 lets a host supply three pieces of the system prompt instead of
+all of it being hardcoded prose asserting the software runs on the person's own machine.
+`deploymentContext`, second person and paragraph length, replaces the deployment claim inside the
+identity block. `firstConversationDeploymentClause`, third person and clause length, replaces the
+matching deployment clause inside the welcome sentence shown on someone's first conversation.
+`firstConversation` replaces that whole welcome and onboarding script. The first two are separate
+fields because one register never worked in both places: second person reads correctly in the
+identity block and reads as a mid-sentence pronoun switch in the welcome, third person is the
+reverse, and the identity block wants a paragraph where the welcome wants a clause. Resolving
+`firstConversationDeploymentClause` fails closed: an explicitly supplied clause always wins,
+including an empty string; the stock default clause applies only when `deploymentContext` is also
+left unset; otherwise the welcome carries no deployment claim at all, because a host that replaced
+`deploymentContext` has told the software the stock claim is false, and repeating it in the welcome
+would be worse than saying nothing there. An empty string for either deployment field omits it
+entirely rather than leaving stray punctuation behind. `buildDreamPersona(mode, resources, options)`
+in `packages/core/src/personas.ts` gives a host that opens `MemoryEngine` directly, rather than
+through the CLI or server launcher, a one-line way to get its `PersonaOptions` into dream runs too.
+Nothing else in the prompt is host-configurable yet, and two gaps in what shipped this round are
+still open, both tracked in [BACKLOG.md](BACKLOG.md): nothing enforces the length of a
+host-supplied field (under "A host-configurable prompt and tool-description surface"), and a host
+that omits `dreamPersona` entirely, or builds one some other way than `buildDreamPersona`, still
+gets an empty system prompt for every dream stage (under "Known defects and gaps"). The general
+named-block override API over the rest of the prompt and over tool descriptions is also tracked
+under "A host-configurable prompt and tool-description surface" in BACKLOG.md. The empty-memory
+guardrail inside the first-conversation section stays engine-composed either way, because it is a
+true statement about engine state on a first conversation, not a preference a host could reasonably
+override. Self-hosted output is unchanged with one deliberate exception, and this is the exception:
+the precedence sentence, which ranks the crisis stance above everything else in the prompt, was
+reworded to rank the blocks by the role they play rather than by naming the stock structures, so it
+still means something once a host replaces one of those structures. That reword changed default
+output for every deployment, self-hosted included, and it was signed off by a human before it was
+written because of what it ranks. Apart from that sentence, `buildPersona` and
+`assembleSystemPrompt` produce the exact same text as before this round when a host supplies
+nothing. See `packages/core/src/personas.ts`
+(`PersonaOptions`, `DEFAULT_DEPLOYMENT_CONTEXT`, `DEFAULT_FIRST_CONVERSATION_DEPLOYMENT_CLAUSE`,
+`buildDreamPersona`) and `packages/core/src/context.ts` (`firstConversationSection`).
 
 The sections above describe the conversation modes, journal mode, the browser interface, and the atlas in full, including their caveats. What follows is the rest of the inventory.
 

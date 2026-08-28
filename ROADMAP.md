@@ -123,6 +123,46 @@ for the full review and our positions on each part, and [BACKLOG.md](BACKLOG.md)
 host-configurable prompt and tool-description surface" for everything from that request not built
 this round.
 
+A follow-up round on the same branch split the deployment claim into two fields instead of one.
+Reverie Cloud's own copy review rendered a real hosted privacy string through both the identity
+block and the welcome sentence, rather than reasoning about it, and found neither register worked
+in both places: second person reads correctly in the identity block and reads as a mid-paragraph
+pronoun switch in the welcome, and third person is the reverse. A second, independent problem made
+one field worse than the register mismatch alone: the identity block wants a paragraph and the
+welcome instruction asks for a clause of two or three sentences, so any host string honest enough to
+state a real deployment stance overflows the welcome's own budget before the model reads a word of
+it. `PersonaOptions` now carries a third field, `firstConversationDeploymentClause`: third person,
+clause length, sitting alongside `deploymentContext`, which stays second person and paragraph
+length. `resolveFirstConversationDeploymentClause` in `packages/core/src/personas.ts` fails closed:
+an explicitly supplied clause always wins, including an empty string; the stock default clause
+applies only when `deploymentContext` is also unset; otherwise the welcome carries no deployment
+claim at all. The reasoning: a host that replaced `deploymentContext` has told us the stock claim is
+false, so falling back to the stock welcome clause anyway would speak that false claim in the
+opening sentences of someone's first conversation. Nothing yet enforces the length of either field,
+so a host could still put a paragraph in the clause slot; that gap is recorded in `BACKLOG.md` and
+scoped to land with the prompt's budget work rather than as a one-off patch on this field.
+
+The same round added `buildDreamPersona` to `packages/core/src/personas.ts`, so a host that opens
+`MemoryEngine` directly, without going through the CLI or server launcher, gets a `PersonaOptions`
+into dream runs in one line instead of hand-writing the closure itself; `packages/server/src/launch.ts`
+and `packages/cli/src/chat.ts` both call it now. This does not close the standing dream hazard.
+`EngineDeps.dreamPersona` is still optional, and a host that omits it, or builds a persona some
+other way, still gets an empty system prompt for all four dream stages through the untouched `?? ''`
+fallback at `packages/memory/src/engine.ts:3173`. Composing the crisis stance in the engine itself on
+the dream path, rather than trusting it to arrive inside a host-supplied string, also remains
+unbuilt. Both stay open in `BACKLOG.md`; neither is fixed by this round.
+
+Separately, `PRECEDENCE_SENTENCE` was reworded from ranking the prompt's blocks by their stock
+structure to ranking them by role: the crisis stance first, then any first-conversation guidance,
+then the rule about how to speak when the topic is personal, then the section it appears in, then
+standing preferences, naming
+no block identities or axes so the ordering survives a replaced block. This is the one place in the
+whole host-configurable-prompt line of work where default output was allowed to change; everywhere
+else the rule stays byte identity, no exceptions. It shipped alone, as its own commit, with the
+exact replacement wording proposed in writing and signed off by Vishal in advance, because the
+sentence ranks how crisis behavior outranks everything else, and both this project's and Reverie
+Cloud's `AGENTS.md` require explicit human sign-off before that kind of text changes.
+
 ## How work happens here
 
 This project is built with heavy use of AI coding agents under human direction, with per-task adversarial review. The bar for merged code is the same regardless of who or what wrote it: understood, tested, and honest. If you pick something up, open an issue first so nobody duplicates effort.
