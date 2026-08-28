@@ -356,6 +356,125 @@ item ships, remove it from here and record it in `ROADMAP.md`'s Done narrative.
   - Size: small (mirror `complete()`'s retry-and-warn logic; `ChatEvent` has no warnings-carrying
     variant yet, so that shape needs deciding too).
 
+- **`dreamPersona` falls back to an empty system prompt when a host omits it.**
+  `packages/memory/src/engine.ts:3173`: `const persona = this.deps.dreamPersona?.(this.currentStyle()) ?? ''`.
+  A host opening `MemoryEngine` directly and omitting the dependency gets an empty system prompt for
+  all four dream stages (exploration, insights, narrative, tone gate): no identity, no memory
+  orientation, no voice rule, no crisis stance.
+  - Why deferred: not a scoping decision, found and recorded during the Reverie Cloud round-two
+    review. In our own words: "the sibling hook `dreamingModel` is enforced with a loud, specific
+    error... `dreamPersona` gets no equivalent guard, and degrades silently instead... This is a
+    live hazard for you specifically... you are one forgotten dependency away from four unguarded
+    model calls per dream, on a mental wellbeing product." Also noted: `dreamPersona` is typed
+    `(style: StyleConfig) => string` with no content validation (`engine.ts:324`), so a host can
+    already omit the crisis stance from dreaming today, not only by omitting the hook but by
+    supplying a persona that does not include it. Composing the crisis stance in the engine itself
+    on the dream path, rather than trusting it to arrive inside a host-supplied string, is "a design
+    round, not a patch, because `memory` sits below `core` and cannot import `buildPersona`."
+  - Where: `packages/memory/src/engine.ts:3173` (the fallback) and `:324` (the hook's type);
+    `docs/specs/2026-08-28-reverie-cloud-round-two-reply.md`, section 1 ("Two places where you are
+    wrong"), "1.2 Part B2 closes the front door while the back door is open".
+  - Trigger: not stated.
+  - Size: small for the fail-loud fix (mirror `dreamingModel`'s guard); medium for engine-composed
+    dream crisis stance (needs a way for `memory` to receive the crisis text without importing
+    `core`).
+
+- **`listStoredSessions` marks every session ended, unconditionally.** `packages/memory/src/engine.ts:1744`
+  returns `status: 'ended', readOnly: true` for every session directory `SessionStore.describe`
+  finds, regardless of whether `endSession()` was ever called. Combined with `requireLive`'s
+  fallback at `packages/server/src/registry.ts:506`, a host whose process evicts or hibernates a
+  live session (a Cloudflare Durable Object sleeping after seconds of inactivity, for instance)
+  makes every in-progress session look permanently and incorrectly ended.
+  - Why deferred: not a scoping decision, found as a bug during the round-two review. In our own
+    words: "This fires on essentially every session under [a hibernating] hosting model, independent
+    of whether a full 'resume' feature is ever built... Fix that first and separately: it is small,
+    it is a correctness bug on its own terms, and shipping resume on top of it would bake the
+    conflation in."
+  - Where: `packages/memory/src/engine.ts:1744` (`listStoredSessions`); `packages/server/src/registry.ts:506`
+    (`requireLive`'s fallback); `docs/specs/2026-08-28-reverie-cloud-round-two-reply.md`, section 5
+    ("Part E, the iOS asks"), "E1, resume and rehydration".
+  - Trigger: not stated. Standing correctness bug independent of whether `AgentSession.resume` and
+    registry rehydration (see "Post-v0.8 hosted-client requests" below) is ever built.
+  - Size: small.
+
+- **`writeJournalingProtocol` rebuilds `meta` from scratch on every call.** `packages/memory/src/journal.ts:151`
+  (`writeJournalingProtocol`) writes `meta: { id, kind: 'journaling', updated: now.toISOString() }`
+  fresh on every call, discarding any pre-existing meta fields, unlike `setSessionMode`'s explicit
+  read-merge-write pattern (`engine.ts:863-866`), which its own comment calls out as deliberate. Any
+  structured field added to that meta (a cadence field, for example) is discarded by the next prose
+  rewrite, whether from the `update_journaling_protocol` tool or from reflection's own rewrite of the
+  same document.
+
+  Related to, but distinct from, the "`journaling.md` is being overwritten with a session summary"
+  entry above in this section: that entry is about the document's *body* being replaced with the
+  wrong prose (a session narrative instead of the person's journaling method). This entry is about
+  the *meta*/frontmatter being clobbered on every write, regardless of what the body contains.
+  Whether the two share a root cause could not be established by reading alone: both go through this
+  one `writeJournalingProtocol` function, so a caller that gets the body wrong and a caller that adds
+  a meta field would both be silently destructive through the same path, but nothing in either
+  investigation traced whether the same call site or the same bad prompt produced both. That
+  determination is one of the "two things to establish before fixing" the earlier entry already
+  names.
+  - Why deferred: not stated (found during the round-two review, not scoped out of an existing
+    task). Blocks structured journaling cadence and settability (see "Post-v0.8 hosted-client
+    requests" below, E4).
+  - Where: `packages/memory/src/journal.ts:151`; `packages/memory/src/engine.ts:863-866` (the
+    contrasting merge pattern); `docs/specs/2026-08-28-reverie-cloud-round-two-reply.md`, section 5,
+    "E4, journaling cadence".
+  - Trigger: not stated.
+  - Size: small.
+
+- **The rollup prompts duplicate `PROSE_VOICE_RULE` and have already diverged, with no test
+  coverage.** `DAILY_ROLLUP_PROMPT` and `WEEKLY_ROLLUP_PROMPT` at `packages/memory/src/rollups.ts:154`
+  reimplement one clause of `PROSE_VOICE_RULE` (`packages/memory/src/voice.ts:15`) inline ("Plain
+  prose, no headings, no em dashes") instead of importing it, and the two no longer say the same
+  thing: the canonical rule also covers sentence-length variation, rhetorical triads, the "it's not
+  just X, it's Y" construction, and a named list of filler words, none of which the rollup prompts
+  mention. `rollups.test.ts` asserts nothing about this text. Also: neither rollup prompt states the
+  actual date or week being summarized, so the model synthesizes "this day" or "this week" with no
+  date grounding at all, relying entirely on the summary bodies handed to it.
+  - Why deferred: not stated (found during the round-two review as a defect, not a scoping
+    decision).
+  - Where: `packages/memory/src/rollups.ts:154` (`DAILY_ROLLUP_PROMPT`, `WEEKLY_ROLLUP_PROMPT`);
+    `packages/memory/src/voice.ts:15` (`PROSE_VOICE_RULE`); `docs/specs/2026-08-28-reverie-cloud-round-two-reply.md`,
+    section 8 ("What you have not thought of"), item 5.
+  - Trigger: not stated.
+  - Size: small.
+
+- **`set_mode`'s computed description has no drift guard.** `packages/core/src/tools.ts:611`
+  enumerates `MODE_NAMES` into the tool description, correct by construction today, but no test
+  checks the content of what it builds: the existing tests check only the nested
+  `parameters.properties.mode.enum` array against `MODE_NAMES`, unaffected by the description
+  string, and three fixed phrases in the description unrelated to the per-mode list. Nothing in the
+  suite would catch a bug in the string-building logic itself listing nine modes instead of ten.
+  Contrast `search_memory`'s `kinds` parameter description, a hand-typed copy of `DOC_KINDS` that
+  `docKinds.test.ts` does guard by asserting the description contains every enum value.
+  - Why deferred: not stated (found during the round-two review as a gap, not a scoping decision).
+  - Where: `packages/core/src/tools.ts:611` (`set_mode`); `packages/memory/src/sqlite.ts:86`
+    (`DOC_KINDS`) and `docKinds.test.ts` (the contrasting guard that exists);
+    `docs/specs/2026-08-28-reverie-cloud-round-two-reply.md`, section 4 ("Part C, tool
+    descriptions").
+  - Trigger: not stated. Relevant if tool description overrides (section 4 below, "A
+    host-configurable prompt and tool-description surface") are ever built: any override seam must
+    special-case `set_mode` and keep this live enumeration, since a naive full-replace would freeze
+    the mode list.
+  - Size: small.
+
+- **`timeSection`'s system-default timezone caveat inverts meaning on a hosted server.**
+  `packages/core/src/context.ts:178` appends "This timezone is a system default, not yet confirmed
+  by the person. Confirm it naturally if the moment allows, rather than assuming it is correct."
+  whenever `context.timezoneSource === 'system-default'`. Written for the CLI, where the system zone
+  is a decent guess about the person (their own machine's clock). On a hosted server, "system
+  default" is a fact about the datacentre, not a guess about the person, so the caveat's implicit
+  reasoning ("probably close, just double check") reads backwards: the default could be many hours
+  off with nothing marking that distinction.
+  - Why deferred: not stated (found during the round-two review; not a launch blocker, but "the
+    same category of bug" as the deployment-claim launch blocker fixed in the same change).
+  - Where: `packages/core/src/context.ts:178` (`timeSection`); `docs/specs/2026-08-28-reverie-cloud-round-two-reply.md`,
+    section 8, item 3.
+  - Trigger: not stated.
+  - Size: small.
+
 ## 2. Retrieval and memory quality
 
 - **`DocumentHit.snippet` and `chunks[0]` can name different physical chunks of the same
@@ -442,6 +561,19 @@ item ships, remove it from here and record it in `ROADMAP.md`'s Done narrative.
   - Where: `docs/retrieval.md`, "Known limitations" and "Query time"; `docs/superpowers/specs/2026-08-16-context-and-retrieval-design.md`,
     section 9 and section 13.
   - Trigger: roughly one to three years of daily use, per section 9's own estimate.
+  - Hosted-deployment measurement, added 2026-08-28: Reverie Cloud's own round-two request calls
+    this same code path `searchSemantic` (it is `MemoryIndex.searchVector`, reading every embedding
+    row into memory, the function this entry already names) and measured it directly against its own
+    target scale: "At 50,000 chunks that is around 102 MB against a 128 MB isolate cap that no local
+    runtime enforces, so it passes locally and fails in production." Their design target is 20,000
+    chunks; the finding was "raised in the previous round, still open," and our own reply confirms it
+    remains open: "Still open, still real, still ours. Your 20,000 chunk target does not make it not
+    a bug." This sharpens the trigger above for a hosted deployment specifically: a fixed per-request
+    memory cap can be exceeded well short of "roughly one to three years of daily use" for one
+    person, if a host's corpus is a tenant's, or otherwise larger. Where (added):
+    `reverie-cloud/docs/specs/2026-08-28-openreverie-request-round-two.md`, part G;
+    `docs/specs/2026-08-28-reverie-cloud-round-two-reply.md`, section 7 ("Part G, your findings,
+    acknowledged").
   - Size: large.
 
 - **No proactive warning when a corpus holds vectors from more than one embedding model.** P0-6
@@ -777,13 +909,29 @@ item ships, remove it from here and record it in `ROADMAP.md`'s Done narrative.
   - Size: not stated.
 
 - **Custom or user-defined modes.** The ten modes are fixed; there is no way for a user to define
-  their own.
+  their own. The same closed-catalogue shape exists one level over: the journal method catalogue
+  (`JOURNAL_FORMAT_CONTENT` and `PER_METHOD_SAFETY_NOTES` in `packages/core/src/journaling.ts`) is
+  also a fixed `Record<JournalMethod, ...>` with no gate to add or restrict a method, found during
+  the Reverie Cloud round-two review: a host might want to add a proprietary journal method, or
+  restrict which of the six are offered (a clinical partnership excluding `morning_pages`/`open` in
+  favor of clinician-endorsed formats), and cannot today. Also worth recording alongside the mode
+  catalogue itself: `set_mode`'s tool description enumerates the live `MODE_NAMES` list to the model
+  regardless of what a host might otherwise configure, so overriding only the *text* of the mode
+  block (see "A host-configurable prompt and tool-description surface" in section 4) would not by
+  itself let a host add an eleventh mode; the tool description would still announce the stock ten.
   - Why deferred: not stated ("Ten fixed modes is the whole catalogue" is the only statement
     given).
   - Where: `docs/superpowers/specs/2026-08-16-modes-profile-settings-design.md`, section 17
     (`Mode` interface).
   - Trigger: not stated.
   - Size: medium.
+  - Journal method catalogue, added 2026-08-28: Why deferred: not stated beyond it being one of the
+    review's own findings, verdict "seam, for the ability to add or restrict methods... The six
+    methods' specific evidence text stays engine-internal by explicit design intent" (quoting the
+    review). Where: `packages/core/src/journaling.ts` (`JOURNAL_FORMAT_CONTENT`,
+    `PER_METHOD_SAFETY_NOTES`); `docs/specs/2026-08-28-reverie-cloud-round-two-reply.md`, section 8
+    ("What you have not thought of"), item 4. Trigger: a host asking for its own mode ("If a host
+    ever wants its own mode, that is a different piece of work from part B"). Size: medium.
 
 - **`/settings` is read-only.** The CLI command only prints current settings; it cannot change
   anything.
@@ -1049,6 +1197,124 @@ item ships, remove it from here and record it in `ROADMAP.md`'s Done narrative.
 Each of these is sized like its own sub-project. Open an issue before starting one; they need
 design conversation first.
 
+- **A host-configurable prompt and tool-description surface**, proposed by Reverie Cloud's
+  round-two request as a general override API over `buildPersona` and `assembleSystemPrompt`'s
+  composed system prompt, plus `toolDefinitions()` and `DREAM_TOOLS`. The request's own framing of
+  the objective: "make the prompt a structured, host-configurable surface, so that varying it is a
+  supported operation rather than a fork." Part D of the same round already shipped the first two
+  named blocks (`deploymentContext`, `firstConversation`) and established `PersonaOptions`, threaded
+  from `AgentSessionOptions` through `assembleSystemPrompt` into both `buildPersona` and
+  `firstConversationSection`, as the type to grow. The full review and our positions on each part
+  below are in `docs/specs/2026-08-28-reverie-cloud-round-two-reply.md`:
+  - *The general named prompt-block override API (part B1).* Turn the rest of `buildPersona`'s and
+    `assembleSystemPrompt`'s authored blocks into named blocks a host can replace or insert after,
+    via an optional dependency, with byte-identical default output when the dependency is absent.
+    Our own correction to the request's proposed boundary: "You defined the seam over `buildPersona`.
+    It has to be defined over the composed system prompt, because that is the unit that reaches the
+    model and `buildPersona` is only part of it... the union of block names belongs in one place that
+    spans both files... Grow that type. Do not grow a second one inside `personas.ts`." Why deferred:
+    not built this round, scoped as its own design and implementation pass. Where:
+    `docs/specs/2026-08-28-reverie-cloud-round-two-reply.md`, section 3 ("Part B, our positions"),
+    "B1, the shape"; `packages/core/src/personas.ts` (`PersonaOptions`, `buildPersona`);
+    `packages/core/src/context.ts` (`assembleSystemPrompt`, `firstConversationSection`). Trigger: not
+    stated. Size: medium.
+  - *The protected block set (part B2), including a fourth member.* `crisis-outranks-tone`,
+    `precedence`, and `crisis-stance` extracted into blocks always composed by the engine, crisis
+    last, so a host replacing style or mode cannot silently delete the sentences that stop those
+    blocks reading as permission to override the crisis stance. We agreed the request's reasoning
+    was right and added a fourth protected member it had not asked about: the empty-memory guardrail
+    inside `firstConversationSection` ("The memory is empty right now...do not tell them you can
+    continue where an earlier conversation left off"), on the same grounds, since
+    `PRECEDENCE_SENTENCE` names "the first-conversation guidance" as a rung in its own ordering. Part
+    D already protects this fourth member for the two blocks it shipped; what remains is extracting
+    `CRISIS_OUTRANKS_TONE` and `PRECEDENCE_SENTENCE` into blocks of their own. Why deferred: scoped
+    to part B1 landing first. Where: `docs/specs/2026-08-28-reverie-cloud-round-two-reply.md`,
+    section 3, "B2, the protected set"; `packages/core/src/personas.ts:122`
+    (`CRISIS_OUTRANKS_TONE`), `:142` (`PRECEDENCE_SENTENCE`). Trigger: not stated. Size: small to
+    medium.
+  - *Mode override must not suppress style axes (part B2b).* `styleSection`
+    (`packages/core/src/personas.ts:128`) computes which style axes to suppress from
+    `modeOverrides(activeMode)`, which reads the stock mode catalogue. A host that replaces only the
+    mode block leaves the stock suppression in force with no replacement clause to fill the gap, so
+    an axis gets no instruction at all, not the host's and not ours. The fix is fail closed: a
+    host-replaced mode block suppresses nothing, so the stock style paragraphs all render. "This is
+    the same correction our own AGENTS.md records from 2026-08-25, where an unhandled case defaulting
+    to admitted hid two real bugs." Why deferred: found during the round-two review, gated on part B1
+    shipping. Where: `docs/specs/2026-08-28-reverie-cloud-round-two-reply.md`, section 3, "B2b, a
+    hole you did not ask about"; `packages/core/src/personas.ts:128` (`styleSection`);
+    `packages/core/src/modes.ts:149` (`modeOverrides`). Trigger: shipping part B1. Size: small.
+  - *Parameterising the precedence sentence (part B3, options 2 to 4).* `PRECEDENCE_SENTENCE` names
+    stock concepts ("this mode," "your configured style," "for every axis this mode does not cover")
+    that a structurally different host block would not have. The round-two request's own words:
+    "treat 2 to 4 as future work, not as this round's scope," with the decision recorded as "the
+    precedence sentence is protected and stays fixed for now." We tested option 1 empirically rather
+    than by taste and found its actual failure mode is not the one predicted: "the actual failure is
+    a missing grant of authority to the host's own block, which is the direction you assumed was
+    impossible," not the harmless over-broad claim the request predicted. We also found part H's
+    byte-identity constraint (no default output differs by a single byte) conflicts directly with the
+    clean fix, rewording the sentence: "Those two constraints cannot both hold... when part B ships
+    you spend the bytes deliberately, in one change, with the diff reviewed by a human." Why
+    deferred: "the precedence sentence is protected and stays fixed for now" (quoting the round-two
+    request). Where: `docs/specs/2026-08-28-reverie-cloud-round-two-reply.md`, section 3, "B3, our
+    opinion, which you asked for"; `reverie-cloud/docs/specs/2026-08-28-openreverie-request-round-two.md`,
+    part B3. Trigger: not stated, gated on a human decision about part H. Size: small.
+  - *Prompt identity (part B5).* No prompt version, hash, or identifier exists anywhere today. Hash
+    the authored surface (the ordered list of `(blockName, blockContent)` pairs for the authored
+    blocks, plus the resolved safety mode and active mode), not the composed prompt, which embeds the
+    person's memory and changes every turn. Return the value alongside the text rather than embedding
+    it in the prompt, since a version string inside the prompt is a moving byte in the cached prefix.
+    Why deferred: not built this round. Where: `docs/specs/2026-08-28-reverie-cloud-round-two-reply.md`,
+    section 3, "B5, prompt identity". Trigger: not stated. Size: small.
+  - *A budget position for host-supplied blocks (part B5), and a budget config surface.* Two things.
+    First, `budget.ts` should state plainly that `PROMPT_BUDGET_TOTAL` does not cover the persona
+    (host blocks included), since the reasoning for excluding it ("authored, fixed in size, and
+    cannot grow with use") stays true for host blocks but the enforcement (a test over our own
+    constants) cannot see theirs; a composition-time length check that throws on an oversized host
+    block should stand in for that enforcement. Second and separate: every cap in `budget.ts` is a
+    module constant with no config surface at all, which a multi-tier hosted product will need to
+    differ per tier and today cannot express. Why deferred: not built this round; the config surface
+    specifically, "not building it in this round." Where: `docs/specs/2026-08-28-reverie-cloud-round-two-reply.md`,
+    section 3, "B5, budget"; `packages/core/src/budget.ts:17` (the persona-exclusion comment), `:71`
+    (`PROMPT_BUDGET_TOTAL`). Trigger: not stated. Size: small for the stated position and length
+    check; small for the config surface (scope grows with however many tiers a host wants).
+  - *Tool description overrides (part C), across both tool surfaces.* `toolDefinitions()` in
+    `packages/core/src/tools.ts:199` (14 tools, 9,727 characters of top-level description) and the
+    separate `DREAM_TOOLS` in `packages/memory/src/dreaming.ts:22` (four overlapping tool names with
+    much terser prose, unreachable from a core-keyed seam because `memory` cannot import `core`) both
+    need a named, per-tool override, defaulting to today's text. `set_mode` needs to be special-cased
+    so a full replace cannot freeze its live mode enumeration (see the standing defect in section 1
+    above). The request's stated need: "Reverie Cloud is moving to more than one provider, explicitly
+    to reduce cost, with DeepSeek and similar named. Tool-calling reliability and the phrasing that
+    achieves it vary materially between model families... A host that cannot tune it is a host that
+    cannot use a cheaper model that would otherwise be fine." We agreed to build it, and corrected the
+    request's own worry about test cost: neither of the two tests it named as at-risk
+    (`docKinds.test.ts`, `tool-labels.test.ts`) actually guards the top-level description field an
+    override would replace. Why deferred: not built this round; sequenced after part B. Where:
+    `docs/specs/2026-08-28-reverie-cloud-round-two-reply.md`, section 4 ("Part C, tool
+    descriptions"); `packages/core/src/tools.ts:199`; `packages/memory/src/dreaming.ts:22`. Trigger:
+    not stated. Size: medium.
+
+- **Internationalisation is its own design round, and a prompt-block override seam must not be sold
+  as one.** English is welded into places no block override would reach: `capBody`'s truncation
+  marker formats numbers with `toLocaleString('en-US')` (`packages/core/src/budget.ts:119`);
+  `localParts`, the shared formatter behind every rendered transcript stamp, hardcodes `'en-US'`
+  (`packages/memory/src/time.ts:19`, `:74`, `:97`), so English weekday abbreviations reach every
+  transcript line of every reflection prompt; singular and plural render through hardcoded ternaries
+  (`packages/core/src/context.ts:297`, "day" vs "days"); booleans render as the English words
+  "yes"/"no" and "has a page"/"no page yet" (`context.ts:331`, `:387`); and `PROSE_VOICE_RULE`
+  (`packages/memory/src/voice.ts:15`) is an English orthography rule (no em dash, a named list of
+  English filler words) spliced unconditionally into every reflection, narrative, and dream prompt,
+  written into the person's permanent record. `ProfileMeta` has no locale or language field to even
+  express a preference. Our own words: "If you need another language, that is its own design round
+  and a large one. Do not let part B make it look adjacent."
+  - Why deferred: not built this round; flagged as a distinct, larger piece of work the prompt-block
+    API above must not be mistaken for.
+  - Where: `docs/specs/2026-08-28-reverie-cloud-round-two-reply.md`, section 8 ("What you have not
+    thought of"), item 2; `packages/core/src/budget.ts:119`; `packages/memory/src/time.ts:19,74,97`;
+    `packages/core/src/context.ts:297,331,387`; `packages/memory/src/voice.ts:15`.
+  - Trigger: not stated.
+  - Size: large.
+
 - **More provider adapters.** The interfaces are in `@openreverie/providers` (`ChatProvider`,
   `EmbeddingProvider`) and the factory has one switch statement waiting for company: Anthropic,
   OpenRouter, Cloudflare AI Gateway, DeepSeek, and local models (Ollama and OpenAI-compatible
@@ -1198,8 +1464,72 @@ design conversation first.
   - Why deferred: "None of them belongs in this release."
   - Where the thinking already lives: the 2026-08-28 release request. A separate request document
     is expected after this release.
-  - Trigger to pick up: the separate request document arrives after v0.8.0.
+  - Trigger to pick up: the separate request document arrives after v0.8.0. **This trigger has now
+    fired**: the separate request arrived as `reverie-cloud/docs/specs/2026-08-28-openreverie-request-round-two.md`,
+    parts E and F. Splitting into the six original asks below, now with the detail the new request
+    and our own review of it added. Our positions and reasoning are in
+    `docs/specs/2026-08-28-reverie-cloud-round-two-reply.md`, sections 5 to 7.
   - Rough size: not stated.
+  - *`AgentSession.resume` and registry rehydration (E1).* `LiveSessionRegistry` models liveness
+    entirely in an in-memory `Map`, and `AgentSession.start()` always mints a new session id; in a
+    Durable Object that hibernates after seconds of inactivity, a session ends whenever the object
+    sleeps. Gated on the `listStoredSessions` defect above (section 1) being fixed first, since
+    shipping resume on top of that conflation would bake it in. The genuinely hard part, per our own
+    review, is not what the request flagged: "turns in flight at eviction leave no durable trace at
+    all, so they cannot be replayed, only retried, and that is a product decision about what the
+    user sees, not an engine detail." Stated fallback: "reopening shows a read-only transcript with
+    no compose bar, which is shippable and noticeably worse." Largest and most valuable of the five
+    iOS asks, per the new request's own sequencing. Where: `packages/server/src/registry.ts`
+    (`LiveSessionRegistry`); `packages/core/src/agent.ts` (`AgentSession.start`); the
+    `listStoredSessions` defect entry in section 1. Trigger: the `listStoredSessions` fix landing
+    first. Size: large.
+  - *Suppress the greeting on session create (E2).* A `greet: false` or equivalent on `POST
+    /api/v1/sessions`. Without it, a session created by a typed first message greets first and then
+    answers, because `registry.message()` awaits the greeting before running the turn. Verified: we
+    checked the two things that could plausibly depend on a greeting existing,
+    `firstConversationSection` and reflection's abandoned-session check, and neither breaks. Stated
+    fallback: "accept the double turn, which is visibly wrong." Where: `packages/server/src/registry.ts:234,250`.
+    Trigger: not stated (build it: "Cheap and low risk," per our own review). Size: small.
+  - *Configurable idle timeout (E3).* `THIRTY_MINUTES` (`registry.ts:16`) becomes a
+    `LiveSessionRegistryOptions` field. Do it as one pass, not one constant: three sibling hardcoded
+    durations sit next to it, `SWEEP_INTERVAL` and `DREAM_SWEEP_INTERVAL`
+    (`packages/server/src/registry.ts:17-18`) and `GREETING_TIMEOUT_MS` (`packages/core/src/agent.ts`).
+    Stated fallback: "sessions expire in 30 minutes and the 24-hour rule is aspirational." Where:
+    `packages/server/src/registry.ts:16-18`; `packages/core/src/agent.ts` (`GREETING_TIMEOUT_MS`).
+    Trigger: not stated. Size: small.
+  - *Journaling cadence, structured storage, and settability (E4).* Cadence needs to be settable
+    conversationally and in settings, both writing the same structured record. The conversational
+    half already exists via the live `update_journaling_protocol` tool; what is missing is a
+    screen-readable structured record, and that is blocked on the `writeJournalingProtocol` meta
+    clobber defect in section 1: "Adding a cadence tool on top of that would produce a setting that
+    silently forgets itself. Fix the meta clobber first, then the structured field, then decide
+    whether a second tool is needed at all. We suspect it is not." Stated fallback: "cadence is a
+    host-side setting the companion cannot change, which contradicts what was asked for but does not
+    block the notification." Where: `packages/memory/src/journal.ts:151` (`writeJournalingProtocol`);
+    `packages/core/src/tools.ts` (`update_journaling_protocol`); the `writeJournalingProtocol` defect
+    entry in section 1. Trigger: the meta-clobber fix landing first. Size: medium.
+  - *A search endpoint, `GET /api/v1/search` (E5).* Over the same hybrid retrieval `engine.search()`
+    (`packages/memory/src/engine.ts:1655`) already exposes: "already a clean decoupled method with no
+    tool-call formatting entangled in it." One wrinkle: the existing cursor and pagination convention
+    does not fit relevance-ranked results, so this should use `limit` only, no cursor. The iOS spec's
+    own words: this "should be specified once the retrieval subsystem has settled rather than
+    invented for iOS in isolation," the least urgent of the five iOS asks. Stated fallback: "per-list
+    client-side filtering, labelled honestly." Where: `packages/memory/src/engine.ts:1655`
+    (`engine.search`). Trigger: not stated. Size: small.
+  - *Optional provider headers on `OpenAiConfig` (part F, not originally one of the five iOS asks but
+    recorded here for the same reason).* `OpenAiConfig` is `{ apiKey, baseUrl? }`
+    (`packages/providers/src/openai.ts:21`) and `authHeaders` (`:233`) returns a fixed pair with no
+    merge point, so a host cannot send provider-gateway headers (Cloudflare AI Gateway's
+    `cf-aig-metadata` for per-user attribution, `cf-aig-collect-log-payload` to turn off payload
+    logging, which is opt-out and stores prompt bodies by default otherwise). We agreed to the static
+    field and declined the alternative the request itself offered, a per-request hook, on a
+    leak-surface reason: "The only cheap way to build it today would hand the hook the full request,
+    message content included, which puts a host-supplied callback in a position to read the person's
+    conversation on its way to the provider. That is a leak surface we will not add to satisfy a need
+    that static headers already meet." Where: `packages/providers/src/openai.ts:21` (`OpenAiConfig`),
+    `:233` (`authHeaders`); `docs/specs/2026-08-28-reverie-cloud-round-two-reply.md`, section 6
+    ("Part F"). Trigger: not stated. Size: small (an optional `headers?: Record<string, string>`
+    merged into `authHeaders`).
 
 ## 5. Smaller improvements, help welcome
 
@@ -1775,6 +2105,22 @@ help welcome" section. Read [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](A
   - Size: not stated for `styleToProfile.ts`, since a faithful conversion needs either a
     permission-aware `FileStore` variant or a separate host-config interface that does not exist
     yet; not stated for `gitSync.ts`.
+
+- **Document that a Workers-style host must take its canonical origin from configuration.**
+  `wrangler dev` rewrites the `Host` header to the configured route hostname while leaving `Origin`
+  alone, so a host running the engine behind it cannot derive its canonical origin from the request,
+  and that origin is not the address a developer types into a browser. One or two sentences wherever
+  `createFetchApp` is documented.
+  - Why deferred: not deferred by a decision. Handed over by Reverie Cloud on 2026-08-28 as a finding
+    with no action requested ("Worth a line in whatever documents `createFetchApp`, because it will
+    confuse the next person to host it"), and recorded here rather than left as a promise inside the
+    reply document.
+  - Where the thinking already lives:
+    `docs/specs/2026-08-28-openreverie-request-round-two.md` part G, and our reply at
+    `docs/specs/2026-08-28-reverie-cloud-round-two-reply.md` section 8.
+  - Trigger: the next time `createFetchApp` or the hosting story is documented, or the next report of
+    a host confused by an origin check.
+  - Size: tiny.
 
 ## 6. Decided against, with a trigger to revisit
 
