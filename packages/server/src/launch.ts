@@ -1,5 +1,10 @@
 import type { RequestListener, Server } from 'node:http'
-import { buildPersona, type ReverieConfig, resolveDreamingModel } from '@openreverie/core'
+import {
+  buildPersona,
+  type PersonaOptions,
+  type ReverieConfig,
+  resolveDreamingModel,
+} from '@openreverie/core'
 import { type EngineDeps, type MemoryEngine, systemTimeZone } from '@openreverie/memory'
 import {
   type ChatEvent,
@@ -21,6 +26,14 @@ export interface ServerLaunchOptions {
   port?: number
   now?: () => number
   openBrowser?: (url: string) => Promise<void>
+  // Host-supplyable prompt blocks. node:http's server genuinely runs on
+  // the person's own machine (or a self-hosted box they control), which is
+  // why DEFAULT_DEPLOYMENT_CONTEXT's claim is the honest default here and
+  // this can be left unset for that case. An operator whose box does not
+  // match that claim (a reverse proxy onto someone else's infrastructure,
+  // for instance) supplies its own. Threaded into both the dream persona
+  // and every live chat session this launcher's registry creates.
+  persona?: PersonaOptions
 }
 
 export interface RunningServer {
@@ -103,6 +116,7 @@ function tryConfiguredProviders(
 export function createServerLauncher(deps: ServerLaunchDeps) {
   return async function launchServer(options: ServerLaunchOptions): Promise<RunningServer> {
     const config = await deps.loadConfig(options.configPath)
+    const persona = options.persona ?? {}
     const providers = tryConfiguredProviders(deps, config) ?? {
       chat: new UnavailableChatProvider(),
       embeddings: new UnavailableEmbeddingProvider(),
@@ -117,7 +131,15 @@ export function createServerLauncher(deps: ServerLaunchDeps) {
         embeddingModel: config.models.embeddings,
         dreamingModel: resolveDreamingModel(config),
         dreaming: config.dreaming,
-        dreamPersona: (style) => buildPersona(config.safety.mode, config.safety.resources, style),
+        dreamPersona: (style) =>
+          buildPersona(
+            config.safety.mode,
+            config.safety.resources,
+            style,
+            undefined,
+            undefined,
+            persona,
+          ),
         // node:http's server genuinely runs on the person's own machine
         // (or a self-hosted box they control), so the system zone is the
         // honest default here. A host with no ambient zone (a Cloudflare
@@ -151,6 +173,7 @@ export function createServerLauncher(deps: ServerLaunchDeps) {
         config,
         chat: providers.chat,
         providerAvailable: providers.available,
+        persona,
         ...(options.now ? { now: options.now } : {}),
         ...(serverTimerDreamingOn ? { dreamTrigger: () => engine.maybeDream('serverTimer') } : {}),
       })

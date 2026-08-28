@@ -181,6 +181,20 @@ repository still cannot run the Workers runtime, so that integration test remain
 [docs/releases/v0.8.0.md](docs/releases/v0.8.0.md) and [ROADMAP.md](ROADMAP.md) for the full
 account.
 
+A further round on top of v0.8.0 lets a host supply two pieces of the system prompt instead of
+both being hardcoded prose asserting the software runs on the person's own machine: the deployment
+claim in the identity block, and the welcome and onboarding script shown on someone's first
+conversation. An empty string for the deployment claim omits it entirely rather than leaving it
+behind as stray punctuation. Nothing else in the prompt is host-configurable yet; a general
+named-block override API over the rest of the prompt, and over tool descriptions, is not built, and
+is tracked under "A host-configurable prompt and tool-description surface" in
+[BACKLOG.md](BACKLOG.md). The empty-memory guardrail inside the first-conversation section stays
+engine-composed either way, because it is a true statement about engine state on a first
+conversation, not a preference a host could reasonably override. Self-hosted output is unaffected:
+`buildPersona` and `assembleSystemPrompt` produce the exact same text as before this round when a
+host supplies nothing. See `packages/core/src/personas.ts` (`PersonaOptions`,
+`DEFAULT_DEPLOYMENT_CONTEXT`) and `packages/core/src/context.ts` (`firstConversationSection`).
+
 The sections above describe the conversation modes, journal mode, the browser interface, and the atlas in full, including their caveats. What follows is the rest of the inventory.
 
 What works today:

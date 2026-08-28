@@ -26,6 +26,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { type AgentEvent, AgentSession } from './agent.js'
 import { defaultCrisisResources, type ReverieConfig } from './config.js'
+import { DEFAULT_DEPLOYMENT_CONTEXT } from './personas.js'
 
 let dir: string
 
@@ -1480,5 +1481,65 @@ describe('AgentSession', () => {
     expect(last).toContain('Gratitude, three times a week.')
 
     await engine.close()
+  })
+
+  describe('AgentSessionOptions.persona', () => {
+    it('reaches the very first system prompt assembled in start()', async () => {
+      const chat = new FakeChatProvider([{ text: 'Hi.', toolCalls: [] }])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const session = await AgentSession.start(engine, testConfig(), chat, {
+        persona: { deploymentContext: 'A hosted deployment claim, agent-level.' },
+      })
+
+      await collect(session.send('Hello.'))
+
+      expect(chat.requests[0]?.system).toContain('A hosted deployment claim, agent-level.')
+      expect(chat.requests[0]?.system).not.toContain(DEFAULT_DEPLOYMENT_CONTEXT)
+
+      await engine.close()
+    })
+
+    it('survives a mid-session refresh triggered by update_profile', async () => {
+      const chat = new FakeChatProvider([
+        {
+          text: '',
+          toolCalls: [
+            {
+              id: 'call_1',
+              name: 'update_profile',
+              arguments: JSON.stringify({ timezone: 'Asia/Kolkata' }),
+            },
+          ],
+        },
+        { text: 'Got it, thanks.', toolCalls: [] },
+        { text: 'Sure.', toolCalls: [] },
+      ])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const session = await AgentSession.start(engine, testConfig(), chat, {
+        now: () => new Date('2026-08-16T20:00:00.000Z'),
+        persona: { deploymentContext: 'A hosted deployment claim, surviving refresh.' },
+      })
+
+      await collect(session.send('I live in Bengaluru.'))
+      await collect(session.send('Anything else?'))
+
+      const last = chat.requests.at(-1)?.system ?? ''
+      expect(last).toContain('A hosted deployment claim, surviving refresh.')
+      expect(last).not.toContain(DEFAULT_DEPLOYMENT_CONTEXT)
+
+      await engine.close()
+    })
+
+    it('omitting persona entirely keeps the default deployment claim', async () => {
+      const chat = new FakeChatProvider([{ text: 'Hi.', toolCalls: [] }])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const session = await AgentSession.start(engine, testConfig(), chat)
+
+      await collect(session.send('Hello.'))
+
+      expect(chat.requests[0]?.system).toContain(DEFAULT_DEPLOYMENT_CONTEXT)
+
+      await engine.close()
+    })
   })
 })

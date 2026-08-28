@@ -96,6 +96,33 @@ migration, and git sync), each for a stated reason recorded in [BACKLOG.md](BACK
 `sqlite.ts`'s top-level `better-sqlite3` import, which is safe today only because that package
 defers loading its native binding until its constructor runs.
 
+A round-two request from Reverie Cloud asked to go further than the hostable-engine refactor: make
+the prompt a structured, host-configurable surface, so that varying it is a supported operation
+rather than a fork. This round shipped the first piece of that, not the whole thing. `PersonaOptions`
+now carries two named, host-supplyable blocks: `deploymentContext`, which replaces the deployment
+claim in the identity block (an empty string omits it entirely), and `firstConversation`, which
+replaces the welcome and onboarding script shown on someone's very first conversation. Both are
+threaded as an optional field at every level a host might enter from: `buildPersona`,
+`assembleSystemPrompt`, `AgentSessionOptions.persona`, `LiveSessionRegistryOptions.persona`, and
+`ServerLaunchOptions.persona`, the last reaching both the registry and `dreamPersona`. The
+empty-memory guardrail inside the first-conversation section stays engine-composed regardless of
+what a host supplies, because it is a true statement about engine state on a first conversation
+(there really is nothing to search yet), not a preference. Default output is unaffected:
+`buildPersona` was compared against the prior code across 48 combinations of safety mode, active
+mode, style, and crisis resources, all identical, and `assembleSystemPrompt`'s first-session output
+matched the prior code byte for byte at 12,896 characters; both are now pinned as literal `toBe`
+assertions rather than substring checks. Verified by the reviewer directly rather than taken from
+the implementer's report: `pnpm build` clean, `pnpm exec tsc --noEmit` exit 0 across all six
+packages, `pnpm lint` clean, and the full suite at 1,664 tests across 81 files, all passing. The
+highest-stakes property was falsified by hand: with the guardrail mutated to drop out whenever a
+host supplies its own opening, exactly one test fails, the one named for that behaviour, and it
+passes again on restore. The rest of what the request asked for, a general override API over the
+whole composed prompt and over tool descriptions, is not built this round. See
+[docs/specs/2026-08-28-reverie-cloud-round-two-reply.md](docs/specs/2026-08-28-reverie-cloud-round-two-reply.md)
+for the full review and our positions on each part, and [BACKLOG.md](BACKLOG.md) under "A
+host-configurable prompt and tool-description surface" for everything from that request not built
+this round.
+
 ## How work happens here
 
 This project is built with heavy use of AI coding agents under human direction, with per-task adversarial review. The bar for merged code is the same regardless of who or what wrote it: understood, tested, and honest. If you pick something up, open an issue first so nobody duplicates effort.

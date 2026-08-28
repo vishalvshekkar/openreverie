@@ -398,6 +398,50 @@ describe('createServerLauncher', () => {
     expect(Object.hasOwn(call, 'dreamTrigger')).toBe(false)
   })
 
+  // ServerLaunchOptions.persona: the host-supplyable prompt blocks that let
+  // a self-hosted operator whose box does not match
+  // DEFAULT_DEPLOYMENT_CONTEXT's claim override it, threaded into both the
+  // dream persona (EngineDeps.dreamPersona) and every live chat session
+  // (LiveSessionRegistryOptions.persona) this launcher creates.
+  it('threads options.persona into both the dream persona and the registry', async () => {
+    const launchServer = createServerLauncher(deps)
+
+    await launchServer({
+      write: () => {},
+      persona: { deploymentContext: 'A hosted deployment claim, launch-level.' },
+    })
+
+    const engineCalls = (deps.openEngine as ReturnType<typeof vi.fn>).mock.calls
+    expect(engineCalls).toHaveLength(1)
+    const engineDeps = engineCalls[0]?.[1] as {
+      dreamPersona?: (style: StyleConfig) => string
+    }
+    expect(typeof engineDeps.dreamPersona).toBe('function')
+    const dreamPersonaText = engineDeps.dreamPersona?.(DEFAULT_STYLE) ?? ''
+    expect(dreamPersonaText).toContain('A hosted deployment claim, launch-level.')
+
+    const registryCalls = (deps.createRegistry as ReturnType<typeof vi.fn>).mock.calls
+    expect(registryCalls).toHaveLength(1)
+    const registryOptions = registryCalls[0]?.[0] as { persona?: { deploymentContext?: string } }
+    expect(registryOptions.persona).toEqual({
+      deploymentContext: 'A hosted deployment claim, launch-level.',
+    })
+  })
+
+  it('omitting options.persona keeps the default deployment claim in the dream persona', async () => {
+    const launchServer = createServerLauncher(deps)
+
+    await launchServer({ write: () => {} })
+
+    const engineCalls = (deps.openEngine as ReturnType<typeof vi.fn>).mock.calls
+    expect(engineCalls).toHaveLength(1)
+    const engineDeps = engineCalls[0]?.[1] as {
+      dreamPersona?: (style: StyleConfig) => string
+    }
+    const dreamPersonaText = engineDeps.dreamPersona?.(DEFAULT_STYLE) ?? ''
+    expect(dreamPersonaText).toContain("You run entirely on the user's own machine")
+  })
+
   // Defect 4, 2026-08-25 dreaming investigation: `reverie web` opens its
   // engine with { maintenance: false }, which also skips MemoryEngine's
   // own onStart dream trigger, so the web server used to have no early

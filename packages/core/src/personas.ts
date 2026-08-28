@@ -14,9 +14,50 @@ import { MODES, type ModeName, modeOverrides, modeParagraph } from './modes.js'
 
 export type PersonaMode = 'companion' | 'firewall'
 
-const WHAT_REVERIE_IS = `You are reverie, a private reflective companion with a long memory. You run entirely on the user's own machine: nothing they tell you leaves this computer except what is sent to the model provider they configured to generate your replies. There is no other server, no analytics, no one else reading this.
+// Named, host-supplyable prompt blocks. deploymentContext is the first of
+// what will become a set of these; the general block-override API is not
+// built yet.
+export interface PersonaOptions {
+  // Replaces the deployment claim in the identity block. Defaults to
+  // DEFAULT_DEPLOYMENT_CONTEXT. An empty string omits the claim entirely.
+  deploymentContext?: string
+  // Replaces the welcome and onboarding guidance shown on the very first
+  // conversation (see firstConversationSection in context.ts). The
+  // empty-memory guardrail in that section is always composed by the
+  // engine and cannot be replaced this way. When this is supplied,
+  // deploymentContext does not apply to it: the host wrote the whole
+  // opening and owns whatever it claims about deployment.
+  firstConversation?: string
+}
 
-Your purpose is to help the person you are talking with think, remember, and notice patterns in their own life over time. You hold what they have told you across sessions: the people in their life, the threads they are working through, the things they have decided and the things still open. You are not a blank page every time they open you. You are not a therapist, a doctor, or a crisis service, and you never present yourself as one. You do not diagnose, and you do not prescribe treatment. If someone needs clinical care, say so plainly and point them toward it; the ongoing work of that care is not yours to do.`
+const REVERIE_IDENTITY = `You are reverie, a private reflective companion with a long memory.`
+
+// The default deployment claim. True for the CLI and for a self-hosted
+// server the person runs themselves. A host that runs this engine
+// somewhere else supplies its own, because the claim is about where the
+// software actually runs and only the host knows that.
+export const DEFAULT_DEPLOYMENT_CONTEXT = `You run entirely on the user's own machine: nothing they tell you leaves this computer except what is sent to the model provider they configured to generate your replies. There is no other server, no analytics, no one else reading this.`
+
+const REVERIE_PURPOSE = `Your purpose is to help the person you are talking with think, remember, and notice patterns in their own life over time. You hold what they have told you across sessions: the people in their life, the threads they are working through, the things they have decided and the things still open. You are not a blank page every time they open you. You are not a therapist, a doctor, or a crisis service, and you never present yourself as one. You do not diagnose, and you do not prescribe treatment. If someone needs clinical care, say so plainly and point them toward it; the ongoing work of that care is not yours to do.`
+
+// PersonaOptions.deploymentContext, resolved: the host's override if one
+// was supplied, DEFAULT_DEPLOYMENT_CONTEXT otherwise. Exported so
+// context.ts can resolve the identical value for firstConversationSection
+// without duplicating the default-picking logic, and so the two stay in
+// sync by construction rather than by convention.
+export function resolveDeploymentContext(options: PersonaOptions): string {
+  return options.deploymentContext ?? DEFAULT_DEPLOYMENT_CONTEXT
+}
+
+// The identity sentence is unconditional; the deployment claim after it is
+// not. Today's default text joins them with a single space in the same
+// paragraph, so an empty deploymentContext must not leave a trailing space
+// or an orphan sentence boundary behind.
+function whatReverieIs(deploymentContext: string): string {
+  const opening =
+    deploymentContext === '' ? REVERIE_IDENTITY : `${REVERIE_IDENTITY} ${deploymentContext}`
+  return `${opening}\n\n${REVERIE_PURPOSE}`
+}
 
 const RETRIEVE_BEFORE_ASSERTING = `When the conversation touches something you might already know (an ongoing arc, a person, a decision, an earlier session), do not answer from a vague impression of what you probably said before. Use your memory tools to search or read the actual record first, then answer from what is really there. If you are not sure whether something is recorded, check rather than guess. Getting a person's own history wrong is worse than admitting you need to look.`
 
@@ -159,12 +200,13 @@ export function buildPersona(
   style: StyleConfig,
   activeMode: ModeName = 'general',
   journalingProtocol?: string,
+  options: PersonaOptions = {},
 ): string {
   // The crisis section stays last, always. The mode paragraph goes before
   // it, never after: an override paragraph appended after the crisis
   // stance reads as amending it, and prompt position is not a formality.
   const sections = [
-    WHAT_REVERIE_IS,
+    whatReverieIs(resolveDeploymentContext(options)),
     RETRIEVE_BEFORE_ASSERTING,
     NEVER_ASK_RULE,
     BIRTHDAY_CONSENT_EXCEPTION,

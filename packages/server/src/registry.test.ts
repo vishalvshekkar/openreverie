@@ -1,7 +1,12 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { defaultCrisisResources, type ReverieConfig } from '@openreverie/core'
+import {
+  DEFAULT_DEPLOYMENT_CONTEXT,
+  defaultCrisisResources,
+  type PersonaOptions,
+  type ReverieConfig,
+} from '@openreverie/core'
 import { type EngineDeps, MemoryEngine } from '@openreverie/memory'
 import {
   type ChatEvent,
@@ -57,6 +62,33 @@ describe('LiveSessionRegistry', () => {
     expect(retry).toEqual(first)
     expect(fakeChat.calls).toHaveLength(1)
     expect(await engine.readTranscript(session.sessionId)).toHaveLength(2)
+  })
+
+  it('threads LiveSessionRegistryOptions.persona into every AgentSession it creates', async () => {
+    const registry = createRegistry({
+      persona: { deploymentContext: 'A hosted deployment claim, registry-level.' },
+    })
+    const session = await registry.create()
+    const promise = collect(registry.message(session.sessionId, 'turn-1', { message: 'hello' }))
+    await fakeChat.waitUntilStreamStarted()
+    fakeChat.releaseText('hi')
+    fakeChat.finish()
+    await promise
+
+    expect(fakeChat.calls[0]?.system).toContain('A hosted deployment claim, registry-level.')
+    expect(fakeChat.calls[0]?.system).not.toContain(DEFAULT_DEPLOYMENT_CONTEXT)
+  })
+
+  it('omitting persona keeps the default deployment claim for every AgentSession it creates', async () => {
+    const registry = createRegistry()
+    const session = await registry.create()
+    const promise = collect(registry.message(session.sessionId, 'turn-1', { message: 'hello' }))
+    await fakeChat.waitUntilStreamStarted()
+    fakeChat.releaseText('hi')
+    fakeChat.finish()
+    await promise
+
+    expect(fakeChat.calls[0]?.system).toContain(DEFAULT_DEPLOYMENT_CONTEXT)
   })
 
   it('rejects a distinct overlapping turn while the first controlled stream is active', async () => {
@@ -378,6 +410,7 @@ function createRegistry(
     maxReplayBytes: number
     dreamTrigger: () => Promise<unknown>
     runBackground: (work: Promise<unknown>) => void
+    persona: PersonaOptions
   }> = {},
 ): LiveSessionRegistry {
   const { chat = fakeChat, ...registryOptions } = options

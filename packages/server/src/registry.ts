@@ -1,6 +1,12 @@
 import { Buffer } from 'node:buffer'
 import { createHash } from 'node:crypto'
-import { type AgentEvent, AgentSession, isModeName, type ReverieConfig } from '@openreverie/core'
+import {
+  type AgentEvent,
+  AgentSession,
+  isModeName,
+  type PersonaOptions,
+  type ReverieConfig,
+} from '@openreverie/core'
 import type { MemoryEngine, PublicSession, PublicTranscriptLine } from '@openreverie/memory'
 import { type ChatProvider, ProviderUnavailableError } from '@openreverie/providers'
 import { ApiError } from './api.js'
@@ -62,6 +68,13 @@ export interface LiveSessionRegistryOptions {
   maxReplayBytes?: number
   scheduler?: RegistryScheduler
   dreamTrigger?: () => Promise<unknown>
+  // Host-supplyable prompt blocks, passed unchanged to every AgentSession
+  // this registry creates. This is the injection point a Cloudflare
+  // Durable Object host actually uses: it builds the registry directly and
+  // never calls packages/server/src/launch.ts. Defaults to {}, which is
+  // AgentSessionOptions.persona's own default and changes nothing for a
+  // caller that omits this.
+  persona?: PersonaOptions
   // A fire-and-forget promise handed to Node's event loop keeps running on
   // its own. On Cloudflare Workers it does not: once the request that
   // started it returns a response, the isolate can be torn down and the
@@ -121,6 +134,7 @@ export class LiveSessionRegistry {
   private readonly cancelSweep: () => void
   private readonly cancelDreamTrigger: () => void
   private readonly dreamTrigger: (() => Promise<unknown>) | undefined
+  private readonly persona: PersonaOptions
   private readonly runBackground: (work: Promise<unknown>) => void
   private readonly live = new Map<string, LiveSession>()
   private readonly tombstones = new Map<string, Tombstone>()
@@ -138,6 +152,7 @@ export class LiveSessionRegistry {
     this.maxReplayEvents = options.maxReplayEvents ?? DEFAULT_REGISTRY_LIMITS.maxReplayEvents
     this.maxReplayBytes = options.maxReplayBytes ?? DEFAULT_REGISTRY_LIMITS.maxReplayBytes
     this.dreamTrigger = options.dreamTrigger
+    this.persona = options.persona ?? {}
     // Same posture as `void work` would give: nothing is attached to
     // `work`, so a rejection surfaces as an unhandled rejection exactly as
     // it did before this hook existed. Only a host that actually needs to
@@ -179,6 +194,7 @@ export class LiveSessionRegistry {
     }
     const agent = await AgentSession.start(this.engine, this.config, this.chat, {
       ...(requested === undefined ? {} : { mode: requested }),
+      persona: this.persona,
     })
     const stored = (await this.engine.listStoredSessions()).find(
       (session) => session.sessionId === agent.sessionId,

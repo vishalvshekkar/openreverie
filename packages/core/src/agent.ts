@@ -30,6 +30,7 @@ import type { ChatProvider, ToolCall } from '@openreverie/providers'
 import type { ReverieConfig } from './config.js'
 import { assembleSystemPrompt } from './context.js'
 import type { ModeName } from './modes.js'
+import type { PersonaOptions } from './personas.js'
 import { dispatchTool, toolDefinitions } from './tools.js'
 
 export type AgentEvent =
@@ -50,6 +51,12 @@ export interface AgentSessionOptions {
   // is session state, never persisted config, so this is the only way a
   // caller sets a starting mode other than the default.
   mode?: ModeName
+  // Host-supplyable prompt blocks, threaded to every assembleSystemPrompt
+  // call this session makes: the initial assembly in start(), and every
+  // later re-assembly (refreshSystemPrompt, the mid-turn refresh after
+  // update_profile). Defaults to {}, which is assembleSystemPrompt's own
+  // default and changes nothing for a caller that omits this.
+  persona?: PersonaOptions
 }
 
 const MAX_TOOL_ROUNDS = 8
@@ -174,6 +181,7 @@ export class AgentSession {
 
   private readonly config: ReverieConfig
   private readonly now: () => Date
+  private readonly personaOptions: PersonaOptions
   private activeMode: ModeName
   // Set once, in start(), from the same sessionContext() read that
   // assembleSystemPrompt already performs internally. Ruling A2:
@@ -196,6 +204,7 @@ export class AgentSession {
     now: () => Date,
     mode: ModeName,
     freshDream: SessionContext['freshDream'],
+    personaOptions: PersonaOptions,
   ) {
     this.engine = engine
     this.chat = chat
@@ -206,6 +215,7 @@ export class AgentSession {
     this.now = now
     this.activeMode = mode
     this.freshDream = freshDream
+    this.personaOptions = personaOptions
   }
 
   get mode(): ModeName {
@@ -225,7 +235,8 @@ export class AgentSession {
     // caller that omits options.now keeps reading the real wall clock
     // unchanged, the same default assembleSystemPrompt itself falls back to.
     const now = options.now ?? (() => new Date())
-    const system = await assembleSystemPrompt(engine, config, mode, now)
+    const personaOptions = options.persona ?? {}
+    const system = await assembleSystemPrompt(engine, config, mode, now, personaOptions)
     // A second, narrower read of session context, just for freshDream (see
     // the field comment above): sessionContext reads only disk state as of
     // `now`, so calling it twice here costs an extra read, never a
@@ -246,6 +257,7 @@ export class AgentSession {
       now,
       mode,
       context.freshDream,
+      personaOptions,
     )
   }
 
@@ -275,7 +287,13 @@ export class AgentSession {
   // the codebase is buried inside runTurn, and a /style change would apply
   // no earlier than the next session.
   async refreshSystemPrompt(): Promise<void> {
-    this.system = await assembleSystemPrompt(this.engine, this.config, this.activeMode, this.now)
+    this.system = await assembleSystemPrompt(
+      this.engine,
+      this.config,
+      this.activeMode,
+      this.now,
+      this.personaOptions,
+    )
   }
 
   async *send(userText: string): AsyncIterable<AgentEvent> {
@@ -485,6 +503,7 @@ export class AgentSession {
             this.config,
             this.activeMode,
             this.now,
+            this.personaOptions,
           )
         }
 
