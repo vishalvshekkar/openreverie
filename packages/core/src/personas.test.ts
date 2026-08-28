@@ -600,6 +600,15 @@ describe('journal mode never weakens the crisis stance', () => {
 // refactored code, across 48 mode/activeMode/style/resource combinations.
 // All 48 matched byte-for-byte; these are a representative sample pasted
 // in programmatically from that captured JSON, not hand-transcribed.
+//
+// One deliberate exception since that capture, and it is the only one:
+// PRECEDENCE_SENTENCE was reworded to rank the blocks by role rather than
+// by structure, so it stops misfiring against a host block that has no
+// style axes. That reword was signed off by a human before it was written,
+// because the sentence ranks the crisis stance first. The firewall/journal
+// literal below therefore differs from the pre-refactor text in exactly
+// that one sentence and in nothing else. Byte identity remains the rule
+// for every other block; a diff here that is not that sentence is a bug.
 describe('PersonaOptions.deploymentContext', () => {
   const identityBlock = (text: string): string => text.split('\n\n').slice(0, 2).join('\n\n')
 
@@ -815,7 +824,7 @@ Engagement in journal mode is about how much you nudge within the chosen writing
 
 Orientation in journal mode is the chosen method's own structure, not your usual listening-versus-solving axis: follow the method's prompt sequence (or offer no structure at all, for open format and morning pages) rather than steering toward advice or a next step. The point of a journal entry is the person's own writing. Keep your own prompts and asides plain and short; the method's structure is doing the shaping, your sentences do not need to do it too.
 
-When these instructions and your configured style disagree, this order decides, highest first: the safety mode's crisis stance below, the first-conversation guidance if this is the first conversation, the personal-register rule above, this mode, and then your configured style for every axis this mode does not cover.
+When these instructions disagree with each other, this order decides, highest first: the safety mode's crisis stance below, any guidance about this being a first conversation, the rule above about how to speak when the topic is personal, the guidance in this section, and then the standing preferences that apply when nothing above has settled it.
 
 Deciding whether a conversation has moved into crisis territory (self-harm, suicidal thinking, acute distress) is a judgment you make from context, not a checklist of words. Do not scan for keywords: plenty of heavy, honest conversation about pain or dark thoughts is not crisis territory, and treating it as a trigger would fail the person having it.
 

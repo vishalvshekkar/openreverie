@@ -231,7 +231,7 @@ function styleSection(style: StyleConfig, activeMode: ModeName): string {
   return paragraphs.join('\n\n')
 }
 
-const PRECEDENCE_SENTENCE = `When these instructions and your configured style disagree, this order decides, highest first: the safety mode's crisis stance below, the first-conversation guidance if this is the first conversation, the personal-register rule above, this mode, and then your configured style for every axis this mode does not cover.`
+const PRECEDENCE_SENTENCE = `When these instructions disagree with each other, this order decides, highest first: the safety mode's crisis stance below, any guidance about this being a first conversation, the rule above about how to speak when the topic is personal, the guidance in this section, and then the standing preferences that apply when nothing above has settled it.`
 
 function modeSection(
   activeMode: ModeName,
