@@ -2,7 +2,7 @@
 
 This file tracks what openreverie can do and what is being worked on now. It is kept honest the same way the README is: nothing here is claimed as done unless it works. Everything not yet started, deferred work, known gaps, and ideas not built, lives in [BACKLOG.md](BACKLOG.md), which is canonical for all of that.
 
-## Done (v0.1.0 through v0.7.3)
+## Done (v0.1.0 through v0.8.0)
 
 Sub-project 1 of 5: the local-first memory engine and agent core, usable as a terminal app. See the README for the full capability list and the [design spec](docs/superpowers/specs/2026-08-13-openreverie-design.md) for how it all fits together.
 
@@ -40,10 +40,10 @@ v0.7.3 is a repair release, and almost all of it came from one person using v0.7
 
 The commitments engine above is built and reachable through the terminal, changing what the companion knows and therefore what it says, per spec Section 8: that is the entire intended surface this round. It has no CLI command and no HTTP route of its own. See [BACKLOG.md](BACKLOG.md) for what is not started, including the commitments engine's own deferred pieces (the real one-ask/permanent-silence mechanism, event-anchored `waitsOn` reactivation, the browser Record-section view, recurring commitments, and the rest) and the retrieval and documentation gaps recorded from the 2026-08-25 review.
 
-The round in progress is a pure refactor with no user-visible change, unreleased as of 2026-08-27:
-making the engine able to run on a machine that is not a machine. It comes from a change request
-by Reverie Cloud, a separate hosted product that runs this engine inside a Cloudflare Durable
-Object, one object per user. The design and the full list of items live in
+v0.8.0 is a pure refactor with no user-visible change to self-hosted openreverie. It makes the
+engine able to run on a machine that is not a machine. It comes from a change request by Reverie
+Cloud, a separate hosted product that runs this engine inside a Cloudflare Durable Object, one
+object per user. The design and the full list of items live in
 [docs/superpowers/specs/2026-08-27-hostable-engine-design.md](docs/superpowers/specs/2026-08-27-hostable-engine-design.md).
 
 What it does: filesystem access in `packages/memory` now goes through two injected interfaces, a
@@ -64,13 +64,16 @@ suite hermetic, with no temp directories.
 
 It has since been run, though not here. Reverie Cloud verified the whole change set against its
 own build rather than accepting the report, and ran the parts only a real runtime can answer on
-real `workerd`. Three things that were open are now settled: the engine constructs and opens
-inside a Durable Object with no filesystem, `gray-matter` bundles and its YAML path executes there
-(it was flagged because its main entry references `fs` for a helper this codebase never calls), and
-bundle size is not close to a limit. That round also found one defect nothing here could have
-caught: `packages/server`'s barrel built a `createRequire` at module scope, and since
-`import.meta.url` is undefined in that kind of bundle, importing the package killed the isolate
-before any handler ran. It is now built on first use. See
+real `workerd`. It is the first real consumer of `createFetchApp` and `LiveSessionRegistry`: the
+whole API, an authenticated streamed turn, and the same turn after rebuilding the engine and
+registry have all run there, then through a local Workers development route with curl. Three things
+that were open are now settled: the engine constructs and opens inside a Durable Object with no
+filesystem, `gray-matter` bundles and its YAML path executes there (it was flagged because its main
+entry references `fs` for a helper this codebase never calls), and bundle size is not close to a
+limit. That round also found one defect nothing here could have caught: `packages/server`'s barrel
+built a `createRequire` at module scope, and since `import.meta.url` is undefined in that kind of
+bundle, importing the package killed the isolate before any handler ran. It is now built on first
+use. See
 [docs/superpowers/specs/2026-08-27-hostable-engine-followup-design.md](docs/superpowers/specs/2026-08-27-hostable-engine-followup-design.md)
 for that round and its three smaller fixes.
 
@@ -78,7 +81,10 @@ A later integration pass found that the shared server still treated its public c
 as the loopback address it binds to. It now accepts origin-only HTTP and HTTPS URLs for public
 hosts, including standard ports, while rejecting paths, credentials, queries, and fragments. A
 Fetch host must also choose whether authenticated writes may omit `Origin`; the Node adapter keeps
-requiring it, so self-hosted behavior is unchanged. The decision and its limits are recorded in
+requiring it, so self-hosted behavior is unchanged. A Workers development route can replace the
+incoming `Host` with its route hostname while leaving `Origin` unchanged, so the canonical origin
+must come from host configuration rather than from the address a developer types into a browser.
+The decision and its limits are recorded in
 [docs/superpowers/specs/2026-08-27-hostable-engine-canonical-origin-design.md](docs/superpowers/specs/2026-08-27-hostable-engine-canonical-origin-design.md).
 
 What still has not happened: none of this has been run from this repository, on any runtime. The

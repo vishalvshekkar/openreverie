@@ -1,6 +1,6 @@
 # Hostable engine, round two: what running it actually found
 
-Date: 2026-08-27. Status: implemented on the feat/hostable-engine branch, unreleased.
+Date: 2026-08-27. Status: released in v0.8.0.
 
 ## Why there is a second round
 

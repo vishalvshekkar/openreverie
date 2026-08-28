@@ -1188,6 +1188,19 @@ design conversation first.
     migration is required, since the memory folder and `graph.jsonl` are the only truth and the
     index is disposable).
 
+### Post-v0.8 hosted-client requests
+
+- **Greeting suppression on session creation, `AgentSession.resume` with registry rehydration, a
+  configurable idle timeout, a search endpoint, a journaling-cadence tool, and optional provider
+  headers on `OpenAiConfig`.** These are six separate follow-up requests for a hostable deployment.
+  They are recorded together only because they arrived as one release deferral, not because they
+  share an implementation boundary.
+  - Why deferred: "None of them belongs in this release."
+  - Where the thinking already lives: the 2026-08-28 release request. A separate request document
+    is expected after this release.
+  - Trigger to pick up: the separate request document arrives after v0.8.0.
+  - Rough size: not stated.
+
 ## 5. Smaller improvements, help welcome
 
 Good first contributions, carried across unchanged from ROADMAP.md's prior "Smaller improvements,

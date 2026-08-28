@@ -1,6 +1,6 @@
 # Hostable engine: the canonical origin is public, not local
 
-Date: 2026-08-27. Status: approved for implementation on the `feat/hostable-engine` branch.
+Date: 2026-08-27. Status: released in v0.8.0.
 
 ## What real clients found
 
@@ -61,5 +61,5 @@ not carry the authenticated session.
   clean. Cross-package tests are trusted only after the build.
 
 There is no deferral in this change, so it adds nothing to `BACKLOG.md`. README and ROADMAP need no
-status change because this fixes an unreleased compatibility defect without changing the stated
+status change because this fixes a compatibility defect without changing the stated
 scope or verification history.

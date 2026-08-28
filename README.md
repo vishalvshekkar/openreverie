@@ -6,7 +6,7 @@ openreverie is a source-available agent you run on your own machine. You talk to
 
 Website: [reverie.my](https://reverie.my)
 
-Current release: v0.7.3. It runs as a terminal app and as a local web interface. The [Status](#status) section below is the unvarnished inventory of what works and what does not, and it is kept accurate on purpose.
+Current release: v0.8.0. It runs as a terminal app and as a local web interface. The [Status](#status) section below is the unvarnished inventory of what works and what does not, and it is kept accurate on purpose.
 
 ## What you can do with it
 
@@ -167,21 +167,19 @@ Realm influence visualization and a history time lens still do not exist in the 
 
 **Usable as a terminal app and a local web interface. v0.4.0 was the first release to ship a browser UI alongside the terminal CLI. v0.5.0 rebuilt that browser UI into three separate sections and replaced the hand-written graph layout with the standard graphology layout libraries. v0.6.0 has now shipped. It made local time a first class fact, closed the gap where the system prompt would say more memory existed without giving the model any way to reach it, added a personal profile and ten conversation modes including how a mode gets chosen when a session starts, added the `doctor`, `version`, `help`, and `--config` CLI surface, and delivered a real journal mode: six evidence-based writing formats, a safety gate on the riskiest of them, and a browser tab to read back what was written. A memory folder created before v0.6.0 needs one `reverie migrate` run before the app will start. The automated suite covers the journal content and its wiring end to end; the live conversational behavior (which format gets suggested, whether the safety gate holds in the moment) has not yet had a hands-on pass with a real model and is queued for one. v0.7.0 has now shipped on top of that: a retrieval and event-time round (a keyword search lane that was silently dead, chunk-level and dated search results, a fixed recency tiebreak) and a commitments engine, a first-class revisable record for a bounded thing you say you mean to do. See the commitments bullet below for what it does and does not do yet, [docs/releases/v0.7.0.md](docs/releases/v0.7.0.md) for the release notes, and [ROADMAP.md](ROADMAP.md) for the full account. Dreaming shipped in v0.7.0 as well: a background process, off by default, that periodically revisits stored memory and writes a narrative and a set of evidence-pointed insights, reachable through `reverie dream` and a web Dreams tab, with per-insight feedback and a capped prompt section. It is described in full under [Dreaming](#dreaming) above. The dreaming pipeline is covered end to end by the automated suite (selection, the tool loop, schema validation and retry, scheduling and the once-per-period rule, feedback, the CLI, the server endpoints, the web view), all of it against scripted fake model providers. No human has yet read a dream a real model wrote and judged whether the narrative reads well in any of the three voices, whether an insight is actually a good one, or whether the tone stays where the design intends. The dreaming machinery is tested. The dreaming output is not. v0.7.1 was a packaging release with no behavior change to the companion itself: it fixed a build defect where every bundled command crashed on load (esbuild's ESM output broke a CommonJS `require`, caught now by a smoke test that runs the built binary as part of the build), fixed the executable bit being silently dropped on rebuild under `npm link`, and fixed the web assets failing to resolve from an installed package. v0.7.2 changed nothing a user runs: it moved npm publishing to trusted publishing (OpenID Connect), so there is no stored `NPM_TOKEN` secret to leak or rotate, and it exists specifically to exercise the publish workflow for real on a release where nothing else was at stake. v0.7.1 reached npm by hand; v0.7.2 is the first release the workflow published for real. See [docs/releases/v0.7.1.md](docs/releases/v0.7.1.md) and [docs/releases/v0.7.2.md](docs/releases/v0.7.2.md) for the full account. v0.7.3 is a repair release, and it corrects something this section got wrong. Dreaming was tested end to end against fake providers and had never once produced a dream on a real memory folder. Six defects sat between turning it on and a dream on disk: the dreaming model fell back to the reflection model, which is not chosen to run a tool loop and in one real config could not run one at all; a failed attempt left no trace anywhere, so a dream that died on its first model call and a dream that was never due looked identical from outside; `reverie dream --force` lost a lock race against the engine's own background trigger in the same process; `reverie web` never fired an early trigger, so nothing happened until a timer first ticked thirty minutes in; the insight prompt biased the model toward evidence ids that could never resolve; and the narrative step sent a temperature the model rejected. All six are fixed, and a real dream has now been produced end to end against a real memory folder as the final check. `reverie doctor` and the web Dreams tab now report dreaming's status honestly, including why the last attempt produced nothing. What a real model actually writes still has not been reviewed by a human, so the sentence above stands: the dreaming machinery is tested, the dreaming output is not. v0.7.3 also fixed the web session list not appearing until a reload, overlapping speaker labels, a composer that stayed on screen for conversations that had ended, tool calls that showed a raw function name and then raw JSON, an atlas where every node type shared one colour, and settings that saved silently without saying so. It gave the model the project's own prose rule, which it had never been given, after em dashes were found written into permanent memory files. See [docs/releases/v0.7.3.md](docs/releases/v0.7.3.md).**
 
-Unreleased, on a branch as of 2026-08-27: a pure refactor that makes the engine able to run
-somewhere without a filesystem, for a separate hosted product built on top of it. Nothing a
-self-hosted user runs behaves differently. Filesystem access, the SQLite handle, the timezone, and
-the wall clock are all injected rather than reached for, the HTTP layer split into a
-transport-agnostic core with the `node:http` server as a thin adapter over it, and providers now
-report token usage. Two parts of it are improvements here regardless: the engine no longer guesses
-your timezone from the machine, and the test suite can run with no temp directories. The hosted
-product that asked for it has since run the engine on a real Cloudflare Workers runtime and
-verified the change set against its own build; that found an import that killed the isolate before
-any handler ran, then a canonical-origin validator that admitted only the loopback address. Both
-are fixed. The shared Fetch app now requires each host to choose whether authenticated native
-clients may omit `Origin`, while the self-hosted Node adapter keeps its existing browser-only
-requirement. Nobody has run it from this repository on anything but Node, and this suite cannot
-run that runtime, so the integration test for it lives downstream. See [ROADMAP.md](ROADMAP.md) for
-the full account.
+v0.8.0 is a hostable-engine release with no user-visible change to self-hosted openreverie. It
+makes filesystem access, the SQLite handle, the timezone, and the wall clock injectable, adds
+public engine and server entry points for a Workers-style host, and keeps the Node server as a thin
+adapter over the transport-agnostic HTTP core. A separate hosted product is the first real consumer:
+it has served the complete API, including one authenticated streamed turn that survived rebuilding
+the engine and registry, and repeated the same path through local Workers development. Its route
+configuration supplies the canonical public origin, which differs from the address a developer
+uses locally: development routing can rewrite `Host` while leaving `Origin` alone. The Fetch app
+therefore requires a configured canonical origin and an explicit policy for whether native clients
+may omit `Origin`; the self-hosted Node adapter keeps its existing browser-only requirement. This
+repository still cannot run the Workers runtime, so that integration test remains downstream. See
+[docs/releases/v0.8.0.md](docs/releases/v0.8.0.md) and [ROADMAP.md](ROADMAP.md) for the full
+account.
 
 The sections above describe the conversation modes, journal mode, the browser interface, and the atlas in full, including their caveats. What follows is the rest of the inventory.
 

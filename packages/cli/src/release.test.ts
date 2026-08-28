@@ -12,7 +12,7 @@ async function readAt(path: string): Promise<string> {
 }
 
 describe('release', () => {
-  it('marks every workspace package as v0.7.3', async () => {
+  it('marks every workspace package as v0.8.0', async () => {
     const manifests = [
       'package.json',
       'packages/cli/package.json',
@@ -23,7 +23,7 @@ describe('release', () => {
       'packages/web/package.json',
     ]
     for (const path of manifests) {
-      expect(JSON.parse(await readAt(path)).version).toBe('0.7.3')
+      expect(JSON.parse(await readAt(path)).version).toBe('0.8.0')
     }
   })
 
