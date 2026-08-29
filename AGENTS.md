@@ -48,6 +48,8 @@ When a backlog item ships, remove its entry and record it in the `ROADMAP.md` Do
 - Relationship claims in prose are testimony, not record. The graph log is the record.
 - Model access goes through the provider interfaces in `@openreverie/providers`. Never call a provider SDK or HTTP API directly from other packages.
 - Dream artifacts live at `dreams/<local-date>-<dreamId>/`, holding `dream.md`, `insight.md`, and `process.jsonl`, plus an append-only `dreams/log.jsonl` alongside them. Dream files are written once and never modified afterward, the same posture as the rest of the memory folder.
+- A host can supply and customize prompt/persona content through a defined seam: `PersonaOptions` (`packages/core/src/personas.ts`), `buildDreamPersona`, `ServerLaunchOptions.persona` (`packages/server/src/launch.ts`), and `LiveSessionRegistryOptions.persona` (`packages/server/src/registry.ts`). Changing what this seam produces when a host supplies no options is a defect, with one signed-off exception already spent (the `PRECEDENCE_SENTENCE` reword in `personas.ts`). Any further change to this prose, anywhere in the persona/prompt path, needs the same explicit human sign-off that one required. See [docs/hosting.md](docs/hosting.md) for the full seam.
+- `packages/memory` reaches its filesystem only through two injected interfaces, `FileStore` and `AppendOnlyStore` (`packages/memory/src/store.ts`). Code touching either must honor the contracts documented on the interfaces themselves, in particular `FileStore.readFile`'s requirement to reject with `.code === 'ENOENT'` when a path does not exist: two other modules depend on that exact code to tell a missing file apart from any other read failure.
 
 ## Domain sensitivity
 

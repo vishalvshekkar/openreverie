@@ -218,6 +218,29 @@ nothing. See `packages/core/src/personas.ts`
 (`PersonaOptions`, `DEFAULT_DEPLOYMENT_CONTEXT`, `DEFAULT_FIRST_CONVERSATION_DEPLOYMENT_CLAUSE`,
 `buildDreamPersona`) and `packages/core/src/context.ts` (`firstConversationSection`).
 
+A 2026-08-29 pass fixed three defects, one of which changes the API. `listStoredSessions` used to
+report every session stored on disk as `'ended'`, whether or not it had actually been reflected.
+`PublicSession.status` now carries a fourth value, `'open'`, for a session that is on disk, was
+never reflected, and is not live in this process, distinct from `'expired'`, which is the
+in-memory idle sweep's own state and never describes a session read straight off disk. `readOnly`
+stays `true` for both `'ended'` and `'open'` unconditionally, because the stored view still cannot
+serve writes until session resume exists: only the label was wrong, not the permission underneath
+it. The server's registry now answers a write attempted against an `'open'` session with `409
+session_not_live` rather than the more restrictive `409 session_ended`; any status it does not
+recognize, including one added later, still falls to `session_ended`, fail closed. The response
+schema's `status` field now accepts `'open'` as a fourth value alongside the other three, so a
+client validating that enum strictly needs to add it too. Dreaming now fails loudly rather than
+silently: when the rendered dream persona is empty or whitespace only, the engine records the
+attempt as `'failed'` and throws instead of running all four dream stages on an empty system
+prompt; a non-empty persona that renders real prose with no crisis stance in it still passes this
+guard, a gap tracked in [BACKLOG.md](BACKLOG.md). Separately, the `FileStore.readFile` contract is
+now written down directly on the interface in `packages/memory/src/store.ts`: an implementation
+must reject with an error whose `.code` is `'ENOENT'` when the path does not exist, because
+`journal.ts` and `profile.ts` both depend on that exact code to tell a missing file apart from any
+other read failure. It was written down because a real host's own `FileStore` implementation threw
+a plain `Error` instead, silently breaking reflection end to end on that deployment before anyone
+noticed.
+
 The sections above describe the conversation modes, journal mode, the browser interface, and the atlas in full, including their caveats. What follows is the rest of the inventory.
 
 What works today:
@@ -305,6 +328,8 @@ TypeScript monorepo, six packages, strict downward-only dependencies:
 | `@openreverie/providers` | Chat and embedding provider interfaces, swappable adapters (OpenAI first) |
 
 Dependencies point downward only. `cli` and `server` are sibling outer interfaces that both depend on `core`, which depends on `memory`, which depends on `providers`. `cli` also depends on `server` to launch the web interface. `web` depends on nothing in the engine and reaches the server over HTTP alone.
+
+The engine and server can also be embedded by a host other than this repository's own CLI: see [docs/hosting.md](docs/hosting.md) for what a host supplies and what it can customize.
 
 ## Roadmap
 
