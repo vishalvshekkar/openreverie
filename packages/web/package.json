@@ -1,8 +1,13 @@
 {
   "name": "@openreverie/web",
-  "private": true,
-  "version": "0.9.0",
+  "version": "0.9.1",
+  "description": "The openreverie web interface: a local, browser-based view of a person's memory graph and chat, built for the Node static-serving path in @openreverie/server.",
+  "homepage": "https://reverie.my",
+  "license": "FSL-1.1-ALv2",
   "type": "module",
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc -b && vite build",
     "test": "vitest run --passWithNoTests"

@@ -50,7 +50,7 @@ async function isFile(path: string): Promise<boolean> {
   }
 }
 
-// Finds the web interface's built assets. There are two layouts to find
+// Finds the web interface's built assets. There are three layouts to find
 // them in, and only a positive check on the first tells them apart:
 //
 // - The published, bundled `openreverie` CLI: `packages/cli/scripts/
@@ -61,6 +61,12 @@ async function isFile(path: string): Promise<boolean> {
 // - The monorepo, running from source or from `tsc -b` output: web/'s dist
 //   is not copied anywhere, but `@openreverie/web` is a real workspace
 //   dependency of `@openreverie/server` and resolves through node_modules.
+// - A published `@openreverie/server` installed on its own: `@openreverie/
+//   web` is an optional peer dependency (see packages/server/package.json),
+//   so a consumer who only wants createFetchApp never has to install a
+//   React application to run a Worker. A consumer who does want the Node
+//   static-serving path but skipped that install gets a require.resolve
+//   MODULE_NOT_FOUND here, which we turn into an error naming the fix.
 //
 // moduleDir defaults to this file's own directory and is only overridden
 // by tests, which need to point it at a temporary directory instead of
@@ -72,7 +78,24 @@ export async function resolveStaticDir(
   if (await isFile(join(bundledAssets, 'index.html'))) {
     return bundledAssets
   }
-  const webPackage = nodeRequire().resolve('@openreverie/web/package.json')
+  let webPackage: string
+  try {
+    webPackage = nodeRequire().resolve('@openreverie/web/package.json')
+  } catch (error) {
+    if (
+      error &&
+      typeof error === 'object' &&
+      'code' in error &&
+      error.code === 'MODULE_NOT_FOUND'
+    ) {
+      throw new Error(
+        'Web interface assets were not found: @openreverie/web is not installed. ' +
+          'Install @openreverie/web alongside @openreverie/server to serve the local web interface, ' +
+          'or use the published openreverie CLI, which ships the web assets already.',
+      )
+    }
+    throw error
+  }
   return join(dirname(webPackage), 'dist')
 }
 

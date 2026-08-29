@@ -296,7 +296,14 @@ What does not exist yet:
 The architecture and memory model are specified in full in [the design spec](docs/superpowers/specs/2026-08-13-openreverie-design.md). This README is updated honestly as the project progresses; if this section says something works, it works.
 
 
-v0.9.0 has now shipped. It answered a single consolidated request from a hosted deployment building
+v0.9.1 is a packaging release with no behaviour change: it publishes the four engine packages a host
+imports (`@openreverie/core`, `@openreverie/memory`, `@openreverie/providers`,
+`@openreverie/server`) plus `@openreverie/web`, which v0.9.0 did not, so building on this engine no
+longer means depending on a working copy of this repository. `@openreverie/web` also stopped being a
+hard dependency of the server, so a host serving the API without the browser interface no longer
+installs React to do it. See [docs/releases/v0.9.1.md](docs/releases/v0.9.1.md).
+
+v0.9.0 shipped before it. It answered a single consolidated request from a hosted deployment building
 on this engine, and where v0.8.0 made the engine runnable by a host with no local filesystem, this
 release makes it survivable by a host whose process evicts between one message and the next. See
 [docs/releases/v0.9.0.md](docs/releases/v0.9.0.md) for the full account. Unlike v0.8.0, this one does

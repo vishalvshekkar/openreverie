@@ -1,9 +1,11 @@
 name: Publish
 
-# Publishes the openreverie CLI to npm when a version tag is pushed. Runs
-# the full suite, the build, and the lint first, and refuses to publish if
-# any of them fail: a red run never reaches the publish step, because it
-# is a separate job that depends on the check job succeeding.
+# Publishes every publishable workspace package to npm when a version tag
+# is pushed: the bundled `openreverie` CLI, and the five scoped engine
+# packages a host imports directly. Runs the full suite, the build, and the
+# lint first, and refuses to publish if any of them fail: a red run never
+# reaches the publish step, because it is a separate job that depends on
+# the check job succeeding.
 
 on:
   push:
@@ -73,6 +75,67 @@ jobs:
       # design. The practical effect is that publishing is possible in
       # exactly two ways: this workflow on a version tag, or a human at an
       # interactive terminal with a passkey.
+      #
+      # The loop below walks the packages in dependency order. Order does
+      # not affect correctness, since npm does not require a dependency to
+      # exist at publish time, but it keeps a partial failure
+      # comprehensible: whatever succeeded is always a prefix of the list.
       - name: Publish to npm
-        working-directory: packages/cli
-        run: npm publish --provenance --access public
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          mkdir -p /tmp/packed
+          for dir in packages/providers packages/memory packages/core packages/web packages/server packages/cli; do
+            name="$(node -p "require('./$dir/package.json').name")"
+
+            # Skip a version already on the registry rather than failing on
+            # it. This is idempotency, not error hiding, and it is load
+            # bearing twice. A publish that fails partway through this loop
+            # can be rerun without inventing a version number nobody asked
+            # for. And npm's trusted publishing cannot be configured on a
+            # package that does not exist yet, so each of these names has to
+            # be created once by a human at an interactive terminal before
+            # this workflow can ever publish it; on the release where that
+            # happens, this step finds those versions already present and
+            # says so instead of going red.
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "skip $name@$version: already on the registry"
+              continue
+            fi
+
+            # pnpm pack, then publish the tarball, rather than npm publish
+            # from the package directory. npm does not rewrite the
+            # workspace: protocol, so publishing packages/core directly
+            # would put "@openreverie/memory": "workspace:*" on the
+            # registry, which is uninstallable. pnpm rewrites it to the
+            # concrete version. Verified by packing core and reading the
+            # manifest back out of the tarball. Authentication and
+            # provenance still come from npm, which is why this does not
+            # use pnpm publish: the OpenID Connect exchange described above
+            # is npm's, and this keeps it on the path it already works on.
+            ( cd "$dir" && pnpm pack --pack-destination /tmp/packed )
+            # The tarball name is derived rather than scraped from pnpm's
+            # output: "@openreverie/core" packs as
+            # "openreverie-core-<version>.tgz". Reading it off the last line
+            # of the pack output would work today and break silently the
+            # first time pnpm changes what it prints, on the one step in
+            # this repository whose mistakes cannot be taken back.
+            tarball="/tmp/packed/$(echo "$name" | sed 's|^@||; s|/|-|')-$version.tgz"
+            if [ ! -f "$tarball" ]; then
+              echo "pnpm pack did not produce the expected tarball for $name at $tarball"
+              ls -la /tmp/packed
+              exit 1
+            fi
+            # Last line of defence, checking the artifact itself rather than
+            # trusting that the pack rewrote what it was supposed to. An
+            # uninstallable manifest is not something a later release can
+            # repair: that version number is spent.
+            tar -xzOf "$tarball" package/package.json > /tmp/packed-manifest.json
+            if grep -q '"workspace:' /tmp/packed-manifest.json; then
+              echo "refusing to publish $name: its packed manifest still carries a workspace: specifier"
+              cat /tmp/packed-manifest.json
+              exit 1
+            fi
+            echo "publishing $name@$version from $tarball"
+            npm publish "$tarball" --provenance --access public
+          done

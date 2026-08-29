@@ -515,9 +515,19 @@ item ships, remove it from here and record it in `ROADMAP.md`'s Done narrative.
   - Trigger: not stated.
   - Rough size: small.
 
-- **`packages/web/src/views/settings.test.tsx` flakes rarely under full-suite load.** Seen once, as
-  a `waitFor` timing failure, during a full `pnpm test` run on 2026-08-30. Not reproduced in two
-  further full runs or three web-only runs immediately afterwards.
+- **`packages/web/src/views/settings.test.tsx` flakes rarely under full-suite load.** Seen twice
+  during a full `pnpm test` run, on 2026-08-30, both times as
+  `sends null when a field is cleared, not an empty string` failing with `expected [] to have a
+  length of 1 but got +0`: the blur never produced a profile patch. Never reproduced in isolation,
+  across nine single-file runs and several full runs in between.
+  - **One hypothesis investigated and disproved**, recorded so nobody spends the same hour on it.
+    The obvious reading is that `findByLabelText` resolves as soon as the control exists, before
+    `getProfile` has populated it, so clearing an empty input is a no-op and the commit on blur is
+    correctly skipped (`Settings.tsx`'s field commits only `if (draft !== (value ?? ''))`). That
+    cannot be it: `Settings` returns a `Loading settings.` placeholder while `profile === null`, so
+    the fields do not render until the profile has loaded, and `findByLabelText` is already waiting
+    for exactly that. Forcing the race with an injected 400ms delay in `getProfile` did not
+    reproduce the failure either. The cause is still unknown.
   - Why deferred: not reproduced, so there is nothing yet to fix against. Recorded rather than
     dropped because an intermittently failing test is a real defect here, and because a flake that
     gets waved off is how a genuine ordering bug hides: one was found on this same branch when an
@@ -525,7 +535,8 @@ item ships, remove it from here and record it in `ROADMAP.md`'s Done narrative.
     `LiveSessionRegistry.close`.
   - Where: `packages/web/src/views/settings.test.tsx`. Last modified in v0.7.3 (`1f8bef5`) and
     untouched by the host-configurable-deployment-context branch, so it predates that work.
-  - Trigger: seeing it again, or a `waitFor` in that file failing in CI.
+  - Trigger: seeing it again, ideally with a way to reproduce it on demand. A `waitFor` in that
+    file failing in CI is the likeliest place it shows up next.
   - Rough size: small, once it is reproducible.
 
 ## 2. Retrieval and memory quality

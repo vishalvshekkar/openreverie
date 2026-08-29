@@ -1,6 +1,6 @@
 {
   "name": "@openreverie/server",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -15,7 +15,17 @@
     "@openreverie/core": "workspace:*",
     "@openreverie/memory": "workspace:*",
     "@openreverie/providers": "workspace:*",
-    "@openreverie/web": "workspace:*",
     "zod": "^4.0.0"
+  },
+  "peerDependencies": {
+    "@openreverie/web": "^0.9.0"
+  },
+  "peerDependenciesMeta": {
+    "@openreverie/web": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@openreverie/web": "workspace:*"
   }
 }

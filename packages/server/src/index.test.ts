@@ -1,9 +1,11 @@
 // resolveStaticDir locates the web interface's built assets at runtime. It
-// has two layouts to find them in: the monorepo, where `@openreverie/web`
-// is a real workspace package resolvable through node_modules, and a
+// has three layouts to find them in: the monorepo, where `@openreverie/web`
+// is a real workspace package resolvable through node_modules; a
 // published, bundled install of the `openreverie` CLI, where the web
 // assets are copied to a `web` directory sitting next to the running
-// bundle and there is no `@openreverie/web` package to resolve at all.
+// bundle and there is no `@openreverie/web` package to resolve at all; and
+// a published `@openreverie/server` on its own, where `@openreverie/web`
+// is an optional peer dependency that a consumer may not have installed.
 // See packages/cli/scripts/bundle.mjs for the copy step that produces the
 // second layout.
 
@@ -45,6 +47,71 @@ describe('resolveStaticDir', () => {
     const here = dirname(fileURLToPath(import.meta.url))
     expect(staticDir.endsWith(join('web', 'dist'))).toBe(true)
     expect(staticDir).not.toBe(join(here, 'web'))
+  })
+})
+
+// @openreverie/web is now an optional peer of @openreverie/server (see
+// packages/server/package.json), so a consumer who runs the Node
+// static-serving path without installing it hits require.resolve's
+// MODULE_NOT_FOUND. These tests mock node:module the same way the
+// module-scope suite below does, since there is no way to make the real,
+// installed @openreverie/web workspace package disappear mid test run.
+describe('resolveStaticDir when @openreverie/web is not installed', () => {
+  let tempDir: string
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'reverie-static-dir-missing-peer-'))
+    vi.resetModules()
+  })
+
+  afterEach(async () => {
+    vi.doUnmock('node:module')
+    vi.resetModules()
+    await rm(tempDir, { recursive: true, force: true })
+  })
+
+  it('names @openreverie/web and how to fix it, rather than a raw MODULE_NOT_FOUND', async () => {
+    vi.doMock('node:module', () => ({
+      createRequire: () => {
+        const fakeRequire = (() => {
+          throw new Error('unexpected direct require() call in test')
+        }) as unknown as NodeRequire
+        fakeRequire.resolve = (() => {
+          const error = new Error("Cannot find module '@openreverie/web/package.json'")
+          ;(error as NodeJS.ErrnoException).code = 'MODULE_NOT_FOUND'
+          throw error
+        }) as unknown as NodeRequire['resolve']
+        return fakeRequire
+      },
+    }))
+    const fresh = await import('./index.js')
+
+    await expect(fresh.resolveStaticDir(tempDir)).rejects.toThrow(
+      'Web interface assets were not found: @openreverie/web is not installed. ' +
+        'Install @openreverie/web alongside @openreverie/server to serve the local web interface, ' +
+        'or use the published openreverie CLI, which ships the web assets already.',
+    )
+  })
+
+  it('does not swallow or reinterpret a resolve failure that is not MODULE_NOT_FOUND', async () => {
+    vi.doMock('node:module', () => ({
+      createRequire: () => {
+        const fakeRequire = (() => {
+          throw new Error('unexpected direct require() call in test')
+        }) as unknown as NodeRequire
+        fakeRequire.resolve = (() => {
+          const error = new Error('EACCES: permission denied resolving @openreverie/web')
+          ;(error as NodeJS.ErrnoException).code = 'EACCES'
+          throw error
+        }) as unknown as NodeRequire['resolve']
+        return fakeRequire
+      },
+    }))
+    const fresh = await import('./index.js')
+
+    await expect(fresh.resolveStaticDir(tempDir)).rejects.toThrow(
+      'EACCES: permission denied resolving @openreverie/web',
+    )
   })
 })
 

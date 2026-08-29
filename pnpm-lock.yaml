@@ -96,12 +96,13 @@ importers:
       '@openreverie/providers':
         specifier: workspace:*
         version: link:../providers
-      '@openreverie/web':
-        specifier: workspace:*
-        version: link:../web
       zod:
         specifier: ^4.0.0
         version: 4.4.3
+    devDependencies:
+      '@openreverie/web':
+        specifier: workspace:*
+        version: link:../web
 
   packages/web:
     dependencies:

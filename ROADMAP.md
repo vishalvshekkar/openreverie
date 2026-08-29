@@ -2,7 +2,7 @@
 
 This file tracks what openreverie can do and what is being worked on now. It is kept honest the same way the README is: nothing here is claimed as done unless it works. Everything not yet started, deferred work, known gaps, and ideas not built, lives in [BACKLOG.md](BACKLOG.md), which is canonical for all of that.
 
-## Done (v0.1.0 through v0.9.0)
+## Done (v0.1.0 through v0.9.1)
 
 Sub-project 1 of 5: the local-first memory engine and agent core, usable as a terminal app. See the README for the full capability list and the [design spec](docs/superpowers/specs/2026-08-13-openreverie-design.md) for how it all fits together.
 
@@ -221,9 +221,30 @@ answers, search returns an honest 503 rather than an unhandled 500, ending a con
 14ms with its reflection still running behind it, and that reflection's outcome is on disk afterwards
 rather than lost to the shutdown.
 
+v0.9.1 followed as a packaging release, prompted by the consumer that v0.9.0 was built for finding
+it could not actually install any of it. v0.9.0 published one package, the bundled CLI, which is
+everything a person needs to run openreverie and nothing a program needs to build on it: the four
+engine packages a host imports were never published, so the only way to consume them was a path
+dependency onto a working copy of this repository, which survives neither a branch switch nor a
+second machine nor a continuous integration run.
+
+All five scoped packages publish now. The pipeline packs with pnpm before handing the tarball to
+npm, because npm does not rewrite the `workspace:*` protocol and three of these packages declare
+workspace dependencies on each other: publishing them straight from their directories would have put
+an uninstallable manifest on the registry, on a version number that cannot be reused. The step
+refuses any tarball whose manifest still carries a `workspace:` specifier, and skips a version
+already published rather than failing on it, which makes a partial publish rerunnable and lets a
+package's first release be created by hand where npm's trusted publishing requires it.
+
+`@openreverie/web` also stopped being a hard dependency of `@openreverie/server`. Only the Node
+static-serving path ever touches it, so a host running `createFetchApp` on Workers was installing
+React, sigma and graphology to serve an interface it never mounts. It is an optional peer now, and
+the resolver says which of the two fixes applies when it is absent instead of surfacing a bare
+module-not-found.
+
 ## Current direction
 
-v0.9.0 is released and nothing is started after it. See [BACKLOG.md](BACKLOG.md) for everything
+v0.9.1 is released and nothing is started after it. See [BACKLOG.md](BACKLOG.md) for everything
 named and not built, which is canonical for all of it. The nearest items to hand, none of them
 begun: the search endpoint has no browser interface and session resume has no HTTP route, so two
 capabilities this release added are reachable by code and not by a person; the session listing still
