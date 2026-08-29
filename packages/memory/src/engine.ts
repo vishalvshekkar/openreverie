@@ -228,6 +228,19 @@ export interface PublicSessionReflection {
   lastFailureReason?: string
 }
 
+// The row shape MemoryEngine.listStoredSessionStates returns: the state a
+// caller needs to triage a stored session, at the read cost that method is
+// built for (see its own doc comment). No updatedAt and no transcript
+// counts, unlike PublicSession above, both dropped on purpose because
+// deriving either needs a session's full transcript.
+export interface StoredSessionState {
+  sessionId: string
+  date: string
+  status: 'open' | 'ended'
+  resumable: boolean
+  reflection: PublicSessionReflection
+}
+
 export interface PublicGraphNode {
   id: string
   type: GraphNode['type']
@@ -1913,27 +1926,12 @@ export class MemoryEngine implements DreamLookup {
         reflected,
         skipped,
       })
-      // 'open' means only reflection.state === 'not_started': on disk,
-      // never reflected, and never even attempted. Before R4, status was
-      // `reflected ? 'ended' : 'open'`, which was right only because
-      // ending a session used to block on its own reflection finishing.
-      // That changed (endSession now hands reflection to the background
-      // for a caller that asks), so a session the person deliberately
-      // ended can now sit unreflected for as long as reflection takes,
-      // and under the old rule it would still report 'open'. Session
-      // resume treats 'open' as "resumable", so a deliberately ended
-      // session, or one whose reflection failed, must never look
-      // resumable: a partial reflection may already have materialized
-      // arcs, people, or items from that transcript. Everything except
-      // a session with no recorded attempt at all is 'ended'.
-      const status = reflection.state === 'not_started' ? 'open' : 'ended'
+      const { status, resumable } = statusFromReflection(reflection)
       return {
         ...session,
         reflection,
         status,
-        // Same value as status above, never a second check: see the field
-        // comment on PublicSession.resumable.
-        resumable: status === 'open',
+        resumable,
         // Both statuses are read-only regardless: this is the stored view of
         // a session nothing has resumed into this process, so it genuinely
         // cannot serve writes right now, whether or not a host could choose
@@ -1942,6 +1940,50 @@ export class MemoryEngine implements DreamLookup {
         // see the design's addendum, decision 2.
         readOnly: true,
       }
+    })
+  }
+
+  // A reconciliation-shaped sibling of listStoredSessions above: one entry
+  // per stored session with the state a caller needs to triage which
+  // sessions are open, and nothing more. Built for a consumer's alarm-driven
+  // pass that asks "which stored sessions are open" to find the sessions it
+  // has no durable row for; their own framing was that they would rather
+  // this be shaped for both listing and resume than shaped for resume alone
+  // and widened later.
+  //
+  // Deliberately excludes updatedAt and the four per-role transcript counts
+  // that listStoredSessions carries: both require reading a session's whole
+  // transcript, which is exactly the cost this method exists to avoid (a
+  // consumer measured listStoredSessions, through SessionStore.describe, at
+  // 67ms for 200 sessions, and it grows without bound). A caller that needs
+  // the last-line timestamp for one specific session, such as a
+  // reconciliation pass that has already found the handful of sessions with
+  // no durable row, should pay that cost only for those few sessions,
+  // through listStoredSessions or readTranscript on that one id, never for
+  // every session in the folder.
+  //
+  // Built on SessionStore.listSessions, not describe: its own per-session
+  // cost is one summary.md read for a reflected session (already needed to
+  // tell reflected from skipped) plus, only when that summary carries no
+  // frozen date, one bounded read of the transcript's first line
+  // (paths.logs.readRange). Never a full transcript read (readAll): that
+  // property is asserted directly, the same way sessionReflectionState's
+  // own no-transcript test is.
+  //
+  // status, resumable, and reflection are derived through the exact same
+  // helpers listStoredSessions uses (statusFromReflection and
+  // publicReflectionFrom), never a second copy of that mapping: two methods
+  // answering the same question about the same session, in two different
+  // ways, is the specific drift AGENTS.md warns this repository has already
+  // been bitten by.
+  async listStoredSessionStates(): Promise<StoredSessionState[]> {
+    const sessions = await SessionStore.listSessions(this.paths)
+    // One fold of the whole reflection log, not one read per session: same
+    // reasoning as listStoredSessions above.
+    const logState = foldReflectionLog(await readReflectionLog(this.paths))
+    return sessions.map(({ sessionId, date, reflected, skipped }) => {
+      const reflection = publicReflectionFrom(logState.get(sessionId), { reflected, skipped })
+      return { sessionId, date, reflection, ...statusFromReflection(reflection) }
     })
   }
 
@@ -3628,6 +3670,34 @@ function isDegraded(
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
+}
+
+// The single derivation of status and resumable from a session's already-
+// resolved PublicSessionReflection, shared by listStoredSessions and
+// listStoredSessionStates so the two can never compute this two different
+// ways.
+//
+// 'open' means only reflection.state === 'not_started': on disk, never
+// reflected, and never even attempted. Before R4, status was
+// `reflected ? 'ended' : 'open'`, which was right only because ending a
+// session used to block on its own reflection finishing. That changed
+// (endSession now hands reflection to the background for a caller that
+// asks), so a session the person deliberately ended can now sit unreflected
+// for as long as reflection takes, and under the old rule it would still
+// report 'open'. Session resume treats 'open' as "resumable", so a
+// deliberately ended session, or one whose reflection failed, must never
+// look resumable: a partial reflection may already have materialized arcs,
+// people, or items from that transcript. Everything except a session with
+// no recorded attempt at all is 'ended'.
+//
+// resumable is always the same value as status, never a second, independent
+// derivation: see the field comment on PublicSession.resumable.
+function statusFromReflection(reflection: PublicSessionReflection): {
+  status: 'open' | 'ended'
+  resumable: boolean
+} {
+  const status = reflection.state === 'not_started' ? 'open' : 'ended'
+  return { status, resumable: status === 'open' }
 }
 
 // Builds the public PublicSessionReflection shape from one session's

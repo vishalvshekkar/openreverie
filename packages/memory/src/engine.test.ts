@@ -3614,6 +3614,247 @@ describe('MemoryEngine', () => {
     })
   })
 
+  describe('listStoredSessionStates: the same read as listStoredSessions, without transcript content', () => {
+    let dir: string
+    let paths: MemoryPaths
+
+    beforeEach(async () => {
+      dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-liststates-'))
+      paths = memoryPaths(dir, nodeStores())
+      await ensureMemoryTree(paths, 'UTC')
+      await pinTimezoneUtc(paths)
+    })
+
+    afterEach(async () => {
+      await rmWithRetry(dir)
+    })
+
+    it('reads open/resumable for a never-attempted session and ended/not-resumable for a reflected, a skipped, and an in-progress one, agreeing with listStoredSessions', async () => {
+      const chat = new FakeChatProvider([
+        { text: JSON.stringify(emptyReflectionOutput('Reflected fine.')), toolCalls: [] },
+      ])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      const openId = await engine.startSession()
+      await engine.appendTranscript(openId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'Never touched by reflection.',
+      })
+
+      const reflectedId = await engine.startSession()
+      await engine.appendTranscript(reflectedId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'A short session, reflected normally.',
+      })
+      await engine.endSession(reflectedId)
+
+      const skippedId = await engine.startSession()
+      await engine.appendTranscript(skippedId, {
+        ts: new Date().toISOString(),
+        role: 'assistant',
+        content: 'No user lines in this one.',
+      })
+      await engine.endSession(skippedId)
+
+      const inProgressId = await engine.startSession()
+      await engine.appendTranscript(inProgressId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'Reflection started elsewhere and never resolved.',
+      })
+      await appendReflectionLog(paths, [
+        {
+          ts: new Date().toISOString(),
+          type: 'attempt',
+          session: inProgressId,
+          trigger: 'endSession',
+        },
+      ])
+
+      const viaList = await engine.listStoredSessions()
+      const viaStates = await engine.listStoredSessionStates()
+
+      for (const id of [openId, reflectedId, skippedId, inProgressId]) {
+        const listEntry = viaList.find((s) => s.sessionId === id)
+        const stateEntry = viaStates.find((s) => s.sessionId === id)
+        if (!listEntry || !stateEntry) throw new Error(`missing entry for ${id}`)
+        // Asserting agreement directly against listStoredSessions, not just
+        // fixed literals twice: a future change to one derivation that does
+        // not change the other fails here even if neither side's own
+        // expected value moves.
+        expect(stateEntry.status).toBe(listEntry.status)
+        expect(stateEntry.resumable).toBe(listEntry.resumable)
+        expect(stateEntry.reflection).toEqual(listEntry.reflection)
+      }
+
+      const open = viaStates.find((s) => s.sessionId === openId)
+      expect(open).toMatchObject({ status: 'open', resumable: true })
+
+      const reflected = viaStates.find((s) => s.sessionId === reflectedId)
+      expect(reflected).toMatchObject({ status: 'ended', resumable: false })
+
+      const skipped = viaStates.find((s) => s.sessionId === skippedId)
+      expect(skipped).toMatchObject({ status: 'ended', resumable: false })
+
+      const inProgress = viaStates.find((s) => s.sessionId === inProgressId)
+      expect(inProgress).toMatchObject({ status: 'ended', resumable: false })
+      expect(inProgress?.reflection).toMatchObject({ state: 'in_progress', attempts: 1 })
+
+      await engine.close()
+    })
+
+    it('reads ended/not-resumable for a failed session, agreeing with listStoredSessions', async () => {
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('Started training for a marathon.'),
+        items: [{ text: 'Went for a long run', kind: 'event' }],
+        newArcs: [
+          {
+            name: 'Marathon Training',
+            realm: 'Fitness',
+            reason: 'mentioned training for a marathon',
+            itemIndexes: [0],
+            narrative: 'Training for a marathon this fall.',
+          },
+        ],
+      }
+      const chat = new FakeChatProvider([{ text: JSON.stringify(out), toolCalls: [] }])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      const sessionId = await engine.startSession()
+      await engine.appendTranscript(sessionId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'Went for a long run, training for a marathon this fall.',
+      })
+
+      await chmod(paths.arcsDir, 0o500)
+      try {
+        await expect(engine.endSession(sessionId)).rejects.toThrow()
+      } finally {
+        await chmod(paths.arcsDir, 0o700)
+      }
+
+      const listEntry = (await engine.listStoredSessions()).find((s) => s.sessionId === sessionId)
+      const stateEntry = (await engine.listStoredSessionStates()).find(
+        (s) => s.sessionId === sessionId,
+      )
+      if (!listEntry || !stateEntry) throw new Error('missing session entry')
+
+      expect(stateEntry.status).toBe(listEntry.status)
+      expect(stateEntry.resumable).toBe(listEntry.resumable)
+      expect(stateEntry.reflection).toEqual(listEntry.reflection)
+      expect(stateEntry).toMatchObject({ status: 'ended', resumable: false })
+      expect(stateEntry.reflection).toMatchObject({ state: 'failed', attempts: 1 })
+
+      await engine.close()
+    })
+
+    // The upgrade case: every session every existing self-hosted user
+    // already has, the moment they upgrade to this version. No reflection
+    // log record exists for it at all, only summary.md on disk. Getting
+    // this wrong (reading 'open') would tell a reconciliation pass that the
+    // person's entire history still needed ending.
+    it('a session reflected before the reflection log existed reads ended, not open (the upgrade case)', async () => {
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      const sessionId = await engine.startSession()
+      await engine.appendTranscript(sessionId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'Reflected long before the reflection log existed.',
+      })
+      const sessionDir = await SessionStore.sessionDir(paths, sessionId)
+      await writeFile(
+        join(sessionDir, 'summary.md'),
+        '---\nid: doc_x\n---\nA session summarized before R4 shipped.\n',
+        'utf8',
+      )
+
+      expect(await readReflectionLog(paths)).toEqual([])
+
+      const stateEntry = (await engine.listStoredSessionStates()).find(
+        (s) => s.sessionId === sessionId,
+      )
+      expect(stateEntry).toMatchObject({ status: 'ended', resumable: false })
+      expect(stateEntry?.reflection).toEqual({ state: 'reflected', attempts: 0 })
+
+      await engine.close()
+    })
+
+    // The property this method exists for. Asserted through a store fake
+    // that counts every readAll call's path, the same technique
+    // sessionReflectionState's own no-transcript test uses: readAll reads a
+    // log file's full content, and listSessions's own bounded first-line
+    // read (paths.logs.readRange, exercised for the never-attempted session
+    // below, which has no summary.md date to read instead) is a separate,
+    // deliberately cheaper call this test does not forbid.
+    it('reads no full transcript content, even when real transcripts exist on disk', async () => {
+      const readAllCalls: string[] = []
+      const stores = memoryStores()
+      const countingLogs: AppendOnlyStore = {
+        create: (path) => stores.logs.create(path),
+        appendLines: (path, lines) => stores.logs.appendLines(path, lines),
+        readAll: async (path) => {
+          readAllCalls.push(path)
+          return stores.logs.readAll(path)
+        },
+        readRange: (path, from, count) => stores.logs.readRange(path, from, count),
+      }
+      const testPaths = memoryPaths('/reverie', { files: stores.files, logs: countingLogs })
+      const index = MemoryIndex.open(':memory:')
+      const engine = await MemoryEngine.fromPaths(
+        testPaths,
+        index,
+        fakeDeps(new FakeChatProvider([])),
+        { maintenance: false },
+      )
+
+      const openId = await engine.startSession()
+      await engine.appendTranscript(openId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'A real transcript line, never fully read by listStoredSessionStates.',
+      })
+
+      const reflectedId = await engine.startSession()
+      await engine.appendTranscript(reflectedId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'Another real transcript line.',
+      })
+      await appendReflectionLog(testPaths, [
+        {
+          ts: new Date().toISOString(),
+          type: 'attempt',
+          session: reflectedId,
+          trigger: 'endSession',
+        },
+        {
+          ts: new Date().toISOString(),
+          type: 'outcome',
+          session: reflectedId,
+          outcome: 'reflected',
+        },
+      ])
+      const reflectedDir = await SessionStore.sessionDir(testPaths, reflectedId)
+      await testPaths.files.writeFile(
+        join(reflectedDir, 'summary.md'),
+        '---\nid: doc_y\ndate: 2026-08-14\n---\nReflected.\n',
+      )
+
+      readAllCalls.length = 0
+      const states = await engine.listStoredSessionStates()
+
+      expect(states.map((s) => s.sessionId).sort()).toEqual([openId, reflectedId].sort())
+      expect(readAllCalls.some((path) => path.includes('transcript'))).toBe(false)
+
+      await engine.close()
+    })
+  })
+
   describe('malformed documents do not brick the engine', () => {
     let dir: string
     let paths: MemoryPaths

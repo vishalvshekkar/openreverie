@@ -327,7 +327,22 @@ next one. And the commit this method writes into the memory folder's own history
 sessions and build pending rollups" unconditionally, which would have been a false record on a pass
 that reflected nothing; it now says what actually ran.
 
-Verified here rather than taken from any implementer's report: `pnpm build` exit 0, 1,825 tests
+One more primitive landed for the same host, and it is worth saying why it was shaped the way it
+was rather than the way the first ask implied. Resume needed to know whether one stored session
+exists and is resumable without paying the full listing scan, and that was built as two
+single-session lookups. The consumer then described a reconciliation pass that has to ask the same
+question of every stored session on every alarm, and asked that the primitive be shaped for both
+rather than shaped for resume and widened later, which was the right call.
+`listStoredSessionStates()` answers it for a whole folder with no transcript content read at all:
+one existence check per session, one small read of a reflected session's own summary, a bounded
+first-line read only where a date cannot come from that summary, and a single fold of the reflection
+log for the entire listing. It deliberately carries neither `updatedAt` nor the per-role transcript
+counts, because deriving either needs a session's whole transcript, which is the cost it exists to
+avoid. The status and resumable rules are now computed in one shared place rather than twice, since
+two methods answering the same question about the same session is the shape this repository has
+been bitten by before.
+
+Verified here rather than taken from any implementer's report: `pnpm build` exit 0, 1,829 tests
 across 82 files, `pnpm lint` exit 0, and `tsc --noEmit` exit 0. The self-hosted path was also driven
 by hand, against the real bundled binary and the real Node server with no provider configured, which
 is the state a person is in the moment after installing: the memory folder is created, the read API

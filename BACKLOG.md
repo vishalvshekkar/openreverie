@@ -515,6 +515,19 @@ item ships, remove it from here and record it in `ROADMAP.md`'s Done narrative.
   - Trigger: not stated.
   - Rough size: small.
 
+- **`packages/web/src/views/settings.test.tsx` flakes rarely under full-suite load.** Seen once, as
+  a `waitFor` timing failure, during a full `pnpm test` run on 2026-08-30. Not reproduced in two
+  further full runs or three web-only runs immediately afterwards.
+  - Why deferred: not reproduced, so there is nothing yet to fix against. Recorded rather than
+    dropped because an intermittently failing test is a real defect here, and because a flake that
+    gets waved off is how a genuine ordering bug hides: one was found on this same branch when an
+    intermittent ENOTEMPTY in `app.test.ts` turned out to be a real shutdown-drain defect in
+    `LiveSessionRegistry.close`.
+  - Where: `packages/web/src/views/settings.test.tsx`. Last modified in v0.7.3 (`1f8bef5`) and
+    untouched by the host-configurable-deployment-context branch, so it predates that work.
+  - Trigger: seeing it again, or a `waitFor` in that file failing in CI.
+  - Rough size: small, once it is reproducible.
+
 ## 2. Retrieval and memory quality
 
 - **`DocumentHit.snippet` and `chunks[0]` can name different physical chunks of the same
@@ -1611,9 +1624,15 @@ design conversation first.
     transcript route calls `listStoredSessions().find()` purely to decide 404-or-not and then reads
     the transcript again, so it needs no counts at all. Of the five callers of
     `listStoredSessions`, four need no counts or need them for a single session. The cheap
-    primitive already exists inside `packages/memory`: `SessionStore.listSessions` returns id,
-    date, `reflected` and `skipped` with no full transcript read, and is simply not exposed on the
-    engine. Where: `packages/memory/src/transcripts.ts` (`describe`);
+    primitive already existed inside `packages/memory` (`SessionStore.listSessions` returns id,
+    date, `reflected` and `skipped` with no full transcript read) and **is now exposed on the
+    engine** as `listStoredSessionStates()`, added for a consumer's reconciliation pass. So what
+    remains of this item is rewiring the routes that do not need counts onto it, not building
+    anything new. One thing that primitive deliberately cannot answer: `updatedAt`, because a
+    session's last transcript line is exactly the expensive read. A caller that needs it for a
+    specific session should pay that cost per session rather than for the whole list; making it
+    cheap in bulk would need a tail read on `AppendOnlyStore`, which is a change to one of the two
+    injected interfaces this package reaches its filesystem through and wants a real case first. Where: `packages/memory/src/transcripts.ts` (`describe`);
     `packages/memory/src/engine.ts` (`listStoredSessions`); `packages/server/src/http-core.ts` (the
     sessions, single session and transcript routes); `packages/server/src/registry.ts:199` and its
     `findStoredSession`. Trigger: not stated by them. Ours: whichever comes first of a real
