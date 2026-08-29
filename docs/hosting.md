@@ -17,16 +17,18 @@ This page only points at what exists and where; it does not re-argue why.
 Every filesystem touch in `@openreverie/memory` goes through two injected interfaces in
 `packages/memory/src/store.ts`: `FileStore` (whole-file reads and atomic writes) and
 `AppendOnlyStore` (append-only logs, such as `graph.jsonl` and each session's transcript). A host
-implements both over whatever storage it has.
+implements both over whatever storage it has. A `FileStore` implementation must also expose a
+`capabilities: { versioning: boolean, locking: boolean }` object; see `store.ts` for what each
+flag governs.
 
 `FileStore.readFile` carries a contract every implementation must satisfy: it must reject with an
 error whose `.code` is `'ENOENT'` when the path does not exist, matching `node:fs/promises`'
-`readFile`. `journal.ts` and `profile.ts` both catch a `readFile` rejection and treat it as absence
-only when `err.code === 'ENOENT'`, letting anything else propagate instead of being silently
-swallowed. An implementation that throws a plain `Error` for a missing path, instead of one with
-that code, turns "file absent" into an unhandled read failure for both callers. This is documented
-directly on the interface in `store.ts`; read it there for the full contract, including atomic
-writes and sorted `readdir` order.
+`readFile`. `journal.ts`'s read helpers and `profile.ts`'s `loadProfile` catch a `readFile`
+rejection and treat it as absence only when `err.code === 'ENOENT'`, letting anything else
+propagate instead of being silently swallowed. An implementation that throws a plain `Error` for a
+missing path, instead of one with that code, turns "file absent" into an unhandled read failure
+for both callers. This is documented directly on the interface in `store.ts`; read it there for
+the full contract, including atomic writes and sorted `readdir` order.
 
 ## Building an engine
 
@@ -52,9 +54,11 @@ filesystem stores and a real `better-sqlite3` database, then delegates to `fromP
 `(Request) => Promise<Response>` entry point, an alternative to the `node:http` adapter. Its
 `FetchAppDeps` requires `writeOriginPolicy` (`'required'` for browser-only clients, `'allow-missing'`
 for authenticated native and command-line clients that never send `Origin`) and a canonical public
-origin (`canonicalOrigin`, an origin-only `http:` or `https:` URL). The canonical origin must come
-from host configuration, not from the address a developer happens to type into a browser: a Workers
-development route can rewrite the incoming `Host` while leaving `Origin` unchanged.
+origin (`canonicalOrigin`, an origin-only `http:` or `https:` URL). `FetchAppDeps` also accepts an
+`origin` field, an alias that takes precedence over `canonicalOrigin` when both are set. The
+canonical origin must come from host configuration, not from the address a developer happens to
+type into a browser: a Workers development route can rewrite the incoming `Host` while leaving
+`Origin` unchanged.
 
 ## Customizing the prompt
 

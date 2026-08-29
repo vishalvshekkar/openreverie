@@ -221,7 +221,7 @@ listed and its transcript read, but nothing lets anyone continue it; that stays 
 `BACKLOG.md`, and its trigger ("gated on this fix landing first") is now cleared.
 
 All three fixes were verified the same way: `pnpm build`, `pnpm -r exec tsc --noEmit`, and
-`pnpm lint` all exit 0, and 1,692 tests across 81 files pass. Each was falsified by the implementer
+`pnpm lint` all exit 0, and 1,693 tests across 81 files pass. Each was falsified by the implementer
 and again on review before being accepted; see commits `a18fd10`, `82d367a`, and `a3e052c`.
 
 ## How work happens here

@@ -229,13 +229,19 @@ it. The server's registry now answers a write attempted against an `'open'` sess
 session_not_live` rather than the more restrictive `409 session_ended`; any status it does not
 recognize, including one added later, still falls to `session_ended`, fail closed. The response
 schema's `status` field now accepts `'open'` as a fourth value alongside the other three, so a
-client validating that enum strictly needs to add it too. Dreaming now fails loudly rather than
-silently: when the rendered dream persona is empty or whitespace only, the engine records the
-attempt as `'failed'` and throws instead of running all four dream stages on an empty system
-prompt; a non-empty persona that renders real prose with no crisis stance in it still passes this
-guard, a gap tracked in [BACKLOG.md](BACKLOG.md). Separately, the `FileStore.readFile` contract is
-now written down directly on the interface in `packages/memory/src/store.ts`: an implementation
-must reject with an error whose `.code` is `'ENOENT'` when the path does not exist, because
+client validating that enum strictly needs to add it too. In the browser, a session interrupted
+before reflection now shows as `open` in the Talk list instead of `ended`; nothing else about it
+changed for a self-hosted user. The second defect: dreaming used to run all four dream stages on
+an empty system prompt when the rendered dream persona was empty or whitespace only; it now fails
+loudly instead, recording the attempt as `'failed'` and throwing before any stage runs. A
+non-empty persona that renders real prose with no crisis stance in it still passes this guard, a
+gap tracked in [BACKLOG.md](BACKLOG.md). The third defect: `writeJournalingProtocol` used to
+rebuild the journal entry's `meta` object from scratch on every rewrite, discarding any structured
+field it did not know about; it now reads the existing `meta`, merges its own fields into it, and
+writes the result back, so a pre-existing structured field survives the next prose rewrite.
+Separately, the `FileStore.readFile` contract is now written down directly on the interface in
+`packages/memory/src/store.ts`: an implementation must reject with an error whose `.code` is
+`'ENOENT'` when the path does not exist, because
 `journal.ts` and `profile.ts` both depend on that exact code to tell a missing file apart from any
 other read failure. It was written down because a real host's own `FileStore` implementation threw
 a plain `Error` instead, silently breaking reflection end to end on that deployment before anyone
