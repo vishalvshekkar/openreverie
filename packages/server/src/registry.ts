@@ -311,9 +311,8 @@ export class LiveSessionRegistry {
     if (!live) {
       const tombstone = this.tombstones.get(sessionId)
       if (tombstone) return { ...tombstone.public }
-      if (await this.isStoredSession(sessionId)) {
-        throw new ApiError(409, 'session_ended', 'This session is read-only.')
-      }
+      const stored = await this.findStoredSession(sessionId)
+      if (stored) throw this.storedSessionWriteError(stored)
       throw new ApiError(404, 'not_found', 'The requested resource was not found.')
     }
     await live.greeting
@@ -514,16 +513,33 @@ export class LiveSessionRegistry {
         'This session is read-only.',
       )
     }
-    if (await this.isStoredSession(sessionId)) {
-      throw new ApiError(409, 'session_ended', 'This session is read-only.')
-    }
+    const stored = await this.findStoredSession(sessionId)
+    if (stored) throw this.storedSessionWriteError(stored)
     throw new ApiError(404, 'not_found', 'The requested resource was not found.')
   }
 
-  private async isStoredSession(sessionId: string): Promise<boolean> {
-    return (await this.engine.listStoredSessions()).some(
+  private async findStoredSession(sessionId: string): Promise<PublicSession | undefined> {
+    return (await this.engine.listStoredSessions()).find(
       (session) => session.sessionId === sessionId,
     )
+  }
+
+  // A stored session that was never reflected is not the same lie as one
+  // that genuinely ended: the person's process crashed or was killed
+  // before reflection ran, not because they closed the conversation. Only
+  // 'open' gets the softer code; anything else, including a status this
+  // method does not recognise, falls to session_ended, the more
+  // restrictive of the two. Fail closed: an unrecognised status must never
+  // be read as license to admit a write.
+  private storedSessionWriteError(stored: PublicSession): ApiError {
+    if (stored.status === 'open') {
+      return new ApiError(
+        409,
+        'session_not_live',
+        'This session was never ended. It is not live in this process.',
+      )
+    }
+    return new ApiError(409, 'session_ended', 'This session is read-only.')
   }
 
   private async syncPublic(live: LiveSession): Promise<void> {

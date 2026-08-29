@@ -8,6 +8,7 @@ import {
   parseStreamEvent,
   requireTerminal,
   type StreamEvent,
+  sessionSchema,
   transcriptLineSchema,
 } from './api.js'
 
@@ -315,6 +316,18 @@ describe('ApiClient request and NDJSON parsing', () => {
       title: 'doc_01JZZZ2',
       updatedAt: '2026-08-16T21:04:00.000Z',
       readOnly: true,
+    })
+    expect(result.success).toBe(true)
+  })
+
+  it('sessionSchema accepts status open, a stored session that exists on disk but was never reflected', () => {
+    const result = sessionSchema.safeParse({
+      sessionId: 'session_01JZZZ',
+      createdAt: '2026-08-16T21:04:00.000Z',
+      updatedAt: '2026-08-16T21:04:00.000Z',
+      status: 'open',
+      readOnly: true,
+      transcript: { lineCount: 1, userCount: 1, assistantCount: 0, toolCount: 0 },
     })
     expect(result.success).toBe(true)
   })

@@ -339,6 +339,56 @@ describe('MemoryEngine', () => {
 
       await engine.close()
     })
+
+    it('listStoredSessions reports open for an unreflected session and ended for a reflected one, read-only either way', async () => {
+      const unreflected = await SessionStore.start(paths, new Date('2026-08-14T12:00:00.000Z'))
+      await unreflected.appendLine(paths, {
+        ts: '2026-08-14T12:00:00.000Z',
+        role: 'user',
+        content: 'Interrupted before reflection ran.',
+      })
+
+      const reflected = await SessionStore.start(paths, new Date('2026-08-14T13:00:00.000Z'))
+      await reflected.appendLine(paths, {
+        ts: '2026-08-14T13:00:00.000Z',
+        role: 'user',
+        content: 'Reflected on directly.',
+      })
+      await applyReflection(
+        paths,
+        emptyReflectionOutput('Reflected already.'),
+        reflected.sessionId,
+        [],
+        new Date('2026-08-14T13:00:00.000Z'),
+        new Map(),
+        async () => {},
+        'UTC',
+      )
+
+      // maintenance: false, the same way the probe that found this bug did,
+      // so nothing here auto-reflects the unreflected session.
+      const engine = await MemoryEngine.open(paths.root, fakeDeps(new FakeChatProvider([])), {
+        maintenance: false,
+      })
+
+      const sessions = await engine.listStoredSessions()
+      expect(sessions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            sessionId: unreflected.sessionId,
+            status: 'open',
+            readOnly: true,
+          }),
+          expect.objectContaining({
+            sessionId: reflected.sessionId,
+            status: 'ended',
+            readOnly: true,
+          }),
+        ]),
+      )
+
+      await engine.close()
+    })
   })
 
   describe('full session lifecycle', () => {

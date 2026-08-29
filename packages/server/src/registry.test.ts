@@ -7,7 +7,15 @@ import {
   type PersonaOptions,
   type ReverieConfig,
 } from '@openreverie/core'
-import { type EngineDeps, MemoryEngine } from '@openreverie/memory'
+import {
+  applyReflection,
+  type EngineDeps,
+  MemoryEngine,
+  memoryPaths,
+  nodeStores,
+  type ReflectionOutput,
+  SessionStore,
+} from '@openreverie/memory'
 import {
   type ChatEvent,
   type ChatProvider,
@@ -184,6 +192,51 @@ describe('LiveSessionRegistry', () => {
     await new Promise<void>((resolve) => setImmediate(resolve))
   })
 
+  it('rejects a write against a stored-but-unreflected session with session_not_live, distinct from session_ended for a reflected one', async () => {
+    const registry = createRegistry({ providerAvailable: false })
+    const paths = memoryPaths(dir, nodeStores())
+
+    const unreflected = await SessionStore.start(paths, new Date('2026-08-14T12:00:00.000Z'))
+    await unreflected.appendLine(paths, {
+      ts: '2026-08-14T12:00:00.000Z',
+      role: 'user',
+      content: 'Interrupted before reflection ran, never seen by this registry.',
+    })
+
+    const reflected = await SessionStore.start(paths, new Date('2026-08-14T13:00:00.000Z'))
+    await reflected.appendLine(paths, {
+      ts: '2026-08-14T13:00:00.000Z',
+      role: 'user',
+      content: 'Reflected on directly, never seen by this registry.',
+    })
+    await applyReflection(
+      paths,
+      emptyReflectionOutput('Reflected already.'),
+      reflected.sessionId,
+      [],
+      new Date('2026-08-14T13:00:00.000Z'),
+      new Map(),
+      async () => {},
+      'UTC',
+    )
+
+    await expect(
+      collect(registry.message(unreflected.sessionId, 'turn-unreflected', { message: 'again' })),
+    ).rejects.toMatchObject({ status: 409, code: 'session_not_live' })
+    await expect(
+      collect(registry.message(reflected.sessionId, 'turn-reflected', { message: 'again' })),
+    ).rejects.toMatchObject({ status: 409, code: 'session_ended' })
+
+    await expect(registry.end(unreflected.sessionId)).rejects.toMatchObject({
+      status: 409,
+      code: 'session_not_live',
+    })
+    await expect(registry.end(reflected.sessionId)).rejects.toMatchObject({
+      status: 409,
+      code: 'session_ended',
+    })
+  })
+
   it('expires inactive sessions through its scheduler and releases capacity without a manual sweep', async () => {
     let now = 0
     const scheduler = new FakeScheduler()
@@ -284,9 +337,16 @@ describe('LiveSessionRegistry', () => {
     now = THIRTY_MINUTES + 1
     scheduler.runAll()
 
+    // sessions[0] was evicted from the tombstone cache above, so this falls
+    // through to the disk fallback. It was swept for inactivity, never
+    // reflected, so the fallback correctly reports session_not_live here,
+    // not session_ended: unlike sessions[1] and sessions[64], this one
+    // cannot come from a tombstone at all, so it proves eviction more
+    // sharply than session_ended could (session_ended could also mean a
+    // still-cached tombstone).
     await expect(
       collect(registry.message(sessions[0]?.sessionId ?? '', 'turn-oldest', { message: 'again' })),
-    ).rejects.toMatchObject({ status: 409, code: 'session_ended' })
+    ).rejects.toMatchObject({ status: 409, code: 'session_not_live' })
     await expect(
       collect(registry.message(sessions[1]?.sessionId ?? '', 'turn-next', { message: 'again' })),
     ).rejects.toMatchObject({ status: 409, code: 'session_expired' })
@@ -422,6 +482,22 @@ function createRegistry(
     now: () => 0,
     ...(registryOptions as object),
   })
+}
+
+function emptyReflectionOutput(summary: string): ReflectionOutput {
+  return {
+    summary,
+    items: [],
+    attributions: [],
+    newArcs: [],
+    newPersons: [],
+    newEntities: [],
+    pagePromotions: [],
+    arcUpdates: [],
+    personUpdates: [],
+    constitutionUpdate: null,
+    journalingUpdate: null,
+  }
 }
 
 function engineDeps(chat: ChatProvider): EngineDeps {

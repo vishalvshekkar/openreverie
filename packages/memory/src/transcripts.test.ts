@@ -235,6 +235,25 @@ describe('SessionStore', () => {
     ])
   })
 
+  it('describe carries the reflected flag listSessions already computed, true once summary.md exists and false before', async () => {
+    const store = await SessionStore.start(paths, new Date('2026-08-13T21:04:11Z'))
+    await store.appendLine(paths, {
+      ts: '2026-08-13T21:04:11.000Z',
+      role: 'user',
+      content: 'hello',
+    })
+
+    await expect(SessionStore.describe(paths)).resolves.toEqual([
+      expect.objectContaining({ sessionId: store.sessionId, reflected: false }),
+    ])
+
+    await writeFile(join(store.dir, 'summary.md'), '---\nid: doc_x\n---\nSummary text.\n', 'utf8')
+
+    await expect(SessionStore.describe(paths)).resolves.toEqual([
+      expect.objectContaining({ sessionId: store.sessionId, reflected: true }),
+    ])
+  })
+
   it('readTranscript throws for malformed JSON in the middle of a transcript', async () => {
     const now = new Date('2026-08-13T21:04:11Z')
     const store = await SessionStore.start(paths, now)

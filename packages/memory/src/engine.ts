@@ -163,7 +163,13 @@ export interface PublicSession {
   sessionId: string
   createdAt: string
   updatedAt: string
-  status: 'live' | 'ended' | 'expired'
+  // 'open' is a session directory that exists on disk and was never
+  // reflected: not 'ended', because reflection never ran on it, and not
+  // 'live' in this process either, since nothing here is holding it open.
+  // It is also not 'expired', which is the in-memory idle sweep's own
+  // state (LiveSessionRegistry's tombstones) and never describes a session
+  // read straight off disk.
+  status: 'live' | 'ended' | 'expired' | 'open'
   readOnly: boolean
   // Set when a session is created or switched, so a browser reload recovers
   // the mode the conversation is actually in. It is carried onto the ended and
@@ -1743,9 +1749,13 @@ export class MemoryEngine implements DreamLookup {
 
   async listStoredSessions(): Promise<PublicSession[]> {
     const sessions = await SessionStore.describe(this.paths)
-    return sessions.map((session) => ({
+    return sessions.map(({ reflected, ...session }) => ({
       ...session,
-      status: 'ended',
+      status: reflected ? 'ended' : 'open',
+      // Both statuses are read-only regardless: whether or not the session
+      // was reflected, this stored view genuinely cannot serve writes,
+      // because session resume does not exist yet. Only the status label
+      // was wrong before; the permission underneath it was already right.
       readOnly: true,
     }))
   }

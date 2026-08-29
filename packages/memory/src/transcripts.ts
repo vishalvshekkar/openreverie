@@ -66,6 +66,12 @@ export interface StoredSessionDescription {
   sessionId: string
   createdAt: string
   updatedAt: string
+  // Carried straight from listSessions, which already derives this from
+  // whether summary.md exists on disk. The engine's public projection
+  // needs to tell a reflected session apart from one that was interrupted
+  // before reflection ran, and recomputing the same check here, a second
+  // place, would let the two drift.
+  reflected: boolean
   transcript: {
     lineCount: number
     userCount: number
@@ -171,6 +177,7 @@ export class SessionStore {
         sessionId: session.sessionId,
         createdAt,
         updatedAt: lines.at(-1)?.ts ?? createdAt,
+        reflected: session.reflected,
         transcript: {
           lineCount: lines.length,
           userCount: lines.filter((line) => line.role === 'user').length,

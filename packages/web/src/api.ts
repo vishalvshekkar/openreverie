@@ -36,7 +36,7 @@ export const sessionSchema = z.strictObject({
   sessionId: z.string(),
   createdAt: z.string(),
   updatedAt: z.string(),
-  status: z.enum(['live', 'ended', 'expired']),
+  status: z.enum(['live', 'ended', 'expired', 'open']),
   readOnly: z.boolean(),
   mode: z.string().optional(),
   transcript: z.strictObject({

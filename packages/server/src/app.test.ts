@@ -730,6 +730,11 @@ describe('record browsing app', () => {
     ])
   })
 
+  it('serves an unreflected stored session as status open instead of failing response validation', async () => {
+    engine.sessions[0] = { ...engine.sessions[0], status: 'open' } as unknown as PublicSession
+    await expect(getJson('/api/v1/sessions')).resolves.toMatchObject({ status: 200 })
+  })
+
   it('serializes concurrent proposal resolutions so only one can materialize a pending proposal', async () => {
     engine.pauseProposalResolution()
     const first = request(
