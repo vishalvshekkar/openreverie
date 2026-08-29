@@ -23,15 +23,47 @@
 // other. A stamp, once written into history, is never rewritten: that is
 // what keeps every request a strict extension of the previous one, which is
 // the shape a provider's prefix cache is built to serve.
+//
+// A second divergence: setMode writes a /mode line to the transcript for
+// the CLI's typed /mode and the web picker's click, but that line was never
+// sent to the model as a message, because setMode changes the session's
+// mode directly rather than running a turn. The line carries
+// historyOmitted: true so it stays on disk (a real thing the person typed
+// or clicked) without ever entering this session's in-memory history.
+//
+// A third divergence, only visible on session resume: appendBoth writes an
+// assistant tool-call line before the tool actually runs, so a session
+// evicted between that write and the matching tool result leaves a durable
+// assistant line carrying a tool_call nothing ever answered. Resume rebuilds
+// history from the transcript (see AgentSession.resume and rebuildHistory
+// below) and drops any assistant line like that, wherever it sits in the
+// rebuilt history, not only when it is the last line: a provider rejects an
+// assistant message carrying tool_calls that is not followed by a matching
+// tool result for every id, and a dangling call written on one resume can
+// end up in the middle of history on the next one, once later turns are
+// appended after it. Replaying an unanswered tool_call into history would
+// make the next request to the provider a 400, not a degraded answer. The
+// transcript keeps the line untouched either way: transcripts are never
+// rewritten.
 
-import type { MemoryEngine, SessionContext } from '@openreverie/memory'
-import { renderLiveStamp, renderLocalTime, utcOffsetMinutesFor } from '@openreverie/memory'
+import type {
+  MemoryEngine,
+  PublicTranscriptLine,
+  ReflectionItemKind,
+  SessionContext,
+} from '@openreverie/memory'
+import {
+  renderLiveStamp,
+  renderLocalTime,
+  renderStoredStamp,
+  utcOffsetMinutesFor,
+} from '@openreverie/memory'
 import type { ChatProvider, ToolCall } from '@openreverie/providers'
 import type { ReverieConfig } from './config.js'
 import { assembleSystemPrompt } from './context.js'
-import type { ModeName } from './modes.js'
+import { isModeName, type ModeName } from './modes.js'
 import type { PersonaOptions } from './personas.js'
-import { dispatchTool, toolDefinitions } from './tools.js'
+import { dispatchTool, parseReplayableRememberArgs, toolDefinitions } from './tools.js'
 
 export type AgentEvent =
   | { type: 'text'; text: string }
@@ -63,6 +95,42 @@ export interface AgentSessionOptions {
   // request budget (a Cloudflare Worker's own wall-clock limit, say) can
   // shrink or grow it.
   greetingTimeoutMs?: number
+}
+
+// A turn the transcript caught mid-flight at eviction: either a user line
+// with nothing after it, or one or more assistant tool-call lines whose
+// matching tool result line never landed. Reported, never smoothed over or
+// silently reconstructed: see the resume design, section 1.3.
+export interface IncompleteTurn {
+  // The transcript lineSequence of the person's last message: where the
+  // lost turn started.
+  fromLineSequence: number
+  // Dangling assistant tool-call lines left out of the rebuilt history:
+  // ones with no matching tool result anywhere later in the rebuild, not
+  // only ones sitting at the very end of it. The transcript on disk still
+  // holds them untouched; this counts how many of them this rebuild
+  // declined to carry into history. 0 for the "user line with nothing
+  // after it" shape.
+  droppedToolCallLines: number
+}
+
+// What AgentSession.resume hands back alongside the rebuilt session, so a
+// caller can tell a cache-preserving resume from a cache-breaking one, and
+// a complete rebuild from one that lost a turn at eviction, rather than
+// inferring either from a provider bill or a 400.
+export interface ResumeReport {
+  transcriptLineCount: number
+  historyMessageCount: number
+  // false means at least one user stamp could not be reproduced byte for
+  // byte against what the live session actually sent, so this resume did
+  // not preserve the provider's prefix cache for that message onward. See
+  // the resume design, section 1.1.
+  stampsExact: boolean
+  // true when the system prompt came back from the persisted copy this
+  // session itself wrote; false when no usable persisted copy existed and
+  // the prompt was re-assembled instead. See the resume design, section 5.
+  systemPromptRestored: boolean
+  incompleteTurn?: IncompleteTurn
 }
 
 const MAX_TOOL_ROUNDS = 8
@@ -169,6 +237,140 @@ interface SessionMessage {
   toolCallId?: string
 }
 
+interface RebuiltHistory {
+  history: SessionMessage[]
+  stampsExact: boolean
+  incompleteTurn?: IncompleteTurn
+  liveItems: { text: string; kind?: ReflectionItemKind; eventTime?: string; ts: string }[]
+}
+
+// The core of AgentSession.resume: turns a session's stored transcript back
+// into the in-memory history a live session would have built. A plain
+// function, not a method, because it touches no session state: everything
+// it needs is the transcript itself and the timezone to check stamps
+// against. Follows the resume design's rules exactly (docs/specs/2026-08-29-
+// session-resume-design.md, section 1).
+function rebuildHistory(lines: PublicTranscriptLine[], timezone: string): RebuiltHistory {
+  const history: SessionMessage[] = []
+  let stampsExact = true
+  let lastUserLineSequence: number | undefined
+  const liveItems: RebuiltHistory['liveItems'] = []
+
+  for (const line of lines) {
+    // historyOmitted lines are on disk and real (a /mode line the person
+    // typed, say) but were never sent to the model as a message: see the
+    // field's own comment in transcripts.ts.
+    if (line.historyOmitted) continue
+
+    if (line.role === 'user') {
+      const liveOffset = utcOffsetMinutesFor(new Date(line.ts), timezone)
+      let content: string
+      if (line.utcOffsetMinutes !== undefined && line.utcOffsetMinutes === liveOffset) {
+        // Equal offsets at the same instant mean identical wall-clock
+        // digits, and the zone label is the same string it was then: this
+        // reproduces the live path's rendering byte for byte.
+        content = `${renderLiveStamp(new Date(line.ts), timezone)} ${line.content}`
+      } else {
+        // The person's zone changed since this line was written, or the
+        // line predates utcOffsetMinutes existing. Either way the exact
+        // string the live session wrote is genuinely unrecoverable, so
+        // this renders the offset it actually has rather than fabricating
+        // a current-zone wall clock onto an old instant.
+        stampsExact = false
+        content = `${renderStoredStamp(line.ts, line.utcOffsetMinutes)} ${line.content}`
+      }
+      history.push({ role: 'user', content })
+      lastUserLineSequence = line.lineSequence
+    } else if (line.role === 'assistant') {
+      const message: SessionMessage = { role: 'assistant', content: line.content }
+      if (line.toolCalls && line.toolCalls.length > 0) message.toolCalls = line.toolCalls
+      history.push(message)
+      for (const toolCall of line.toolCalls ?? []) {
+        if (toolCall.name !== 'remember') continue
+        const parsed = parseReplayableRememberArgs(toolCall.arguments)
+        if (parsed === undefined) continue
+        // Replayed with this line's own ts, never the resume clock: see
+        // the resume design, section 2, and MemoryEngine.restoreLiveItems.
+        // Deliberately not gated on whether this line survives the dangling
+        // tool-call drop below: a remember call on a line that turns out to
+        // be dangling still replays, preferring a possible duplicate over a
+        // lost item, per the design's own section 1.3. Do not move this
+        // loop after that drop; that would silently start losing exactly
+        // the items the design says to keep.
+        liveItems.push({
+          text: parsed.text,
+          ...(parsed.kind !== undefined ? { kind: parsed.kind } : {}),
+          ...(parsed.eventTime !== undefined ? { eventTime: parsed.eventTime } : {}),
+          ts: line.ts,
+        })
+      }
+    } else {
+      const message: SessionMessage = { role: 'tool', content: line.content }
+      if (line.toolCallId !== undefined) message.toolCallId = line.toolCallId
+      history.push(message)
+    }
+  }
+
+  // Drop any assistant tool-call line whose result line never landed,
+  // wherever it sits in this rebuild: appendBoth writes the assistant
+  // tool-call line before dispatchTool runs, so an eviction in that gap
+  // leaves a durable assistant message carrying a tool_call that nothing
+  // answers. The invariant a provider enforces is structural, not
+  // positional: it rejects any assistant message carrying tool_calls that
+  // is not followed by a tool result for every id, regardless of where
+  // that message sits in the array. A purely positional (trailing-only)
+  // trim only ever catches the dangling line on the resume that produced
+  // it; the ordinary hibernate, resume, talk, hibernate cycle appends
+  // later, complete turns after it, which pushes it into the middle of the
+  // next rebuild and leaves it there unanswered. Matched on toolCallId,
+  // scanned back to front so "later" means later in this rebuilt history,
+  // not later in the original transcript. Fail closed: an assistant
+  // tool-call message that cannot be shown to have every id answered is
+  // dropped, whole, because dropping costs a retry while keeping it costs
+  // the entire next request. The transcript keeps these lines untouched;
+  // only this rebuilt history drops them.
+  const answeredToolCallIds = new Set<string>()
+  const droppedIndices = new Set<number>()
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const message = history[index]
+    if (message === undefined) continue
+    if (message.role === 'tool') {
+      if (message.toolCallId !== undefined) answeredToolCallIds.add(message.toolCallId)
+      continue
+    }
+    if (message.role === 'assistant' && message.toolCalls && message.toolCalls.length > 0) {
+      const fullyAnswered = message.toolCalls.every((toolCall) =>
+        answeredToolCallIds.has(toolCall.id),
+      )
+      if (!fullyAnswered) droppedIndices.add(index)
+    }
+  }
+  const droppedToolCallLines = droppedIndices.size
+  const rebuiltHistory =
+    droppedIndices.size === 0
+      ? history
+      : history.filter((_message, index) => !droppedIndices.has(index))
+
+  const last = rebuiltHistory.at(-1)
+  // Complete only when the last rebuilt history message is an assistant
+  // message with no tool calls. An empty history (a session evicted before
+  // its greeting landed) is not incomplete: there is no lost turn to
+  // report.
+  const tailComplete =
+    rebuiltHistory.length === 0 || (last?.role === 'assistant' && !last.toolCalls)
+  const incompleteTurn: IncompleteTurn | undefined =
+    !tailComplete && lastUserLineSequence !== undefined
+      ? { fromLineSequence: lastUserLineSequence, droppedToolCallLines }
+      : undefined
+
+  return {
+    history: rebuiltHistory,
+    stampsExact,
+    liveItems,
+    ...(incompleteTurn ? { incompleteTurn } : {}),
+  }
+}
+
 export class AgentSession {
   readonly sessionId: string
   private readonly engine: MemoryEngine
@@ -259,7 +461,7 @@ export class AgentSession {
     // Recorded from the session's first moment, so a process that dies
     // before /bye still leaves the mode where reflection can find it.
     await engine.setSessionMode(sessionId, mode)
-    return new AgentSession(
+    const session = new AgentSession(
       engine,
       chat,
       config.models.chat,
@@ -272,6 +474,113 @@ export class AgentSession {
       personaOptions,
       options.greetingTimeoutMs ?? GREETING_TIMEOUT_MS,
     )
+    // Persists what the constructor just assigned to this.system: the
+    // constructor itself cannot await a write, so its caller does it
+    // instead. See persistSystemPrompt's own comment for why every one of
+    // this.system's assignment sites has a matching call.
+    await session.persistSystemPrompt()
+    return session
+  }
+
+  // Rebuilds a session over a session id that already exists on disk,
+  // instead of minting a new one. Follows section 1 of
+  // docs/specs/2026-08-29-session-resume-design.md. Deliberately does not
+  // check whether sessionId is on disk, or whether it was already
+  // reflected: those are the registry's checks (section 3 of the design,
+  // built by a separate task against packages/server), not this session
+  // object's. Calling resume on an id this cannot find fails the same way
+  // engine.readTranscript / engine.sessionMode already fail for an unknown
+  // id.
+  static async resume(
+    engine: MemoryEngine,
+    config: ReverieConfig,
+    chat: ChatProvider,
+    sessionId: string,
+    // mode is deliberately not part of this options type (unlike
+    // AgentSessionOptions, which start() takes): a resumed session's mode
+    // always comes from the durable session.json record
+    // (engine.sessionMode), never from a caller-supplied override, because
+    // this is rebuilding an existing session rather than starting a new
+    // one. Accepting it here and silently ignoring it would be exactly the
+    // kind of API lie this codebase does not allow.
+    options: Omit<AgentSessionOptions, 'mode'> = {},
+  ): Promise<{ session: AgentSession; report: ResumeReport }> {
+    const now = options.now ?? (() => new Date())
+    const personaOptions = options.persona ?? {}
+    const timezone = engine.timezone()
+
+    // Absence means a legacy or corrupt session: start() records the mode
+    // immediately (setSessionMode right after startSession, above), so
+    // every session resume can actually reach has one. Falls back to the
+    // same default start() would have used for a brand new session.
+    const storedMode = await engine.sessionMode(sessionId)
+    const mode: ModeName =
+      storedMode !== undefined && isModeName(storedMode) ? storedMode : 'general'
+
+    const transcriptLines = await engine.readTranscriptPage(sessionId)
+    const rebuilt = rebuildHistory(transcriptLines, timezone)
+
+    // Replayed unconditionally, even for an item whose transcript line was
+    // dangling and already dropped from rebuilt.history inside
+    // rebuildHistory above: the design (section 1.3) chooses a possible
+    // duplicate over a lost item, because reflection re-derives items from
+    // the transcript regardless. rebuildHistory collects liveItems before
+    // dropping any dangling line for exactly this reason; do not filter
+    // rebuilt.liveItems against rebuilt.history here, that would silently
+    // start losing exactly the items the design says to keep.
+    engine.restoreLiveItems(sessionId, rebuilt.liveItems)
+
+    let system: string
+    let systemPromptRestored: boolean
+    try {
+      const persisted = await engine.readSessionSystemPrompt(sessionId)
+      if (persisted !== undefined) {
+        system = persisted
+        systemPromptRestored = true
+      } else {
+        system = await assembleSystemPrompt(engine, config, mode, now, personaOptions)
+        systemPromptRestored = false
+      }
+    } catch {
+      // A persisted prompt exists but could not be read (a real I/O
+      // failure, not a missing file): still falls back rather than
+      // resuming with a prompt this session cannot vouch for, and still
+      // reports that it did.
+      system = await assembleSystemPrompt(engine, config, mode, now, personaOptions)
+      systemPromptRestored = false
+    }
+
+    const session = new AgentSession(
+      engine,
+      chat,
+      config.models.chat,
+      system,
+      sessionId,
+      config,
+      now,
+      mode,
+      // freshDream is only ever consumed by runGreeting, and a resumed
+      // session never greets: carrying a value forward here would risk
+      // burning the one-time dream mention on a greeting that never
+      // happens.
+      undefined,
+      personaOptions,
+      options.greetingTimeoutMs ?? GREETING_TIMEOUT_MS,
+    )
+    session.history.push(...rebuilt.history)
+    // Same reasoning as start() above: persist what was just assigned,
+    // whether restored from disk or freshly re-assembled, so a later
+    // resume finds a persisted copy instead of falling back again.
+    await session.persistSystemPrompt()
+
+    const report: ResumeReport = {
+      transcriptLineCount: transcriptLines.length,
+      historyMessageCount: session.history.length,
+      stampsExact: rebuilt.stampsExact,
+      systemPromptRestored,
+      ...(rebuilt.incompleteTurn ? { incompleteTurn: rebuilt.incompleteTurn } : {}),
+    }
+    return { session, report }
   }
 
   // The one place a session's mode changes, from all three callers. Each
@@ -288,6 +597,14 @@ export class AgentSession {
         utcOffsetMinutes: utcOffsetMinutesFor(now, this.engine.timezone()),
         role: 'user',
         content: `/mode ${name}`,
+        // This branch only ever runs for the CLI's typed /mode and the web
+        // picker's click (options.source !== 'tool'), and neither was ever
+        // sent to the model as a message: setMode changes the session's
+        // mode and reassembles the system prompt, it does not run a turn.
+        // historyOmitted marks that so session resume rebuilds history from
+        // every other line but skips this one (see the resume design,
+        // section 1.2).
+        historyOmitted: true,
         ...(options.source === 'web' ? { synthetic: true as const } : {}),
       })
     }
@@ -307,6 +624,23 @@ export class AgentSession {
       this.now,
       this.personaOptions,
     )
+    await this.persistSystemPrompt()
+  }
+
+  // Persists whatever this.system currently holds to the session
+  // directory, so a later resume can read back the exact string this
+  // session actually used instead of re-assembling one that might not
+  // match (docs/specs/2026-08-29-session-resume-design.md, section 5, and
+  // its addendum). Called once after every one of this.system's three
+  // assignment sites: the constructor (from both start() and resume(), its
+  // two callers, since the constructor itself cannot await a write),
+  // refreshSystemPrompt above, and the inline re-assembly in runTurn's
+  // update_profile branch below. A write failure here is not swallowed: it
+  // propagates the same way any other engine write failure in this class
+  // already does, since a live turn that could not durably persist its own
+  // prompt is not a state to paper over silently.
+  private async persistSystemPrompt(): Promise<void> {
+    await this.engine.writeSessionSystemPrompt(this.sessionId, this.system)
   }
 
   async *send(userText: string): AsyncIterable<AgentEvent> {
@@ -518,6 +852,7 @@ export class AgentSession {
             this.now,
             this.personaOptions,
           )
+          await this.persistSystemPrompt()
         }
 
         // Same reasoning as update_profile above: journaling.md feeds

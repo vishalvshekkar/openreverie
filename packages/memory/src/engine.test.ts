@@ -573,6 +573,145 @@ describe('MemoryEngine', () => {
     })
   })
 
+  describe('session resume support', () => {
+    let dir: string
+    let paths: MemoryPaths
+
+    beforeEach(async () => {
+      dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-resume-'))
+      paths = memoryPaths(dir, nodeStores())
+      await ensureMemoryTree(paths, 'UTC')
+    })
+
+    afterEach(async () => {
+      await rmWithRetry(dir)
+    })
+
+    describe('listStoredSessions resumable', () => {
+      it('reports resumable true for an open session and false for a reflected one', async () => {
+        const chat = new FakeChatProvider([])
+        const engine = await MemoryEngine.open(dir, fakeDeps(chat), { maintenance: false })
+
+        const openSessionId = await engine.startSession()
+        await engine.appendTranscript(openSessionId, {
+          ts: new Date().toISOString(),
+          role: 'user',
+          content: 'Never reflected.',
+        })
+
+        const reflectedSessionId = await engine.startSession()
+        await engine.appendTranscript(reflectedSessionId, {
+          ts: new Date().toISOString(),
+          role: 'user',
+          content: 'Reflected already.',
+        })
+        await applyReflection(
+          paths,
+          emptyReflectionOutput('Reflected already.'),
+          reflectedSessionId,
+          [],
+          new Date(),
+          new Map(),
+          async () => {},
+          'UTC',
+        )
+
+        const sessions = await engine.listStoredSessions()
+        const open = sessions.find((s) => s.sessionId === openSessionId)
+        const reflected = sessions.find((s) => s.sessionId === reflectedSessionId)
+        expect(open?.status).toBe('open')
+        expect(open?.resumable).toBe(true)
+        expect(reflected?.status).toBe('ended')
+        expect(reflected?.resumable).toBe(false)
+
+        await engine.close()
+      })
+    })
+
+    describe('storedSessionExists', () => {
+      it('reports true for a session started in this process', async () => {
+        const chat = new FakeChatProvider([])
+        const engine = await MemoryEngine.open(dir, fakeDeps(chat), { maintenance: false })
+        const sessionId = await engine.startSession()
+        expect(await engine.storedSessionExists(sessionId)).toBe(true)
+        await engine.close()
+      })
+
+      it('reports false for an id nothing on disk matches', async () => {
+        const chat = new FakeChatProvider([])
+        const engine = await MemoryEngine.open(dir, fakeDeps(chat), { maintenance: false })
+        expect(await engine.storedSessionExists('session_does_not_exist')).toBe(false)
+        await engine.close()
+      })
+    })
+
+    describe('persisted system prompt', () => {
+      it('round-trips through the engine', async () => {
+        const chat = new FakeChatProvider([])
+        const engine = await MemoryEngine.open(dir, fakeDeps(chat), { maintenance: false })
+        const sessionId = await engine.startSession()
+        await engine.writeSessionSystemPrompt(sessionId, 'You are reverie.')
+        expect(await engine.readSessionSystemPrompt(sessionId)).toBe('You are reverie.')
+        await engine.close()
+      })
+
+      it('reports undefined when nothing was ever persisted', async () => {
+        const chat = new FakeChatProvider([])
+        const engine = await MemoryEngine.open(dir, fakeDeps(chat), { maintenance: false })
+        const sessionId = await engine.startSession()
+        expect(await engine.readSessionSystemPrompt(sessionId)).toBeUndefined()
+        await engine.close()
+      })
+    })
+
+    describe('restoreLiveItems', () => {
+      it('replays items into a reflected summary with each item keeping its own ts', async () => {
+        const chat = new FakeChatProvider([
+          { text: JSON.stringify(emptyReflectionOutput('A quiet check-in.')), toolCalls: [] },
+        ])
+        const engine = await MemoryEngine.open(dir, fakeDeps(chat), { maintenance: false })
+        const startedAt = new Date('2026-08-20T09:00:00.000Z')
+        const sessionId = await engine.startSession(startedAt)
+        await engine.appendTranscript(sessionId, {
+          ts: startedAt.toISOString(),
+          role: 'user',
+          content: 'Watching Halcyon tonight.',
+        })
+
+        const restoredTs = '2026-08-20T09:00:05.000Z'
+        engine.restoreLiveItems(sessionId, [
+          { text: 'Watching Halcyon tonight', kind: 'intention', ts: restoredTs },
+        ])
+
+        await engine.endSession(sessionId)
+
+        const summaryPath = join(
+          paths.sessionsDir,
+          `${formatLocalDate(startedAt, engine.timezone())}-${sessionId}`,
+          'summary.md',
+        )
+        const summaryDoc = await readDocument(paths.files, summaryPath)
+        const items = summaryDoc.meta.items as { text: string; ts: string }[]
+        const item = items.find((i) => i.text === 'Watching Halcyon tonight')
+        expect(item).toBeDefined()
+        // The restore clock (startedAt above) is deliberately not the ts
+        // handed to restoreLiveItems: proves the item's own ts survives
+        // rather than being overwritten by the moment restore ran.
+        expect(item?.ts).toBe(restoredTs)
+
+        await engine.close()
+      })
+
+      it('is safe to call with an empty array on an unreflected session', async () => {
+        const chat = new FakeChatProvider([])
+        const engine = await MemoryEngine.open(dir, fakeDeps(chat), { maintenance: false })
+        const sessionId = await engine.startSession()
+        expect(() => engine.restoreLiveItems(sessionId, [])).not.toThrow()
+        await engine.close()
+      })
+    })
+  })
+
   describe('runMaintenance', () => {
     let dir: string
     let paths: MemoryPaths

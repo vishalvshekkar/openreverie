@@ -295,6 +295,38 @@ What does not exist yet:
 
 The architecture and memory model are specified in full in [the design spec](docs/superpowers/specs/2026-08-13-openreverie-design.md). This README is updated honestly as the project progresses; if this section says something works, it works.
 
+
+A round on 2026-08-29 answered a single consolidated request from a hosted deployment building on
+this engine. Unlike v0.8.0, this one does change things a self-hosted person can see, so it is not
+described as invisible. Ending a conversation in the browser now returns as soon as the transcript
+is durable, with reflection continuing behind it, where it used to wait for one or two more model
+calls plus a rewrite for every arc and person that changed. The terminal's own path is unchanged and
+still waits. Two new things appear in the memory folder: `sessions/log.jsonl`, an append-only record
+of every reflection attempt and how it resolved, and a `system-prompt.txt` in each session
+directory holding the prompt that session was actually opened with. Sessions now report whether
+their reflection has not started, is in progress, finished, was skipped, or failed and why, so a
+reflection that dies partway is no longer invisible; before this, it left the session looking
+untouched and nothing on disk said it had ever been tried.
+
+Also in that round: `POST /api/v1/sessions` accepts `greet: false` for a client whose person opens
+by typing rather than being greeted; `LiveSessionRegistry` takes its idle timeout, sweep intervals
+and greeting timeout as options and can have its sweeps turned off outright, for a host that owns
+session lifetime itself; and `OpenAiConfig` accepts extra headers, so a self-hoster routing through
+a provider gateway can turn off that gateway's payload logging instead of silently shipping every
+conversation into its logs.
+
+Two things from that round are reachable by code and not yet by a person, and the distinction
+matters. `GET /api/v1/search` exposes the same hybrid search the companion already had through its
+own tool, but **no browser UI calls it yet**, so searching your own memory from the web interface
+still is not a thing you can do. Session resume is built as a library seam, `AgentSession.resume`
+and `LiveSessionRegistry.resume`, with **no HTTP route**, because it is driven by a host that keeps
+its own durable record of which session is live; a self-hosted browser user cannot resume a session.
+Resume is covered by the automated suite and has never been run against a real model or a real
+process that evicts between messages, so the machinery is tested and the behaviour in a live
+deployment is not. Search also has no lexical fallback: with no provider configured it returns an
+honest 503 rather than the keyword half it could have computed, which is recorded in
+[BACKLOG.md](BACKLOG.md).
+
 ## Command reference
 
 Subcommands of the same binary:

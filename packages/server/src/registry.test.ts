@@ -898,6 +898,255 @@ describe('LiveSessionRegistry', () => {
     expect(transcript).toHaveLength(1)
     expect(chat.requests).toHaveLength(1)
   })
+
+  describe('resume', () => {
+    it('serves a message on a resumed session without a greeting call', async () => {
+      const chat = new FakeChatProvider([{ text: 'Still here.', toolCalls: [] }])
+      const registry = createRegistry({ chat })
+      const sessionId = await engine.startSession(new Date('2026-08-16T20:00:00.000Z'))
+      await engine.setSessionMode(sessionId, 'general')
+      await engine.appendTranscript(sessionId, {
+        ts: '2026-08-16T20:00:00.000Z',
+        utcOffsetMinutes: 0,
+        role: 'user',
+        content: 'Before the hibernate.',
+      })
+      await engine.appendTranscript(sessionId, {
+        ts: '2026-08-16T20:00:05.000Z',
+        role: 'assistant',
+        content: 'Noted.',
+      })
+
+      const resumed = await registry.resume(sessionId)
+      expect(resumed.status).toBe('live')
+      expect(resumed.readOnly).toBe(false)
+      expect(resumed.stampsExact).toBe(true)
+      expect(resumed.incompleteTurn).toBeUndefined()
+
+      const events = await collect(
+        registry.message(sessionId, 'turn-1', { message: 'Still there?' }),
+      )
+      expect(events.map((event) => event.type)).toEqual(['thinking', 'text', 'done'])
+
+      // Exactly one model call, the one this message triggered: a
+      // resumed session schedules no greeting (live.greeting stays
+      // undefined), so FakeChatProvider, which records every stream()
+      // call including an empty-message one, must show only this turn.
+      expect(chat.requests).toHaveLength(1)
+      expect(chat.requests[0]?.messages.length).toBeGreaterThan(0)
+    })
+
+    it('resume of a session already live returns the same view without rebuilding', async () => {
+      const registry = createRegistry({ providerAvailable: false })
+      const { sessionId } = await registry.create({ greet: false })
+      const restoreLiveItemsSpy = vi.spyOn(engine, 'restoreLiveItems')
+
+      const resumed = await registry.resume(sessionId)
+
+      expect(resumed.status).toBe('live')
+      expect(resumed.sessionId).toBe(sessionId)
+      // AgentSession.resume is the only caller of restoreLiveItems: a spy
+      // on it staying uncalled proves this path never rebuilt anything,
+      // not just that it returned successfully.
+      expect(restoreLiveItemsSpy).not.toHaveBeenCalled()
+    })
+
+    it('two concurrent resumes of one id produce one session', async () => {
+      const registry = createRegistry({ providerAvailable: false })
+      const sessionId = await engine.startSession(new Date('2026-08-16T20:00:00.000Z'))
+      await engine.setSessionMode(sessionId, 'general')
+      await engine.appendTranscript(sessionId, {
+        ts: '2026-08-16T20:00:00.000Z',
+        utcOffsetMinutes: 0,
+        role: 'user',
+        content: 'Only ever rebuilt once.',
+      })
+      // restoreLiveItems is called exactly once inside AgentSession.resume,
+      // so counting its calls (rather than timing two resolved promises
+      // against each other) proves how many rebuilds actually ran.
+      const restoreLiveItemsSpy = vi.spyOn(engine, 'restoreLiveItems')
+
+      const [first, second] = await Promise.all([
+        registry.resume(sessionId),
+        registry.resume(sessionId),
+      ])
+
+      expect(restoreLiveItemsSpy).toHaveBeenCalledTimes(1)
+      expect(first.sessionId).toBe(sessionId)
+      expect(second.sessionId).toBe(sessionId)
+      expect(registry.getLiveSession(sessionId)).toBeDefined()
+    })
+
+    it('resume of a reflected session is refused with session_ended', async () => {
+      const registry = createRegistry({ providerAvailable: false })
+      const paths = memoryPaths(dir, nodeStores())
+      const reflected = await SessionStore.start(paths, new Date('2026-08-14T13:00:00.000Z'))
+      await reflected.appendLine(paths, {
+        ts: '2026-08-14T13:00:00.000Z',
+        role: 'user',
+        content: 'Already reflected on, never seen by this registry.',
+      })
+      await applyReflection(
+        paths,
+        emptyReflectionOutput('Reflected already.'),
+        reflected.sessionId,
+        [],
+        new Date('2026-08-14T13:00:00.000Z'),
+        new Map(),
+        async () => {},
+        'UTC',
+      )
+
+      await expect(registry.resume(reflected.sessionId)).rejects.toMatchObject({
+        status: 409,
+        code: 'session_ended',
+      })
+    })
+
+    it('resume of a session this process just ended is refused with the same code requireLive gives', async () => {
+      const registry = createRegistry({ providerAvailable: false })
+      const { sessionId } = await registry.create({ greet: false })
+
+      await registry.end(sessionId)
+
+      await expect(registry.resume(sessionId)).rejects.toMatchObject({
+        status: 409,
+        code: 'session_ended',
+      })
+    })
+
+    it('resume of a session expired by sweep() is refused with session_expired', async () => {
+      let now = 0
+      const registry = createRegistry({ providerAvailable: false, now: () => now })
+      const { sessionId } = await registry.create({ greet: false })
+
+      now = THIRTY_MINUTES + 1
+      registry.sweep(now)
+
+      await expect(registry.resume(sessionId)).rejects.toMatchObject({
+        status: 409,
+        code: 'session_expired',
+      })
+    })
+
+    it('refuses to resume a just-ended session before its durable reflection record has landed, closing the race with sessionReflectionState', async () => {
+      const registry = createRegistry({ providerAvailable: false })
+      const { sessionId } = await registry.create({ greet: false })
+
+      // Plain method reassignment, not vi.spyOn(...).mockRejectedValue(...):
+      // a spy's own mock tracking attaches a handler to the promise it
+      // returns, which can make a test like this one pass for the wrong
+      // reason. A promise nothing but production code ever touches is what
+      // actually proves the durable record has not landed while resume()
+      // runs, the same reasoning the file's other plain-reassignment test
+      // (`does not reject registry.end() ... when the detached reflection
+      // fails`) already relies on.
+      engine.endSession = () => new Promise<void>(() => {})
+
+      await registry.end(sessionId)
+
+      // Sanity: this is the race window doResume's old checks alone would
+      // have walked straight through. sessionReflectionState reads
+      // 'not_started' because engine.endSession above never got far enough
+      // to append the durable attempt record.
+      const state = await engine.sessionReflectionState(sessionId)
+      expect(state.state).toBe('not_started')
+
+      await expect(registry.resume(sessionId)).rejects.toMatchObject({
+        status: 409,
+        code: 'session_ended',
+      })
+    })
+
+    it('resume of an unknown id is 404', async () => {
+      const registry = createRegistry({ providerAvailable: false })
+
+      await expect(registry.resume('session_unknown')).rejects.toMatchObject({
+        status: 404,
+        code: 'not_found',
+      })
+    })
+
+    it('resume at capacity is 429', async () => {
+      const registry = createRegistry({ providerAvailable: false, maxLiveSessions: 1 })
+      await registry.create({ greet: false })
+      const sessionId = await engine.startSession(new Date('2026-08-16T20:00:00.000Z'))
+      await engine.setSessionMode(sessionId, 'general')
+      await engine.appendTranscript(sessionId, {
+        ts: '2026-08-16T20:00:00.000Z',
+        utcOffsetMinutes: 0,
+        role: 'user',
+        content: 'No room left to resume this one.',
+      })
+
+      await expect(registry.resume(sessionId)).rejects.toMatchObject({
+        status: 429,
+        code: 'session_capacity',
+      })
+    })
+
+    it('never calls engine.listStoredSessions on any resume path', async () => {
+      const registry = createRegistry({ providerAvailable: false })
+      const paths = memoryPaths(dir, nodeStores())
+      const reflected = await SessionStore.start(paths, new Date('2026-08-14T13:00:00.000Z'))
+      await reflected.appendLine(paths, {
+        ts: '2026-08-14T13:00:00.000Z',
+        role: 'user',
+        content: 'Reflected fixture for the listStoredSessions guard.',
+      })
+      await applyReflection(
+        paths,
+        emptyReflectionOutput('Reflected already.'),
+        reflected.sessionId,
+        [],
+        new Date('2026-08-14T13:00:00.000Z'),
+        new Map(),
+        async () => {},
+        'UTC',
+      )
+      const resumableId = await engine.startSession(new Date('2026-08-16T20:00:00.000Z'))
+      await engine.setSessionMode(resumableId, 'general')
+      await engine.appendTranscript(resumableId, {
+        ts: '2026-08-16T20:00:00.000Z',
+        utcOffsetMinutes: 0,
+        role: 'user',
+        content: 'Resume should never scan every stored session for this.',
+      })
+
+      const listSpy = vi.spyOn(engine, 'listStoredSessions')
+
+      await expect(registry.resume('session_unknown')).rejects.toMatchObject({ status: 404 })
+      await expect(registry.resume(reflected.sessionId)).rejects.toMatchObject({ status: 409 })
+      await registry.resume(resumableId)
+
+      expect(listSpy).not.toHaveBeenCalled()
+    })
+
+    it('a resumed session with a lost tail reports incompleteTurn', async () => {
+      const registry = createRegistry({ providerAvailable: false })
+      const sessionId = await engine.startSession(new Date('2026-08-16T20:00:00.000Z'))
+      await engine.setSessionMode(sessionId, 'general')
+      await engine.appendTranscript(sessionId, {
+        ts: '2026-08-16T20:00:00.000Z',
+        utcOffsetMinutes: 0,
+        role: 'user',
+        content: 'What is on my plate?',
+      })
+      // No matching tool result line: eviction happened between announcing
+      // the call and dispatching it, the same fixture shape
+      // packages/core/src/agent.test.ts uses for rebuildHistory directly.
+      await engine.appendTranscript(sessionId, {
+        ts: '2026-08-16T20:00:01.000Z',
+        role: 'assistant',
+        content: '',
+        toolCalls: [{ id: 'call_1', name: 'list_arcs', arguments: '{}' }],
+      })
+
+      const resumed = await registry.resume(sessionId)
+
+      expect(resumed.incompleteTurn).toEqual({ fromLineSequence: 1, droppedToolCallLines: 1 })
+    })
+  })
 })
 
 function createRegistry(

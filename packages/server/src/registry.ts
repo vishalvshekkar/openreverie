@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import {
   type AgentEvent,
   AgentSession,
+  type IncompleteTurn,
   isModeName,
   type PersonaOptions,
   type ReverieConfig,
@@ -57,6 +58,22 @@ type StreamEventInput =
 
 export interface CreateSessionResponse extends PublicSession {
   initialGreetingStreamUrl?: string
+}
+
+// What LiveSessionRegistry.resume hands back: the ordinary public view plus
+// the resume design's own diagnostics (docs/specs/2026-08-29-session-resume-
+// design.md, section 3, and its addendum), reported rather than smoothed
+// over so a host can tell a cache-preserving resume from a cache-breaking
+// one, and a complete rebuild from one that lost a turn at eviction.
+export interface ResumedSession extends PublicSession {
+  incompleteTurn?: IncompleteTurn
+  // false means at least one user stamp could not be reproduced byte for
+  // byte against what the live session actually sent, so this resume did
+  // not preserve the provider's prefix cache for that message onward.
+  stampsExact: boolean
+  // true when the system prompt came back from the persisted copy the
+  // session itself wrote; false when it had to be re-assembled instead.
+  systemPromptRestored: boolean
 }
 
 export interface LiveSessionRegistryOptions {
@@ -190,6 +207,14 @@ export class LiveSessionRegistry {
   private readonly greetingTimeoutMs: number | undefined
   private readonly live = new Map<string, LiveSession>()
   private readonly tombstones = new Map<string, Tombstone>()
+  // Single-flights concurrent resume(id) calls for the same session id:
+  // two requests arriving together (a host resuming defensively from two
+  // in-flight handlers, say) must build at most one AgentSession over that
+  // id, not two racing ones. Populated and read synchronously inside
+  // resume() before any await, so two calls issued back to back always
+  // observe each other's entry; cleared once the shared attempt settles,
+  // including when it rejects, so a failed resume never wedges the id.
+  private readonly resuming = new Map<string, Promise<ResumedSession>>()
   // F1: every reflection this registry has handed off to runBackground
   // (from end()) or run detached (from sweep()), tracked from the moment
   // it starts until it settles. Both end() and sweep() delete their
@@ -318,6 +343,14 @@ export class LiveSessionRegistry {
         updatedAt: stored?.updatedAt ?? createdAt,
         status: 'live',
         readOnly: false,
+        // Never true for a live session: PublicSession.resumable is
+        // derived from status === 'open' everywhere it is computed
+        // (MemoryEngine.listStoredSessions), and 'live' is never 'open'.
+        // Session resume itself (the registry entry point that would
+        // consume this) is a separate task; this keeps the type honest in
+        // the meantime rather than guessing at a value that task should
+        // set.
+        resumable: false,
         mode: agent.mode,
         transcript: stored?.transcript ?? emptyTranscript(),
         reflection: NOT_STARTED_REFLECTION,
@@ -355,6 +388,183 @@ export class LiveSessionRegistry {
     return {
       ...live.public,
       initialGreetingStreamUrl: `/api/v1/sessions/${encodeURIComponent(agent.sessionId)}/events`,
+    }
+  }
+
+  // Session resume (R1): rebuilds a live AgentSession over a session id
+  // that is on disk but not currently held by this registry, so a host's
+  // own hibernate/resume cycle (a Cloudflare Durable Object evicted between
+  // messages, say) can bring a session back without losing its place.
+  // Follows docs/specs/2026-08-29-session-resume-design.md section 3
+  // exactly, in the order its checks run. No auto-resume lives anywhere
+  // else in this class (requireLive never calls this), and no route calls
+  // it either: the design declined both, deliberately, in favor of the
+  // host driving resume from its own durable liveness row. See the
+  // design's own section 3 for why a window check does not belong here.
+  async resume(sessionId: string): Promise<ResumedSession> {
+    // Already live: return the current public view, no rebuild. Idempotent
+    // by design, so a host that resumes defensively before every message
+    // pays one map lookup here, not a second AgentSession. Nothing was
+    // rebuilt and nothing was lost by this call, so every diagnostic
+    // reports the cleanest possible answer rather than a fabricated one.
+    const live = this.live.get(sessionId)
+    if (live) {
+      return { ...live.public, stampsExact: true, systemPromptRestored: true }
+    }
+
+    // Single-flighted: the map is read and, on a miss, populated
+    // synchronously below, with no await in between, so two resume(id)
+    // calls issued back to back (Promise.all([registry.resume(id),
+    // registry.resume(id)]), the same shape message()'s own idempotency
+    // tests use) always observe each other's entry rather than racing to
+    // build two AgentSession objects over one id.
+    let inFlight = this.resuming.get(sessionId)
+    if (!inFlight) {
+      inFlight = this.doResume(sessionId).finally(() => {
+        this.resuming.delete(sessionId)
+      })
+      this.resuming.set(sessionId, inFlight)
+    }
+    const resumed = await inFlight
+    // A fresh copy per caller, the same posture every other public-view
+    // return in this class already takes (liveSessions, getLiveSession,
+    // create's own `{ ...live.public }`): two joiners of one in-flight
+    // promise must never share one mutable reference.
+    return { ...resumed }
+  }
+
+  private async doResume(sessionId: string): Promise<ResumedSession> {
+    // A tombstone is this process's own record that this session was ended
+    // or expired here, and it is authoritative sooner than the durable
+    // record the reflection-state check below reads: engine.endSession
+    // only appends that durable attempt record after its own idempotency
+    // scan of every stored session on disk (SessionStore.listSessions,
+    // packages/memory/src/engine.ts), and end() and sweep() never wait for
+    // any of that before deleting the session from `this.live` and adding
+    // this tombstone. A resume racing in during that gap would otherwise
+    // see: not live here, present on disk, reflection state still
+    // 'not_started', and rebuild a live session over one that is, at that
+    // instant, being reflected. Checked first, before the storedSessionExists
+    // and sessionReflectionState checks below, since a map lookup here is
+    // both cheaper and more current than either. Reuses requireLive's own
+    // error mapping so the two paths never answer one tombstoned id two
+    // different ways.
+    //
+    // Not a complete fix, stated honestly: the tombstone cache is capped at
+    // ENDED_TOMBSTONE_CAP and evicts oldest-first (addTombstone below), so a
+    // session whose tombstone has since been evicted falls through to the
+    // checks below, which by then have the durable record on disk and
+    // refuse correctly on their own. The window that would remain, a
+    // session tombstoned so recently its durable record has not landed and
+    // evicted from the cache so long ago it is already gone, cannot both be
+    // true under this registry's default configuration (maxLiveSessions: 8,
+    // far under the 64-entry cap: sweep() can tombstone at most
+    // maxLiveSessions sessions in one call). That is a configuration fact,
+    // though, not a structural guarantee, and it does not hold in general.
+    // sweep() builds and inserts every expired session's tombstone with no
+    // I/O between them, a single synchronous pass over `this.live` with no
+    // await anywhere in its loop, unlike end()'s own disk read
+    // (syncPublic) before its tombstone. A host that configures
+    // maxLiveSessions above ENDED_TOMBSTONE_CAP can hit a sweep() call that
+    // expires more sessions in one pass than the cache holds, evicting an
+    // early one before its own live.agent.end() has reached its first
+    // await, let alone before its durable record has landed. That
+    // configuration is the real residual window this check does not close.
+    const tombstone = this.tombstones.get(sessionId)
+    if (tombstone) throw this.tombstoneError(tombstone)
+
+    if (this.live.size >= this.maxLiveSessions) {
+      throw new ApiError(429, 'session_capacity', 'Too many live sessions are open.')
+    }
+
+    // Existence only, no transcript read: session resume runs on a host's
+    // post-hibernation path, which is every message it sends after a cold
+    // start, so this must never become a second caller of
+    // engine.listStoredSessions(), which reads every session's transcript
+    // in full (a consumer measured that scan at 67ms for 200 sessions). A
+    // written commitment was made that resume would not become a new
+    // caller of it. Do not "simplify" this into listStoredSessions(): that
+    // is exactly the regression this comment exists to catch.
+    const exists = await this.engine.storedSessionExists(sessionId)
+    if (!exists) {
+      throw new ApiError(404, 'not_found', 'The requested resource was not found.')
+    }
+
+    // A session is resumable only when no reflection attempt has ever run
+    // against it: a partial reflection may already have materialised arcs,
+    // people, or items from that transcript, so this must fail closed.
+    // sessionReflectionState folds the reflection log and checks disk for
+    // a summary without reading a transcript, the same cheap primitive
+    // storedSessionExists above is. Allow-list of exactly one state
+    // ('not_started'), never a deny-list of the other four: a reflection
+    // state nobody has named yet must default to refused, not admitted.
+    const reflection = await this.engine.sessionReflectionState(sessionId)
+    if (reflection.state !== 'not_started') {
+      throw new ApiError(409, 'session_ended', 'This session is read-only.')
+    }
+
+    // One read of this one session's own transcript, to build the counts
+    // and timestamps the public view carries (the same shape syncPublic
+    // computes elsewhere in this class). Not the banned listStoredSessions
+    // scan: this is a single-session read, the same primitive syncPublic
+    // already calls after every turn.
+    const transcriptLines = await this.engine.readTranscriptPage(sessionId)
+    // Same fallback create() already uses when its own listStoredSessions
+    // lookup comes back empty: a resume clock read is the honest answer
+    // when there is no recorded line to derive a real timestamp from.
+    const createdAt = transcriptLines[0]?.ts ?? new Date(this.now()).toISOString()
+    const updatedAt = transcriptLines.at(-1)?.ts ?? createdAt
+
+    const { session: agent, report } = await AgentSession.resume(
+      this.engine,
+      this.config,
+      this.chat,
+      sessionId,
+      {
+        persona: this.persona,
+        ...(this.greetingTimeoutMs === undefined
+          ? {}
+          : { greetingTimeoutMs: this.greetingTimeoutMs }),
+      },
+    )
+
+    const publicSession: PublicSession = {
+      sessionId: agent.sessionId,
+      createdAt,
+      updatedAt,
+      status: 'live',
+      readOnly: false,
+      // Never true once resumed into this process: PublicSession.resumable
+      // means "could a host resume this", and a session already live here
+      // has already been resumed. Same reasoning create() states for its
+      // own live sessions.
+      resumable: false,
+      mode: agent.mode,
+      transcript: transcriptCounts(transcriptLines),
+      reflection: NOT_STARTED_REFLECTION,
+    }
+    const live: LiveSession = {
+      agent,
+      public: publicSession,
+      turns: new Map(),
+      replay: [],
+      replayBytes: 0,
+      sequence: 0,
+      activeTurnId: undefined,
+      lastActivity: this.now(),
+      // A resumed session never greets: no greeting was scheduled here, so
+      // message()'s '__greeting__' guard never trips and requireLive can
+      // serve a message immediately.
+      greeting: undefined,
+      waiters: new Set(),
+    }
+    this.live.set(sessionId, live)
+
+    return {
+      ...publicSession,
+      stampsExact: report.stampsExact,
+      systemPromptRestored: report.systemPromptRestored,
+      ...(report.incompleteTurn ? { incompleteTurn: report.incompleteTurn } : {}),
     }
   }
 
@@ -683,16 +893,23 @@ export class LiveSessionRegistry {
     const live = this.live.get(sessionId)
     if (live) return live
     const tombstone = this.tombstones.get(sessionId)
-    if (tombstone) {
-      throw new ApiError(
-        409,
-        tombstone.public.status === 'expired' ? 'session_expired' : 'session_ended',
-        'This session is read-only.',
-      )
-    }
+    if (tombstone) throw this.tombstoneError(tombstone)
     const stored = await this.findStoredSession(sessionId)
     if (stored) throw this.storedSessionWriteError(stored)
     throw new ApiError(404, 'not_found', 'The requested resource was not found.')
+  }
+
+  // Shared by requireLive and doResume, so a tombstoned session id gets the
+  // same answer from both: 'expired' for one this registry's own sweep()
+  // timed out, 'session_ended' for anything else (a person-driven end(),
+  // and the fallback for a status this method does not recognise, same
+  // fail-closed posture storedSessionWriteError already takes below).
+  private tombstoneError(tombstone: Tombstone): ApiError {
+    return new ApiError(
+      409,
+      tombstone.public.status === 'expired' ? 'session_expired' : 'session_ended',
+      'This session is read-only.',
+    )
   }
 
   private async findStoredSession(sessionId: string): Promise<PublicSession | undefined> {

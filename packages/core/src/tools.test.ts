@@ -17,7 +17,7 @@ import {
 import { FakeChatProvider, FakeEmbeddingProvider, type ToolCall } from '@openreverie/providers'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { MODE_NAMES } from './modes.js'
-import { dispatchTool, toolDefinitions } from './tools.js'
+import { dispatchTool, parseReplayableRememberArgs, toolDefinitions } from './tools.js'
 
 let dir: string
 
@@ -1258,4 +1258,45 @@ it('list_arcs filters by status and pages, and its description matches what it r
   expect(Object.keys(listArcsProps).sort()).toEqual(['limit', 'offset', 'status'])
 
   await engine.close()
+})
+
+describe('parseReplayableRememberArgs', () => {
+  it('parses the plain item shape', () => {
+    const args = JSON.stringify({ text: 'Likes tea', kind: 'observation', eventTime: 'tonight' })
+    expect(parseReplayableRememberArgs(args)).toEqual({
+      text: 'Likes tea',
+      kind: 'observation',
+      eventTime: 'tonight',
+    })
+  })
+
+  it('parses a bare text call with no kind or eventTime', () => {
+    const args = JSON.stringify({ text: 'Likes tea' })
+    expect(parseReplayableRememberArgs(args)).toEqual({ text: 'Likes tea' })
+  })
+
+  it('skips the commitment shape, never replaying it as a plain item', () => {
+    const args = JSON.stringify({ commitment: { label: 'See Nightfall', flavor: 'plan' } })
+    expect(parseReplayableRememberArgs(args)).toBeUndefined()
+  })
+
+  it('skips the reviseCommitment shape', () => {
+    const args = JSON.stringify({ reviseCommitment: { commitmentId: 'commit_1', label: 'x' } })
+    expect(parseReplayableRememberArgs(args)).toBeUndefined()
+  })
+
+  it('skips the resolveCommitment shape', () => {
+    const args = JSON.stringify({
+      resolveCommitment: { commitmentId: 'commit_1', outcome: 'done' },
+    })
+    expect(parseReplayableRememberArgs(args)).toBeUndefined()
+  })
+
+  it('skips arguments that fail to parse as JSON', () => {
+    expect(parseReplayableRememberArgs('{ not json')).toBeUndefined()
+  })
+
+  it('skips a plain shape whose text is missing', () => {
+    expect(parseReplayableRememberArgs(JSON.stringify({ kind: 'observation' }))).toBeUndefined()
+  })
 })

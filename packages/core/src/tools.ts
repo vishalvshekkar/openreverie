@@ -107,6 +107,11 @@ const rememberItemArgs = z.strictObject({
     .optional(),
 })
 
+// Exported so session resume (AgentSession.resume, agent.ts) can type the
+// parsed values parseReplayableRememberArgs below hands it, without a
+// second, hand-written copy of this shape living in agent.ts.
+export type RememberItemArgs = z.infer<typeof rememberItemArgs>
+
 // Record a brand new commitment. flavor is required because an errand and
 // a plan are selected and asked about differently; statedTime is a real,
 // distinct field, never prose packed into label.
@@ -812,6 +817,40 @@ async function dispatchReadTranscript(engine: MemoryEngine, value: unknown): Pro
 // can correct it.
 function hasKey(value: unknown, key: string): boolean {
   return typeof value === 'object' && value !== null && key in value
+}
+
+// Session resume's own entry point into this file's remember shapes (see
+// docs/specs/2026-08-29-session-resume-design.md, section 2). Replaying an
+// evicted session's liveItems means walking the transcript's own remember
+// tool calls and picking out only the ones that were ever an in-memory
+// write. Kept here, not duplicated in packages/core/src/agent.ts or in
+// packages/memory, because this file already owns the four remember shapes
+// and their disambiguation: a second copy anywhere else would let the two
+// drift out of sync with dispatchRemember below.
+//
+// Mirrors dispatchRemember's own gating exactly: the three commitment
+// shapes (commitment, reviseCommitment, resolveCommitment) all write
+// straight to graph.jsonl and are already durable by the time their tool
+// result landed, so replaying them here would double-record a commitment
+// rather than restore one. Only the plain item shape is an in-memory
+// write, so only it is worth replaying. Arguments that fail to parse as
+// JSON, or that fail the plain item shape once none of the three
+// commitment keys are present, return undefined: the live call itself
+// returned an error and never became an item, so replay must skip it the
+// same way.
+export function parseReplayableRememberArgs(raw: string): RememberItemArgs | undefined {
+  const parsedArgs = parseArguments(raw)
+  if (!parsedArgs.ok) return undefined
+  const value = parsedArgs.value
+  if (
+    hasKey(value, 'commitment') ||
+    hasKey(value, 'reviseCommitment') ||
+    hasKey(value, 'resolveCommitment')
+  ) {
+    return undefined
+  }
+  const parsed = rememberItemArgs.safeParse(value)
+  return parsed.success ? parsed.data : undefined
 }
 
 async function dispatchRemember(

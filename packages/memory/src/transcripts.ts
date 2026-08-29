@@ -42,6 +42,18 @@ export interface TranscriptLine {
   // no existing transcript needs migrating and no reader written before
   // this field existed breaks on it.
   synthetic?: true
+  // Marks a line that was deliberately never part of the model's message
+  // history, even though it is durably recorded here. The one line this
+  // exists for today is the /mode line AgentSession.setMode writes for the
+  // CLI's typed /mode and the web picker's click: both are real transcript
+  // events worth keeping, but neither was ever sent to the model as a
+  // message, so replaying the transcript into history verbatim would put a
+  // turn in front of the model that the live session never actually had.
+  // Same posture as synthetic above: true or absent, never false, so no
+  // existing transcript needs migrating and no reader written before this
+  // field existed breaks on it. Session resume rebuilds history from every
+  // transcript line that does not carry this.
+  historyOmitted?: true
 }
 
 // A small, mutable piece of per-session metadata, kept in its own file
@@ -88,7 +100,31 @@ export interface StoredSessionDescription {
 const TRANSCRIPT_FILE = 'transcript.jsonl'
 const SUMMARY_FILE = 'summary.md'
 const SESSION_META_FILE = 'session.json'
+// Holds the exact system prompt string a session's model calls used, so a
+// later resume can read back what the model actually saw instead of
+// re-assembling a string that might not match (see
+// docs/specs/2026-08-29-session-resume-design.md, section 5, and its
+// addendum). Named and extensioned so it can never be mistaken for a memory
+// document by anything that scans a session directory's contents: it is not
+// TRANSCRIPT_FILE, SUMMARY_FILE, or SESSION_META_FILE, the only three exact
+// filenames anything in this package ever reads inside a session directory
+// (readTranscript/appendLine on TRANSCRIPT_FILE, listSessions/describe on
+// SUMMARY_FILE, readMeta/writeMeta on SESSION_META_FILE), and its .txt
+// extension keeps it out of anything that might one day glob *.md. Checked
+// before choosing this name: MemoryEngine.walkAllDocuments (engine.ts),
+// the one function that scans for memory documents to index, never reads
+// paths.sessionsDir at all, so nothing here is at risk of being indexed or
+// listed as a document regardless of filename. SessionStore.listSessions
+// and findSessionDir only ever readdir paths.sessionsDir itself (the
+// session directories, one level up), never the contents of one session's
+// directory, so a file living inside a session directory is invisible to
+// both.
+const SYSTEM_PROMPT_FILE = 'system-prompt.txt'
 const SESSION_DIR_PATTERN = /^(\d{4}-\d{2}-\d{2})-(session_[0-9A-Za-z]+)$/
+
+function isEnoent(err: unknown): boolean {
+  return err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code === 'ENOENT'
+}
 
 export class SessionStore {
   readonly sessionId: string
@@ -225,6 +261,60 @@ export class SessionStore {
       return parsed.success ? parsed.data : undefined
     } catch {
       return undefined
+    }
+  }
+
+  // The one write site for a session's persisted system prompt. Whole-file,
+  // through FileStore.writeFile, the same atomic temp-then-rename path
+  // session.json already uses through writeMeta above: a reader never
+  // observes a half-written prompt.
+  static async writeSystemPrompt(
+    paths: MemoryPaths,
+    sessionId: string,
+    prompt: string,
+  ): Promise<void> {
+    const dir = await findSessionDir(paths, sessionId)
+    await paths.files.writeFile(join(dir, SYSTEM_PROMPT_FILE), prompt)
+  }
+
+  // Returns undefined only when the file genuinely does not exist yet (an
+  // ENOENT from FileStore.readFile, per the contract on that interface in
+  // store.ts). Anything else, a permissions error, a corrupt read, is a
+  // real failure and propagates rather than being folded into "absent":
+  // unlike readMeta above, this does not treat every failure the same way,
+  // because the caller (AgentSession.resume) needs to fall back to
+  // re-assembling the prompt and say so either way, and collapsing a real
+  // I/O error into a silent "missing" here would hide it from that report.
+  static async readSystemPrompt(
+    paths: MemoryPaths,
+    sessionId: string,
+  ): Promise<string | undefined> {
+    const dir = await findSessionDir(paths, sessionId)
+    try {
+      return await paths.files.readFile(join(dir, SYSTEM_PROMPT_FILE))
+    } catch (err) {
+      if (isEnoent(err)) return undefined
+      throw err
+    }
+  }
+
+  // Existence only, and deliberately cheap: one readdir of paths.sessionsDir
+  // (via findSessionDir's own directory-name match), no file content read
+  // at all, not even the first transcript line. This exists specifically so
+  // session resume's "is this id on disk" check never becomes a second
+  // caller of listSessions/describe, both of which do real per-session work
+  // (an exists() check for summary.md, and describe() a full transcript
+  // read on top of that): a consumer measured that scan at 67ms for 200
+  // sessions, and resume runs on their post-hibernation path, which is
+  // every message. If a later change makes this call anything that reads
+  // transcript.jsonl, this property is gone; do not "simplify" it into
+  // listSessions.
+  static async exists(paths: MemoryPaths, sessionId: string): Promise<boolean> {
+    try {
+      await findSessionDir(paths, sessionId)
+      return true
+    } catch {
+      return false
     }
   }
 

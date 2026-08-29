@@ -806,6 +806,11 @@ const publicSessionSchema = z.strictObject({
   updatedAt: z.string(),
   status: z.enum(['live', 'ended', 'expired', 'open']),
   readOnly: z.boolean(),
+  // Session resume (R1). See PublicSession.resumable's own comment in
+  // packages/memory/src/engine.ts: a claim about the session itself
+  // ("could a host resume this"), distinct from readOnly's promise about
+  // this process.
+  resumable: z.boolean(),
   mode: z.string().optional(),
   transcript: z.strictObject({
     lineCount: z.number().int().nonnegative(),
@@ -839,6 +844,11 @@ const publicTranscriptLineSchema = z.strictObject({
   toolCalls: z.array(toolCallSchema).optional(),
   toolCallId: z.string().optional(),
   synthetic: z.literal(true).optional(),
+  // Session resume (R1). See TranscriptLine.historyOmitted's own comment
+  // in packages/memory/src/transcripts.ts: marks a line, such as the
+  // CLI's typed /mode, that is durably recorded but was never part of the
+  // model's message history.
+  historyOmitted: z.literal(true).optional(),
 })
 const publicTranscriptLinesSchema = z.array(publicTranscriptLineSchema)
 const publicProposalSchema = z.strictObject({

@@ -13,6 +13,7 @@ import {
   memoryPaths,
   newId,
   nodeStores,
+  readDocument,
   SessionStore,
   writeDocumentAtomic,
   writeProfile,
@@ -26,6 +27,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { type AgentEvent, AgentSession } from './agent.js'
 import { defaultCrisisResources, type ReverieConfig } from './config.js'
+import { assembleSystemPrompt } from './context.js'
 import { DEFAULT_DEPLOYMENT_CONTEXT } from './personas.js'
 
 let dir: string
@@ -1697,6 +1699,588 @@ describe('AgentSession', () => {
       expect(chat.requests[0]?.system).toContain(DEFAULT_DEPLOYMENT_CONTEXT)
 
       await engine.close()
+    })
+  })
+
+  describe('resume', () => {
+    it('reproduces a byte-exact stamp when the stored offset still matches the current zone', async () => {
+      const chat = new FakeChatProvider([{ text: 'Sounds fun.', toolCalls: [] }])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      await engine.updateProfile({ timezone: 'Asia/Kolkata' })
+      const live = await AgentSession.start(engine, testConfig(), chat, {
+        now: () => new Date('2026-08-16T20:00:00.000Z'),
+      })
+      await collect(live.send("I'm watching Halcyon tonight at 7.25pm"))
+      const liveMessages = chat.requests.at(-1)?.messages ?? []
+
+      const chat2 = new FakeChatProvider([{ text: 'Enjoy.', toolCalls: [] }])
+      const { session: resumed, report } = await AgentSession.resume(
+        engine,
+        testConfig(),
+        chat2,
+        live.sessionId,
+        { now: () => new Date('2026-08-17T02:00:00.000Z') },
+      )
+      expect(report.stampsExact).toBe(true)
+
+      await collect(resumed.send('Back home now.'))
+      const resumedMessages = chat2.requests[0]?.messages ?? []
+      // Round two's messages are a strict extension of round one's, the
+      // same "prefix stays byte-identical" claim the live-session stamping
+      // tests already prove, but proven here across a resume boundary: the
+      // rebuilt history must match what the live session actually sent to
+      // the provider, element for element.
+      expect(resumedMessages.slice(0, liveMessages.length)).toEqual(liveMessages)
+
+      await engine.close()
+    })
+
+    it('falls back to the stored-offset rendering when the stored offset disagrees with the current zone', async () => {
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      await engine.updateProfile({ timezone: 'Asia/Kolkata' })
+      const sessionId = await engine.startSession(new Date('2026-08-16T20:00:00.000Z'))
+      await engine.setSessionMode(sessionId, 'general')
+      // utcOffsetMinutes -300 (US Eastern) does not match Asia/Kolkata's
+      // +330 at this instant: the fallback branch must fire.
+      await engine.appendTranscript(sessionId, {
+        ts: '2026-08-16T20:00:00.000Z',
+        utcOffsetMinutes: -300,
+        role: 'user',
+        content: 'Moved timezones since I last wrote.',
+      })
+
+      const chat2 = new FakeChatProvider([{ text: 'Got it.', toolCalls: [] }])
+      const { session: resumed, report } = await AgentSession.resume(
+        engine,
+        testConfig(),
+        chat2,
+        sessionId,
+        { now: () => new Date('2026-08-17T02:00:00.000Z') },
+      )
+      expect(report.stampsExact).toBe(false)
+
+      await collect(resumed.send('Confirming.'))
+      const firstMessage = chat2.requests[0]?.messages[0]
+      expect(firstMessage).toEqual({
+        role: 'user',
+        content: '[Sun 2026-08-16 15:00 UTC-05:00] Moved timezones since I last wrote.',
+      })
+
+      await engine.close()
+    })
+
+    it('carries both stamp branches in one rebuild when the zone changed partway', async () => {
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      await engine.updateProfile({ timezone: 'Asia/Kolkata' })
+      const sessionId = await engine.startSession(new Date('2026-08-16T20:00:00.000Z'))
+      await engine.setSessionMode(sessionId, 'general')
+      await engine.appendTranscript(sessionId, {
+        ts: '2026-08-16T20:00:00.000Z',
+        utcOffsetMinutes: 330,
+        role: 'user',
+        content: 'First message, exact.',
+      })
+      await engine.appendTranscript(sessionId, {
+        ts: '2026-08-16T20:01:00.000Z',
+        role: 'assistant',
+        content: 'Noted.',
+      })
+      await engine.appendTranscript(sessionId, {
+        ts: '2026-08-16T20:05:00.000Z',
+        utcOffsetMinutes: -300,
+        role: 'user',
+        content: 'Second message, fallback.',
+      })
+      await engine.appendTranscript(sessionId, {
+        ts: '2026-08-16T20:06:00.000Z',
+        role: 'assistant',
+        content: 'Also noted.',
+      })
+
+      const chat2 = new FakeChatProvider([{ text: 'Continuing.', toolCalls: [] }])
+      const { session: resumed, report } = await AgentSession.resume(
+        engine,
+        testConfig(),
+        chat2,
+        sessionId,
+        { now: () => new Date('2026-08-17T02:00:00.000Z') },
+      )
+      expect(report.stampsExact).toBe(false)
+
+      await collect(resumed.send('Third.'))
+      const messages = chat2.requests[0]?.messages ?? []
+      expect(messages[0]).toEqual({
+        role: 'user',
+        content: '[Mon 2026-08-17 01:30 Asia/Kolkata] First message, exact.',
+      })
+      expect(messages[2]).toEqual({
+        role: 'user',
+        content: '[Sun 2026-08-16 15:05 UTC-05:00] Second message, fallback.',
+      })
+
+      await engine.close()
+    })
+
+    it('excludes a historyOmitted /mode line from history but leaves it in the transcript', async () => {
+      const chat = new FakeChatProvider([{ text: 'Hi.', toolCalls: [] }])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      await engine.updateProfile({ timezone: 'UTC' })
+      const live = await AgentSession.start(engine, testConfig(), chat, {
+        now: () => new Date('2026-08-16T20:00:00.000Z'),
+      })
+      await live.setMode('listen', { source: 'cli' })
+
+      const beforeResume = await engine.readTranscript(live.sessionId)
+      const modeLine = beforeResume.find((line) => line.content === '/mode listen')
+      expect(modeLine?.historyOmitted).toBe(true)
+
+      const chat2 = new FakeChatProvider([{ text: 'Sure.', toolCalls: [] }])
+      const { session: resumed } = await AgentSession.resume(
+        engine,
+        testConfig(),
+        chat2,
+        live.sessionId,
+        { now: () => new Date('2026-08-16T20:05:00.000Z') },
+      )
+      await collect(resumed.send('Continuing.'))
+      const messages = chat2.requests[0]?.messages ?? []
+      expect(messages.some((m) => m.content.includes('/mode listen'))).toBe(false)
+
+      const afterResume = await engine.readTranscript(live.sessionId)
+      expect(afterResume.find((line) => line.content === '/mode listen')).toEqual(modeLine)
+
+      await engine.close()
+    })
+
+    it('drops a dangling trailing tool-call line from history, leaving the transcript unchanged', async () => {
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      await engine.updateProfile({ timezone: 'UTC' })
+      const sessionId = await engine.startSession(new Date('2026-08-16T20:00:00.000Z'))
+      await engine.setSessionMode(sessionId, 'general')
+      await engine.appendTranscript(sessionId, {
+        ts: '2026-08-16T20:00:00.000Z',
+        utcOffsetMinutes: 0,
+        role: 'user',
+        content: 'What is on my plate?',
+      })
+      // No matching tool result line: eviction happened between announcing
+      // the call and dispatching it.
+      await engine.appendTranscript(sessionId, {
+        ts: '2026-08-16T20:00:01.000Z',
+        role: 'assistant',
+        content: '',
+        toolCalls: [{ id: 'call_1', name: 'list_arcs', arguments: '{}' }],
+      })
+
+      const before = await engine.readTranscript(sessionId)
+
+      const chat2 = new FakeChatProvider([{ text: 'Here you go.', toolCalls: [] }])
+      const { session: resumed, report } = await AgentSession.resume(
+        engine,
+        testConfig(),
+        chat2,
+        sessionId,
+        { now: () => new Date('2026-08-16T20:10:00.000Z') },
+      )
+      expect(report.historyMessageCount).toBe(1)
+      expect(report.incompleteTurn).toEqual({ fromLineSequence: 1, droppedToolCallLines: 1 })
+
+      // Unchanged by the rebuild itself, before any new turn runs: resume
+      // never rewrites a transcript line, and this is checked at the point
+      // where only the rebuild has happened.
+      const afterResume = await engine.readTranscript(sessionId)
+      expect(afterResume).toEqual(before)
+
+      await collect(resumed.send('Anything?'))
+      const messages = chat2.requests[0]?.messages ?? []
+      expect(messages.some((m) => m.toolCalls !== undefined)).toBe(false)
+
+      await engine.close()
+    })
+
+    it('drops a dangling assistant tool-call line even after a later resume pushes it into the middle of history', async () => {
+      // The ordinary hibernate, resume, talk, hibernate cycle: a dangling
+      // tool-call line is trailing on the first resume (a purely
+      // positional trim would still catch it there), but the person's next
+      // message appends a full, later turn after it, so on the second
+      // resume that same line sits in the middle of the rebuild instead of
+      // at the end. A trim that only ever looks at the tail would leave it
+      // there, unanswered, and the next provider request would be a 400.
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      await engine.updateProfile({ timezone: 'UTC' })
+      const sessionId = await engine.startSession(new Date('2026-08-16T20:00:00.000Z'))
+      await engine.setSessionMode(sessionId, 'general')
+
+      // Step 1: transcript ends mid-tool-call, exactly like the sibling
+      // trailing-drop test above.
+      await engine.appendTranscript(sessionId, {
+        ts: '2026-08-16T20:00:00.000Z',
+        utcOffsetMinutes: 0,
+        role: 'user',
+        content: 'What is on my plate?',
+      })
+      await engine.appendTranscript(sessionId, {
+        ts: '2026-08-16T20:00:01.000Z',
+        role: 'assistant',
+        content: '',
+        toolCalls: [{ id: 'call_1', name: 'list_arcs', arguments: '{}' }],
+      })
+
+      // Step 2: resume once. The dangling line is trailing here.
+      const chat2 = new FakeChatProvider([])
+      const { report: firstReport } = await AgentSession.resume(
+        engine,
+        testConfig(),
+        chat2,
+        sessionId,
+        { now: () => new Date('2026-08-16T20:10:00.000Z') },
+      )
+      expect(firstReport.incompleteTurn).toEqual({ fromLineSequence: 1, droppedToolCallLines: 1 })
+
+      // Step 3: the person sends another message. appendBoth appends to
+      // the same transcript, which now reads [user1, assistant(toolCall
+      // call_1), user2, assistant(text)]: the dangling line is no longer
+      // trailing.
+      await engine.appendTranscript(sessionId, {
+        ts: '2026-08-16T20:15:00.000Z',
+        utcOffsetMinutes: 0,
+        role: 'user',
+        content: 'Never mind, forget it.',
+      })
+      await engine.appendTranscript(sessionId, {
+        ts: '2026-08-16T20:15:01.000Z',
+        role: 'assistant',
+        content: 'No problem.',
+      })
+
+      // Step 4: resume again. The real tail (user2, then a plain assistant
+      // reply) is complete, so this rebuild reports no incompleteTurn of
+      // its own; the earlier loss was already reported by the first
+      // resume above. What matters is whether the still-dangling call_1
+      // line survived into the middle of this rebuild.
+      const chat3 = new FakeChatProvider([{ text: 'Sure.', toolCalls: [] }])
+      const { session: resumed, report: secondReport } = await AgentSession.resume(
+        engine,
+        testConfig(),
+        chat3,
+        sessionId,
+        { now: () => new Date('2026-08-16T20:20:00.000Z') },
+      )
+      expect(secondReport.incompleteTurn).toBeUndefined()
+
+      await collect(resumed.send('Anything?'))
+      const messages = chat3.requests[0]?.messages ?? []
+      expect(messages.every((message) => message.toolCalls === undefined)).toBe(true)
+
+      await engine.close()
+    })
+
+    it('reports incompleteTurn for a user line with nothing after it', async () => {
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const sessionId = await engine.startSession(new Date('2026-08-16T20:00:00.000Z'))
+      await engine.setSessionMode(sessionId, 'general')
+      await engine.appendTranscript(sessionId, {
+        ts: '2026-08-16T20:00:00.000Z',
+        utcOffsetMinutes: 0,
+        role: 'user',
+        content: 'The object evicted right after this.',
+      })
+
+      const { report } = await AgentSession.resume(engine, testConfig(), chat, sessionId, {
+        now: () => new Date('2026-08-16T20:10:00.000Z'),
+      })
+      expect(report.incompleteTurn).toEqual({ fromLineSequence: 1, droppedToolCallLines: 0 })
+
+      await engine.close()
+    })
+
+    it('reports no incompleteTurn for a clean tail', async () => {
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const sessionId = await engine.startSession(new Date('2026-08-16T20:00:00.000Z'))
+      await engine.setSessionMode(sessionId, 'general')
+      await engine.appendTranscript(sessionId, {
+        ts: '2026-08-16T20:00:00.000Z',
+        utcOffsetMinutes: 0,
+        role: 'user',
+        content: 'A complete turn.',
+      })
+      await engine.appendTranscript(sessionId, {
+        ts: '2026-08-16T20:00:05.000Z',
+        role: 'assistant',
+        content: 'Understood.',
+      })
+
+      const { report } = await AgentSession.resume(engine, testConfig(), chat, sessionId, {
+        now: () => new Date('2026-08-16T20:10:00.000Z'),
+      })
+      expect(report.incompleteTurn).toBeUndefined()
+
+      await engine.close()
+    })
+
+    it('reports no incompleteTurn for an empty history evicted before the greeting landed', async () => {
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const sessionId = await engine.startSession(new Date('2026-08-16T20:00:00.000Z'))
+      await engine.setSessionMode(sessionId, 'general')
+
+      const { report } = await AgentSession.resume(engine, testConfig(), chat, sessionId, {
+        now: () => new Date('2026-08-16T20:10:00.000Z'),
+      })
+      expect(report.historyMessageCount).toBe(0)
+      expect(report.incompleteTurn).toBeUndefined()
+
+      await engine.close()
+    })
+
+    it('replays a plain remember call with its original ts, and skips the three commitment shapes', async () => {
+      const summary = JSON.stringify({
+        summary: 'A quiet check-in.',
+        items: [],
+        attributions: [],
+        newArcs: [],
+        newPersons: [],
+        newEntities: [],
+        pagePromotions: [],
+        arcUpdates: [],
+        personUpdates: [],
+        constitutionUpdate: null,
+        journalingUpdate: null,
+      })
+      const chat = new FakeChatProvider([{ text: summary, toolCalls: [] }])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const sessionId = await engine.startSession(new Date('2026-08-16T20:00:00.000Z'))
+      await engine.setSessionMode(sessionId, 'general')
+      const rememberTs = '2026-08-16T20:00:05.000Z'
+
+      await engine.appendTranscript(sessionId, {
+        ts: '2026-08-16T20:00:00.000Z',
+        role: 'user',
+        content: 'Planning things.',
+      })
+      await engine.appendTranscript(sessionId, {
+        ts: rememberTs,
+        role: 'assistant',
+        content: '',
+        toolCalls: [
+          {
+            id: 'call_remember',
+            name: 'remember',
+            arguments: JSON.stringify({ text: 'Watching Halcyon tonight', kind: 'intention' }),
+          },
+        ],
+      })
+      await engine.appendTranscript(sessionId, {
+        ts: '2026-08-16T20:00:06.000Z',
+        role: 'tool',
+        content: '{"ok":true}',
+        toolCallId: 'call_remember',
+      })
+      await engine.appendTranscript(sessionId, {
+        ts: '2026-08-16T20:00:10.000Z',
+        role: 'assistant',
+        content: '',
+        toolCalls: [
+          {
+            id: 'call_commitment',
+            name: 'remember',
+            arguments: JSON.stringify({ commitment: { label: 'See Nightfall', flavor: 'plan' } }),
+          },
+        ],
+      })
+      await engine.appendTranscript(sessionId, {
+        ts: '2026-08-16T20:00:11.000Z',
+        role: 'tool',
+        content: '{"ok":true,"commitmentId":"commit_x"}',
+        toolCallId: 'call_commitment',
+      })
+      await engine.appendTranscript(sessionId, {
+        ts: '2026-08-16T20:00:15.000Z',
+        role: 'assistant',
+        content: '',
+        toolCalls: [
+          {
+            id: 'call_revise',
+            name: 'remember',
+            arguments: JSON.stringify({
+              reviseCommitment: { commitmentId: 'commit_x', label: 'See Nightfall, revised' },
+            }),
+          },
+        ],
+      })
+      await engine.appendTranscript(sessionId, {
+        ts: '2026-08-16T20:00:16.000Z',
+        role: 'tool',
+        content: '{"ok":true,"commitmentId":"commit_x"}',
+        toolCallId: 'call_revise',
+      })
+      await engine.appendTranscript(sessionId, {
+        ts: '2026-08-16T20:00:20.000Z',
+        role: 'assistant',
+        content: '',
+        toolCalls: [
+          {
+            id: 'call_resolve',
+            name: 'remember',
+            arguments: JSON.stringify({
+              resolveCommitment: { commitmentId: 'commit_x', outcome: 'done' },
+            }),
+          },
+        ],
+      })
+      await engine.appendTranscript(sessionId, {
+        ts: '2026-08-16T20:00:21.000Z',
+        role: 'tool',
+        content: '{"ok":true,"commitmentId":"commit_x"}',
+        toolCallId: 'call_resolve',
+      })
+      await engine.appendTranscript(sessionId, {
+        ts: '2026-08-16T20:00:25.000Z',
+        role: 'assistant',
+        content: 'Got it, noted.',
+      })
+
+      const { report } = await AgentSession.resume(engine, testConfig(), chat, sessionId, {
+        now: () => new Date('2026-08-16T21:00:00.000Z'),
+      })
+      expect(report.incompleteTurn).toBeUndefined()
+
+      await engine.endSession(sessionId)
+
+      const paths = memoryPaths(dir, nodeStores())
+      const sessionDir = await SessionStore.sessionDir(paths, sessionId)
+      const summaryDoc = await readDocument(paths.files, join(sessionDir, 'summary.md'))
+      const items = summaryDoc.meta.items as { text: string; ts: string }[]
+      // Only the plain shape became an item: the three commitment shapes
+      // already wrote straight to graph.jsonl when they were live, and
+      // replaying them here would have double-recorded them.
+      expect(items).toHaveLength(1)
+      expect(items[0]).toMatchObject({ text: 'Watching Halcyon tonight', ts: rememberTs })
+
+      await engine.close()
+    })
+
+    it('reads back the persisted system prompt, falsified by mutating the stored string', async () => {
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const live = await AgentSession.start(engine, testConfig(), chat, {
+        now: () => new Date('2026-08-16T20:00:00.000Z'),
+      })
+
+      await engine.writeSessionSystemPrompt(live.sessionId, 'MUTATED SYSTEM PROMPT, NOT REAL')
+
+      const chat2 = new FakeChatProvider([{ text: 'Hi.', toolCalls: [] }])
+      const { session: resumed, report } = await AgentSession.resume(
+        engine,
+        testConfig(),
+        chat2,
+        live.sessionId,
+        { now: () => new Date('2026-08-16T20:05:00.000Z') },
+      )
+      expect(report.systemPromptRestored).toBe(true)
+
+      await collect(resumed.send('Hello again.'))
+      expect(chat2.requests[0]?.system).toBe('MUTATED SYSTEM PROMPT, NOT REAL')
+
+      await engine.close()
+    })
+
+    it('falls back to re-assembling the system prompt when none was persisted, and reports that it did', async () => {
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const sessionId = await engine.startSession(new Date('2026-08-16T20:00:00.000Z'))
+      await engine.setSessionMode(sessionId, 'general')
+      // No system prompt was ever persisted for this session: it was
+      // built directly through engine.startSession, bypassing
+      // AgentSession.start entirely, so persistSystemPrompt never ran.
+      const now = () => new Date('2026-08-16T20:05:00.000Z')
+      const expected = await assembleSystemPrompt(engine, testConfig(), 'general', now, {})
+
+      const chat2 = new FakeChatProvider([{ text: 'Hi.', toolCalls: [] }])
+      const { session: resumed, report } = await AgentSession.resume(
+        engine,
+        testConfig(),
+        chat2,
+        sessionId,
+        { now },
+      )
+      expect(report.systemPromptRestored).toBe(false)
+
+      await collect(resumed.send('Hello.'))
+      expect(chat2.requests[0]?.system).toBe(expected)
+
+      await engine.close()
+    })
+
+    it('rebuilds mode from the durable session record rather than defaulting blindly', async () => {
+      const chat = new FakeChatProvider([{ text: 'Listening.', toolCalls: [] }])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      const live = await AgentSession.start(engine, testConfig(), chat, { mode: 'listen' })
+
+      const chat2 = new FakeChatProvider([{ text: 'Still listening.', toolCalls: [] }])
+      const { session: resumed } = await AgentSession.resume(
+        engine,
+        testConfig(),
+        chat2,
+        live.sessionId,
+      )
+      expect(resumed.mode).toBe('listen')
+
+      await engine.close()
+    })
+
+    it('falls back to general when a session has no recorded mode at all', async () => {
+      const chat = new FakeChatProvider([{ text: 'Hi.', toolCalls: [] }])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      // Built directly through the engine, bypassing setSessionMode, the
+      // same "legacy or corrupt session" shape the design names.
+      const sessionId = await engine.startSession()
+      await engine.appendTranscript(sessionId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'No mode was ever recorded for this one.',
+      })
+
+      const { session: resumed } = await AgentSession.resume(engine, testConfig(), chat, sessionId)
+      expect(resumed.mode).toBe('general')
+
+      await engine.close()
+    })
+  })
+
+  describe('system prompt persistence guard', () => {
+    it('guards every this.system assignment site with a matching persist call', async () => {
+      const sourceDir = new URL('.', import.meta.url).pathname
+      const source = await readFile(join(sourceDir, 'agent.ts'), 'utf8')
+
+      const assignments = source.match(/this\.system\s*=(?!=)/g) ?? []
+      // Exactly 3, matching the design's own citation (agent.ts:223, :303,
+      // :514 at 8dc071f): the constructor's parameter assignment,
+      // refreshSystemPrompt, and runTurn's inline update_profile
+      // re-assembly. A count that moves here means a new assignment site
+      // was added: go persist it at that site, then update this number
+      // once the persist call is in place.
+      expect(assignments.length).toBe(3)
+
+      const constructorCalls = source.match(/new AgentSession\(/g) ?? []
+      // start() and resume() are the only two callers of the private
+      // constructor, so this is the constructor assignment site's other
+      // half: each caller must persist right after construction, since the
+      // constructor itself cannot await a write.
+      expect(constructorCalls.length).toBe(2)
+
+      const persistCalls = source.match(/(?:this|session)\.persistSystemPrompt\(\)/g) ?? []
+      // Four call sites in total: one after each of the two
+      // `new AgentSession(` calls above (covering the constructor's own
+      // assignment), one in refreshSystemPrompt, and one in runTurn's
+      // update_profile branch.
+      expect(persistCalls.length).toBe(4)
     })
   })
 })

@@ -182,6 +182,19 @@ export interface PublicSession {
   // read straight off disk.
   status: 'live' | 'ended' | 'expired' | 'open'
   readOnly: boolean
+  // Whether a host could resume this session (session resume, R1). A
+  // separate field from readOnly rather than a second meaning folded into
+  // it: readOnly is a promise about this process ("will this accept your
+  // next write"), and resumable is a claim about the session itself
+  // ("could a host resume this"). Overloading readOnly would have made the
+  // bundled server, which never auto-resumes, advertise a compose bar that
+  // always 409s for an 'open' session (docs/specs/2026-08-29-session-resume-
+  // design.md, addendum, decision 2). Derived from the same rule R4
+  // established for status: only a session with no recorded reflection
+  // attempt at all is resumable, which is exactly status === 'open'. Always
+  // computed from that one status value, never a second, independent
+  // derivation, so the two fields cannot drift apart.
+  resumable: boolean
   // Set when a session is created or switched, so a browser reload recovers
   // the mode the conversation is actually in. It is carried onto the ended and
   // expired tombstones as well, because those are built by spreading the live
@@ -941,6 +954,60 @@ export class MemoryEngine implements DreamLookup {
   async appendTranscript(sessionId: string, line: TranscriptLine): Promise<void> {
     const store = await SessionStore.open(this.paths, sessionId)
     await store.appendLine(this.paths, line)
+  }
+
+  // Existence only, no transcript read: see SessionStore.exists's own
+  // comment for the cost this is built to avoid. Session resume runs on
+  // the post-hibernation path, which is every message a host sends, so it
+  // must never become a second caller of listStoredSessions (which reads
+  // every session's transcript to build its counts).
+  async storedSessionExists(sessionId: string): Promise<boolean> {
+    return SessionStore.exists(this.paths, sessionId)
+  }
+
+  // The one write site core calls to persist a session's assembled system
+  // prompt, wherever AgentSession.system is assigned. See
+  // SessionStore.writeSystemPrompt's own comment for the atomicity and
+  // naming guarantees.
+  async writeSessionSystemPrompt(sessionId: string, prompt: string): Promise<void> {
+    await SessionStore.writeSystemPrompt(this.paths, sessionId, prompt)
+  }
+
+  // A thin pass-through to SessionStore.readSystemPrompt: resolves
+  // undefined only for a genuinely missing prompt (ENOENT), and rejects for
+  // any other read failure, the same distinction that method preserves.
+  // Not swallowed to undefined here: the caller (AgentSession.resume) falls
+  // back to re-assembling the prompt and reports that it did either way, so
+  // it is the one place that treats "missing" and "unreadable" the same,
+  // not this wrapper, which stays honest about which one actually happened.
+  async readSessionSystemPrompt(sessionId: string): Promise<string | undefined> {
+    return SessionStore.readSystemPrompt(this.paths, sessionId)
+  }
+
+  // Restores liveItems for a resumed session from items parsed out of the
+  // transcript's own remember tool calls (core owns that parse; see
+  // packages/core/src/tools.ts). Mints fresh ids, the same as remember()
+  // does, because an item's id was never durable and nothing references it
+  // across a process. ts is taken from each item as given, never from the
+  // resume clock: ts is the record time reflection anchors a stated event
+  // time against, so a resume-time value would move every item the person
+  // recorded before the eviction to the moment of the resume.
+  //
+  // Safe to call unconditionally, even with an empty array, because an
+  // unreflected session has by definition never written an item to disk:
+  // there is nothing here to double count.
+  restoreLiveItems(
+    sessionId: string,
+    items: { text: string; kind?: ReflectionItemKind; eventTime?: string; ts: string }[],
+  ): void {
+    const restored: ReflectionItem[] = items.map((item) => ({
+      id: newId('item'),
+      text: item.text,
+      kind: item.kind ?? 'observation',
+      ts: item.ts,
+      ...(item.eventTime !== undefined ? { eventTime: item.eventTime } : {}),
+    }))
+    this.liveItems.set(sessionId, restored)
   }
 
   async remember(
@@ -1846,27 +1913,33 @@ export class MemoryEngine implements DreamLookup {
         reflected,
         skipped,
       })
+      // 'open' means only reflection.state === 'not_started': on disk,
+      // never reflected, and never even attempted. Before R4, status was
+      // `reflected ? 'ended' : 'open'`, which was right only because
+      // ending a session used to block on its own reflection finishing.
+      // That changed (endSession now hands reflection to the background
+      // for a caller that asks), so a session the person deliberately
+      // ended can now sit unreflected for as long as reflection takes,
+      // and under the old rule it would still report 'open'. Session
+      // resume treats 'open' as "resumable", so a deliberately ended
+      // session, or one whose reflection failed, must never look
+      // resumable: a partial reflection may already have materialized
+      // arcs, people, or items from that transcript. Everything except
+      // a session with no recorded attempt at all is 'ended'.
+      const status = reflection.state === 'not_started' ? 'open' : 'ended'
       return {
         ...session,
         reflection,
-        // 'open' means only reflection.state === 'not_started': on disk,
-        // never reflected, and never even attempted. Before R4, status was
-        // `reflected ? 'ended' : 'open'`, which was right only because
-        // ending a session used to block on its own reflection finishing.
-        // That changed (endSession now hands reflection to the background
-        // for a caller that asks), so a session the person deliberately
-        // ended can now sit unreflected for as long as reflection takes,
-        // and under the old rule it would still report 'open'. Session
-        // resume treats 'open' as "resumable", so a deliberately ended
-        // session, or one whose reflection failed, must never look
-        // resumable: a partial reflection may already have materialized
-        // arcs, people, or items from that transcript. Everything except
-        // a session with no recorded attempt at all is 'ended'.
-        status: reflection.state === 'not_started' ? 'open' : 'ended',
-        // Both statuses are read-only regardless: whether or not the session
-        // was reflected, this stored view genuinely cannot serve writes,
-        // because session resume does not exist yet. Only the status label
-        // was wrong before; the permission underneath it was already right.
+        status,
+        // Same value as status above, never a second check: see the field
+        // comment on PublicSession.resumable.
+        resumable: status === 'open',
+        // Both statuses are read-only regardless: this is the stored view of
+        // a session nothing has resumed into this process, so it genuinely
+        // cannot serve writes right now, whether or not a host could choose
+        // to resume it (that claim is resumable, above). readOnly is a
+        // promise about this process, never a hint that resume is possible;
+        // see the design's addendum, decision 2.
         readOnly: true,
       }
     })

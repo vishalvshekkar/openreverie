@@ -1,4 +1,4 @@
-import { appendFile, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -502,6 +502,82 @@ describe('SessionStore', () => {
       const afterMethod = await SessionStore.readMeta(paths, store.sessionId)
       expect(afterMethod?.mode).toBe('journal')
       expect(afterMethod?.journalMethod).toBe('gratitude')
+    })
+  })
+
+  describe('persisted system prompt', () => {
+    it('round-trips a written prompt', async () => {
+      const store = await SessionStore.start(paths, new Date('2026-08-17T10:00:00.000Z'))
+      await SessionStore.writeSystemPrompt(paths, store.sessionId, 'You are reverie.\n\nBe kind.')
+      expect(await SessionStore.readSystemPrompt(paths, store.sessionId)).toBe(
+        'You are reverie.\n\nBe kind.',
+      )
+    })
+
+    it('writes it atomically, leaving no temp file in the session directory', async () => {
+      const store = await SessionStore.start(paths, new Date('2026-08-17T10:00:00.000Z'))
+      await SessionStore.writeSystemPrompt(paths, store.sessionId, 'A prompt.')
+      const entries = await readdir(store.dir)
+      expect(entries.filter((name) => name.includes('.tmp-'))).toEqual([])
+      expect(entries).toContain('system-prompt.txt')
+    })
+
+    it('reports undefined for a session with no persisted prompt yet', async () => {
+      const store = await SessionStore.start(paths, new Date('2026-08-17T10:00:00.000Z'))
+      expect(await SessionStore.readSystemPrompt(paths, store.sessionId)).toBeUndefined()
+    })
+
+    it('a later write replaces the earlier one rather than appending to it', async () => {
+      const store = await SessionStore.start(paths, new Date('2026-08-17T10:00:00.000Z'))
+      await SessionStore.writeSystemPrompt(paths, store.sessionId, 'First prompt.')
+      await SessionStore.writeSystemPrompt(paths, store.sessionId, 'Second prompt.')
+      expect(await SessionStore.readSystemPrompt(paths, store.sessionId)).toBe('Second prompt.')
+    })
+
+    it('does not touch the transcript', async () => {
+      const store = await SessionStore.start(paths, new Date('2026-08-17T10:00:00.000Z'))
+      await store.appendLine(paths, {
+        ts: '2026-08-17T10:00:01.000Z',
+        role: 'user',
+        content: 'hello',
+      })
+      const before = await readFile(join(store.dir, 'transcript.jsonl'), 'utf8')
+      await SessionStore.writeSystemPrompt(paths, store.sessionId, 'A prompt.')
+      const after = await readFile(join(store.dir, 'transcript.jsonl'), 'utf8')
+      expect(after).toEqual(before)
+    })
+
+    it('propagates a read failure that is not ENOENT rather than reporting it as absent', async () => {
+      const store = await SessionStore.start(paths, new Date('2026-08-17T10:00:00.000Z'))
+      await SessionStore.writeSystemPrompt(paths, store.sessionId, 'A prompt.')
+      // Replace the file with a directory, so the read fails with EISDIR
+      // rather than ENOENT: the distinction this method exists to preserve.
+      await rm(join(store.dir, 'system-prompt.txt'), { force: true })
+      await mkdir(join(store.dir, 'system-prompt.txt'))
+      await expect(SessionStore.readSystemPrompt(paths, store.sessionId)).rejects.toMatchObject({
+        code: 'EISDIR',
+      })
+    })
+  })
+
+  describe('exists', () => {
+    it('reports true for a started session', async () => {
+      const store = await SessionStore.start(paths, new Date('2026-08-17T10:00:00.000Z'))
+      expect(await SessionStore.exists(paths, store.sessionId)).toBe(true)
+    })
+
+    it('reports false for an id nothing on disk matches', async () => {
+      expect(await SessionStore.exists(paths, 'session_does_not_exist')).toBe(false)
+    })
+
+    it('never reads the transcript to answer', async () => {
+      const store = await SessionStore.start(paths, new Date('2026-08-17T10:00:00.000Z'))
+      // Replace the transcript with a directory, so any attempt to read it
+      // as a file throws. exists() must still answer true: proof that it
+      // never opens transcript.jsonl at all.
+      await rm(join(store.dir, 'transcript.jsonl'), { force: true })
+      await mkdir(join(store.dir, 'transcript.jsonl'))
+      await expect(SessionStore.exists(paths, store.sessionId)).resolves.toBe(true)
     })
   })
 })

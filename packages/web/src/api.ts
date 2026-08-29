@@ -51,6 +51,13 @@ export const sessionSchema = z.strictObject({
   updatedAt: z.string(),
   status: z.enum(['live', 'ended', 'expired', 'open']),
   readOnly: z.boolean(),
+  // Session resume (R1), mirrored from packages/server/src/http-core.ts's
+  // own publicSessionSchema. Optional here, unlike the server's required
+  // field: this package's own test fixtures were built before this field
+  // existed, and a real server response always carries a real boolean, so
+  // accepting its absence costs nothing while resume support in this
+  // package is still unbuilt.
+  resumable: z.boolean().optional(),
   mode: z.string().optional(),
   transcript: z.strictObject({
     lineCount: z.number().int().nonnegative(),
@@ -80,6 +87,11 @@ export const transcriptLineSchema = z.strictObject({
   toolCalls: z.array(toolCallSchema).optional(),
   toolCallId: z.string().optional(),
   synthetic: z.literal(true).optional(),
+  // Session resume (R1), mirrored from packages/server/src/http-core.ts.
+  // A /mode line the CLI or the web picker itself wrote can now carry
+  // this: see TranscriptLine.historyOmitted's own comment in
+  // packages/memory/src/transcripts.ts.
+  historyOmitted: z.literal(true).optional(),
 })
 
 export const proposalSchema = z.strictObject({
