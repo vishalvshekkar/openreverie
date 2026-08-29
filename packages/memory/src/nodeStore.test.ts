@@ -100,6 +100,32 @@ describe('NodeFileStore.writeFile atomic write mechanics', () => {
   })
 })
 
+describe('NodeFileStore.readFile', () => {
+  let root: string
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), 'openreverie-readfile-'))
+  })
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true })
+  })
+
+  // store.ts's FileStore.readFile comment documents this as a contract:
+  // journal.ts and profile.ts both catch a readFile rejection and only
+  // treat it as "file does not exist" when err.code === 'ENOENT'. The
+  // conformance suite in memoryStore.test.ts already runs this same
+  // assertion against NodeFileStore (via describe.each), so this is not
+  // new coverage; it exists here too because a reader of this file, which
+  // exercises NodeFileStore's other behaviors directly, should not have to
+  // go looking in memoryStore.test.ts to find the one that matters most.
+  it('readFile on a path that was never written rejects with ENOENT', async () => {
+    const files = new NodeFileStore()
+    const path = join(root, 'missing.md')
+    await expect(files.readFile(path)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+})
+
 describe('NodeFileStore.readdir sorts its result', () => {
   let root: string
 

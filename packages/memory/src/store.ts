@@ -17,6 +17,14 @@
 // replacement of the file's contents, never a partial one observable by a
 // concurrent reader).
 export interface FileStore {
+  // Implementations MUST reject with an error whose .code is 'ENOENT' when
+  // path does not exist, matching node:fs/promises' own readFile. Callers
+  // depend on that exact code to tell "file does not exist yet" apart from
+  // any other read failure: journal.ts's isEnoent and profile.ts's
+  // loadProfile both catch a readFile rejection and only treat it as
+  // absence when err.code === 'ENOENT', letting anything else (a
+  // permissions error, a corrupt read) propagate instead of being silently
+  // swallowed.
   readFile(path: string): Promise<string>
   // Atomic: write goes to a temporary path first, then a rename lands it
   // at `path` in one filesystem operation. A reader never observes a
