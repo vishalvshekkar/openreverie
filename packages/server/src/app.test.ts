@@ -1298,6 +1298,7 @@ describe('live session HTTP routes', () => {
   let host: string
   let origin: string
   let cookie: string
+  let registry: LiveSessionRegistry
 
   beforeEach(async () => {
     memoryDir = await mkdtemp(join(tmpdir(), 'openreverie-live-app-'))
@@ -1323,7 +1324,7 @@ describe('live session HTTP routes', () => {
       now: () => 0,
       randomBytes: () => Buffer.alloc(32, 3),
     })
-    const registry = new LiveSessionRegistry({
+    registry = new LiveSessionRegistry({
       engine,
       config: liveConfig(memoryDir),
       chat,
@@ -1343,6 +1344,13 @@ describe('live session HTTP routes', () => {
         server.close((error) => (error ? reject(error) : resolve())),
       )
     }
+    // Drain the registry before the engine, the same order
+    // closeServerResources uses in launch.ts. Ending a session no longer
+    // waits for its reflection, so a detached reflection can still be
+    // writing into a session directory when a test finishes; closing the
+    // engine and deleting the folder out from under it fails with
+    // ENOTEMPTY, intermittently and only when the timing lines up.
+    await registry.close()
     await engine.close()
     await rm(memoryDir, { recursive: true, force: true })
   })
@@ -1866,6 +1874,7 @@ describe('the API key is never reachable', () => {
   let origin: string
   let cookie: string
   let sessionId: string
+  let registry: LiveSessionRegistry
 
   beforeEach(async () => {
     memoryDir = await mkdtemp(join(tmpdir(), 'openreverie-sentinel-app-'))
@@ -1898,7 +1907,7 @@ describe('the API key is never reachable', () => {
       now: () => 0,
       randomBytes: () => Buffer.alloc(32, 11),
     })
-    const registry = new LiveSessionRegistry({
+    registry = new LiveSessionRegistry({
       engine,
       config,
       chat,
@@ -1918,6 +1927,13 @@ describe('the API key is never reachable', () => {
         server.close((error) => (error ? reject(error) : resolve())),
       )
     }
+    // Drain the registry before the engine, the same order
+    // closeServerResources uses in launch.ts. Ending a session no longer
+    // waits for its reflection, so a detached reflection can still be
+    // writing into a session directory when a test finishes; closing the
+    // engine and deleting the folder out from under it fails with
+    // ENOTEMPTY, intermittently and only when the timing lines up.
+    await registry.close()
     await engine.close()
     await rm(memoryDir, { recursive: true, force: true })
   })

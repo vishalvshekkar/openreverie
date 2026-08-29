@@ -832,6 +832,52 @@ describe('LiveSessionRegistry', () => {
     await expect(registry.close()).resolves.toBeUndefined()
   })
 
+  it("close() still drains every other session when one live session's reflection rejects", async () => {
+    // The failure this guards: draining live sessions with Promise.all
+    // meant one rejected reflection rejected the whole chain, so the
+    // continuation that drains the detached reflections never ran and
+    // every other in-flight reflection was abandoned mid write. launch.ts
+    // swallows a rejected close() and goes straight on to engine.close(),
+    // so nothing downstream would have noticed.
+    const failing = 'session-that-fails'
+    const settled: string[] = []
+    // Plain reassignment rather than vi.spyOn(...).mockRejectedValue(...),
+    // which attaches its own handler to the promise it returns and can
+    // make a rejection test pass for the wrong reason.
+    const realEndSession = engine.endSession.bind(engine)
+    engine.endSession = async (sessionId: string) => {
+      if (sessionId === failing) {
+        settled.push(`rejected:${sessionId}`)
+        throw new Error('reflection blew up')
+      }
+      await realEndSession(sessionId)
+      settled.push(`resolved:${sessionId}`)
+    }
+    try {
+      const registry = createRegistry({
+        chat: new FakeChatProvider([
+          { text: '', toolCalls: [] },
+          { text: '', toolCalls: [] },
+        ]),
+      })
+      const first = await registry.create()
+      const second = await registry.create()
+      // Make exactly one of the two live sessions the failing one, by id,
+      // so the other is a real session whose reflection must still run.
+      const target = first.sessionId
+      const originalEndSession = engine.endSession
+      engine.endSession = async (sessionId: string) =>
+        originalEndSession(sessionId === target ? failing : sessionId)
+
+      await expect(registry.close()).resolves.toBeUndefined()
+
+      expect(settled).toContain(`rejected:${failing}`)
+      expect(settled).toContain(`resolved:${second.sessionId}`)
+    } finally {
+      engine.endSession = realEndSession
+    }
+  })
+
   it('records a mode event when the model switches mode mid-turn', async () => {
     const registry = createRegistry({
       chat: new FakeChatProvider([

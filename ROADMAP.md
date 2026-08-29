@@ -268,21 +268,55 @@ true of every session an existing self-hosted user already has at the moment the
 the disk evidence now, still without reading any transcript, which is the property that made the
 method worth having.
 
-Not built, deliberately. Session resume is designed and not written: the request's own process
-asked for a one-page design before any code, and that design went back as
-[docs/specs/2026-08-29-session-resume-design.md](docs/specs/2026-08-29-session-resume-design.md)
-with three things the request had not named. The stamp rule is a check, not a rendering choice,
-because the stored-stamp helper renders an offset where the live path wrote a zone name. `setMode`
-appends to the transcript and never to history, so `/mode` lines were never part of what the model
-saw, which is a second history/transcript divergence nobody had written down. And the assistant
-tool-call line is appended before the tool is dispatched, so an eviction in that gap leaves a
-durable unanswered tool call that is a provider 400 rather than a degraded answer when replayed.
-One decision sits with the requester: whether the assembled system prompt is persisted per session
-or re-assembled on resume. Two further items from the same document are recorded in
-[BACKLOG.md](BACKLOG.md) rather than built: batch model calls for reflection and dreaming, which
-was asked for as a record and not as code, and the cost of listing sessions, which was measured by
-the requester and deferred here with the diagnosis corrected (it is not the contract question they
-took it for).
+Session resume shipped too, after that design went back and came back agreed. A session can now be
+rebuilt over its existing transcript instead of a host losing the conversation whenever its process
+evicts. Three things made that harder than a replay, and all three were found by writing the design
+rather than the code. Stamps are re-derived from each line's own stored instant and offset, but
+through a check rather than the helper every other stored-transcript reader uses: that helper prints
+the stored offset where the live path printed the person's zone name, so the honest-looking rewrite
+would still have changed every user message in the conversation and cost the provider's prefix cache
+on every resume. `/mode` lines are excluded, because `setMode` appends to the transcript and never to
+history, which is a second deliberate divergence between the two records that nothing had written
+down; those lines now carry a marker rather than being guessed at from their content. And an
+assistant tool-call line whose result never landed is dropped from history wherever it sits, because
+the assistant line is appended before the tool is dispatched, so an eviction in that gap leaves a
+durable unanswered tool call that a provider rejects outright. That last check was positional in its
+first form, trimming only the tail, which held exactly until a later resume appended a completed turn
+behind the orphan and pushed it into the middle: the hibernate, resume, talk, hibernate cycle that is
+a hosted deployment's normal operating mode.
+
+The assembled system prompt is now persisted per session and read back on resume. It is the start of
+the request prefix, so re-assembling it would invalidate the whole cache however carefully history
+was preserved, and would also fold in mid-session graph writes the live session never refreshed into
+its own prompt. The consumer dismantled the caveat this repository had attached to that: a session's
+prompt is already frozen for its life in every deployment including the terminal, so persisting
+introduces no freeze, it restores the one hibernation accidentally breaks. It is written at every
+site that assigns the prompt, with a guard test that fails when a new assignment appears without a
+matching persist, because the first enumeration counted triggers rather than assignment sites and
+gave four names for three places.
+
+`readOnly` keeps meaning exactly what it always meant, a promise about this process, and a separate
+`resumable` field carries the other claim. Both options originally offered were refused, correctly:
+overloading `readOnly` would have left this repository's own bundled server advertising a compose bar
+that fails, which is a self-hosted bug bought to give a hosted consumer clarity.
+
+Not built, deliberately. Resume has no HTTP route and the bundled server never resumes on its own, so
+a self-hosted person still cannot continue a conversation their server restarted out from under them:
+that needs a durable liveness record on this side, which is the real work rather than the route.
+`GET /api/v1/search` ships with no browser UI. Both are recorded in [BACKLOG.md](BACKLOG.md), along
+with batch model calls for reflection and dreaming, which was asked for as a record and not as code,
+and the cost of listing sessions, which was measured by the requester and deferred here with the
+diagnosis corrected: it is not the contract question it was taken for, since sorting and pagination
+never need a transcript read, so it is the route that has to stop calling the expensive method rather
+than the counts that have to change.
+
+Verified here rather than taken from any implementer's report: `pnpm build` exit 0, 1,819 tests
+across 82 files, `pnpm lint` exit 0, and `tsc --noEmit` exit 0. The self-hosted path was also driven
+by hand, against the real bundled binary and the real Node server with no provider configured, which
+is the state a person is in the moment after installing: the memory folder is created, the read API
+answers, search returns an honest 503 rather than an unhandled 500, ending a conversation returns in
+14ms with its reflection still running behind it, and that reflection's outcome is on disk afterwards
+rather than lost to the shutdown.
 
 ## How work happens here
 

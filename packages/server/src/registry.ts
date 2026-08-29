@@ -292,7 +292,16 @@ export class LiveSessionRegistry {
     const sessions = [...this.live.values()]
     this.live.clear()
     for (const live of sessions) this.notify(live)
-    this.closePromise = Promise.all(
+    // allSettled, not all, for the same reason it is used on the detached
+    // set below, and for one more that is specific to here: with all, a
+    // single session whose reflection rejects would reject this whole
+    // chain, so the .then() that drains detachedReflections would never
+    // run and every other in-flight reflection would be abandoned
+    // mid-write. launch.ts swallows a rejected close() and goes straight
+    // on to engine.close() and, in a test, to deleting the memory folder.
+    // Shutdown has to drain everything it can, not stop at the first
+    // failure.
+    this.closePromise = Promise.allSettled(
       sessions.map(async (live) => {
         await live.greeting
         await live.agent.end()

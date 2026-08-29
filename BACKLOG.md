@@ -1545,67 +1545,6 @@ design conversation first.
     added.
   - Rough size: see each entry.
 
-  - *`AgentSession.resume` and registry rehydration (E1).* `LiveSessionRegistry` models liveness
-    entirely in an in-memory `Map`, and `AgentSession.start()` always mints a new session id; in a
-    Durable Object that hibernates after seconds of inactivity, a session ends whenever the object
-    sleeps. Was gated on the `listStoredSessions` defect (formerly section 1) being fixed first,
-    since shipping resume on top of that conflation would bake it in. **That gate has now cleared**:
-    the fix landed in `a3e052c` (`listStoredSessions` stopped reporting every stored session as
-    ended, and `PublicSession.status` gained an honest `'open'` value for a session that is on disk,
-    never reflected, and not live in this process). Only the resume and rehydration work itself
-    remains. The genuinely hard part, per our own review, is not what the request flagged: "turns in
-    flight at eviction leave no durable trace at all, so they cannot be replayed, only retried, and
-    that is a product decision about what the user sees, not an engine detail." Stated fallback:
-    "reopening shows a read-only transcript with no compose bar, which is shippable and noticeably
-    worse." Largest and most valuable of the five iOS asks, per the new request's own sequencing.
-    Reverie Cloud's round-three reply agreed with this framing outright ("Agreed. `engine.ts:1744`
-    sets `status: 'ended'` unconditionally, so eviction already makes in-progress sessions look
-    permanently ended, with or without resume. Fix it first and separately.") and stated their own
-    position for whenever this is built, narrower than a full replay: "retry is acceptable and
-    silence is not. A user whose turn was lost to an eviction should see that it was lost, not a
-    transcript that ends mid-thought. We do not need replay." What that withdraws is the original
-    scope: replay, and resume as the request first framed it. What stays open is the narrower shape
-    they stated, retry with the loss made visible. Where:
-    `packages/server/src/registry.ts` (`LiveSessionRegistry`); `packages/core/src/agent.ts`
-    (`AgentSession.start`); the `listStoredSessions` fix, `a3e052c`;
-    `reverie-cloud/docs/specs/2026-08-28-openreverie-round-three.md`, section 6.3. Trigger: was the
-    `listStoredSessions` fix landing first; it has now landed in `a3e052c`, so the gate is cleared
-    and only the work itself remains. Size: large.
-
-    **Status as of 2026-08-29: designed, not built.** The release benchmark's section 4 asked for
-    a one-page design before any code, and it was sent as
-    [docs/specs/2026-08-29-session-resume-design.md](docs/specs/2026-08-29-session-resume-design.md).
-    Building waits on that design coming back. Three things the design surfaced that the request
-    did not name, all of which the eventual implementation has to honor. First, the stamp rule is
-    a check rather than a rendering choice: `renderStoredStamp` (`packages/memory/src/time.ts`)
-    renders a stored offset, `[Sat 2026-08-29 14:32 UTC+05:30]`, where the live path wrote a zone
-    name, `[Sat 2026-08-29 14:32 Asia/Kolkata]`, so re-deriving from each line's own `ts` and
-    `utcOffsetMinutes` through the obvious helper would still change every user message. Second,
-    there is a second history/transcript divergence nobody had written down: `setMode`
-    (`packages/core/src/agent.ts:273`) appends to the transcript only, never to history, so
-    `/mode` lines were never part of what the model saw, and neither `synthetic` nor content
-    matching can discriminate them. Third, the assistant tool-call line is appended before
-    `dispatchTool` runs, so an eviction in that gap leaves a durable unanswered `tool_call`, and
-    replaying it into history is a provider 400 rather than a degraded answer. One decision is
-    open with the requester: whether the assembled system prompt is persisted per session or
-    re-assembled on resume. Re-assembling invalidates the whole cached prefix regardless of how
-    carefully history is preserved, because the system prompt is the start of that prefix, and it
-    also picks up mid-session `graph.jsonl` writes the live session never refreshed into its own
-    prompt.
-
-    A design consideration surfaced by Reverie Cloud after this entry was written, not yet decided:
-    `MemoryEngine.remember` (`packages/memory/src/engine.ts:916`) pushes into the in-memory
-    `liveItems` map (`packages/memory/src/engine.ts:594`), which reaches disk only inside
-    `applyReflection`. A session resumed after an eviction (their Durable Object hibernates on a
-    timescale of seconds) cannot restore `liveItems` recorded before that eviction, because they
-    were never written; the transcript stays complete and continuous to the person, but the
-    live-recorded items from before the eviction are gone. Not data loss in the serious sense,
-    since reflection re-derives items from the transcript regardless, but it constrains what E1 can
-    actually restore. Two shapes were suggested, undecided: persist `liveItems`, or have resume
-    treat the pre-eviction span as reflect-on-resume. Where:
-    `reverie-cloud/docs/specs/2026-08-29-openreverie-round-seven.md`, addendum (delivered as chat
-    text, not a file, 2026-08-29). Trigger: E1 design starting. Size: not stated, folds into E1's
-    own sizing.
   - *Journaling cadence, structured storage, and settability (E4), withdrawn as originally scoped.*
     Cadence needs to be settable conversationally and in settings, both writing the same structured
     record. The conversational half already exists via the live `update_journaling_protocol` tool;
@@ -1680,6 +1619,49 @@ design conversation first.
     `findStoredSession`. Trigger: not stated by them. Ours: whichever comes first of a real
     complaint about listing latency, or the next piece of work that would put another caller of the
     full scan on a hot path. Size: small to medium, no contract change.
+
+
+  - *Resume has no HTTP route and the bundled server never resumes by itself.* `AgentSession.resume`
+    and `LiveSessionRegistry.resume` exist and are covered by the suite, but nothing in `/api/v1`
+    reaches them and `requireLive` does not auto-resume, so a self-hosted browser user cannot
+    continue an interrupted conversation even though the engine now can.
+    - Why deferred: the requester drives resume from their own durable record of which session is
+      live, so they asked for the registry entry point and nothing more. A window guess in front of
+      every write would be worse than an explicit call, and the engine has no durable liveness of
+      its own to guess from. Both were considered and declined in the design rather than overlooked.
+    - Where: `docs/specs/2026-08-29-session-resume-design.md` section 3;
+      `packages/server/src/registry.ts` (`resume`, `requireLive`);
+      `packages/server/src/http-core.ts` (no route).
+    - Trigger: wanting a self-hosted person to continue a conversation their server restarted out
+      from under them. That needs a durable liveness record on this side, which is the real work,
+      not the route.
+    - Rough size: medium, most of it the durable liveness record rather than the plumbing.
+  - *A narrow resume window survives when `maxLiveSessions` is set above the tombstone cap.*
+    `resume` refuses a session this process has ended or expired by consulting the tombstones, which
+    is authoritative sooner than the durable attempt record, since that record now lands
+    asynchronously. The tombstone cache is capped at 64 and evicts oldest first. `sweep()` is fully
+    synchronous and tombstones every expired session in one pass, so a host configuring
+    `maxLiveSessions` above 64 can evict a tombstone in that same pass, before that session's own
+    detached `agent.end()` has reached its first await. Such a session falls through to the durable
+    check while its record has not landed, and could be resumed while being reflected. It cannot
+    happen at the default of 8.
+    - Why deferred: found while closing the main race, and unreachable at the shipped default. The
+      original reasoning offered for why it could not happen at all was wrong and was replaced with
+      this counterexample rather than left standing.
+    - Where: `packages/server/src/registry.ts` (`doResume`'s tombstone check, `addTombstone`'s
+      `ENDED_TOMBSTONE_CAP`, `sweep`).
+    - Trigger: raising `maxLiveSessions` above 64, or any host that ends many sessions at once.
+    - Rough size: small (bound the tombstone cache to the live-session limit, or record the ended
+      state durably before tombstoning).
+  - *`GET /api/v1/search` has no browser UI.* The route ships and the web client cannot call it, so
+    a person still cannot search their own memory from the interface they actually use, which was
+    the stated reason the endpoint was worth building.
+    - Why deferred: the request asked for the endpoint and scoped the web work out. Building a
+      search surface is a design question about where results belong among the existing sections,
+      not a wiring job.
+    - Where: `packages/server/src/http-core.ts` (the route); `packages/web`.
+    - Trigger: not stated.
+    - Rough size: medium.
 
 ## 5. Smaller improvements, help welcome
 
