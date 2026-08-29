@@ -148,21 +148,30 @@ export async function readJournalingProtocolIfPresent(
 // for instance) is treated the same as absent here, unlike the read
 // helpers above: a write should not be blocked by a document that already
 // cannot be parsed.
+// Read-merge-write, on the same shape as setSessionMode
+// (packages/memory/src/engine.ts): existing meta first, so a field this
+// function does not know about (a structured journaling cadence, for
+// instance) survives the rewrite instead of being discarded. kind and
+// updated are still set on every write, and id keeps its current
+// behaviour: reused from the existing document, minted fresh when there is
+// nothing to read.
 export async function writeJournalingProtocol(
   paths: MemoryPaths,
   body: string,
   now: Date,
 ): Promise<Document> {
+  let existing: Record<string, unknown> = {}
   let id: string
   try {
-    const existing = await readDocument(paths.files, paths.journaling)
-    id = typeof existing.meta.id === 'string' ? existing.meta.id : newId('doc')
+    const doc = await readDocument(paths.files, paths.journaling)
+    existing = doc.meta
+    id = typeof doc.meta.id === 'string' ? doc.meta.id : newId('doc')
   } catch {
     id = newId('doc')
   }
   await writeDocumentAtomic(paths.files, {
     path: paths.journaling,
-    meta: { id, kind: 'journaling', updated: now.toISOString() },
+    meta: { ...existing, id, kind: 'journaling', updated: now.toISOString() },
     body,
   })
   return readDocument(paths.files, paths.journaling)

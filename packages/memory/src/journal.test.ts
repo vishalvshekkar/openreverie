@@ -327,4 +327,88 @@ describe('journaling.md protocol read and write', () => {
     )
     expect(revised.body).not.toContain('Gratitude')
   })
+
+  // Defect: writeJournalingProtocol used to rebuild meta from scratch
+  // (`{ id, kind: 'journaling', updated }`), throwing away every other
+  // field a prior write had put there. That is what blocked a structured
+  // journaling cadence field: the next prose rewrite, from either the
+  // update_journaling_protocol tool or reflection's own rewrite, silently
+  // erased it. These four tests match setSessionMode's read-merge-write
+  // shape (packages/memory/src/engine.ts:863-866).
+  it('preserves an unrelated pre-existing meta field across a rewrite', async () => {
+    await writeDocumentAtomic(paths.files, {
+      path: paths.journaling,
+      meta: {
+        id: 'doc_01JZZZ',
+        kind: 'journaling',
+        updated: '2026-08-16T21:04:00.000Z',
+        cadence: 'daily',
+      },
+      body: 'Gratitude, three times a week.',
+    })
+
+    const revised = await writeJournalingProtocol(
+      paths,
+      'Switched to the examen instead.',
+      new Date('2026-08-17T10:00:00.000Z'),
+    )
+
+    expect(revised.meta.cadence).toBe('daily')
+  })
+
+  it('still writes kind and a changed updated timestamp on a merged rewrite', async () => {
+    await writeDocumentAtomic(paths.files, {
+      path: paths.journaling,
+      meta: {
+        id: 'doc_01JZZZ',
+        kind: 'journaling',
+        updated: '2026-08-16T21:04:00.000Z',
+        cadence: 'daily',
+      },
+      body: 'Gratitude, three times a week.',
+    })
+
+    const revised = await writeJournalingProtocol(
+      paths,
+      'Switched to the examen instead.',
+      new Date('2026-08-17T10:00:00.000Z'),
+    )
+
+    expect(revised.meta.kind).toBe('journaling')
+    expect(revised.meta.updated).toBe('2026-08-17T10:00:00.000Z')
+    expect(revised.meta.updated).not.toBe('2026-08-16T21:04:00.000Z')
+  })
+
+  it('preserves the existing id across a merged rewrite', async () => {
+    await writeDocumentAtomic(paths.files, {
+      path: paths.journaling,
+      meta: {
+        id: 'doc_01JZZZ',
+        kind: 'journaling',
+        updated: '2026-08-16T21:04:00.000Z',
+        cadence: 'daily',
+      },
+      body: 'Gratitude, three times a week.',
+    })
+
+    const revised = await writeJournalingProtocol(
+      paths,
+      'Switched to the examen instead.',
+      new Date('2026-08-17T10:00:00.000Z'),
+    )
+
+    expect(revised.meta.id).toBe('doc_01JZZZ')
+  })
+
+  it('mints an id and writes normally when there is no pre-existing document to merge', async () => {
+    const doc = await writeJournalingProtocol(
+      paths,
+      'Gratitude, three times a week.',
+      new Date('2026-08-16T21:04:00.000Z'),
+    )
+    expect(doc.meta.id).toMatch(/^doc_[0-9A-Z]{26}$/)
+    expect(doc.meta.kind).toBe('journaling')
+    expect(doc.meta.updated).toBe('2026-08-16T21:04:00.000Z')
+    expect(doc.meta.cadence).toBeUndefined()
+  })
 })
