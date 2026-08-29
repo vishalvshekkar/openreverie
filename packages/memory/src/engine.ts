@@ -124,6 +124,17 @@ import {
   resolveItemIds,
   resolveNarratives,
 } from './reflection.js'
+import {
+  appendReflectionLog,
+  emptyReflectionLogState,
+  foldReflectionLog,
+  type PublicReflectionState,
+  type ReflectionOutcome,
+  type ReflectionTrigger,
+  readReflectionLog,
+  reflectionStateFromLog,
+  type SessionReflectionLogState,
+} from './reflectionLog.js'
 import { type SearchFilters, searchMemory } from './retrieval.js'
 import {
   buildDailyRollup,
@@ -183,6 +194,25 @@ export interface PublicSession {
     assistantCount: number
     toolCount: number
   }
+  reflection: PublicSessionReflection
+}
+
+// The durable attempt record reflection now carries, mirroring dreaming's
+// own attempt log (dreamLog.ts). `attempts` is optional, not the plain
+// number the spec for this shape first called for: LiveSessionRegistry
+// builds a PublicSession the instant a session ends or expires, after
+// handing reflection off to run detached in the background, and at that
+// exact moment it cannot synchronously know how many attempts the durable
+// log holds. Reporting 0 there would be a fabricated claim ("no attempt
+// has been made") the registry cannot back up; omitting the field is the
+// honest alternative. Every value the engine itself computes (listStoredSessions,
+// sessionReflectionState) always includes a real count, including 0 for a
+// session that has genuinely never been attempted.
+export interface PublicSessionReflection {
+  state: PublicReflectionState
+  attempts?: number
+  lastAttemptAt?: string
+  lastFailureReason?: string
 }
 
 export interface PublicGraphNode {
@@ -1036,29 +1066,79 @@ export class MemoryEngine implements DreamLookup {
     // call on an already-reflected session leaves existing warnings untouched.
     this.clearWarnings()
 
-    await this._doEndSession(sessionId)
+    await this._doEndSession(sessionId, 'endSession')
   }
 
-  private async _doEndSession(sessionId: string): Promise<void> {
+  private async _doEndSession(sessionId: string, trigger: ReflectionTrigger): Promise<void> {
     // Internal session-ending logic used by runMaintenance's loop.
     // Does NOT clear warnings; the public endSession or runMaintenance
     // is responsible for warning lifecycle.
     const now = this.now()
-    // Read from disk rather than from any in-memory session registry, so
-    // this works whether or not the process that started the session is the
-    // one ending it. The journal spec's gated write reads this value.
-    //
-    // Consumed by the journal spec's gated entry write. Read here, in the one
-    // place that knows how to answer the question, rather than in two.
-    const sessionModeAtEnd = await this.sessionMode(sessionId)
-    const transcript = await SessionStore.readTranscript(this.paths, sessionId)
 
-    if (!transcript.some((line) => line.role === 'user')) {
-      await this.writeSkippedSummary(sessionId, now)
-      this.liveItems.delete(sessionId)
-      return
+    // The durable attempt record (R4): appended before any model call, so
+    // a crash or a throw anywhere below it still leaves something on disk
+    // saying this session was attempted. summary.md written last stays the
+    // commit marker; this is a record alongside it, never a replacement.
+    await this.recordReflectionAttempt(sessionId, trigger)
+
+    // outcomeRecorded guards against a session that resolved cleanly
+    // (its outcome already appended below) but then hits a later,
+    // unrelated throw in this same call (syncGraph, a reindex read, the
+    // journal write): without this, the catch below would append a second
+    // 'failed' outcome after the first 'reflected' one for the same
+    // attempt. sessionReflectionState now checks disk too (see its own
+    // comment), so a spurious later 'failed' would not flip its public
+    // answer for a session whose summary.md was, in fact, written: disk
+    // still wins. The reflection log itself is still meant to hold one
+    // outcome per attempt, though, and a second, contradictory record for
+    // an attempt that already resolved is wrong data on its own terms,
+    // independent of whether any reader downstream happens to be fooled by
+    // it.
+    let outcomeRecorded = false
+
+    try {
+      // Read from disk rather than from any in-memory session registry, so
+      // this works whether or not the process that started the session is the
+      // one ending it. The journal spec's gated write reads this value.
+      //
+      // Consumed by the journal spec's gated entry write. Read here, in the one
+      // place that knows how to answer the question, rather than in two.
+      const sessionModeAtEnd = await this.sessionMode(sessionId)
+      const transcript = await SessionStore.readTranscript(this.paths, sessionId)
+
+      if (!transcript.some((line) => line.role === 'user')) {
+        await this.writeSkippedSummary(sessionId, now)
+        this.liveItems.delete(sessionId)
+        outcomeRecorded = true
+        await this.recordReflectionOutcome(sessionId, 'skipped')
+        return
+      }
+
+      await this._doEndSessionReflect(sessionId, now, sessionModeAtEnd, transcript, () => {
+        outcomeRecorded = true
+      })
+    } catch (err) {
+      if (!outcomeRecorded) {
+        await this.recordReflectionOutcome(sessionId, 'failed', errorMessage(err))
+      }
+      throw err
     }
+  }
 
+  // Split out of _doEndSession so the try/catch above wraps every
+  // remaining line of the real reflection pipeline (unchanged from before
+  // R4) without re-indenting all of it. onReflected is called the instant
+  // applyReflection has written summary.md, before anything else in this
+  // method runs, which is also where the 'reflected' outcome is appended:
+  // see the comment on outcomeRecorded in _doEndSession for why that has
+  // to happen exactly once, at that point, not after this method returns.
+  private async _doEndSessionReflect(
+    sessionId: string,
+    now: Date,
+    sessionModeAtEnd: string | undefined,
+    transcript: TranscriptLine[],
+    onReflected: () => void,
+  ): Promise<void> {
     const context = await this.buildReflectionContext()
     const raw = await reflectSession(
       { chat: this.deps.chat, model: this.deps.reflectionModel },
@@ -1228,6 +1308,14 @@ export class MemoryEngine implements DreamLookup {
       this.timezone(),
     )
     this.liveItems.delete(sessionId)
+    // The durable 'reflected' outcome (R4), appended the instant
+    // applyReflection has written summary.md and before anything else in
+    // this method runs. onReflected marks _doEndSession's own
+    // outcomeRecorded flag so a later throw in this method (syncGraph, a
+    // reindex read, the journal write) does not also append 'failed' for
+    // this same, already-resolved attempt.
+    onReflected()
+    await this.recordReflectionOutcome(sessionId, 'reflected')
 
     // Reflection's profile backstop. A model that already used the live
     // update_profile tool during the conversation has written these facts
@@ -1749,15 +1837,69 @@ export class MemoryEngine implements DreamLookup {
 
   async listStoredSessions(): Promise<PublicSession[]> {
     const sessions = await SessionStore.describe(this.paths)
-    return sessions.map(({ reflected, ...session }) => ({
-      ...session,
-      status: reflected ? 'ended' : 'open',
-      // Both statuses are read-only regardless: whether or not the session
-      // was reflected, this stored view genuinely cannot serve writes,
-      // because session resume does not exist yet. Only the status label
-      // was wrong before; the permission underneath it was already right.
-      readOnly: true,
-    }))
+    // One fold of the whole reflection log, not one read per session: the
+    // same reasoning pendingDailyRollups and friends already apply to
+    // sessionsDir scans elsewhere in this file.
+    const logState = foldReflectionLog(await readReflectionLog(this.paths))
+    return sessions.map(({ reflected, skipped, ...session }) => {
+      const reflection = publicReflectionFrom(logState.get(session.sessionId), {
+        reflected,
+        skipped,
+      })
+      return {
+        ...session,
+        reflection,
+        // 'open' means only reflection.state === 'not_started': on disk,
+        // never reflected, and never even attempted. Before R4, status was
+        // `reflected ? 'ended' : 'open'`, which was right only because
+        // ending a session used to block on its own reflection finishing.
+        // That changed (endSession now hands reflection to the background
+        // for a caller that asks), so a session the person deliberately
+        // ended can now sit unreflected for as long as reflection takes,
+        // and under the old rule it would still report 'open'. Session
+        // resume treats 'open' as "resumable", so a deliberately ended
+        // session, or one whose reflection failed, must never look
+        // resumable: a partial reflection may already have materialized
+        // arcs, people, or items from that transcript. Everything except
+        // a session with no recorded attempt at all is 'ended'.
+        status: reflection.state === 'not_started' ? 'open' : 'ended',
+        // Both statuses are read-only regardless: whether or not the session
+        // was reflected, this stored view genuinely cannot serve writes,
+        // because session resume does not exist yet. Only the status label
+        // was wrong before; the permission underneath it was already right.
+        readOnly: true,
+      }
+    })
+  }
+
+  // R4's narrow, single-session read: derives the same PublicSessionReflection
+  // shape as listStoredSessions above, by folding the reflection log for
+  // this one session and checking disk for it through
+  // SessionStore.diskReflectionState, the same { reflected, skipped } pair
+  // listStoredSessions derives for every session it scans. The two now
+  // agree for every session, including one reflected before this log ever
+  // existed (every session every existing self-hosted user already has,
+  // the moment they upgrade to this version): that session has no attempt
+  // or outcome record, but its summary.md still exists, so disk.reflected
+  // carries it to 'reflected' here the same way listStoredSessions always
+  // read it.
+  //
+  // Still never reads a transcript. That property is the whole reason
+  // this method exists rather than every caller just using
+  // listStoredSessions: LiveSessionRegistry needs this on the hot GET
+  // /api/v1/sessions/:id path, and a consumer measured the full
+  // listStoredSessions scan (which reads every session's transcript to
+  // count lines) at 67ms for 200 sessions. The added cost here is one
+  // summary.md existence check for the single session asked about, and,
+  // only when that session turns out to be reflected, one read of that one
+  // file. Never a directory-wide scan, never a transcript.
+  async sessionReflectionState(sessionId: string): Promise<PublicSessionReflection> {
+    const [records, disk] = await Promise.all([
+      readReflectionLog(this.paths),
+      SessionStore.diskReflectionState(this.paths, sessionId),
+    ])
+    const logState = foldReflectionLog(records)
+    return publicReflectionFrom(logState.get(sessionId), disk)
   }
 
   async readGraphHistory(): Promise<SequencedGraphRecord[]> {
@@ -2111,7 +2253,7 @@ export class MemoryEngine implements DreamLookup {
     for (const session of sessions) {
       if (session.reflected) continue
       try {
-        await this._doEndSession(session.sessionId)
+        await this._doEndSession(session.sessionId, 'runMaintenance')
       } catch {
         // reflectSession, applyReflection's own writes, or the
         // materializeNew callback it invokes (creating a new arc or
@@ -2119,9 +2261,15 @@ export class MemoryEngine implements DreamLookup {
         // own reindex and commit steps no longer throw; see reindexOrWarn
         // below), so the session stays unreflected in its frontmatter and
         // is retried on the next pass. The transcript itself is never at
-        // risk. This is caught silently, with no warning recorded, the
-        // same way every other pre-summary failure here always has been:
-        // the retry on the next pass is the recovery, not a warning.
+        // risk. Caught silently here, with no warning recorded in
+        // this.warnings, the same way every other pre-summary failure here
+        // always has been: the retry on the next pass is the recovery, not
+        // a warning. That is no longer "no record anywhere on disk" as of
+        // R4: _doEndSession's own catch already appended a durable
+        // 'failed' outcome (with the error's message) to the reflection
+        // log before rethrowing into this catch, so the failure this
+        // swallows here is visible through sessionReflectionState and
+        // listStoredSessions even though this.warnings stays empty.
       }
     }
 
@@ -3304,6 +3452,57 @@ export class MemoryEngine implements DreamLookup {
     }
   }
 
+  // Appends the durable attempt record behind reflection (R4), the same
+  // problem dreaming's own recordDreamAttempt above already solved: a
+  // reflection that throws partway used to leave the session permanently
+  // 'open' with nothing on disk saying it was attempted or why. Logging
+  // failures are swallowed rather than thrown, same posture as
+  // recordDreamAttempt: the point of ending a session must never be
+  // undone by a secondary failure to write a line about attempting it.
+  private async recordReflectionAttempt(
+    sessionId: string,
+    trigger: ReflectionTrigger,
+  ): Promise<void> {
+    try {
+      await appendReflectionLog(this.paths, [
+        { ts: this.now().toISOString(), type: 'attempt', session: sessionId, trigger },
+      ])
+    } catch (err) {
+      this.warnings.push(
+        `Could not record the reflection attempt for session ${sessionId}: ${errorMessage(err)}`,
+      )
+    }
+  }
+
+  // Appends the durable outcome record an attempt resolves to. Same
+  // swallow-and-warn posture as recordReflectionAttempt above: a
+  // 'reflected' outcome logged here runs after summary.md is already
+  // durably written, so a logging failure must never turn a session that
+  // actually succeeded into one _doEndSession reports as thrown; a
+  // 'failed' outcome logged from the catch block must never mask the real
+  // error it is recording the reason for.
+  private async recordReflectionOutcome(
+    sessionId: string,
+    outcome: ReflectionOutcome,
+    reason?: string,
+  ): Promise<void> {
+    try {
+      await appendReflectionLog(this.paths, [
+        {
+          ts: this.now().toISOString(),
+          type: 'outcome',
+          session: sessionId,
+          outcome,
+          ...(reason !== undefined ? { reason } : {}),
+        },
+      ])
+    } catch (err) {
+      this.warnings.push(
+        `Could not record the reflection outcome (${outcome}) for session ${sessionId}: ${errorMessage(err)}`,
+      )
+    }
+  }
+
   // A node seed contributes its page body when it has one (no page means
   // nothing more than its label and type to offer). A document seed
   // contributes its own body. Either way the text is capped, the same as
@@ -3342,6 +3541,27 @@ function isDegraded(
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
+}
+
+// Builds the public PublicSessionReflection shape from one session's
+// folded log entry (undefined for a session the log has never mentioned),
+// combined with disk-derived reflected/skipped: listStoredSessions already
+// has it from its own directory-wide scan, and sessionReflectionState now
+// derives it itself, single-session, through SessionStore.diskReflectionState
+// (see its own comment for why that stays cheap).
+function publicReflectionFrom(
+  logEntry: SessionReflectionLogState | undefined,
+  disk?: { reflected: boolean; skipped: boolean },
+): PublicSessionReflection {
+  const state = logEntry ?? emptyReflectionLogState()
+  return {
+    state: reflectionStateFromLog(state, disk),
+    attempts: state.attempts,
+    ...(state.lastAttemptAt !== undefined ? { lastAttemptAt: state.lastAttemptAt } : {}),
+    ...(state.lastFailureReason !== undefined
+      ? { lastFailureReason: state.lastFailureReason }
+      : {}),
+  }
 }
 
 function publicDocumentRow(doc: Document, kind: DocKind): PublicDocumentRow {

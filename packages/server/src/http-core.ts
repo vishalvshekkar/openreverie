@@ -25,11 +25,13 @@
 // passes it straight through with no wrapper.
 import type { ReverieConfig } from '@openreverie/core'
 import {
+  DOC_KINDS,
   type Document,
   type DreamStatus,
   type DreamSummary,
   type DreamVerdict,
   EDGE_TYPES,
+  type EngineSearchResult,
   foldDreamLog,
   type MemoryPaths,
   NODE_TYPES,
@@ -44,9 +46,11 @@ import {
   type PublicTranscriptLine,
   profileSettingsPatchSchema,
   readDreamLog,
+  type SearchFilters,
   type SequencedGraphRecord,
   type StyleConfig,
 } from '@openreverie/memory'
+import { ProviderUnavailableError } from '@openreverie/providers'
 import { z } from 'zod'
 import {
   ApiError,
@@ -69,6 +73,14 @@ function byteLength(text: string): number {
   return utf8.encode(text).byteLength
 }
 
+// GET /api/v1/search's own limit clamp, not a CursorResource default:
+// search has no cursor (see the route below for why), so parsePageLimit is
+// called directly instead of through pageResource. 8 matches searchMemory's
+// own default document-hit count (retrieval.ts's DEFAULT_LIMIT); 50 is a
+// sane upper bound on how many hits a single request can ask for.
+const SEARCH_DEFAULT_LIMIT = 8
+const SEARCH_MAX_LIMIT = 50
+
 export interface RecordEngine {
   // The MemoryPaths this engine was built over. Required, not optional:
   // the dream detail route reads feedback verdicts through this, and an
@@ -82,6 +94,13 @@ export interface RecordEngine {
   getPublicDocument(docId: string): Promise<PublicDocument | null>
   listStoredSessions(): Promise<PublicSession[]>
   readTranscriptPage(sessionId: string): Promise<PublicTranscriptLine[]>
+  // The same hybrid search the model already reaches through its
+  // search_memory tool (packages/memory/src/engine.ts's search()), exposed
+  // to the person whose memory it is. Signature mirrors MemoryEngine.search
+  // exactly, filters included, even though the route below never passes
+  // any: this describes what a real engine offers, not just what the
+  // current route happens to call.
+  search(query: string, filters?: SearchFilters, limit?: number): Promise<EngineSearchResult>
   graphSnapshot(): { nodes: PublicGraphNode[]; edges: PublicGraphEdge[] }
   readGraphHistory(): Promise<SequencedGraphRecord[]>
   docIdForPath(path: string): string | undefined
@@ -422,6 +441,56 @@ export async function handle(
     return
   }
 
+  // GET /api/v1/search: the person's own access to hybrid search
+  // (engine.search), previously reachable only by the model through the
+  // search_memory tool. The person whose memory it is had less access to
+  // it than the companion did; this route closes that gap.
+  //
+  // Deliberately no cursor and no pagination. Every other paginated route
+  // here orders its page by a stable tuple taken from the record itself
+  // (createdAt+sessionId, kind+title+docId, and so on: see Cursor in
+  // api.ts), so a page boundary can be re-found by identity on the next
+  // request. A relevance-ranked result has no such tuple: fuseByReciprocalRank
+  // (retrieval.ts) produces one fused score per query, over the candidate
+  // window that query happened to pull in, and that ranking is not a
+  // stable total order a second request could resume from. `limit` below
+  // is a plain clamp on how many hits come back, not a page boundary. Do
+  // not add a cursor here to "fix" that; there is nothing it would be
+  // correct to resume from.
+  if (method === 'GET' && path.length === 3 && path[2] === 'search') {
+    const q = parsed.searchParams.get('q')
+    if (q === null || q.trim().length === 0) {
+      throw new ApiError(400, 'invalid_request', 'The query is invalid.')
+    }
+    const limit = parsePageLimit(
+      parsed.searchParams.get('limit'),
+      SEARCH_DEFAULT_LIMIT,
+      SEARCH_MAX_LIMIT,
+    )
+    let result: EngineSearchResult
+    try {
+      result = await engine.search(q, undefined, limit)
+    } catch (error) {
+      // engine.search goes through the embedding provider (searchMemory,
+      // retrieval.ts, awaits embeddings.embed with no fallback: a rejected
+      // embed call discards the lexical hits already computed alongside it
+      // and fails the whole call). On the bundled Node server with no
+      // provider configured, that provider is launch.ts's
+      // UnavailableEmbeddingProvider, which always throws
+      // ProviderUnavailableError; a configured provider can throw the same
+      // error on a genuine outage (429 or 5xx, see providers/src/openai.ts).
+      // Either way this is a defined, expected failure mode, not a bug, so
+      // it gets its own status and code rather than falling through to
+      // toApiError's generic 500.
+      if (error instanceof ProviderUnavailableError) {
+        throw new ApiError(503, 'search_unavailable', 'Search is unavailable right now.')
+      }
+      throw error
+    }
+    writePublicJson(sink, 200, searchResultSchema, result, null)
+    return
+  }
+
   if (method === 'GET' && path.length === 3 && path[2] === 'sessions') {
     const byId = new Map(
       (await engine.listStoredSessions()).map((session) => [session.sessionId, session]),
@@ -486,9 +555,10 @@ export async function handle(
     const raw = await readJsonOrEmpty(request)
     const body = createSessionSchema.safeParse(raw)
     if (!body.success) throw new ApiError(400, 'invalid_request', 'The request is invalid.')
-    const session = await registry.create(
-      body.data.mode === undefined ? {} : { mode: body.data.mode },
-    )
+    const session = await registry.create({
+      ...(body.data.mode === undefined ? {} : { mode: body.data.mode }),
+      ...(body.data.greet === undefined ? {} : { greet: body.data.greet }),
+    })
     writePublicJson(sink, 201, createSessionResponseSchema, session, null)
     return
   }
@@ -716,6 +786,20 @@ const publicDocumentRowSchema = z.strictObject({
 })
 const publicDocumentRowsSchema = z.array(publicDocumentRowSchema)
 const publicDocumentSchema = publicDocumentRowSchema.extend({ body: z.string() })
+// R4's durable attempt record, mirrored over HTTP. `attempts` is optional,
+// not a plain number, for the same reason PublicSessionReflection itself
+// carries it that way (packages/memory/src/engine.ts): LiveSessionRegistry
+// builds a tombstone the instant a session ends or expires, after handing
+// reflection off to run detached in the background, and at that exact
+// moment it cannot synchronously know the durable count. Omitting the
+// field there is the honest choice; every value the engine computes
+// (listStoredSessions, sessionReflectionState) always includes a real one.
+const publicSessionReflectionSchema = z.strictObject({
+  state: z.enum(['not_started', 'in_progress', 'reflected', 'skipped', 'failed']),
+  attempts: z.number().int().nonnegative().optional(),
+  lastAttemptAt: z.string().optional(),
+  lastFailureReason: z.string().optional(),
+})
 const publicSessionSchema = z.strictObject({
   sessionId: z.string(),
   createdAt: z.string(),
@@ -729,12 +813,16 @@ const publicSessionSchema = z.strictObject({
     assistantCount: z.number().int().nonnegative(),
     toolCount: z.number().int().nonnegative(),
   }),
+  reflection: publicSessionReflectionSchema,
 })
 const createSessionResponseSchema = publicSessionSchema.extend({
   initialGreetingStreamUrl: z.string().optional(),
 })
 const publicSessionsSchema = z.array(publicSessionSchema)
-const createSessionSchema = z.strictObject({ mode: z.string().optional() })
+const createSessionSchema = z.strictObject({
+  mode: z.string().optional(),
+  greet: z.boolean().optional(),
+})
 const sessionModeSchema = z.strictObject({ mode: z.string() })
 const sessionModeResponseSchema = z.strictObject({ mode: z.string() })
 const toolCallSchema = z.strictObject({
@@ -949,6 +1037,45 @@ function publicDreamStatus(status: DreamStatus): z.infer<typeof dreamStatusSchem
       : {}),
   }
 }
+
+// Mirrors DocumentHit (packages/memory/src/retrieval.ts) exactly, not the
+// narrower SearchHit type EngineSearchResult.documents is declared against.
+// engine.search's real return value carries chunks and chunksTotal on
+// every document hit (retrieval.ts's fuseByReciprocalRank builds
+// DocumentHit objects, and TypeScript's structural typing lets that
+// superset satisfy the narrower declared type without dropping the extra
+// fields at runtime). Leaving them out here would make writePublicJson's
+// own schema check fail on every real search response, turning it into a
+// 500 for every query.
+//
+// docKindSchema, not the narrower documentKindSchema used for
+// GET /api/v1/documents above: search indexes dream and dream_insight
+// documents too (sqlite.ts's DOC_KINDS), which that schema does not cover.
+// Derived from DOC_KINDS rather than hand copied, same reasoning as
+// graphNodeTypeSchema/graphEdgeTypeSchema above.
+const docKindSchema = z.enum(DOC_KINDS)
+const searchDocumentHitSchema = z.strictObject({
+  docId: z.string(),
+  path: z.string(),
+  kind: docKindSchema,
+  snippet: z.string(),
+  score: z.number(),
+  dateStart: z.string().optional(),
+  dateEnd: z.string().optional(),
+  chunks: z.array(z.string()),
+  chunksTotal: z.number().int().nonnegative(),
+})
+const searchNodeHitSchema = z.strictObject({
+  nodeId: z.string(),
+  name: z.string(),
+  type: graphNodeTypeSchema,
+  hasPage: z.boolean(),
+  docId: z.string().optional(),
+})
+const searchResultSchema = z.strictObject({
+  documents: z.array(searchDocumentHitSchema),
+  nodes: z.array(searchNodeHitSchema),
+})
 
 // Built from the whitelist, key by key, never by serializing the loaded
 // object. profile.md's own schema passes unknown keys through, so a

@@ -194,6 +194,14 @@ async function collect(events: AsyncIterable<AgentEvent>): Promise<AgentEvent[]>
   return out
 }
 
+// Lets already-queued microtasks (promise reactions already scheduled)
+// run before the next assertion, without waiting on any real timer. Used
+// only to observe that a promise has NOT settled yet, never to wait for
+// one that eventually will.
+async function flushMicrotasks(): Promise<void> {
+  await new Promise<void>((resolve) => setImmediate(resolve))
+}
+
 // A round in a scripted script for makeAgentFixture: a small DSL over
 // FakeChatProvider's {text, toolCalls} shape, so a caller can spell out a
 // round as the events it produces rather than translate that by hand.
@@ -571,6 +579,116 @@ describe('AgentSession', () => {
 
     await session.end()
     expect(chat.requests.length).toBe(2)
+
+    await engine.close()
+  })
+
+  it('end() with no options still awaits reflection, even when engine.endSession is slow', async () => {
+    const chat = new FakeChatProvider([{ text: 'Just checking in.', toolCalls: [] }])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const session = await AgentSession.start(engine, testConfig(), chat)
+    await collect(session.send('Just checking in.'))
+
+    let resolveEndSession: (() => void) | undefined
+    vi.spyOn(engine, 'endSession').mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveEndSession = resolve
+        }),
+    )
+
+    let settled = false
+    const endPromise = session.end().then(() => {
+      settled = true
+    })
+
+    await flushMicrotasks()
+    expect(settled).toBe(false)
+
+    resolveEndSession?.()
+    await endPromise
+    expect(settled).toBe(true)
+
+    await engine.close()
+  })
+
+  it('end({ runReflection }) resolves before reflection settles, and hands the hook the reflection promise exactly once', async () => {
+    const chat = new FakeChatProvider([{ text: 'Just checking in.', toolCalls: [] }])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const session = await AgentSession.start(engine, testConfig(), chat)
+    await collect(session.send('Just checking in.'))
+
+    let resolveEndSession: (() => void) | undefined
+    vi.spyOn(engine, 'endSession').mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveEndSession = resolve
+        }),
+    )
+
+    const received: Promise<unknown>[] = []
+    await session.end({
+      runReflection: (work) => {
+        received.push(work)
+      },
+    })
+    expect(received).toHaveLength(1)
+
+    let settled = false
+    received[0]?.then(() => {
+      settled = true
+    })
+    await flushMicrotasks()
+    expect(settled).toBe(false)
+
+    resolveEndSession?.()
+    await received[0]
+    expect(settled).toBe(true)
+
+    await engine.close()
+  })
+
+  it('end({ runReflection }) still drains an in-flight send() before calling engine.endSession', async () => {
+    const chat = new FakeChatProvider([
+      {
+        text: '',
+        toolCalls: [{ id: 'call_1', name: 'list_arcs', arguments: '{}' }],
+      },
+      { text: 'All done here.', toolCalls: [] },
+    ])
+    const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+    const session = await AgentSession.start(engine, testConfig(), chat)
+
+    const calls: string[] = []
+    const originalAppendTranscript = engine.appendTranscript.bind(engine)
+    vi.spyOn(engine, 'appendTranscript').mockImplementation((sessionId, line) => {
+      calls.push('appendTranscript')
+      return originalAppendTranscript(sessionId, line)
+    })
+    vi.spyOn(engine, 'endSession').mockImplementation(async () => {
+      calls.push('endSession')
+    })
+
+    const sendPromise = collect(session.send('Do a thing'))
+    const endPromise = session.end({
+      runReflection: (work) => {
+        void work
+      },
+    })
+
+    await Promise.all([sendPromise, endPromise])
+
+    // The in-flight send() writes four transcript lines (user, assistant
+    // tool-call, tool result, final assistant text): all four must be
+    // appended before endSession is ever called, proving the send chain
+    // drained first.
+    expect(calls).toEqual([
+      'appendTranscript',
+      'appendTranscript',
+      'appendTranscript',
+      'appendTranscript',
+      'endSession',
+    ])
 
     await engine.close()
   })
@@ -1102,6 +1220,45 @@ describe('AgentSession', () => {
 
       const resultPromise = collect(session.greet())
       await vi.advanceTimersByTimeAsync(20_001)
+      const events = await resultPromise
+
+      expect(events).toEqual([{ type: 'thinking' }])
+      const transcript = await engine.readTranscript(session.sessionId)
+      expect(transcript).toEqual([])
+
+      await engine.close()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('honors a custom greetingTimeoutMs instead of the default 20 seconds', async () => {
+    vi.useFakeTimers()
+    try {
+      const hangingChat: ChatProvider = {
+        name: 'hanging',
+        async complete() {
+          throw new Error('not used in this test')
+        },
+        stream() {
+          return (async function* () {
+            await new Promise<never>(() => {
+              // Never resolves: simulates a provider that stalls forever.
+            })
+          })()
+        },
+      }
+      const engine = await MemoryEngine.open(dir, fakeDeps(hangingChat))
+      const session = await AgentSession.start(engine, testConfig(), hangingChat, {
+        greetingTimeoutMs: 5_000,
+      })
+
+      const resultPromise = collect(session.greet())
+      // If greetingTimeoutMs were ignored in favor of the hardcoded 20
+      // second default, this advance alone would not fire the timeout,
+      // and awaiting resultPromise below would hang until vitest's own
+      // test timeout, not resolve with these events.
+      await vi.advanceTimersByTimeAsync(5_001)
       const events = await resultPromise
 
       expect(events).toEqual([{ type: 'thinking' }])

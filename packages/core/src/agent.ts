@@ -57,11 +57,17 @@ export interface AgentSessionOptions {
   // update_profile). Defaults to {}, which is assembleSystemPrompt's own
   // default and changes nothing for a caller that omits this.
   persona?: PersonaOptions
+  // Per-call timeout for the greeting's model stream, passed to
+  // withTimeout below. Omitted keeps GREETING_TIMEOUT_MS (20 seconds)
+  // exactly, unchanged from today. A host on a platform with a different
+  // request budget (a Cloudflare Worker's own wall-clock limit, say) can
+  // shrink or grow it.
+  greetingTimeoutMs?: number
 }
 
 const MAX_TOOL_ROUNDS = 8
 
-const GREETING_TIMEOUT_MS = 20_000
+export const GREETING_TIMEOUT_MS = 20_000
 
 const GREETING_INSTRUCTION = `## Speak first
 
@@ -193,6 +199,10 @@ export class AgentSession {
   // start() ever refreshes it either, so a later greet() call (not part of
   // any normal flow today) would see the same value start() captured.
   private readonly freshDream: SessionContext['freshDream']
+  // Set once in start() from AgentSessionOptions.greetingTimeoutMs, or
+  // GREETING_TIMEOUT_MS when that option is omitted. Only ever read by
+  // runGreeting, the one caller of withTimeout in this file.
+  private readonly greetingTimeoutMs: number
 
   private constructor(
     engine: MemoryEngine,
@@ -205,6 +215,7 @@ export class AgentSession {
     mode: ModeName,
     freshDream: SessionContext['freshDream'],
     personaOptions: PersonaOptions,
+    greetingTimeoutMs: number,
   ) {
     this.engine = engine
     this.chat = chat
@@ -216,6 +227,7 @@ export class AgentSession {
     this.activeMode = mode
     this.freshDream = freshDream
     this.personaOptions = personaOptions
+    this.greetingTimeoutMs = greetingTimeoutMs
   }
 
   get mode(): ModeName {
@@ -258,6 +270,7 @@ export class AgentSession {
       mode,
       context.freshDream,
       personaOptions,
+      options.greetingTimeoutMs ?? GREETING_TIMEOUT_MS,
     )
   }
 
@@ -371,7 +384,7 @@ export class AgentSession {
         messages: [],
         tools: [],
       })
-      for await (const event of withTimeout(stream, GREETING_TIMEOUT_MS)) {
+      for await (const event of withTimeout(stream, this.greetingTimeoutMs)) {
         if (event.type === 'text' && event.text.length > 0) {
           text += event.text
           yield { type: 'text', text: event.text }
@@ -529,14 +542,36 @@ export class AgentSession {
     yield { type: 'done' }
   }
 
-  async end(): Promise<void> {
+  // Ends the session and starts reflection. By default this awaits
+  // reflection the same way it always has, so the CLI and every caller
+  // that passes no options sees no change at all.
+  //
+  // A caller that cannot afford to block on reflection (an HTTP handler
+  // that owes the person a fast response to "end conversation") passes
+  // runReflection: instead of awaiting the reflection promise, this hands
+  // it to that callback and returns as soon as the callback has been
+  // called, leaving the caller free to run reflection in the background on
+  // whatever schedule it wants.
+  //
+  // `await this.sendChain` stays in front of both paths, unconditionally.
+  // Reflection reads the transcript from disk, so a round that is still
+  // being written must never be excluded from it: draining the chain first
+  // is what guarantees engine.endSession() only ever starts once the
+  // transcript is complete. That guarantee is also what makes it safe to
+  // stop awaiting the reflection call itself below: the ordering that
+  // matters (transcript complete, then reflection reads it) is already
+  // enforced before reflection begins, so detaching the caller from how
+  // long reflection then takes changes nothing about what it reads.
+  async end(options: { runReflection?: (work: Promise<unknown>) => void } = {}): Promise<void> {
     if (this.ended) return
     this.ended = true
-    // Let any in-flight (or queued) send() finish writing its lines
-    // before reflection reads the transcript, so a round in progress is
-    // never silently excluded from reflection.
     await this.sendChain
-    await this.engine.endSession(this.sessionId)
+    const reflection = this.engine.endSession(this.sessionId)
+    if (options.runReflection === undefined) {
+      await reflection
+      return
+    }
+    options.runReflection(reflection)
   }
 
   // Appends a message to the on-disk transcript first, then to the

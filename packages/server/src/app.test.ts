@@ -14,6 +14,7 @@ import type {
   DreamStatus,
   DreamSummary,
   DreamVerdict,
+  EngineSearchResult,
   GraphRecord,
   MemoryPaths,
   Profile,
@@ -101,6 +102,7 @@ class FakeEngine implements RecordEngine {
       status: 'ended',
       readOnly: true,
       transcript: { lineCount: 2, userCount: 1, assistantCount: 1, toolCount: 0 },
+      reflection: { state: 'reflected', attempts: 1 },
     },
     {
       sessionId: 'session_01K2XNJYABCD12345678901235',
@@ -109,6 +111,7 @@ class FakeEngine implements RecordEngine {
       status: 'ended',
       readOnly: true,
       transcript: { lineCount: 0, userCount: 0, assistantCount: 0, toolCount: 0 },
+      reflection: { state: 'reflected', attempts: 1 },
     },
   ]
   lines: TranscriptLine[] = [userLine, assistantLine]
@@ -385,6 +388,15 @@ class FakeEngine implements RecordEngine {
 
   async dreamStatus(): Promise<DreamStatus> {
     return this.dreamStatusValue
+  }
+
+  // Search itself is exercised end to end through fetch-app.test.ts's
+  // GET /api/v1/search suite, against the same shared route logic
+  // (http-core.ts's handle). This stub only needs to satisfy
+  // RecordEngine.search so this file, which never calls it, keeps
+  // compiling.
+  async search(): Promise<EngineSearchResult> {
+    return { documents: [], nodes: [] }
   }
 }
 
@@ -1365,6 +1377,34 @@ describe('live session HTTP routes', () => {
     expect(replay.headers['content-type']).toContain('application/json')
   })
 
+  it('POST .../end returns 200 with reflection: in_progress and attempts omitted, validated by publicSessionSchema at the HTTP boundary (R4)', async () => {
+    const created = await liveRequest(
+      'POST',
+      '/api/v1/sessions',
+      undefined,
+      authenticated({ origin }),
+    )
+    const id = (created.json as { data: { sessionId: string } }).data.sessionId
+
+    // The response body itself is proof enough that http-core.ts's
+    // publicSessionSchema (a z.strictObject) accepts this shape: were
+    // `attempts` required there, writePublicJson's own .parse() call
+    // would throw before this request ever got a body back.
+    const ended = await liveRequest(
+      'POST',
+      `/api/v1/sessions/${id}/end`,
+      undefined,
+      authenticated({ origin }),
+    )
+    expect(ended.status).toBe(200)
+    const json = ended.json as {
+      data: { status: string; reflection: Record<string, unknown> }
+    }
+    expect(json.data.status).toBe('ended')
+    expect(json.data.reflection).toEqual({ state: 'in_progress' })
+    expect('attempts' in json.data.reflection).toBe(false)
+  })
+
   describe('session mode endpoints', () => {
     it('starts a session in a requested mode', async () => {
       const response = await liveRequest(
@@ -1480,6 +1520,53 @@ describe('live session HTTP routes', () => {
       const lines = (transcript.json as { data: { content: string; synthetic?: boolean }[] }).data
       const modeLine = lines.find((line) => line.content === '/mode listen')
       expect(modeLine?.synthetic).toBe(true)
+    })
+  })
+
+  describe('session creation greet option', () => {
+    it('omits initialGreetingStreamUrl and lets the first message run immediately when greet is false', async () => {
+      const created = await liveRequest(
+        'POST',
+        '/api/v1/sessions',
+        { greet: false },
+        authenticated({ origin }),
+      )
+      expect(created.status).toBe(201)
+      const createdJson = created.json as {
+        data: { sessionId: string; initialGreetingStreamUrl?: string }
+      }
+      expect(createdJson.data.initialGreetingStreamUrl).toBeUndefined()
+
+      const response = await liveRequest(
+        'POST',
+        `/api/v1/sessions/${createdJson.data.sessionId}/message`,
+        { message: 'hi' },
+        authenticated({ origin, 'x-reverie-turn-id': 'turn-1' }),
+      )
+      expect(response.status).toBe(200)
+      expect(response.headers['content-type']).toContain('application/x-ndjson')
+    })
+
+    it('sets initialGreetingStreamUrl when greet is true, same as when it is omitted', async () => {
+      const created = await liveRequest(
+        'POST',
+        '/api/v1/sessions',
+        { greet: true },
+        authenticated({ origin }),
+      )
+      expect(created.status).toBe(201)
+      const createdJson = created.json as { data: { initialGreetingStreamUrl?: string } }
+      expect(createdJson.data.initialGreetingStreamUrl).toBeDefined()
+    })
+
+    it('rejects a non-boolean greet field with 400', async () => {
+      const response = await liveRequest(
+        'POST',
+        '/api/v1/sessions',
+        { greet: 'no' },
+        authenticated({ origin }),
+      )
+      expect(response.status).toBe(400)
     })
   })
 

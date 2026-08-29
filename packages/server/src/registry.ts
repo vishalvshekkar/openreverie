@@ -13,8 +13,11 @@ import { ApiError } from './api.js'
 
 const MAX_NDJSON_EVENT_BYTES = 256 * 1024
 const ENDED_TOMBSTONE_CAP = 64
-const THIRTY_MINUTES = 30 * 60 * 1000
-const SWEEP_INTERVAL = 60 * 1000
+// Named and exported so a host can read these instead of copying the
+// numbers: omitting idleSweep or dreamSweep on LiveSessionRegistryOptions
+// reproduces these exact values, unchanged from today.
+export const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60 * 1000
+export const DEFAULT_IDLE_SWEEP_INTERVAL_MS = 60 * 1000
 export const DREAM_SWEEP_INTERVAL = 30 * 60 * 1000
 
 export const DEFAULT_REGISTRY_LIMITS = {
@@ -85,11 +88,58 @@ export interface LiveSessionRegistryOptions {
   // fire and forget, with no added catch, so a rejection still surfaces
   // as an unhandled rejection rather than being silently swallowed.
   runBackground?: (work: Promise<unknown>) => void
+  // A host that owns session lifetime itself (a Cloudflare Durable Object
+  // driven by its own alarm, working off durable session rows on disk)
+  // needs a way to turn this registry's own idle sweep off entirely, not
+  // just make it into a no-op. sweep() only ever walks this registry's
+  // in-memory `live` map, which in a Durable Object holds only the
+  // sessions this particular wake has touched since the object was last
+  // instantiated: a session whose object already evicted is gone from
+  // that map and can never be swept, no matter how sweep() is configured.
+  // This registry cannot own session lifetime for that host under any
+  // configuration, so the honest seam is a constructor option that says
+  // so plainly, rather than a scheduler quietly wired to never fire.
+  //
+  // Omitted keeps today's behavior exactly. `false` schedules no timer at
+  // all, for a host that owns session lifetime itself.
+  idleSweep?: false | { idleTimeoutMs?: number; intervalMs?: number }
+  // `dreamSweep: false` alongside a supplied `dreamTrigger` is legal: the
+  // host already holds its own reference to that function (it is the one
+  // that passed it in) and can call it directly from its own alarm.
+  // With `dreamSweep: false`, this registry itself never calls it.
+  //
+  // Omitted keeps today's behavior exactly. `false` schedules no timer at
+  // all.
+  dreamSweep?: false | { intervalMs?: number }
+  // Passed through unchanged to every AgentSession this registry creates.
+  // Omitted keeps AgentSessionOptions.greetingTimeoutMs's own default
+  // (GREETING_TIMEOUT_MS, 20 seconds).
+  greetingTimeoutMs?: number
 }
 
 export interface RegistryScheduler {
   schedule(callback: () => void, intervalMs: number): () => void
 }
+
+// The two reflection projections this registry can ever honestly build
+// itself, without asking the engine (R4). A live session has not had
+// endSession called for it yet, so 'not_started' with zero attempts is
+// simply true. A session this registry has just ended or swept as
+// expired is different: reflection has been handed off to run detached in
+// the background (see end()'s runReflection callback and sweep() below)
+// at the exact instant this object is built, so the registry genuinely
+// cannot know, synchronously, whether the durable attempt record has even
+// landed yet, let alone whether it has resolved. 'in_progress' is the
+// only state that assertion can make without lying: a reflection call for
+// this session has definitely just been initiated. attempts is left out
+// entirely rather than fabricated as 0 or 1, since either could already
+// be wrong by the time a caller reads this response. GET
+// /api/v1/sessions/:id reads the real, durable answer once a session is
+// no longer live (it falls through to engine.listStoredSessions(), backed
+// by the reflection log); these two constants only have to be honest
+// about what the registry itself can assert at the instant it responds.
+const NOT_STARTED_REFLECTION: PublicSession['reflection'] = { state: 'not_started', attempts: 0 }
+const DETACHED_REFLECTION: PublicSession['reflection'] = { state: 'in_progress' }
 
 interface ReplayRecord {
   event: StreamEvent
@@ -136,8 +186,17 @@ export class LiveSessionRegistry {
   private readonly dreamTrigger: (() => Promise<unknown>) | undefined
   private readonly persona: PersonaOptions
   private readonly runBackground: (work: Promise<unknown>) => void
+  private readonly idleTimeoutMs: number
+  private readonly greetingTimeoutMs: number | undefined
   private readonly live = new Map<string, LiveSession>()
   private readonly tombstones = new Map<string, Tombstone>()
+  // F1: every reflection this registry has handed off to runBackground
+  // (from end()) or run detached (from sweep()), tracked from the moment
+  // it starts until it settles. Both end() and sweep() delete their
+  // session from `this.live` before or as part of detaching its
+  // reflection, so close()'s own await over `this.live` never sees either
+  // one; this set is what makes close() still wait for them.
+  private readonly detachedReflections = new Set<Promise<unknown>>()
   private closed = false
   private closePromise: Promise<void> | undefined
 
@@ -158,13 +217,46 @@ export class LiveSessionRegistry {
     // it did before this hook existed. Only a host that actually needs to
     // extend the promise's lifetime (Workers' ctx.waitUntil) overrides this.
     this.runBackground = options.runBackground ?? ((work) => void work)
+    this.greetingTimeoutMs = options.greetingTimeoutMs
+    // sweep()'s own idle threshold, read regardless of whether the sweep
+    // timer below is even scheduled: a caller can still invoke sweep()
+    // manually (this registry's own tests do), and it must use the
+    // configured timeout either way.
+    this.idleTimeoutMs = options.idleSweep
+      ? (options.idleSweep.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS)
+      : DEFAULT_IDLE_TIMEOUT_MS
     const scheduler = options.scheduler ?? nodeIntervalScheduler
-    this.cancelSweep = scheduler.schedule(() => {
-      if (!this.closed) this.sweep()
-    }, SWEEP_INTERVAL)
-    this.cancelDreamTrigger = scheduler.schedule(() => {
-      if (!this.closed) this.runDreamTrigger()
-    }, DREAM_SWEEP_INTERVAL)
+    // `false` means scheduler.schedule is never called for that timer:
+    // not called with a no-op callback, not called and immediately
+    // cancelled. A plain no-op cancel function stands in its place, so
+    // close() stays correct either way without needing to know which
+    // timers were actually scheduled.
+    this.cancelSweep =
+      options.idleSweep === false
+        ? noopCancel
+        : scheduler.schedule(() => {
+            if (!this.closed) this.sweep()
+          }, options.idleSweep?.intervalMs ?? DEFAULT_IDLE_SWEEP_INTERVAL_MS)
+    this.cancelDreamTrigger =
+      options.dreamSweep === false
+        ? noopCancel
+        : scheduler.schedule(() => {
+            if (!this.closed) this.runDreamTrigger()
+          }, options.dreamSweep?.intervalMs ?? DREAM_SWEEP_INTERVAL)
+  }
+
+  // F1: registers `work` in detachedReflections until it settles, so
+  // close() can find and await it even after the caller has already
+  // deleted its session from `this.live`. Returns `work` unchanged so a
+  // caller can hand the result straight to runBackground (end()) or await
+  // it directly (sweep()).
+  private trackDetached<T>(work: Promise<T>): Promise<T> {
+    this.detachedReflections.add(work)
+    const clear = (): void => {
+      this.detachedReflections.delete(work)
+    }
+    work.then(clear, clear)
+    return work
   }
 
   async close(): Promise<void> {
@@ -180,11 +272,26 @@ export class LiveSessionRegistry {
         await live.greeting
         await live.agent.end()
       }),
-    ).then(() => undefined)
+    )
+      // Snapshotting detachedReflections here, after the live-session
+      // drain above starts rather than before it, matters: an end() or
+      // sweep() call already in flight when close() begins registers its
+      // reflection into the set only once its own call reaches that
+      // point, which can happen while the drain above is still running.
+      // Reading the set late, in this continuation, still catches those.
+      //
+      // allSettled, not all: a rejected reflection here is already an
+      // expected, swallowed failure by construction (both end() and
+      // sweep() catch before calling trackDetached), but this is close()'s
+      // own backstop, so it never rejects because of one regardless of
+      // whether every future caller of trackDetached remembers to
+      // pre-catch.
+      .then(() => Promise.allSettled([...this.detachedReflections]))
+      .then(() => undefined)
     return this.closePromise
   }
 
-  async create(options: { mode?: string } = {}): Promise<CreateSessionResponse> {
+  async create(options: { mode?: string; greet?: boolean } = {}): Promise<CreateSessionResponse> {
     if (this.live.size >= this.maxLiveSessions) {
       throw new ApiError(429, 'session_capacity', 'Too many live sessions are open.')
     }
@@ -195,6 +302,9 @@ export class LiveSessionRegistry {
     const agent = await AgentSession.start(this.engine, this.config, this.chat, {
       ...(requested === undefined ? {} : { mode: requested }),
       persona: this.persona,
+      ...(this.greetingTimeoutMs === undefined
+        ? {}
+        : { greetingTimeoutMs: this.greetingTimeoutMs }),
     })
     const stored = (await this.engine.listStoredSessions()).find(
       (session) => session.sessionId === agent.sessionId,
@@ -210,6 +320,7 @@ export class LiveSessionRegistry {
         readOnly: false,
         mode: agent.mode,
         transcript: stored?.transcript ?? emptyTranscript(),
+        reflection: NOT_STARTED_REFLECTION,
       },
       turns: new Map(),
       replay: [],
@@ -222,7 +333,14 @@ export class LiveSessionRegistry {
     }
     this.live.set(agent.sessionId, live)
 
-    if (!this.providerAvailable) return { ...live.public }
+    // A client whose person opened the conversation by typing a first
+    // message has no use for a greeting turn ahead of it: greet: false
+    // skips the model call entirely, so this returns the same shape the
+    // !providerAvailable branch already produces (no
+    // initialGreetingStreamUrl, live.greeting left undefined,
+    // live.activeTurnId left undefined so message()'s '__greeting__'
+    // guard never trips).
+    if (!this.providerAvailable || options.greet === false) return { ...live.public }
 
     live.activeTurnId = '__greeting__'
     live.greeting = this.recordGreeting(live).finally(() => {
@@ -316,10 +434,56 @@ export class LiveSessionRegistry {
       throw new ApiError(404, 'not_found', 'The requested resource was not found.')
     }
     await live.greeting
-    await live.agent.end()
+    // Reflection is handed to runBackground rather than awaited here, so a
+    // person tapping "end conversation" gets a response as soon as the
+    // transcript is complete, not after one or two more model calls plus a
+    // rewrite per changed arc and person. syncPublic below still runs after
+    // agent.end() returns, and agent.end() itself still waits for the send
+    // chain to drain first, so it keeps reading a complete transcript.
+    //
+    // The catch here is still a swallow, but no longer because there is
+    // nowhere to record a background reflection failure: engine.endSession
+    // now appends a durable attempt record before any model call and a
+    // 'failed' outcome (with the error's own message) if reflection throws
+    // (R4, packages/memory/src/reflectionLog.ts), so a failure here is no
+    // longer invisible. The swallow stays for a narrower reason: `work` is
+    // already a detached, fire-and-forget promise by the time it reaches
+    // this callback (this HTTP response has already returned), and letting
+    // it reject unhandled here would surface as a process-level unhandled
+    // rejection for a request nobody is still waiting on. The durable
+    // record is what a person or `reverie doctor` reads instead; GET
+    // /api/v1/sessions/:id surfaces it through engine.listStoredSessions()
+    // once this session is no longer live.
+    await live.agent.end({
+      runReflection: (work) => {
+        this.runBackground(
+          // trackDetached first, then the catch's swallow is what gets
+          // handed to runBackground: registering the settled (already
+          // caught) promise in detachedReflections, rather than the raw
+          // one, is what lets close() await this reflection even though
+          // this session is about to be deleted from `this.live` below
+          // (F1). See the comment above: the durable record now lives in
+          // the reflection log, not in this promise's rejection, so
+          // swallowing it here loses nothing that matters.
+          this.trackDetached(work.catch(() => {})),
+        )
+      },
+    })
     await this.syncPublic(live)
     this.live.delete(sessionId)
-    const publicSession = { ...live.public, status: 'ended' as const, readOnly: true }
+    // reflection here is DETACHED_REFLECTION ('in_progress', attempts
+    // omitted), not whatever live.public.reflection already held
+    // ('not_started', from create()): the runReflection callback above
+    // has just handed a real reflection attempt to the background, so by
+    // the time this response is built, 'not_started' would already be a
+    // stale claim. See DETACHED_REFLECTION's own comment above for why
+    // this is the most this registry can honestly assert right here.
+    const publicSession = {
+      ...live.public,
+      status: 'ended' as const,
+      readOnly: true,
+      reflection: DETACHED_REFLECTION,
+    }
     this.addTombstone({ sessionId, public: publicSession })
     return { ...publicSession }
   }
@@ -340,11 +504,24 @@ export class LiveSessionRegistry {
   sweep(now = this.now()): void {
     if (this.closed) return
     for (const [sessionId, live] of this.live) {
-      if (live.activeTurnId || now - live.lastActivity < THIRTY_MINUTES) continue
+      if (live.activeTurnId || now - live.lastActivity < this.idleTimeoutMs) continue
       this.live.delete(sessionId)
-      const publicSession = { ...live.public, status: 'expired' as const, readOnly: true }
+      // reflection: DETACHED_REFLECTION for the same reason end() above
+      // uses it: live.agent.end() below is about to hand a real
+      // reflection attempt to the background (R4 logs it durably), so
+      // this tombstone must not keep claiming 'not_started'.
+      const publicSession = {
+        ...live.public,
+        status: 'expired' as const,
+        readOnly: true,
+        reflection: DETACHED_REFLECTION,
+      }
       this.addTombstone({ sessionId, public: publicSession })
-      void live.agent.end().catch(() => {})
+      // Same shape as end()'s detached reflection above (F1): live.agent.end()
+      // here runs with no runReflection override, so it awaits reflection
+      // itself internally and the whole call, not just reflection, is what
+      // gets tracked and left detached.
+      void this.trackDetached(live.agent.end().catch(() => {}))
       this.notify(live)
     }
   }
@@ -572,6 +749,12 @@ export function createLiveSessionRegistry(
 ): LiveSessionRegistry {
   return new LiveSessionRegistry(options)
 }
+
+// Stands in for scheduler.schedule's own returned cancel function when a
+// timer was never scheduled at all (idleSweep: false or dreamSweep:
+// false), so close() can call cancelSweep/cancelDreamTrigger
+// unconditionally without needing to know which timers actually exist.
+function noopCancel(): void {}
 
 const nodeIntervalScheduler: RegistryScheduler = {
   schedule(callback, intervalMs) {

@@ -25,12 +25,14 @@ import {
   FakeEmbeddingProvider,
   ProviderUnavailableError,
 } from '@openreverie/providers'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from './api.js'
 import {
+  DEFAULT_IDLE_SWEEP_INTERVAL_MS,
   DEFAULT_REGISTRY_LIMITS,
   DREAM_SWEEP_INTERVAL,
   LiveSessionRegistry,
+  type RegistryScheduler,
   type StreamEvent,
 } from './registry.js'
 
@@ -288,6 +290,110 @@ describe('LiveSessionRegistry', () => {
     expect(calls).toBe(2)
   })
 
+  it('schedules exactly two timers, at their documented default intervals, when idleSweep and dreamSweep are both omitted', () => {
+    const scheduler = new FakeScheduler()
+    createRegistry({ providerAvailable: false, scheduler })
+
+    expect([...scheduler.intervals()].sort((a, b) => a - b)).toEqual(
+      [DEFAULT_IDLE_SWEEP_INTERVAL_MS, DREAM_SWEEP_INTERVAL].sort((a, b) => a - b),
+    )
+  })
+
+  it('schedules no idle timer at all when idleSweep is false, leaving the dream timer scheduled', () => {
+    const scheduler = new FakeScheduler()
+    createRegistry({ providerAvailable: false, scheduler, idleSweep: false })
+
+    expect(scheduler.intervals()).toEqual([DREAM_SWEEP_INTERVAL])
+  })
+
+  it('schedules no dream timer at all when dreamSweep is false, leaving the idle timer scheduled', () => {
+    const scheduler = new FakeScheduler()
+    createRegistry({ providerAvailable: false, scheduler, dreamSweep: false })
+
+    expect(scheduler.intervals()).toEqual([DEFAULT_IDLE_SWEEP_INTERVAL_MS])
+  })
+
+  it('never calls scheduler.schedule at all when both idleSweep and dreamSweep are false, not schedule-then-cancel', () => {
+    const schedule = vi.fn((): (() => void) => () => {})
+    createRegistry({
+      providerAvailable: false,
+      scheduler: { schedule },
+      idleSweep: false,
+      dreamSweep: false,
+    })
+
+    expect(schedule).not.toHaveBeenCalled()
+  })
+
+  it('closes cleanly when both idleSweep and dreamSweep are false and nothing was ever scheduled', async () => {
+    const registry = createRegistry({
+      providerAvailable: false,
+      scheduler: new FakeScheduler(),
+      idleSweep: false,
+      dreamSweep: false,
+    })
+
+    await expect(registry.close()).resolves.toBeUndefined()
+  })
+
+  it('expires a session at a custom idleSweep.idleTimeoutMs instead of the default thirty minutes', async () => {
+    let now = 0
+    const customTimeout = 5 * 60 * 1000
+    const registry = createRegistry({
+      providerAvailable: false,
+      now: () => now,
+      idleSweep: { idleTimeoutMs: customTimeout },
+    })
+    const session = await registry.create()
+
+    now = customTimeout - 1
+    registry.sweep(now)
+    expect(registry.getLiveSession(session.sessionId)).toBeDefined()
+
+    now = customTimeout + 1
+    registry.sweep(now)
+    expect(registry.getLiveSession(session.sessionId)).toBeUndefined()
+    await expect(
+      collect(
+        registry.message(session.sessionId, 'turn-after-custom-timeout', { message: 'again' }),
+      ),
+    ).rejects.toMatchObject({ status: 409, code: 'session_expired' })
+  })
+
+  it('aborts a stalled greeting at a custom greetingTimeoutMs instead of the default 20 seconds', async () => {
+    vi.useFakeTimers()
+    try {
+      const hangingChat: ChatProvider = {
+        name: 'hanging',
+        async complete() {
+          throw new Error('not used in this test')
+        },
+        stream() {
+          return (async function* () {
+            await new Promise<never>(() => {
+              // Never resolves: simulates a provider that stalls forever.
+            })
+          })()
+        },
+      }
+      const registry = createRegistry({ chat: hangingChat, greetingTimeoutMs: 5_000 })
+      const session = await registry.create()
+
+      // If greetingTimeoutMs were ignored in favor of the hardcoded 20
+      // second default, live.greeting would still be pending at this
+      // point, and registry.end() below (which awaits live.greeting
+      // before doing anything else) would hang until vitest's own test
+      // timeout rather than resolve.
+      await vi.advanceTimersByTimeAsync(5_001)
+
+      const result = await registry.end(session.sessionId)
+      expect(result.status).toBe('ended')
+      expect(await engine.readTranscript(session.sessionId)).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('contains a dream trigger that rejects or throws synchronously, without breaking the sweep beside it', async () => {
     let now = 0
     const scheduler = new FakeScheduler()
@@ -338,21 +444,47 @@ describe('LiveSessionRegistry', () => {
     scheduler.runAll()
 
     // sessions[0] was evicted from the tombstone cache above, so this falls
-    // through to the disk fallback. It was swept for inactivity, never
-    // reflected, so the fallback correctly reports session_not_live here,
-    // not session_ended: unlike sessions[1] and sessions[64], this one
-    // cannot come from a tombstone at all, so it proves eviction more
-    // sharply than session_ended could (session_ended could also mean a
-    // still-cached tombstone).
+    // through to the disk fallback (findStoredSession, backed by
+    // engine.listStoredSessions()). Before R4, that fallback reported
+    // session_not_live here, on the reasoning that a session swept for
+    // inactivity had never actually been reflected yet, so status read
+    // 'open'. That reasoning no longer holds: sweep() calls
+    // live.agent.end() for every one of these sessions, which durably
+    // records a reflection attempt (packages/memory/src/reflectionLog.ts)
+    // before any model call, and R4 changed listStoredSessions() so any
+    // recorded attempt already means status: 'ended', not 'open'
+    // (a deliberately ended session must never look resumable). So the
+    // fallback now correctly reports session_ended here too, the same
+    // code a still-cached tombstone would give, and the two paths can no
+    // longer be told apart by error code alone. What still distinguishes
+    // real eviction from a cache hit is whether the disk fallback ran at
+    // all: requireLive returns straight from a cached tombstone without
+    // ever calling engine.listStoredSessions(), so a spy on that method is
+    // what proves session0 truly fell through to it.
+    const listSpy = vi.spyOn(engine, 'listStoredSessions')
+
     await expect(
       collect(registry.message(sessions[0]?.sessionId ?? '', 'turn-oldest', { message: 'again' })),
-    ).rejects.toMatchObject({ status: 409, code: 'session_not_live' })
+    ).rejects.toMatchObject({ status: 409, code: 'session_ended' })
+    expect(listSpy).toHaveBeenCalled()
+    const fallbackListing = await (listSpy.mock.results.at(-1)?.value as ReturnType<
+      MemoryEngine['listStoredSessions']
+    >)
+    expect(fallbackListing.some((s) => s.sessionId === sessions[0]?.sessionId)).toBe(true)
+
+    listSpy.mockClear()
     await expect(
       collect(registry.message(sessions[1]?.sessionId ?? '', 'turn-next', { message: 'again' })),
     ).rejects.toMatchObject({ status: 409, code: 'session_expired' })
+    // A cache hit resolves straight from the tombstone map: it never calls
+    // engine.listStoredSessions() at all, unlike session0's fallback above.
+    expect(listSpy).not.toHaveBeenCalled()
+
+    listSpy.mockClear()
     await expect(
       collect(registry.message(sessions[64]?.sessionId ?? '', 'turn-newest', { message: 'again' })),
     ).rejects.toMatchObject({ status: 409, code: 'session_expired' })
+    expect(listSpy).not.toHaveBeenCalled()
   }, 15_000)
 
   it('returns one safe terminal chat_unavailable event when the provider is absent', async () => {
@@ -444,6 +576,262 @@ describe('LiveSessionRegistry', () => {
     await expect(received[1]).resolves.toBeUndefined()
   })
 
+  it('end() resolves while reflection is still running, having handed the reflection promise to runBackground', async () => {
+    const received: Promise<unknown>[] = []
+    const registry = createRegistry({
+      runBackground: (work) => {
+        received.push(work)
+      },
+    })
+    const { sessionId } = await registry.create()
+    fakeChat.enqueueText('answer')
+    await collect(registry.message(sessionId, 'turn-1', { message: 'one' }))
+    // The greeting and the one turn above, both already settled.
+    expect(received).toHaveLength(2)
+
+    let resolveEndSession: (() => void) | undefined
+    vi.spyOn(engine, 'endSession').mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveEndSession = resolve
+        }),
+    )
+
+    const result = await registry.end(sessionId)
+    expect(result.status).toBe('ended')
+    // end() reached runBackground with the reflection promise even though
+    // engine.endSession has not resolved yet.
+    expect(received).toHaveLength(3)
+
+    let reflectionSettled = false
+    received[2]?.then(() => {
+      reflectionSettled = true
+    })
+    await flushMicrotasks()
+    expect(reflectionSettled).toBe(false)
+
+    resolveEndSession?.()
+    await received[2]
+    expect(reflectionSettled).toBe(true)
+  })
+
+  it('create() reports reflection not_started with zero attempts, before endSession has ever run', async () => {
+    const registry = createRegistry()
+    const session = await registry.create()
+    expect(session.reflection).toEqual({ state: 'not_started', attempts: 0 })
+  })
+
+  it("end()'s returned and tombstoned session reports reflection in_progress with attempts omitted, since the registry cannot synchronously know the durable count once reflection has been handed off", async () => {
+    const registry = createRegistry()
+    const { sessionId } = await registry.create()
+
+    const result = await registry.end(sessionId)
+
+    expect(result.reflection).toEqual({ state: 'in_progress' })
+    expect('attempts' in result.reflection).toBe(false)
+
+    // The cached tombstone (a second end() call against a session no
+    // longer live returns it verbatim) must carry the same value, not
+    // just the immediate return.
+    const tombstoned = await registry.end(sessionId)
+    expect(tombstoned.reflection).toEqual({ state: 'in_progress' })
+  })
+
+  it("sweep()'s expired tombstone likewise reports reflection in_progress with attempts omitted", async () => {
+    let now = 0
+    const scheduler = new FakeScheduler()
+    const registry = createRegistry({ providerAvailable: false, now: () => now, scheduler })
+    const { sessionId } = await registry.create()
+
+    now = THIRTY_MINUTES + 1
+    scheduler.runAll()
+
+    // Reading the now-expired tombstone back through end(): its early
+    // branch returns the cached tombstone verbatim once a session is no
+    // longer live, without touching the durable engine at all, so this is
+    // stable regardless of whether the detached reflection sweep() started
+    // has resolved yet.
+    const tombstoned = await registry.end(sessionId)
+    expect(tombstoned.status).toBe('expired')
+    expect(tombstoned.reflection).toEqual({ state: 'in_progress' })
+    expect('attempts' in tombstoned.reflection).toBe(false)
+  })
+
+  it('waits for an in-flight turn to finish writing before computing the transcript counts it returns', async () => {
+    const registry = createRegistry()
+    const { sessionId } = await registry.create()
+
+    const iterator = registry
+      .message(sessionId, 'turn-1', { message: 'hello' })
+      [Symbol.asyncIterator]()
+    const first = await iterator.next()
+    expect(first.value).toMatchObject({ type: 'thinking' })
+
+    await fakeChat.waitUntilStreamStarted()
+
+    let settled = false
+    const endPromise = registry.end(sessionId).then((result) => {
+      settled = true
+      return result
+    })
+
+    // The turn is still mid-stream (blocked in the controlled provider), so
+    // end() must not have resolved yet: it has to wait for the send chain
+    // to drain before it can even hand reflection off, let alone compute
+    // the transcript counts it returns.
+    await flushMicrotasks()
+    expect(settled).toBe(false)
+
+    fakeChat.releaseText('hello back')
+    fakeChat.finish()
+
+    const result = await endPromise
+    expect(settled).toBe(true)
+    expect(result.transcript).toEqual({
+      lineCount: 2,
+      userCount: 1,
+      assistantCount: 1,
+      toolCount: 0,
+    })
+  })
+
+  it('does not reject registry.end() or produce an unhandled rejection when the detached reflection fails', async () => {
+    const registry = createRegistry()
+    const { sessionId } = await registry.create()
+    fakeChat.enqueueText('answer')
+    await collect(registry.message(sessionId, 'turn-1', { message: 'one' }))
+
+    // A plain reassignment, not vi.spyOn: vitest's own mock tracking
+    // attaches its own handler to a spy's returned promise (to record its
+    // settled result in mock.results), which makes it impossible for a
+    // *missing* .catch downstream to ever show up as a real unhandled
+    // rejection. Only a promise nothing but production code ever touches
+    // can prove that.
+    engine.endSession = () => Promise.reject(new Error('reflection blew up'))
+
+    const unhandled: unknown[] = []
+    const onUnhandledRejection = (reason: unknown) => {
+      unhandled.push(reason)
+    }
+    process.on('unhandledRejection', onUnhandledRejection)
+    try {
+      const result = await registry.end(sessionId)
+      expect(result.status).toBe('ended')
+      // Give the detached, rejected reflection promise a chance to surface
+      // as an unhandled rejection if nothing caught it.
+      await flushMicrotasks()
+      await flushMicrotasks()
+    } finally {
+      process.off('unhandledRejection', onUnhandledRejection)
+    }
+    expect(unhandled).toEqual([])
+  })
+
+  // F1: end() hands its reflection to runBackground and immediately
+  // deletes the session from `this.live`, so close()'s own await over
+  // `this.live` never sees it. Before this fix nothing awaited a detached
+  // reflection at all: close() would resolve while it was still running,
+  // and on the bundled Node server (default runBackground is `void work`,
+  // launch.ts opens the engine with { maintenance: false }) that reflection
+  // was simply lost the moment the process exited.
+  it('end() followed by close() does not resolve close() until the detached reflection has settled', async () => {
+    const registry = createRegistry()
+    const { sessionId } = await registry.create()
+    fakeChat.enqueueText('answer')
+    await collect(registry.message(sessionId, 'turn-1', { message: 'one' }))
+
+    let resolveEndSession: (() => void) | undefined
+    vi.spyOn(engine, 'endSession').mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveEndSession = resolve
+        }),
+    )
+
+    const result = await registry.end(sessionId)
+    expect(result.status).toBe('ended')
+
+    let closed = false
+    const closePromise = registry.close().then(() => {
+      closed = true
+    })
+
+    // The detached reflection is still pending (engine.endSession has not
+    // resolved), so close() must not have resolved yet either.
+    await flushMicrotasks()
+    expect(closed).toBe(false)
+
+    resolveEndSession?.()
+    await closePromise
+    expect(closed).toBe(true)
+  })
+
+  it('a rejected detached reflection from end() does not make close() reject or produce an unhandled rejection', async () => {
+    const registry = createRegistry()
+    const { sessionId } = await registry.create()
+    fakeChat.enqueueText('answer')
+    await collect(registry.message(sessionId, 'turn-1', { message: 'one' }))
+
+    // Plain reassignment, not vi.spyOn: see the comment on the sibling
+    // "does not reject registry.end()..." test above for why a spy's own
+    // mock.results tracking would mask a missing downstream .catch here.
+    engine.endSession = () => Promise.reject(new Error('reflection blew up'))
+
+    const unhandled: unknown[] = []
+    const onUnhandledRejection = (reason: unknown) => {
+      unhandled.push(reason)
+    }
+    process.on('unhandledRejection', onUnhandledRejection)
+    try {
+      await registry.end(sessionId)
+      await expect(registry.close()).resolves.toBeUndefined()
+      // Give a rejected detached reflection a chance to surface as an
+      // unhandled rejection if close() awaited it without catching.
+      await flushMicrotasks()
+      await flushMicrotasks()
+    } finally {
+      process.off('unhandledRejection', onUnhandledRejection)
+    }
+    expect(unhandled).toEqual([])
+  })
+
+  it('a session expired by sweep() is likewise awaited by close(), not left detached the way end() used to leave it', async () => {
+    let now = 0
+    const registry = createRegistry({ now: () => now })
+    const { sessionId } = await registry.create()
+    fakeChat.enqueueText('answer')
+    await collect(registry.message(sessionId, 'turn-1', { message: 'one' }))
+
+    let resolveEndSession: (() => void) | undefined
+    vi.spyOn(engine, 'endSession').mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveEndSession = resolve
+        }),
+    )
+
+    now = THIRTY_MINUTES + 1
+    registry.sweep(now)
+
+    let closed = false
+    const closePromise = registry.close().then(() => {
+      closed = true
+    })
+
+    await flushMicrotasks()
+    expect(closed).toBe(false)
+
+    resolveEndSession?.()
+    await closePromise
+    expect(closed).toBe(true)
+  })
+
+  it('close() resolves immediately when there are no live sessions and no detached reflections pending', async () => {
+    const registry = createRegistry()
+
+    await expect(registry.close()).resolves.toBeUndefined()
+  })
+
   it('records a mode event when the model switches mode mid-turn', async () => {
     const registry = createRegistry({
       chat: new FakeChatProvider([
@@ -456,6 +844,60 @@ describe('LiveSessionRegistry', () => {
     const events = await collect(registry.message(sessionId, 'turn-1', { message: 'listen to me' }))
     expect(events.some((event) => event.type === 'mode' && event.mode === 'listen')).toBe(true)
   })
+
+  it('create({ greet: false }) makes no greeting model call, writes no transcript line, and leaves message() free to run its turn immediately', async () => {
+    const chat = new FakeChatProvider([{ text: 'answer', toolCalls: [] }])
+    const registry = createRegistry({ chat })
+
+    const session = await registry.create({ greet: false })
+
+    expect(session.initialGreetingStreamUrl).toBeUndefined()
+    expect(chat.requests).toHaveLength(0)
+    expect(await engine.readTranscript(session.sessionId)).toEqual([])
+
+    // A subsequent message() must not wait on any greeting: if
+    // activeTurnId were still left at '__greeting__', this would throw
+    // turn_in_progress instead of running the turn below.
+    const events = await collect(registry.message(session.sessionId, 'turn-1', { message: 'hi' }))
+    expect(events.map((event) => event.type)).toEqual(['thinking', 'text', 'done'])
+    expect(chat.requests).toHaveLength(1)
+  })
+
+  it('create({ greet: true }) still runs the greeting model call and sets initialGreetingStreamUrl, unchanged from today', async () => {
+    const chat = new FakeChatProvider([{ text: 'hello there', toolCalls: [] }])
+    const registry = createRegistry({ chat })
+
+    const session = await registry.create({ greet: true })
+
+    expect(session.initialGreetingStreamUrl).toBe(
+      `/api/v1/sessions/${encodeURIComponent(session.sessionId)}/events`,
+    )
+    let transcript = await engine.readTranscript(session.sessionId)
+    for (let attempt = 0; attempt < 50 && transcript.length < 1; attempt += 1) {
+      await flushMicrotasks()
+      transcript = await engine.readTranscript(session.sessionId)
+    }
+    expect(transcript).toHaveLength(1)
+    expect(chat.requests).toHaveLength(1)
+  })
+
+  it('create() with greet omitted still runs the greeting model call and sets initialGreetingStreamUrl, unchanged from today', async () => {
+    const chat = new FakeChatProvider([{ text: 'hello there', toolCalls: [] }])
+    const registry = createRegistry({ chat })
+
+    const session = await registry.create()
+
+    expect(session.initialGreetingStreamUrl).toBe(
+      `/api/v1/sessions/${encodeURIComponent(session.sessionId)}/events`,
+    )
+    let transcript = await engine.readTranscript(session.sessionId)
+    for (let attempt = 0; attempt < 50 && transcript.length < 1; attempt += 1) {
+      await flushMicrotasks()
+      transcript = await engine.readTranscript(session.sessionId)
+    }
+    expect(transcript).toHaveLength(1)
+    expect(chat.requests).toHaveLength(1)
+  })
 })
 
 function createRegistry(
@@ -463,7 +905,7 @@ function createRegistry(
     providerAvailable: boolean
     chat: ChatProvider
     now: () => number
-    scheduler: FakeScheduler
+    scheduler: RegistryScheduler
     maxLiveSessions: number
     maxTurns: number
     maxReplayEvents: number
@@ -471,6 +913,9 @@ function createRegistry(
     dreamTrigger: () => Promise<unknown>
     runBackground: (work: Promise<unknown>) => void
     persona: PersonaOptions
+    idleSweep: false | { idleTimeoutMs?: number; intervalMs?: number }
+    dreamSweep: false | { intervalMs?: number }
+    greetingTimeoutMs: number
   }> = {},
 ): LiveSessionRegistry {
   const { chat = fakeChat, ...registryOptions } = options

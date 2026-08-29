@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import type { ReverieConfig } from '@openreverie/core'
 import type {
   DreamStatus,
+  EngineSearchResult,
   MemoryEngine,
   MemoryPaths,
   Profile,
@@ -100,6 +101,12 @@ class FakeEngine implements RecordEngine {
   }
 
   maybeDream = vi.fn(async (_trigger: string) => undefined)
+
+  // No test in this file calls search; this stub only exists to satisfy
+  // RecordEngine.search.
+  async search(): Promise<EngineSearchResult> {
+    return { documents: [], nodes: [] }
+  }
 }
 
 function config(memoryDir: string): ReverieConfig {

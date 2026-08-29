@@ -107,6 +107,7 @@ describe('ApiClient request and NDJSON parsing', () => {
           readOnly: false,
           mode: 'journal',
           transcript: { lineCount: 0, userCount: 0, assistantCount: 0, toolCount: 0 },
+          reflection: { state: 'not_started', attempts: 0 },
         },
         meta: { nextCursor: null },
       }),
@@ -128,6 +129,7 @@ describe('ApiClient request and NDJSON parsing', () => {
           status: 'live',
           readOnly: false,
           transcript: { lineCount: 0, userCount: 0, assistantCount: 0, toolCount: 0 },
+          reflection: { state: 'not_started', attempts: 0 },
         },
         meta: { nextCursor: null },
       }),
@@ -328,6 +330,20 @@ describe('ApiClient request and NDJSON parsing', () => {
       status: 'open',
       readOnly: true,
       transcript: { lineCount: 1, userCount: 1, assistantCount: 0, toolCount: 0 },
+      reflection: { state: 'not_started', attempts: 0 },
+    })
+    expect(result.success).toBe(true)
+  })
+
+  it('sessionSchema accepts a reflection with attempts omitted (the registry tombstone shape)', () => {
+    const result = sessionSchema.safeParse({
+      sessionId: 'session_01JZZZ',
+      createdAt: '2026-08-16T21:04:00.000Z',
+      updatedAt: '2026-08-16T21:04:00.000Z',
+      status: 'ended',
+      readOnly: true,
+      transcript: { lineCount: 1, userCount: 1, assistantCount: 0, toolCount: 0 },
+      reflection: { state: 'in_progress' },
     })
     expect(result.success).toBe(true)
   })

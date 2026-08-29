@@ -13,10 +13,13 @@ import { createHash } from 'node:crypto'
 import {
   appendDreamLog,
   type Document,
+  type DocumentHit,
+  type EngineSearchResult,
   type MemoryPaths,
   memoryPaths,
   memoryStores,
 } from '@openreverie/memory'
+import { ProviderUnavailableError } from '@openreverie/providers'
 import { describe, expect, it } from 'vitest'
 import type { BootstrapAuth } from './auth.js'
 import {
@@ -67,6 +70,7 @@ function stubEngine(overrides: Partial<RecordEngine> = {}): RecordEngine {
     listDreams: async () => [],
     readDream: async () => null,
     recordDreamFeedback: async () => false,
+    search: async (): Promise<EngineSearchResult> => ({ documents: [], nodes: [] }),
     dreamStatus: async () => ({
       configured: false,
       enabled: false,
@@ -212,6 +216,106 @@ describe('createFetchApp', () => {
     expect(second.status).toBe(304)
     expect(second.headers.get('etag')).toBe(etag)
     expect(second.body).toBeNull()
+  })
+
+  describe('GET /api/v1/search', () => {
+    it("answers the person's own hybrid search with no cursor, mirroring engine.search's document and node hit shapes exactly", async () => {
+      const calls: { query: string; filters: unknown; limit: number | undefined }[] = []
+      // Built as a DocumentHit (retrieval.ts), then assigned into
+      // EngineSearchResult.documents (typed as SearchHit[], the narrower
+      // type). chunks and chunksTotal are DocumentHit fields SearchHit
+      // does not declare; they are present on every real engine.search
+      // response regardless (DocumentHit is what fuseByReciprocalRank
+      // actually builds), so the response schema has to carry them too, or
+      // every real search response fails writePublicJson's own schema
+      // check and turns into a 500. Going through a DocumentHit-typed
+      // variable, rather than an inline object literal, is what makes this
+      // fixture accurately mirror the runtime shape: TypeScript's excess
+      // property check would otherwise reject `chunks`/`chunksTotal` on a
+      // literal assigned straight into the narrower type.
+      const documentHit: DocumentHit = {
+        docId: 'doc_1',
+        path: '/fake/doc_1.md',
+        kind: 'summary',
+        snippet: 'a matching chunk',
+        score: 0.9,
+        chunks: ['a matching chunk'],
+        chunksTotal: 1,
+      }
+      const app = buildApp({
+        engine: stubEngine({
+          search: async (query, filters, limit): Promise<EngineSearchResult> => {
+            calls.push({ query, filters, limit })
+            return {
+              documents: [documentHit],
+              nodes: [
+                { nodeId: 'node_1', name: 'Mina', type: 'person', hasPage: true, docId: 'doc_1' },
+              ],
+            }
+          },
+        }),
+      })
+
+      const response = await app(authedGet('/api/v1/search?q=mina&limit=5'))
+
+      expect(response.status).toBe(200)
+      expect(await response.json()).toEqual({
+        data: {
+          documents: [
+            {
+              docId: 'doc_1',
+              path: '/fake/doc_1.md',
+              kind: 'summary',
+              snippet: 'a matching chunk',
+              score: 0.9,
+              chunks: ['a matching chunk'],
+              chunksTotal: 1,
+            },
+          ],
+          nodes: [
+            { nodeId: 'node_1', name: 'Mina', type: 'person', hasPage: true, docId: 'doc_1' },
+          ],
+        },
+        meta: { nextCursor: null },
+      })
+      expect(calls).toEqual([{ query: 'mina', filters: undefined, limit: 5 }])
+    })
+
+    it('returns 400 invalid_request when q is missing', async () => {
+      const response = await buildApp()(authedGet('/api/v1/search'))
+
+      expect(response.status).toBe(400)
+      expect(await response.json()).toMatchObject({ code: 'invalid_request' })
+    })
+
+    it.each(['', '   '])('returns 400 invalid_request when q is %j', async (q) => {
+      const response = await buildApp()(authedGet(`/api/v1/search?q=${encodeURIComponent(q)}`))
+
+      expect(response.status).toBe(400)
+      expect(await response.json()).toMatchObject({ code: 'invalid_request' })
+    })
+
+    it('rejects an out-of-range limit the same way pageResource routes do, not by silently clamping it', async () => {
+      const response = await buildApp()(authedGet('/api/v1/search?q=mina&limit=0'))
+
+      expect(response.status).toBe(400)
+      expect(await response.json()).toMatchObject({ code: 'invalid_request' })
+    })
+
+    it('maps an unavailable embedding provider to a 503 search_unavailable, not an unhandled 500', async () => {
+      const app = buildApp({
+        engine: stubEngine({
+          search: async () => {
+            throw new ProviderUnavailableError()
+          },
+        }),
+      })
+
+      const response = await app(authedGet('/api/v1/search?q=mina'))
+
+      expect(response.status).toBe(503)
+      expect(await response.json()).toMatchObject({ code: 'search_unavailable' })
+    })
   })
 
   it('rejects an oversized request body before the (here, endless) stream ever ends', async () => {

@@ -198,6 +198,66 @@ describe('SessionStore', () => {
     expect(sessions[0]?.skipped).toBe(false)
   })
 
+  it('diskReflectionState reports reflected false before and true after summary.md is written', async () => {
+    const now = new Date('2026-08-13T21:04:11Z')
+    const store = await SessionStore.start(paths, now)
+    await store.appendLine(paths, { ts: now.toISOString(), role: 'user', content: 'hello' })
+
+    const before = await SessionStore.diskReflectionState(paths, store.sessionId)
+    expect(before).toEqual({ reflected: false, skipped: false })
+
+    await writeFile(join(store.dir, 'summary.md'), '---\nid: doc_x\n---\nSummary text.\n', 'utf8')
+
+    const after = await SessionStore.diskReflectionState(paths, store.sessionId)
+    expect(after).toEqual({ reflected: true, skipped: false })
+  })
+
+  it('diskReflectionState reports skipped true when the summary carries skipped: true in its frontmatter', async () => {
+    const now = new Date('2026-08-13T21:04:11Z')
+    const store = await SessionStore.start(paths, now)
+
+    await writeFile(
+      join(store.dir, 'summary.md'),
+      '---\nid: doc_x\nskipped: true\nreason: no user messages in this session\n---\nNothing happened.\n',
+      'utf8',
+    )
+
+    expect(await SessionStore.diskReflectionState(paths, store.sessionId)).toEqual({
+      reflected: true,
+      skipped: true,
+    })
+  })
+
+  it('diskReflectionState reports reflected true, skipped false for a summary.md that fails to parse, matching listSessions own tolerance', async () => {
+    const now = new Date('2026-08-13T21:04:11Z')
+    const store = await SessionStore.start(paths, now)
+    await writeFile(join(store.dir, 'summary.md'), '---\nname: [unterminated\n---\nbody\n', 'utf8')
+
+    expect(await SessionStore.diskReflectionState(paths, store.sessionId)).toEqual({
+      reflected: true,
+      skipped: false,
+    })
+  })
+
+  it('diskReflectionState agrees with listSessions for the same session', async () => {
+    const now = new Date('2026-08-13T21:04:11Z')
+    const store = await SessionStore.start(paths, now)
+    await writeFile(join(store.dir, 'summary.md'), '---\nid: doc_x\n---\nSummary text.\n', 'utf8')
+
+    const viaSingle = await SessionStore.diskReflectionState(paths, store.sessionId)
+    const viaList = (await SessionStore.listSessions(paths)).find(
+      (s) => s.sessionId === store.sessionId,
+    )
+    expect(viaSingle).toEqual({ reflected: viaList?.reflected, skipped: viaList?.skipped })
+  })
+
+  it('diskReflectionState does not throw for an unknown session id, reporting no reflection state', async () => {
+    expect(await SessionStore.diskReflectionState(paths, 'session_doesnotexist')).toEqual({
+      reflected: false,
+      skipped: false,
+    })
+  })
+
   it('readTranscript silently drops a truncated final line from a crash mid-append', async () => {
     const now = new Date('2026-08-13T21:04:11Z')
     const store = await SessionStore.start(paths, now)
@@ -251,6 +311,25 @@ describe('SessionStore', () => {
 
     await expect(SessionStore.describe(paths)).resolves.toEqual([
       expect.objectContaining({ sessionId: store.sessionId, reflected: true }),
+    ])
+  })
+
+  it('describe carries the skipped flag listSessions already computed, alongside reflected', async () => {
+    const store = await SessionStore.start(paths, new Date('2026-08-13T21:04:11Z'))
+    await store.appendLine(paths, {
+      ts: '2026-08-13T21:04:11.000Z',
+      role: 'assistant',
+      content: 'hi',
+    })
+
+    await writeFile(
+      join(store.dir, 'summary.md'),
+      '---\nid: doc_x\nskipped: true\n---\nThis session had no user messages, so there was nothing to reflect on.\n',
+      'utf8',
+    )
+
+    await expect(SessionStore.describe(paths)).resolves.toEqual([
+      expect.objectContaining({ sessionId: store.sessionId, reflected: true, skipped: true }),
     ])
   })
 

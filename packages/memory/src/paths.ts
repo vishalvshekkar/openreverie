@@ -25,6 +25,18 @@ export interface MemoryPaths {
   indexDb: string
   dreamsDir: string
   dreamLog: string
+  // sessions/log.jsonl, beside the session directories, mirroring
+  // dreamsDir/dreamLog's own layout. This cannot collide with a session
+  // directory: both SessionStore.listSessions and its findSessionDir
+  // helper (transcripts.ts) gate every entry of sessionsDir on
+  // SESSION_DIR_PATTERN (`^\d{4}-\d{2}-\d{2}-session_[0-9A-Za-z]+$`)
+  // before treating it as a session, so a bare `log.jsonl` entry never
+  // matches and is silently skipped by both. walkAllDocuments's own
+  // sessionsDir scan (engine.ts) has no such gate, but it only ever joins
+  // each entry name with `summary.md` and tries to read that path; joining
+  // a file (not a directory) with a further path segment fails to open,
+  // which that scan already tolerates as "no summary.md yet, not reflected".
+  reflectionLog: string
   files: FileStore
   logs: AppendOnlyStore
 }
@@ -54,6 +66,7 @@ export function memoryPaths(root: string, stores: MemoryStores): MemoryPaths {
     indexDb: join(root, 'index.db'),
     dreamsDir: join(root, 'dreams'),
     dreamLog: join(root, 'dreams', 'log.jsonl'),
+    reflectionLog: join(root, 'sessions', 'log.jsonl'),
     files: stores.files,
     logs: stores.logs,
   }

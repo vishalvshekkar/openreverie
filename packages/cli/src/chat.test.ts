@@ -2201,9 +2201,10 @@ describe('runChat status line', () => {
       // The timeout is now known to be registered, so one precise jump
       // past its 20 second threshold fires it deterministically: no more
       // guesswork about how many small steps are needed to cross it. This
-      // mirrors agent.ts's own (unexported) GREETING_TIMEOUT_MS; if that
-      // constant ever changes, the assertion below on settled, not a bare
-      // vitest timeout, is what will say so.
+      // mirrors agent.ts's own exported GREETING_TIMEOUT_MS default (the
+      // CLI passes no greetingTimeoutMs, so AgentSession.start falls back
+      // to it); if that default ever changes, the assertion below on
+      // settled, not a bare vitest timeout, is what will say so.
       const greetingTimeoutMs = 20_000
       await vi.advanceTimersByTimeAsync(greetingTimeoutMs + 1)
 

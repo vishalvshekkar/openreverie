@@ -15,12 +15,16 @@ import { recordCommitment, resolveCommitment } from './commitments.js'
 import { listDocuments, newId, readDocument, writeDocumentAtomic } from './documents.js'
 import { type EngineDeps, MemoryEngine } from './engine.js'
 import { appendGraph, readGraph } from './graph.js'
+import { memoryStores } from './memoryStore.js'
 import { nodeStores } from './nodeStore.js'
 import { ensureMemoryTree, type MemoryPaths, memoryPaths } from './paths.js'
 import { loadProfile, writeProfile } from './profile.js'
 import { appendProposals, type Proposal, pendingProposals } from './proposals.js'
 import { applyReflection, type ReflectionItem, type ReflectionOutput } from './reflection.js'
+import { appendReflectionLog, readReflectionLog } from './reflectionLog.js'
 import { buildDailyRollup } from './rollups.js'
+import { MemoryIndex } from './sqlite.js'
+import type { AppendOnlyStore } from './store.js'
 import { formatLocalDate } from './time.js'
 import { SessionStore } from './transcripts.js'
 
@@ -1799,8 +1803,13 @@ describe('MemoryEngine', () => {
       }
 
       // Caught silently, exactly like every other pre-summary failure
-      // runMaintenance's loop has always swallowed: no warning is recorded,
-      // and the retry on the next pass is the recovery.
+      // runMaintenance's loop has always swallowed: no warning is recorded
+      // in engine.warnings, and the retry on the next pass is the
+      // recovery. Since R4 this is no longer a failure with nothing
+      // recorded anywhere: the reflection log's own 'failed' outcome
+      // record (see reflectionLog.test.ts and the "reflection log (R4)"
+      // describe block below) is what makes it visible, independent of
+      // this in-memory, per-process warnings list.
       expect(engine.warnings).toEqual([])
 
       const staleSessionDir = join(
@@ -2804,6 +2813,459 @@ describe('MemoryEngine', () => {
 
       await expect(engine.endSession('session_does_not_exist')).resolves.toBeUndefined()
       expect(chat.requests).toHaveLength(0)
+
+      await engine.close()
+    })
+  })
+
+  describe('reflection log (R4): durable attempt record', () => {
+    let dir: string
+    let paths: MemoryPaths
+
+    beforeEach(async () => {
+      dir = await mkdtemp(join(tmpdir(), 'openreverie-engine-reflectionlog-'))
+      paths = memoryPaths(dir, nodeStores())
+      await ensureMemoryTree(paths, 'UTC')
+      await pinTimezoneUtc(paths)
+    })
+
+    afterEach(async () => {
+      await rmWithRetry(dir)
+    })
+
+    it('a normal endSession records an attempt then a reflected outcome', async () => {
+      const chat = new FakeChatProvider([
+        { text: JSON.stringify(emptyReflectionOutput('All good.')), toolCalls: [] },
+      ])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      const sessionId = await engine.startSession()
+      await engine.appendTranscript(sessionId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'A short session.',
+      })
+      await engine.endSession(sessionId)
+
+      const records = await readReflectionLog(paths)
+      expect(records).toEqual([
+        expect.objectContaining({ type: 'attempt', session: sessionId, trigger: 'endSession' }),
+        expect.objectContaining({ type: 'outcome', session: sessionId, outcome: 'reflected' }),
+      ])
+
+      // endSession's own idempotency guard returns early, before
+      // _doEndSession, for a session it already finds reflected: a second
+      // call must record nothing more. If the guard ever logged before
+      // returning, this array would grow to 3 or 4 records and this same
+      // assertion would fail.
+      await engine.endSession(sessionId)
+      expect(await readReflectionLog(paths)).toEqual(records)
+
+      await engine.close()
+    })
+
+    it('a session with no user lines records an attempt then a skipped outcome', async () => {
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      const sessionId = await engine.startSession()
+      await engine.appendTranscript(sessionId, {
+        ts: new Date().toISOString(),
+        role: 'assistant',
+        content: 'Good to see you.',
+      })
+      await engine.endSession(sessionId)
+
+      const records = await readReflectionLog(paths)
+      expect(records).toEqual([
+        expect.objectContaining({ type: 'attempt', session: sessionId, trigger: 'endSession' }),
+        expect.objectContaining({ type: 'outcome', session: sessionId, outcome: 'skipped' }),
+      ])
+
+      await engine.close()
+    })
+
+    it('a reflection that throws records a failed outcome with the error message and still rethrows; a retry accumulates a second attempt and then reflects', async () => {
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('Started training for a marathon.'),
+        items: [{ text: 'Went for a long run', kind: 'event' }],
+        newArcs: [
+          {
+            name: 'Marathon Training',
+            realm: 'Fitness',
+            reason: 'mentioned training for a marathon',
+            itemIndexes: [0],
+            narrative: 'Training for a marathon this fall.',
+          },
+        ],
+      }
+      const chat = new FakeChatProvider([
+        { text: JSON.stringify(out), toolCalls: [] },
+        { text: JSON.stringify(out), toolCalls: [] },
+      ])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      const sessionId = await engine.startSession()
+      await engine.appendTranscript(sessionId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'Went for a long run, training for a marathon this fall.',
+      })
+
+      // Same permission trick the pre-R4 retry test above uses: createArc's
+      // write, invoked as applyReflection's own materializeNew callback,
+      // fails partway through endSession.
+      await chmod(paths.arcsDir, 0o500)
+      let thrown: unknown
+      try {
+        await engine.endSession(sessionId)
+        throw new Error('expected endSession to reject')
+      } catch (err) {
+        thrown = err
+      } finally {
+        await chmod(paths.arcsDir, 0o700)
+      }
+      expect(thrown).toBeInstanceOf(Error)
+
+      const afterFailure = await readReflectionLog(paths)
+      expect(afterFailure).toHaveLength(2)
+      expect(afterFailure[0]).toMatchObject({
+        type: 'attempt',
+        session: sessionId,
+        trigger: 'endSession',
+      })
+      expect(afterFailure[1]).toMatchObject({
+        type: 'outcome',
+        session: sessionId,
+        outcome: 'failed',
+      })
+      const failedRecord = afterFailure[1] as { reason?: string }
+      // The recorded reason is the real error's own message, not a
+      // placeholder: this is what a person or `reverie doctor` reads to
+      // find out why, so it has to be the actual failure, not just proof
+      // that something happened.
+      expect(failedRecord.reason).toBe((thrown as Error).message)
+      expect(failedRecord.reason?.length).toBeGreaterThan(0)
+
+      const failedSession = (await engine.listStoredSessions()).find(
+        (s) => s.sessionId === sessionId,
+      )
+      // The part that matters most (AGENTS.md's framing for this task):
+      // a session with a failed attempt is never 'open', because session
+      // resume treats 'open' as resumable, and a partial reflection may
+      // already have materialized graph state from this transcript.
+      expect(failedSession?.status).toBe('ended')
+      expect(failedSession?.reflection).toMatchObject({ state: 'failed', attempts: 1 })
+      expect(failedSession?.reflection.lastFailureReason).toBe((thrown as Error).message)
+
+      // sessionReflectionState's own disk check must not change this
+      // post-R4 path: no summary.md was ever written (the reflection
+      // failed before one could be), so disk stays unreflected and the
+      // failed outcome from the log still wins here too.
+      expect(await engine.sessionReflectionState(sessionId)).toMatchObject({
+        state: 'failed',
+        attempts: 1,
+      })
+
+      // Retryable: with the permission restored, endSession on the same
+      // sessionId succeeds, and attempts accumulates to 2 across the retry.
+      await engine.endSession(sessionId)
+      const afterRetry = await readReflectionLog(paths)
+      expect(afterRetry.filter((r) => r.type === 'attempt')).toHaveLength(2)
+      expect(afterRetry.at(-1)).toMatchObject({ type: 'outcome', outcome: 'reflected' })
+
+      const reflectedSession = (await engine.listStoredSessions()).find(
+        (s) => s.sessionId === sessionId,
+      )
+      expect(reflectedSession?.status).toBe('ended')
+      expect(reflectedSession?.reflection).toMatchObject({ state: 'reflected', attempts: 2 })
+
+      await engine.close()
+    })
+
+    it('runMaintenance still retries a failed session: two attempts recorded, the second reflected', async () => {
+      const now = new Date()
+      const twoDaysAgo = new Date(
+        Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - 2),
+      )
+
+      const staleStore = await SessionStore.start(paths, twoDaysAgo)
+      await staleStore.appendLine(paths, {
+        ts: twoDaysAgo.toISOString(),
+        role: 'user',
+        content: 'Went for a long run, training for a marathon this fall.',
+      })
+
+      const out: ReflectionOutput = {
+        ...emptyReflectionOutput('Started training for a marathon.'),
+        items: [{ text: 'Went for a long run', kind: 'event' }],
+        newArcs: [
+          {
+            name: 'Marathon Training',
+            realm: 'Fitness',
+            reason: 'mentioned training for a marathon',
+            itemIndexes: [0],
+            narrative: 'Training for a marathon this fall.',
+          },
+        ],
+      }
+      const script = [{ text: JSON.stringify(out), toolCalls: [] }]
+      const chat = new FakeChatProvider(script)
+
+      await chmod(paths.arcsDir, 0o500)
+      let engine: MemoryEngine
+      try {
+        engine = await MemoryEngine.open(dir, fakeDeps(chat))
+      } finally {
+        await chmod(paths.arcsDir, 0o700)
+      }
+
+      const afterFirstPass = (await readReflectionLog(paths)).filter(
+        (r) => r.session === staleStore.sessionId,
+      )
+      expect(afterFirstPass.filter((r) => r.type === 'attempt')).toHaveLength(1)
+      expect(afterFirstPass.at(-1)).toMatchObject({ type: 'outcome', outcome: 'failed' })
+
+      script.push({ text: JSON.stringify(out), toolCalls: [] })
+      await engine.runMaintenance()
+
+      const afterRetry = (await readReflectionLog(paths)).filter(
+        (r) => r.session === staleStore.sessionId,
+      )
+      expect(afterRetry.filter((r) => r.type === 'attempt')).toHaveLength(2)
+      expect(afterRetry.at(-1)).toMatchObject({ type: 'outcome', outcome: 'reflected' })
+
+      await engine.close()
+    })
+
+    it('a session with an attempt and no outcome after it reads in_progress, and status ended', async () => {
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      const sessionId = await engine.startSession()
+      await engine.appendTranscript(sessionId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'Reflection started elsewhere and never resolved.',
+      })
+      // Simulates a process that appended the attempt record and then
+      // crashed before recording any outcome: nothing else in this test
+      // ever calls endSession or runMaintenance for this session.
+      await appendReflectionLog(paths, [
+        {
+          ts: new Date().toISOString(),
+          type: 'attempt',
+          session: sessionId,
+          trigger: 'endSession',
+        },
+      ])
+
+      const session = (await engine.listStoredSessions()).find((s) => s.sessionId === sessionId)
+      expect(session?.reflection).toMatchObject({ state: 'in_progress', attempts: 1 })
+      // 'in_progress' is not 'not_started', so this must not read 'open':
+      // the durable record already shows an attempt was made.
+      expect(session?.status).toBe('ended')
+
+      // No summary.md exists yet, so sessionReflectionState's disk check
+      // stays unreflected and this post-R4 path is unchanged: the pending
+      // attempt still reads 'in_progress'.
+      expect(await engine.sessionReflectionState(sessionId)).toMatchObject({
+        state: 'in_progress',
+        attempts: 1,
+      })
+
+      await engine.close()
+    })
+
+    it('a pre-existing session with no log records reads not_started and keeps status open (no migration needed)', async () => {
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      const sessionId = await engine.startSession()
+      await engine.appendTranscript(sessionId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'Never touched by reflection.',
+      })
+
+      const session = (await engine.listStoredSessions()).find((s) => s.sessionId === sessionId)
+      expect(session?.reflection).toEqual({ state: 'not_started', attempts: 0 })
+      expect(session?.status).toBe('open')
+
+      // No summary.md either (unlike the upgrade case below), so disk
+      // stays unreflected here too: genuinely not_started, not just
+      // log-only not_started.
+      expect(await engine.sessionReflectionState(sessionId)).toEqual({
+        state: 'not_started',
+        attempts: 0,
+      })
+
+      await engine.close()
+    })
+
+    // The bug: sessionReflectionState used to fold the reflection log only
+    // and pass no disk argument to publicReflectionFrom, so a session that
+    // was reflected before the reflection log existed (every session every
+    // existing self-hosted user already has, the moment they upgrade to
+    // this version) read 'not_started' here while listStoredSessions
+    // correctly read 'reflected' from summary.md. 'not_started' is the
+    // exact value listStoredSessions maps to status: 'open', which session
+    // resume treats as resumable, so this was a wrong answer about a
+    // resumable session, not a documented gap.
+    it('a session reflected before the reflection log existed reads reflected here too, not not_started (the upgrade case)', async () => {
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      const sessionId = await engine.startSession()
+      await engine.appendTranscript(sessionId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'Reflected long before the reflection log existed.',
+      })
+      const sessionDir = await SessionStore.sessionDir(paths, sessionId)
+      await writeFile(
+        join(sessionDir, 'summary.md'),
+        '---\nid: doc_x\n---\nA session summarized before R4 shipped.\n',
+        'utf8',
+      )
+
+      // No reflection log record at all for this session: this is exactly
+      // the upgrade state, not a contrived one.
+      expect(await readReflectionLog(paths)).toEqual([])
+
+      expect(await engine.sessionReflectionState(sessionId)).toEqual({
+        state: 'reflected',
+        attempts: 0,
+      })
+
+      await engine.close()
+    })
+
+    it('sessionReflectionState and listStoredSessions agree on the same session, including the pre-log upgrade case', async () => {
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      const sessionId = await engine.startSession()
+      await engine.appendTranscript(sessionId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'Reflected long before the reflection log existed.',
+      })
+      const sessionDir = await SessionStore.sessionDir(paths, sessionId)
+      await writeFile(
+        join(sessionDir, 'summary.md'),
+        '---\nid: doc_x\n---\nA session summarized before R4 shipped.\n',
+        'utf8',
+      )
+
+      const viaList = (await engine.listStoredSessions()).find((s) => s.sessionId === sessionId)
+      const viaSingle = await engine.sessionReflectionState(sessionId)
+
+      // Asserting agreement directly, not just the same fixed literal
+      // twice: a future change to one derivation that does not change the
+      // other fails here even if neither side's own expected value moves.
+      expect(viaSingle).toEqual(viaList?.reflection)
+
+      await engine.close()
+    })
+
+    it('a skipped pre-log session reads skipped through both listStoredSessions and sessionReflectionState', async () => {
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      const sessionId = await engine.startSession()
+      await engine.appendTranscript(sessionId, {
+        ts: new Date().toISOString(),
+        role: 'assistant',
+        content: 'No user lines, and no reflection log record either.',
+      })
+      const sessionDir = await SessionStore.sessionDir(paths, sessionId)
+      await writeFile(
+        join(sessionDir, 'summary.md'),
+        '---\nid: doc_x\nskipped: true\nreason: no user messages in this session\n---\nNothing happened.\n',
+        'utf8',
+      )
+
+      const viaList = (await engine.listStoredSessions()).find((s) => s.sessionId === sessionId)
+      expect(viaList?.reflection).toEqual({ state: 'skipped', attempts: 0 })
+
+      const viaSingle = await engine.sessionReflectionState(sessionId)
+      expect(viaSingle).toEqual({ state: 'skipped', attempts: 0 })
+
+      await engine.close()
+    })
+
+    it('sessionReflectionState does not throw for an unknown session id, and reads not_started', async () => {
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat))
+
+      // No directory for this id exists at all. Fail closed (AGENTS.md):
+      // an unknown session has no reflection state to report, so this
+      // reads the same as a session nobody has touched, never a fabricated
+      // 'reflected' or 'skipped'.
+      await expect(engine.sessionReflectionState('session_doesnotexist')).resolves.toEqual({
+        state: 'not_started',
+        attempts: 0,
+      })
+
+      await engine.close()
+    })
+
+    // sessionReflectionState now checks disk for this one session too (see
+    // its own comment in engine.ts), so the previous log-only description
+    // here is no longer accurate: it answers from the reflection log plus
+    // one summary.md check for this session, never a transcript, because a
+    // consumer benchmarked the full listStoredSessions scan (which reads
+    // every session's transcript.jsonl) at 67ms for 200 sessions. Asserted
+    // through a store fake that counts every readAll call's path, not by
+    // timing: timing a fast in-memory call proves nothing about which
+    // files it touched.
+    it('sessionReflectionState reads no transcript, even when a real transcript exists on disk', async () => {
+      const readAllCalls: string[] = []
+      const stores = memoryStores()
+      const countingLogs: AppendOnlyStore = {
+        create: (path) => stores.logs.create(path),
+        appendLines: (path, lines) => stores.logs.appendLines(path, lines),
+        readAll: async (path) => {
+          readAllCalls.push(path)
+          return stores.logs.readAll(path)
+        },
+        readRange: (path, from, count) => stores.logs.readRange(path, from, count),
+      }
+      const testPaths = memoryPaths('/reverie', { files: stores.files, logs: countingLogs })
+      const index = MemoryIndex.open(':memory:')
+      const engine = await MemoryEngine.fromPaths(
+        testPaths,
+        index,
+        fakeDeps(new FakeChatProvider([])),
+        { maintenance: false },
+      )
+
+      const sessionId = await engine.startSession()
+      await engine.appendTranscript(sessionId, {
+        ts: new Date().toISOString(),
+        role: 'user',
+        content: 'A real transcript line, never to be read by sessionReflectionState.',
+      })
+      await appendReflectionLog(testPaths, [
+        {
+          ts: new Date().toISOString(),
+          type: 'attempt',
+          session: sessionId,
+          trigger: 'endSession',
+        },
+      ])
+
+      readAllCalls.length = 0
+      const state = await engine.sessionReflectionState(sessionId)
+
+      expect(state).toEqual({
+        state: 'in_progress',
+        attempts: 1,
+        lastAttemptAt: expect.any(String),
+      })
+      expect(readAllCalls.some((path) => path.includes('transcript'))).toBe(false)
+      expect(readAllCalls).toContain(testPaths.reflectionLog)
 
       await engine.close()
     })

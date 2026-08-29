@@ -32,6 +32,7 @@ const session = {
   status: 'live',
   readOnly: false,
   transcript: { lineCount: 0, userCount: 0, assistantCount: 0, toolCount: 0 },
+  reflection: { state: 'not_started', attempts: 0 },
 } as const
 
 const helloLine: TranscriptLine = {

@@ -26,6 +26,7 @@ const liveSession: Session = {
   status: 'live',
   readOnly: false,
   transcript: { lineCount: 0, userCount: 0, assistantCount: 0, toolCount: 0 },
+  reflection: { state: 'not_started', attempts: 0 },
 }
 
 const endedSession: Session = {
@@ -35,6 +36,7 @@ const endedSession: Session = {
   status: 'ended',
   readOnly: true,
   transcript: { lineCount: 2, userCount: 1, assistantCount: 1, toolCount: 0 },
+  reflection: { state: 'reflected', attempts: 1 },
 }
 
 const endedTranscript: TranscriptLine[] = [

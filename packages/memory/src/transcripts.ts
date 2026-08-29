@@ -72,6 +72,11 @@ export interface StoredSessionDescription {
   // before reflection ran, and recomputing the same check here, a second
   // place, would let the two drift.
   reflected: boolean
+  // Also carried straight from listSessions: whether a reflected session's
+  // summary.md is the placeholder written for a session with no user
+  // lines. The engine's reflection.state derivation (reflected vs skipped)
+  // needs this the same way status needs `reflected` above.
+  skipped: boolean
   transcript: {
     lineCount: number
     userCount: number
@@ -178,6 +183,7 @@ export class SessionStore {
         createdAt,
         updatedAt: lines.at(-1)?.ts ?? createdAt,
         reflected: session.reflected,
+        skipped: session.skipped,
         transcript: {
           lineCount: lines.length,
           userCount: lines.filter((line) => line.role === 'user').length,
@@ -314,6 +320,52 @@ export class SessionStore {
       sessions.push({ sessionId, dirName, date, reflected, skipped })
     }
     return sessions
+  }
+
+  // Answers, for one session id, the same { reflected, skipped } pair
+  // listSessions computes for every session in the folder: whether
+  // summary.md exists in this session's own directory, and when it does,
+  // that document's frontmatter skipped flag. Matches listSessions's own
+  // tolerance exactly (a summary.md that fails to parse is still
+  // reflected, since it exists, with skipped unknowable and therefore
+  // false) so the two can never answer differently for the same session.
+  // If that tolerance ever changes, change it in both places.
+  //
+  // Costs one directory-wide readdir (via findSessionDir, the same lookup
+  // every other single-session method on this class already pays) plus,
+  // only when the session has a summary, one read of that one file. Never
+  // reads transcript.jsonl: MemoryEngine.sessionReflectionState exists
+  // specifically to avoid the transcript read listSessions pays for every
+  // session it scans, and this helper preserves that for the
+  // single-session case.
+  //
+  // An unknown session id (no directory at all) reports
+  // { reflected: false, skipped: false } rather than throwing: fail
+  // closed (AGENTS.md), an unknown session has no reflection state to
+  // report, and claiming reflected or skipped either way would be a
+  // fabrication.
+  static async diskReflectionState(
+    paths: MemoryPaths,
+    sessionId: string,
+  ): Promise<{ reflected: boolean; skipped: boolean }> {
+    let dir: string
+    try {
+      dir = await findSessionDir(paths, sessionId)
+    } catch {
+      return { reflected: false, skipped: false }
+    }
+    const summaryPath = join(dir, SUMMARY_FILE)
+    const reflected = await paths.files.exists(summaryPath)
+    if (!reflected) return { reflected: false, skipped: false }
+    try {
+      const doc = await readDocument(paths.files, summaryPath)
+      return { reflected: true, skipped: doc.meta.skipped === true }
+    } catch {
+      // Same tolerance as listSessions: a summary.md that fails to parse
+      // is still reflected (it exists), with skipped unknowable and
+      // therefore false.
+      return { reflected: true, skipped: false }
+    }
   }
 }
 

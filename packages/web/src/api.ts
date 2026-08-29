@@ -32,6 +32,19 @@ export const documentRowSchema = z.strictObject({
 
 export const documentSchema = documentRowSchema.extend({ body: z.string() })
 
+// R4's durable attempt record, carried over HTTP from
+// packages/server/src/http-core.ts's own publicSessionReflectionSchema.
+// `attempts` is optional (not read anywhere in this package yet: session
+// resume, the feature that would read it, has not landed) because the
+// server itself cannot always supply a real count; see that schema's
+// comment for why.
+export const sessionReflectionSchema = z.strictObject({
+  state: z.enum(['not_started', 'in_progress', 'reflected', 'skipped', 'failed']),
+  attempts: z.number().int().nonnegative().optional(),
+  lastAttemptAt: z.string().optional(),
+  lastFailureReason: z.string().optional(),
+})
+
 export const sessionSchema = z.strictObject({
   sessionId: z.string(),
   createdAt: z.string(),
@@ -45,6 +58,7 @@ export const sessionSchema = z.strictObject({
     assistantCount: z.number().int().nonnegative(),
     toolCount: z.number().int().nonnegative(),
   }),
+  reflection: sessionReflectionSchema,
 })
 
 export const createSessionResponseSchema = sessionSchema.extend({
