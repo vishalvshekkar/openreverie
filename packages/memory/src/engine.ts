@@ -3171,6 +3171,30 @@ export class MemoryEngine implements DreamLookup {
     }
     const voice: DreamVoice = this.profileCache.meta.dreams?.voice ?? 'first'
     const persona = this.deps.dreamPersona?.(this.currentStyle()) ?? ''
+    // Guarding on the rendered persona, not on whether the dependency is
+    // present, is deliberate: dreamPersona: () => '' satisfies an
+    // undefined check and lands right back in the silent state this guard
+    // exists to close, and that is a plausible shape for someone stubbing
+    // the dependency to get a build green. Both branches record the failed
+    // attempt before throwing, on the same reasoning as the dreamingModel
+    // guard above: in a Cloudflare alarm handler this produces a durable
+    // recorded failure plus an alarm retry, rather than a silent success.
+    //
+    // What this does NOT close: a non-empty host-supplied persona is still
+    // unvalidated past this point. A host can pass a dreamPersona that
+    // renders real prose with no crisis stance in it at all, and this
+    // guard will not catch that. Composing the crisis stance in the engine
+    // itself on the dream path remains unbuilt: packages/memory sits below
+    // packages/core and cannot import buildPersona to do it. Do not read
+    // this guard as having closed that hole.
+    if (persona.trim() === '') {
+      const reason =
+        this.deps.dreamPersona === undefined
+          ? 'Dreaming has no persona configured: EngineDeps.dreamPersona was not set. Build one with buildDreamPersona from @openreverie/core and pass it as dreamPersona.'
+          : 'Dreaming has no persona configured: EngineDeps.dreamPersona returned an empty persona. Build one with buildDreamPersona from @openreverie/core and pass it as dreamPersona.'
+      await this.recordDreamAttempt(args.period, args.trigger, 'failed', reason)
+      throw new Error(reason)
+    }
     const seedBodies = await this.buildSeedBodies(args.seeds)
     const recentDreamDigest = await buildDreamDigest(this.paths, args.logState, DREAM_DIGEST_COUNT)
 

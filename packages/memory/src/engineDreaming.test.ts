@@ -732,6 +732,173 @@ describe('MemoryEngine dreaming', () => {
     }
   })
 
+  // Defect: dreamPersona degrading silently to an empty system prompt,
+  // 2026-08-28. dreamingModel gets a loud guard a few lines above;
+  // dreamPersona did not, so a host that forgot to set it (or stubbed it
+  // with a callback that renders nothing) got all four dream stages run
+  // with no identity, no memory orientation, no voice rule, and no crisis
+  // stance, silently, while still writing into the person's permanent
+  // record. These four tests mirror the missing-dreamingModel test above.
+  it('a missing dreamPersona fails loudly and names dreamPersona', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'openreverie-dreaming-nopersona-'))
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
+    await pinTimezoneUtc(paths)
+    const script: FakeChatResult[] = []
+    const chat = new FakeChatProvider(script)
+    const engine = await MemoryEngine.open(
+      dir,
+      {
+        chat,
+        embeddings: new FakeEmbeddingProvider(),
+        reflectionModel: 'fake-reflect',
+        embeddingModel: 'fake-embed',
+        timezone: 'UTC',
+        dreamingModel: 'fake-dream',
+        // dreamPersona deliberately omitted.
+        dreaming: ENABLED_DREAMING,
+      },
+      { maintenance: false },
+    )
+    try {
+      await seedReflectedSessions(engine, script, 5)
+
+      await expect(engine.dreamNow({ force: true })).rejects.toThrow(
+        /EngineDeps\.dreamPersona was not set/,
+      )
+    } finally {
+      await engine.close()
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('a dreamPersona that renders to an empty string fails loudly with the empty-persona message', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'openreverie-dreaming-emptypersona-'))
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
+    await pinTimezoneUtc(paths)
+    const script: FakeChatResult[] = []
+    const chat = new FakeChatProvider(script)
+    const engine = await MemoryEngine.open(
+      dir,
+      {
+        chat,
+        embeddings: new FakeEmbeddingProvider(),
+        reflectionModel: 'fake-reflect',
+        embeddingModel: 'fake-embed',
+        timezone: 'UTC',
+        dreamingModel: 'fake-dream',
+        dreamPersona: () => '',
+        dreaming: ENABLED_DREAMING,
+      },
+      { maintenance: false },
+    )
+    try {
+      await seedReflectedSessions(engine, script, 5)
+
+      await expect(engine.dreamNow({ force: true })).rejects.toThrow(/returned an empty persona/i)
+    } finally {
+      await engine.close()
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('a dreamPersona that renders whitespace only is treated the same as empty', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'openreverie-dreaming-wspersona-'))
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
+    await pinTimezoneUtc(paths)
+    const script: FakeChatResult[] = []
+    const chat = new FakeChatProvider(script)
+    const engine = await MemoryEngine.open(
+      dir,
+      {
+        chat,
+        embeddings: new FakeEmbeddingProvider(),
+        reflectionModel: 'fake-reflect',
+        embeddingModel: 'fake-embed',
+        timezone: 'UTC',
+        dreamingModel: 'fake-dream',
+        dreamPersona: () => '  \n\t ',
+        dreaming: ENABLED_DREAMING,
+      },
+      { maintenance: false },
+    )
+    try {
+      await seedReflectedSessions(engine, script, 5)
+
+      await expect(engine.dreamNow({ force: true })).rejects.toThrow(/returned an empty persona/i)
+    } finally {
+      await engine.close()
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('a real non-empty dreamPersona does not trip this guard, and the dream proceeds past it', async () => {
+    const { engine, chat, script } = await openTestEngine({ dreaming: ENABLED_DREAMING })
+    const sessionId = await seedReflectedSessions(engine, script, 5)
+    script.push(
+      { text: 'noted', toolCalls: [] }, // exploration wrap-up
+      { text: insightsJsonForSession(sessionId), toolCalls: [] }, // insights
+      { text: NARRATIVE_TEXT, toolCalls: [] }, // narrative
+      { text: TONE_OK, toolCalls: [] }, // tone check
+    )
+
+    const result = await engine.dreamNow({ force: true })
+    if ('dryRun' in result) throw new Error('expected a real run, not a dry run preview')
+
+    // openTestEngine's dreamPersona renders the non-empty 'DREAM_PERSONA';
+    // the guard must not reject it, and the pipeline must have actually
+    // spent its 4 chat calls past that point.
+    expect(result.outcome).toBe('written')
+    expect(chat.requests).toHaveLength(5 + 4)
+  })
+
+  it('records the dream attempt as failed with the guard reason BEFORE the throw reaches the caller (ordering)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'openreverie-dreaming-persona-ordering-'))
+    const paths = memoryPaths(dir, nodeStores())
+    await ensureMemoryTree(paths, 'UTC')
+    await pinTimezoneUtc(paths)
+    const script: FakeChatResult[] = []
+    const chat = new FakeChatProvider(script)
+    const engine = await MemoryEngine.open(
+      dir,
+      {
+        chat,
+        embeddings: new FakeEmbeddingProvider(),
+        reflectionModel: 'fake-reflect',
+        embeddingModel: 'fake-embed',
+        timezone: 'UTC',
+        dreamingModel: 'fake-dream',
+        // dreamPersona deliberately omitted, same as the first test above,
+        // but this test's whole point is the durable record left behind,
+        // not the thrown message.
+        dreaming: ENABLED_DREAMING,
+      },
+      { maintenance: false },
+    )
+    try {
+      await seedReflectedSessions(engine, script, 5)
+
+      await expect(engine.dreamNow({ force: true })).rejects.toThrow(
+        /EngineDeps\.dreamPersona was not set/,
+      )
+
+      const records = await readDreamLog(paths)
+      const attempts = records.filter((r) => r.type === 'attempt')
+      expect(attempts).toHaveLength(1)
+      expect(attempts[0]).toMatchObject({ outcome: 'failed' })
+      expect(String(attempts[0]?.reason)).toContain('EngineDeps.dreamPersona was not set')
+
+      // Never silently spent a call against any model: the only requests
+      // made are the 5 reflectSession calls seedReflectedSessions scripted.
+      expect(chat.requests).toHaveLength(5)
+    } finally {
+      await engine.close()
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
   it('Ruling A5: skipped sessions never count toward the reflected-session floor', async () => {
     const { engine, chat } = await openTestEngine({ dreaming: ENABLED_DREAMING })
     // Each of these ends with no user transcript line at all, so
