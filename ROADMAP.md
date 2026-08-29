@@ -310,7 +310,24 @@ diagnosis corrected: it is not the contract question it was taken for, since sor
 never need a transcript read, so it is the route that has to stop calling the expensive method rather
 than the counts that have to change.
 
-Verified here rather than taken from any implementer's report: `pnpm build` exit 0, 1,819 tests
+An addendum to the host-owned lifetime work landed after the rest, from the same theme. `runMaintenance`
+began with a loop ending every unreflected session, before it touched rollups or the index, with no
+way to turn it off. For a host that owns session lifetime that pass is not maintenance, it is a
+second and conflicting session policy: an alarm that has just ended the sessions past its window and
+deliberately spared the one the person is still in cannot then ask for the rollups without that call
+ending the session it spared. `runMaintenance(now, { endSessions: false })` skips the loop and runs
+everything after it. The default is unchanged.
+
+Two things came out of building it. The comment justifying the loop's position was stale: it said
+rollups depend on it because `pendingDailyRollups` does not check whether a date's sessions are
+reflected, but this call site already filters to reflected sessions before computing pending dates,
+so skipping the loop cannot strand a rollup. The comment now states the reason that does still hold,
+which is that a stale session reflected by the loop gets its rollup on the same pass rather than the
+next one. And the commit this method writes into the memory folder's own history said "reflect stale
+sessions and build pending rollups" unconditionally, which would have been a false record on a pass
+that reflected nothing; it now says what actually ran.
+
+Verified here rather than taken from any implementer's report: `pnpm build` exit 0, 1,825 tests
 across 82 files, `pnpm lint` exit 0, and `tsc --noEmit` exit 0. The self-hosted path was also driven
 by hand, against the real bundled binary and the real Node server with no provider configured, which
 is the state a person is in the moment after installing: the memory folder is created, the read API

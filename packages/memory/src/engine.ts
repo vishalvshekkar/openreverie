@@ -2314,35 +2314,47 @@ export class MemoryEngine implements DreamLookup {
     return { retractedNodes, retractedEdges, rewrittenDocuments }
   }
 
-  async runMaintenance(now: Date = this.now()): Promise<void> {
+  async runMaintenance(
+    now: Date = this.now(),
+    options: { endSessions?: boolean } = {},
+  ): Promise<void> {
     this.clearWarnings()
 
-    // Reflect stale sessions first: pendingDailyRollups only looks at
-    // whether a date has sessions, not whether they are reflected, and
-    // buildDailyRollup throws for a date with no reflected session.
+    const endSessions = options.endSessions !== false
+
+    // Reflect stale sessions first (when endSessions is not disabled): a
+    // stale session from an earlier day, reflected by this loop, has its
+    // date picked up when reflected sessions are re-listed below, so its
+    // rollup is built on this same pass instead of waiting for the next
+    // one. A host that owns session lifetime itself can pass
+    // { endSessions: false } to skip this loop entirely and still get the
+    // rollup and index work below; such a host is responsible for ending
+    // sessions on its own schedule.
     // Call _doEndSession (not endSession) so each session's warnings
     // accumulate rather than being cleared per session.
-    const sessions = await SessionStore.listSessions(this.paths)
-    for (const session of sessions) {
-      if (session.reflected) continue
-      try {
-        await this._doEndSession(session.sessionId, 'runMaintenance')
-      } catch {
-        // reflectSession, applyReflection's own writes, or the
-        // materializeNew callback it invokes (creating a new arc or
-        // person) all failed before summary.md was written (_doEndSession's
-        // own reindex and commit steps no longer throw; see reindexOrWarn
-        // below), so the session stays unreflected in its frontmatter and
-        // is retried on the next pass. The transcript itself is never at
-        // risk. Caught silently here, with no warning recorded in
-        // this.warnings, the same way every other pre-summary failure here
-        // always has been: the retry on the next pass is the recovery, not
-        // a warning. That is no longer "no record anywhere on disk" as of
-        // R4: _doEndSession's own catch already appended a durable
-        // 'failed' outcome (with the error's message) to the reflection
-        // log before rethrowing into this catch, so the failure this
-        // swallows here is visible through sessionReflectionState and
-        // listStoredSessions even though this.warnings stays empty.
+    if (endSessions) {
+      const sessions = await SessionStore.listSessions(this.paths)
+      for (const session of sessions) {
+        if (session.reflected) continue
+        try {
+          await this._doEndSession(session.sessionId, 'runMaintenance')
+        } catch {
+          // reflectSession, applyReflection's own writes, or the
+          // materializeNew callback it invokes (creating a new arc or
+          // person) all failed before summary.md was written (_doEndSession's
+          // own reindex and commit steps no longer throw; see reindexOrWarn
+          // below), so the session stays unreflected in its frontmatter and
+          // is retried on the next pass. The transcript itself is never at
+          // risk. Caught silently here, with no warning recorded in
+          // this.warnings, the same way every other pre-summary failure here
+          // always has been: the retry on the next pass is the recovery, not
+          // a warning. That is no longer "no record anywhere on disk" as of
+          // R4: _doEndSession's own catch already appended a durable
+          // 'failed' outcome (with the error's message) to the reflection
+          // log before rethrowing into this catch, so the failure this
+          // swallows here is visible through sessionReflectionState and
+          // listStoredSessions even though this.warnings stays empty.
+        }
       }
     }
 
@@ -2408,7 +2420,9 @@ export class MemoryEngine implements DreamLookup {
     const commitResult = await commitMemory(
       this.paths.files,
       this.paths.root,
-      'maintenance: reflect stale sessions and build pending rollups',
+      endSessions
+        ? 'maintenance: reflect stale sessions and build pending rollups'
+        : 'maintenance: build pending rollups',
     )
     if (!commitResult.ok && commitResult.warning) {
       this.warnings.push(commitResult.warning)

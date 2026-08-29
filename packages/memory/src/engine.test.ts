@@ -842,6 +842,210 @@ describe('MemoryEngine', () => {
 
       await engine.close()
     })
+
+    it('with no options still ends an unreflected session, exactly as today', async () => {
+      const sessionAt = new Date('2026-08-18T10:00:00.000Z')
+      const store = await SessionStore.start(paths, sessionAt)
+      await store.appendLine(paths, {
+        ts: sessionAt.toISOString(),
+        role: 'user',
+        content: 'A session about a rough day at work.',
+      })
+
+      const chat = new FakeChatProvider([
+        {
+          text: JSON.stringify(emptyReflectionOutput('A rough day, reflected on.')),
+          toolCalls: [],
+        },
+      ])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat), { maintenance: false })
+
+      // Same day as the session itself, so the session's date is never
+      // strictly before "today" and no daily rollup call is also due on
+      // this pass: this test is about the session-ending loop alone.
+      await engine.runMaintenance(new Date('2026-08-18T20:00:00.000Z'))
+
+      const summary = await readDocument(paths.files, join(store.dir, 'summary.md'))
+      expect(summary.body.trim()).toBe('A rough day, reflected on.')
+
+      const records = await readReflectionLog(paths)
+      const forThisSession = records.filter((r) => r.session === store.sessionId)
+      expect(forThisSession.map((r) => r.type)).toEqual(['attempt', 'outcome'])
+
+      await engine.close()
+    })
+
+    it('commits "maintenance: reflect stale sessions and build pending rollups" by default, when the pass writes a rollup after ending a session', async () => {
+      // _doEndSession's own commit (inside the loop) already captures the
+      // reflected session's summary.md, so a default-path pass with
+      // nothing left to commit afterward would leave the last commit
+      // message as _doEndSession's own "reflect: session <id>", not
+      // runMaintenance's. Giving this pass a rollup to build too, from an
+      // already-reflected earlier-day session, means real work happens
+      // after the session-ending loop's own commit: that is what makes
+      // runMaintenance's own final commit, and its message, the one git
+      // log actually shows.
+      const priorDayAt = new Date('2026-08-17T10:00:00.000Z')
+      const priorDayStore = await SessionStore.start(paths, priorDayAt)
+      await priorDayStore.appendLine(paths, {
+        ts: priorDayAt.toISOString(),
+        role: 'user',
+        content: 'A session from the day before, reflected directly.',
+      })
+      await applyReflection(
+        paths,
+        emptyReflectionOutput('Reflected directly, the day before.'),
+        priorDayStore.sessionId,
+        [],
+        priorDayAt,
+        new Map(),
+        async () => {},
+        'UTC',
+      )
+
+      const sessionAt = new Date('2026-08-18T10:00:00.000Z')
+      const store = await SessionStore.start(paths, sessionAt)
+      await store.appendLine(paths, {
+        ts: sessionAt.toISOString(),
+        role: 'user',
+        content: 'A session about a rough day at work.',
+      })
+
+      const chat = new FakeChatProvider([
+        {
+          text: JSON.stringify(emptyReflectionOutput('A rough day, reflected on.')),
+          toolCalls: [],
+        },
+        { text: 'Daily rollup prose for the prior day.', toolCalls: [] },
+      ])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat), { maintenance: false })
+
+      await engine.runMaintenance(new Date('2026-08-18T20:00:00.000Z'))
+
+      const daily = await readDocument(paths.files, join(paths.rollupsDailyDir, '2026-08-17.md'))
+      expect(daily.body.trim()).toBe('Daily rollup prose for the prior day.')
+
+      const { stdout: commitMessage } = await execFileAsync('git', ['log', '-1', '--format=%s'], {
+        cwd: dir,
+      })
+      expect(commitMessage.trim()).toBe(
+        'maintenance: reflect stale sessions and build pending rollups',
+      )
+
+      await engine.close()
+    })
+
+    it('with endSessions: false leaves an unreflected session unreflected: no summary.md, no reflection log record', async () => {
+      const sessionAt = new Date('2026-08-18T10:00:00.000Z')
+      const store = await SessionStore.start(paths, sessionAt)
+      await store.appendLine(paths, {
+        ts: sessionAt.toISOString(),
+        role: 'user',
+        content: 'A session that a host-owned session policy is still in charge of.',
+      })
+
+      // Empty scripted chat: any reflection call would throw "scripted
+      // results exhausted", which is exactly what proves the loop never ran.
+      const chat = new FakeChatProvider([])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat), { maintenance: false })
+
+      await engine.runMaintenance(new Date('2026-08-19T00:00:00.000Z'), { endSessions: false })
+
+      expect(chat.requests).toHaveLength(0)
+
+      let readError: NodeJS.ErrnoException | undefined
+      try {
+        await readDocument(paths.files, join(store.dir, 'summary.md'))
+      } catch (err) {
+        readError = err as NodeJS.ErrnoException
+      }
+      expect(readError?.code).toBe('ENOENT')
+
+      const records = await readReflectionLog(paths)
+      expect(records.filter((r) => r.session === store.sessionId)).toEqual([])
+
+      await engine.close()
+    })
+
+    it('with endSessions: false still builds a pending daily rollup for an already-reflected session', async () => {
+      const sessionAt = new Date('2026-08-18T10:00:00.000Z')
+      const store = await SessionStore.start(paths, sessionAt)
+      await store.appendLine(paths, {
+        ts: sessionAt.toISOString(),
+        role: 'user',
+        content: 'A session reflected directly, outside of runMaintenance.',
+      })
+      await applyReflection(
+        paths,
+        emptyReflectionOutput('Reflected directly, before any runMaintenance pass.'),
+        store.sessionId,
+        [],
+        sessionAt,
+        new Map(),
+        async () => {},
+        'UTC',
+      )
+
+      const chat = new FakeChatProvider([
+        { text: 'Daily rollup prose built with sessions still ending elsewhere.', toolCalls: [] },
+      ])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat), { maintenance: false })
+
+      await engine.runMaintenance(new Date('2026-08-19T00:00:00.000Z'), { endSessions: false })
+
+      const daily = await readDocument(paths.files, join(paths.rollupsDailyDir, '2026-08-18.md'))
+      expect(daily.body.trim()).toBe(
+        'Daily rollup prose built with sessions still ending elsewhere.',
+      )
+
+      const { stdout: commitMessage } = await execFileAsync('git', ['log', '-1', '--format=%s'], {
+        cwd: dir,
+      })
+      expect(commitMessage.trim()).toBe('maintenance: build pending rollups')
+
+      await engine.close()
+    })
+
+    it('a session reflected on an earlier pass still contributes its date to a rollup built on a later endSessions: false pass', async () => {
+      const sessionAt = new Date('2026-08-18T10:00:00.000Z')
+      const store = await SessionStore.start(paths, sessionAt)
+      await store.appendLine(paths, {
+        ts: sessionAt.toISOString(),
+        role: 'user',
+        content: 'A session reflected on day one, rolled up a day later.',
+      })
+
+      const chat = new FakeChatProvider([
+        { text: JSON.stringify(emptyReflectionOutput('Reflected on day one.')), toolCalls: [] },
+        { text: 'Daily rollup prose, built a day later.', toolCalls: [] },
+      ])
+      const engine = await MemoryEngine.open(dir, fakeDeps(chat), { maintenance: false })
+
+      // Pass 1, same day as the session: reflects it (default endSessions),
+      // but the session's own date is today, so pendingDailyRollups never
+      // considers it and no rollup is built yet.
+      await engine.runMaintenance(new Date('2026-08-18T20:00:00.000Z'))
+      expect(chat.requests).toHaveLength(1)
+      let noRollupYetError: NodeJS.ErrnoException | undefined
+      try {
+        await readDocument(paths.files, join(paths.rollupsDailyDir, '2026-08-18.md'))
+      } catch (err) {
+        noRollupYetError = err as NodeJS.ErrnoException
+      }
+      expect(noRollupYetError?.code).toBe('ENOENT')
+
+      // Pass 2, the next day, with endSessions: false: the session-ending
+      // loop is skipped entirely, but its date (already reflected on pass 1)
+      // is still picked up by the fresh SessionStore.listSessions read below
+      // the (skipped) loop, so the rollup gets built.
+      await engine.runMaintenance(new Date('2026-08-19T09:00:00.000Z'), { endSessions: false })
+      expect(chat.requests).toHaveLength(2)
+
+      const daily = await readDocument(paths.files, join(paths.rollupsDailyDir, '2026-08-18.md'))
+      expect(daily.body.trim()).toBe('Daily rollup prose, built a day later.')
+
+      await engine.close()
+    })
   })
 
   describe('empty session skip', () => {
