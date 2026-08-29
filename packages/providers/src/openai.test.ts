@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { OpenAiChatProvider } from './openai.js'
+import { OpenAiChatProvider, OpenAiEmbeddingProvider } from './openai.js'
 import {
   type ChatEvent,
   type ChatRequest,
@@ -250,6 +250,28 @@ describe('OpenAiChatProvider.complete', () => {
       expect(firstBody.temperature).toBe(0.9)
       const secondBody = JSON.parse(String(calls[1]?.init?.body))
       expect(secondBody.temperature).toBeUndefined()
+    })
+
+    it('carries configured headers on the retried request too, not just the first attempt', async () => {
+      const { fetch, calls } = fakeFetchSequence([
+        new Response(temperatureRejectionBody(), { status: 400 }),
+        new Response(
+          JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'a dream' } }] }),
+          { status: 200 },
+        ),
+      ])
+      const provider = new OpenAiChatProvider({ apiKey: 'sk-test', headers: gatewayHeaders }, fetch)
+
+      await provider.complete(withTemperature)
+
+      expect(calls).toHaveLength(2)
+      const expectedHeaders = {
+        ...gatewayHeaders,
+        'content-type': 'application/json',
+        authorization: 'Bearer sk-test',
+      }
+      expect(calls[0]?.init?.headers).toEqual(expectedHeaders)
+      expect(calls[1]?.init?.headers).toEqual(expectedHeaders)
     })
 
     it('marks the result with a warning naming the dropped temperature, so the decision is not silent', async () => {
@@ -503,5 +525,124 @@ describe('OpenAiChatProvider.stream', () => {
 
     expect(events).toEqual([{ type: 'text', text: 'Hello' }])
     expect(cancelled).toBe(true)
+  })
+})
+
+// A canned embeddings response, just enough for OpenAiEmbeddingProvider.embed
+// to resolve without throwing: these tests only care about the outgoing
+// request headers, not the parsed result.
+function fakeEmbeddingResponse(): Response {
+  return new Response(JSON.stringify({ data: [{ index: 0, embedding: [1, 2, 3] }] }), {
+    status: 200,
+  })
+}
+
+const gatewayHeaders = {
+  'cf-aig-collect-log-payload': 'false',
+  'cf-aig-metadata': '{"user":"abc123"}',
+}
+
+describe('OpenAiConfig.headers (provider-gateway headers)', () => {
+  it('complete() sends exactly the two headers it sends today, when no headers are configured', async () => {
+    const canned = new Response(
+      JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }),
+      { status: 200 },
+    )
+    const { fetch, calls } = fakeFetch(canned)
+    const provider = new OpenAiChatProvider({ apiKey: 'sk-test' }, fetch)
+
+    await provider.complete(baseRequest)
+
+    expect(calls[0]?.init?.headers).toEqual({
+      'content-type': 'application/json',
+      authorization: 'Bearer sk-test',
+    })
+  })
+
+  it('embed() sends exactly the two headers it sends today, when no headers are configured', async () => {
+    const { fetch, calls } = fakeFetch(fakeEmbeddingResponse())
+    const provider = new OpenAiEmbeddingProvider({ apiKey: 'sk-test' }, fetch)
+
+    await provider.embed('text-embedding-3-small', ['hi'])
+
+    expect(calls[0]?.init?.headers).toEqual({
+      'content-type': 'application/json',
+      authorization: 'Bearer sk-test',
+    })
+  })
+
+  it('complete() carries configured headers alongside the fixed pair', async () => {
+    const canned = new Response(
+      JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }),
+      { status: 200 },
+    )
+    const { fetch, calls } = fakeFetch(canned)
+    const provider = new OpenAiChatProvider({ apiKey: 'sk-test', headers: gatewayHeaders }, fetch)
+
+    await provider.complete(baseRequest)
+
+    expect(calls[0]?.init?.headers).toEqual({
+      ...gatewayHeaders,
+      'content-type': 'application/json',
+      authorization: 'Bearer sk-test',
+    })
+  })
+
+  it('stream() carries configured headers alongside the fixed pair', async () => {
+    const canned = new Response(sseStreamFor('text'), { status: 200 })
+    const { fetch, calls } = fakeFetch(canned)
+    const provider = new OpenAiChatProvider({ apiKey: 'sk-test', headers: gatewayHeaders }, fetch)
+
+    for await (const _event of provider.stream(baseRequest)) {
+      // draining is enough; this test only inspects the outgoing request
+    }
+
+    expect(calls[0]?.init?.headers).toEqual({
+      ...gatewayHeaders,
+      'content-type': 'application/json',
+      authorization: 'Bearer sk-test',
+    })
+  })
+
+  it('embed() carries configured headers alongside the fixed pair', async () => {
+    const { fetch, calls } = fakeFetch(fakeEmbeddingResponse())
+    const provider = new OpenAiEmbeddingProvider(
+      { apiKey: 'sk-test', headers: gatewayHeaders },
+      fetch,
+    )
+
+    await provider.embed('text-embedding-3-small', ['hi'])
+
+    expect(calls[0]?.init?.headers).toEqual({
+      ...gatewayHeaders,
+      'content-type': 'application/json',
+      authorization: 'Bearer sk-test',
+    })
+  })
+
+  it('a configured header trying to override authorization or content-type does not win', async () => {
+    const canned = new Response(
+      JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }),
+      { status: 200 },
+    )
+    const { fetch, calls } = fakeFetch(canned)
+    const provider = new OpenAiChatProvider(
+      {
+        apiKey: 'sk-test',
+        headers: { authorization: 'Bearer attacker-supplied', 'content-type': 'text/evil' },
+      },
+      fetch,
+    )
+
+    await provider.complete(baseRequest)
+
+    // The real API key and the real content type must survive: a host
+    // header can never clobber authentication or the content type this
+    // file depends on, even though nothing in the gateway headers this
+    // feature exists for would ever collide with these two in practice.
+    expect(calls[0]?.init?.headers).toEqual({
+      'content-type': 'application/json',
+      authorization: 'Bearer sk-test',
+    })
   })
 })

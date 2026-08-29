@@ -144,6 +144,31 @@ describe('createChatProvider', () => {
     const sel = { provider: 'anthropic', apiKey: 'sk-test' } as unknown as ProviderSelection
     expect(() => createChatProvider(sel)).toThrow('unknown provider: anthropic')
   })
+
+  it('threads the selection headers through to the outgoing request', async () => {
+    const calls: Array<RequestInit | undefined> = []
+    const fetchImpl: FetchLike = async (_input, init) => {
+      calls.push(init)
+      return new Response(
+        JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }),
+        { status: 200 },
+      )
+    }
+    const sel: ProviderSelection = {
+      provider: 'openai',
+      apiKey: 'sk-test',
+      headers: { 'cf-aig-collect-log-payload': 'false' },
+    }
+    const provider = createChatProvider(sel, fetchImpl)
+
+    await provider.complete({ model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'hi' }] })
+
+    expect(calls[0]?.headers).toEqual({
+      'cf-aig-collect-log-payload': 'false',
+      'content-type': 'application/json',
+      authorization: 'Bearer sk-test',
+    })
+  })
 })
 
 describe('createEmbeddingProvider', () => {

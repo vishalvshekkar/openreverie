@@ -21,6 +21,15 @@ import { ProviderUnavailableError } from './types.js'
 export interface OpenAiConfig {
   apiKey: string
   baseUrl?: string
+  // Extra headers a host wants sent on every request this provider makes,
+  // for example a provider gateway's own headers: Cloudflare AI Gateway's
+  // cf-aig-collect-log-payload (its request/response body logging is
+  // opt-out, so a host routing through it needs this to keep a
+  // conversation out of Cloudflare's logs) and cf-aig-metadata (per-user
+  // cost attribution). Merged into the fixed content-type and
+  // authorization pair every call already sends; see authHeaders for the
+  // merge order.
+  headers?: Record<string, string>
 }
 
 const DEFAULT_BASE_URL = 'https://api.openai.com/v1'
@@ -230,26 +239,39 @@ async function requestOpenAi(
   }
 }
 
-function authHeaders(apiKey: string): Record<string, string> {
-  return { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` }
+// Host headers are spread first and the fixed pair last, so a host-supplied
+// header can never clobber authentication or the content type this file
+// depends on: a key collision is not expected in practice (a provider
+// gateway's own headers, the reason this parameter exists, do not collide
+// with either name), which is exactly why this fail-closed ordering costs
+// nothing. When hostHeaders is absent, the result is byte-for-byte what
+// this function has always returned.
+function authHeaders(apiKey: string, hostHeaders?: Record<string, string>): Record<string, string> {
+  return {
+    ...hostHeaders,
+    'content-type': 'application/json',
+    authorization: `Bearer ${apiKey}`,
+  }
 }
 
 export class OpenAiChatProvider implements ChatProvider {
   readonly name = 'openai'
   private readonly apiKey: string
   private readonly baseUrl: string
+  private readonly headers: Record<string, string> | undefined
   private readonly fetchImpl: FetchLike
 
   constructor(cfg: OpenAiConfig, fetchImpl: FetchLike = fetch) {
     this.apiKey = cfg.apiKey
     this.baseUrl = cfg.baseUrl ?? DEFAULT_BASE_URL
+    this.headers = cfg.headers
     this.fetchImpl = fetchImpl
   }
 
   async complete(req: ChatRequest): Promise<ChatResult> {
     const res = await requestOpenAi(this.fetchImpl, `${this.baseUrl}/chat/completions`, {
       method: 'POST',
-      headers: authHeaders(this.apiKey),
+      headers: authHeaders(this.apiKey, this.headers),
       body: JSON.stringify(buildRequestBody(req, false)),
     })
     if (res.ok) return parseCompletion(res, req.model)
@@ -269,7 +291,7 @@ export class OpenAiChatProvider implements ChatProvider {
     if (req.temperature !== undefined && isUnsupportedTemperatureError(res.status, bodyText)) {
       const retryRes = await requestOpenAi(this.fetchImpl, `${this.baseUrl}/chat/completions`, {
         method: 'POST',
-        headers: authHeaders(this.apiKey),
+        headers: authHeaders(this.apiKey, this.headers),
         body: JSON.stringify(buildRequestBody(req, false, true)),
       })
       await requireOk(retryRes)
@@ -288,7 +310,7 @@ export class OpenAiChatProvider implements ChatProvider {
   async *stream(req: ChatRequest): AsyncIterable<ChatEvent> {
     const res = await requestOpenAi(this.fetchImpl, `${this.baseUrl}/chat/completions`, {
       method: 'POST',
-      headers: authHeaders(this.apiKey),
+      headers: authHeaders(this.apiKey, this.headers),
       body: JSON.stringify(buildRequestBody(req, true)),
     })
     await requireOk(res)
@@ -412,11 +434,13 @@ export class OpenAiEmbeddingProvider implements EmbeddingProvider {
   readonly name = 'openai'
   private readonly apiKey: string
   private readonly baseUrl: string
+  private readonly headers: Record<string, string> | undefined
   private readonly fetchImpl: FetchLike
 
   constructor(cfg: OpenAiConfig, fetchImpl: FetchLike = fetch) {
     this.apiKey = cfg.apiKey
     this.baseUrl = cfg.baseUrl ?? DEFAULT_BASE_URL
+    this.headers = cfg.headers
     this.fetchImpl = fetchImpl
   }
 
@@ -450,7 +474,7 @@ export class OpenAiEmbeddingProvider implements EmbeddingProvider {
   private async embedBatch(model: string, texts: string[]): Promise<EmbedResult> {
     const res = await requestOpenAi(this.fetchImpl, `${this.baseUrl}/embeddings`, {
       method: 'POST',
-      headers: authHeaders(this.apiKey),
+      headers: authHeaders(this.apiKey, this.headers),
       body: JSON.stringify({ model, input: texts }),
     })
     await requireOk(res)
