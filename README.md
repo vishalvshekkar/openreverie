@@ -296,9 +296,11 @@ What does not exist yet:
 The architecture and memory model are specified in full in [the design spec](docs/superpowers/specs/2026-08-13-openreverie-design.md). This README is updated honestly as the project progresses; if this section says something works, it works.
 
 
-A round on 2026-08-29 answered a single consolidated request from a hosted deployment building on
-this engine. Unlike v0.8.0, this one does change things a self-hosted person can see, so it is not
-described as invisible. Ending a conversation in the browser now returns as soon as the transcript
+v0.9.0 has now shipped. It answered a single consolidated request from a hosted deployment building
+on this engine, and where v0.8.0 made the engine runnable by a host with no local filesystem, this
+release makes it survivable by a host whose process evicts between one message and the next. See
+[docs/releases/v0.9.0.md](docs/releases/v0.9.0.md) for the full account. Unlike v0.8.0, this one does
+change things a self-hosted person can see, so it is not described as invisible. Ending a conversation in the browser now returns as soon as the transcript
 is durable, with reflection continuing behind it, where it used to wait for one or two more model
 calls plus a rewrite for every arc and person that changed. The terminal's own path is unchanged and
 still waits. Two new things appear in the memory folder: `sessions/log.jsonl`, an append-only record

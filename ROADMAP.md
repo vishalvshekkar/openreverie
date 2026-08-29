@@ -2,7 +2,7 @@
 
 This file tracks what openreverie can do and what is being worked on now. It is kept honest the same way the README is: nothing here is claimed as done unless it works. Everything not yet started, deferred work, known gaps, and ideas not built, lives in [BACKLOG.md](BACKLOG.md), which is canonical for all of that.
 
-## Done (v0.1.0 through v0.8.0)
+## Done (v0.1.0 through v0.9.0)
 
 Sub-project 1 of 5: the local-first memory engine and agent core, usable as a terminal app. See the README for the full capability list and the [design spec](docs/superpowers/specs/2026-08-13-openreverie-design.md) for how it all fits together.
 
@@ -92,142 +92,13 @@ migration, and git sync), each for a stated reason recorded in [BACKLOG.md](BACK
 `sqlite.ts`'s top-level `better-sqlite3` import, which is safe today only because that package
 defers loading its native binding until its constructor runs.
 
-## Current direction
-
-The commitments engine above is built and reachable through the terminal, changing what the companion knows and therefore what it says, per spec Section 8: that is the entire intended surface this round. It has no CLI command and no HTTP route of its own. See [BACKLOG.md](BACKLOG.md) for what is not started, including the commitments engine's own deferred pieces (the real one-ask/permanent-silence mechanism, event-anchored `waitsOn` reactivation, the browser Record-section view, recurring commitments, and the rest) and the retrieval and documentation gaps recorded from the 2026-08-25 review.
-
-A round-two request from Reverie Cloud asked to go further than the hostable-engine refactor: make
-the prompt a structured, host-configurable surface, so that varying it is a supported operation
-rather than a fork. This round shipped the first piece of that, not the whole thing. `PersonaOptions`
-now carries two named, host-supplyable blocks: `deploymentContext`, which replaces the deployment
-claim in the identity block (an empty string omits it entirely), and `firstConversation`, which
-replaces the welcome and onboarding script shown on someone's very first conversation. Both are
-threaded as an optional field at every level a host might enter from: `buildPersona`,
-`assembleSystemPrompt`, `AgentSessionOptions.persona`, `LiveSessionRegistryOptions.persona`, and
-`ServerLaunchOptions.persona`, the last reaching both the registry and `dreamPersona`. The
-empty-memory guardrail inside the first-conversation section stays engine-composed regardless of
-what a host supplies, because it is a true statement about engine state on a first conversation
-(there really is nothing to search yet), not a preference. Default output is unaffected:
-`buildPersona` was compared against the prior code across 48 combinations of safety mode, active
-mode, style, and crisis resources, all identical, and `assembleSystemPrompt`'s first-session output
-matched the prior code byte for byte at 12,896 characters; both are now pinned as literal `toBe`
-assertions rather than substring checks. Verified by the reviewer directly rather than taken from
-the implementer's report: `pnpm build` clean, `pnpm exec tsc --noEmit` exit 0 across all six
-packages, `pnpm lint` clean, and the full suite at 1,664 tests across 81 files, all passing. The
-highest-stakes property was falsified by hand: with the guardrail mutated to drop out whenever a
-host supplies its own opening, exactly one test fails, the one named for that behaviour, and it
-passes again on restore. The rest of what the request asked for, a general override API over the
-whole composed prompt and over tool descriptions, is not built this round. See
-[docs/specs/2026-08-28-reverie-cloud-round-two-reply.md](docs/specs/2026-08-28-reverie-cloud-round-two-reply.md)
-for the full review and our positions on each part, and [BACKLOG.md](BACKLOG.md) under "A
-host-configurable prompt and tool-description surface" for everything from that request not built
-this round.
-
-A follow-up round on the same branch split the deployment claim into two fields instead of one.
-Reverie Cloud's own copy review rendered a real hosted privacy string through both the identity
-block and the welcome sentence, rather than reasoning about it, and found neither register worked
-in both places: second person reads correctly in the identity block and reads as a mid-paragraph
-pronoun switch in the welcome, and third person is the reverse. A second, independent problem made
-one field worse than the register mismatch alone: the identity block wants a paragraph and the
-welcome instruction asks for a clause of two or three sentences, so any host string honest enough to
-state a real deployment stance overflows the welcome's own budget before the model reads a word of
-it. `PersonaOptions` now carries a third field, `firstConversationDeploymentClause`: third person,
-clause length, sitting alongside `deploymentContext`, which stays second person and paragraph
-length. `resolveFirstConversationDeploymentClause` in `packages/core/src/personas.ts` fails closed:
-an explicitly supplied clause always wins, including an empty string; the stock default clause
-applies only when `deploymentContext` is also unset; otherwise the welcome carries no deployment
-claim at all. The reasoning: a host that replaced `deploymentContext` has told us the stock claim is
-false, so falling back to the stock welcome clause anyway would speak that false claim in the
-opening sentences of someone's first conversation. Nothing yet enforces the length of either field,
-so a host could still put a paragraph in the clause slot; that gap is recorded in `BACKLOG.md` and
-scoped to land with the prompt's budget work rather than as a one-off patch on this field.
-
-The same round added `buildDreamPersona` to `packages/core/src/personas.ts`, so a host that opens
-`MemoryEngine` directly, without going through the CLI or server launcher, gets a `PersonaOptions`
-into dream runs in one line instead of hand-writing the closure itself; `packages/server/src/launch.ts`
-and `packages/cli/src/chat.ts` both call it now. This does not close the standing dream hazard.
-`EngineDeps.dreamPersona` is still optional, and a host that omits it, or builds a persona some
-other way, still gets an empty system prompt for all four dream stages through the untouched `?? ''`
-fallback at `packages/memory/src/engine.ts:3173` (the empty-persona half of this was closed by the
-2026-08-29 pass described below; the content-validation half stays open). Composing the crisis
-stance in the engine itself on the dream path, rather than trusting it to arrive inside a
-host-supplied string, also remains unbuilt. Both stay open in `BACKLOG.md` as of this round; neither
-is fixed by this round.
-
-Separately, `PRECEDENCE_SENTENCE` was reworded from ranking the prompt's blocks by their stock
-structure to ranking them by role: the crisis stance first, then any first-conversation guidance,
-then the rule about how to speak when the topic is personal, then the section it appears in, then
-standing preferences, naming
-no block identities or axes so the ordering survives a replaced block. This is the one place in the
-whole host-configurable-prompt line of work where default output was allowed to change; everywhere
-else the rule stays byte identity, no exceptions. It shipped alone, as its own commit, with the
-exact replacement wording proposed in writing and signed off by Vishal in advance, because the
-sentence ranks how crisis behavior outranks everything else, and both this project's and Reverie
-Cloud's `AGENTS.md` require explicit human sign-off before that kind of text changes.
-
-A follow-up round on 2026-08-29 was a bounded three-defects pass, each a real, previously recorded
-gap rather than new scope.
-
-Dreaming now fails loudly, in `packages/memory/src/engine.ts`, when the rendered `dreamPersona` is
-empty or whitespace-only, recording the attempt as `'failed'` before throwing so a hibernating host
-gets a durable recorded failure and a retry rather than four dream stages silently run on an empty
-system prompt. The guard checks the rendered value, not whether the dependency is present, so a
-host stubbing `dreamPersona: () => ''` cannot land back in the silent state it closes. This fixes
-only the empty-persona half of the standing dream hazard noted above. A non-empty host-supplied
-persona is still unvalidated for content: a host can still pass a persona that renders real prose
-with no crisis stance in it, and composing the crisis stance in the engine itself on the dream path
-remains unbuilt, because `packages/memory` sits below `packages/core` and cannot import
-`buildPersona`. That half stays open in `BACKLOG.md`, its entry rewritten to describe only what
-still remains.
-
-`writeJournalingProtocol` in `packages/memory/src/journal.ts` now reads, merges, and writes `meta`
-instead of rebuilding it from scratch on every call, on the same read-merge-write shape
-`setSessionMode` already used. A pre-existing meta field now survives the next prose rewrite,
-whether that rewrite comes from the `update_journaling_protocol` tool or from reflection. This is
-unrelated to, and does not fix, the separate open defect about `journaling.md`'s body being
-overwritten with a session summary instead of the person's actual journaling method; that one
-stays open in `BACKLOG.md`.
-
-`listStoredSessions` stopped reporting every session stored on disk as `'ended'`. The status is now
-derived honestly from whether the session was ever reflected: `PublicSession.status` gains a fourth
-value, `'open'`, for a session that is on disk, never reflected, and not live in this process
-(deliberately distinct from `'expired'`, the in-memory idle sweep's own state). `readOnly` stays
-true either way, because the stored view still cannot serve writes until session resume exists;
-only the label was wrong, not the permission underneath it. `requireLive` and `end()` in
-`packages/server/src/registry.ts` now distinguish the two, failing closed: `'open'` gets the softer
-`409 session_not_live`, and any status this code does not recognise, including one added later and
-not yet handled, falls to the more restrictive `409 session_ended` rather than being admitted. This
-also touched `packages/web/src/api.ts`, so the browser's own type for a session status matches, and
-needed two things the original brief for it missed: the strict response validator at
-`packages/server/src/http-core.ts:723`, which would otherwise have made the server return 500 on
-listing an interrupted session, and one assertion in the tombstone eviction test, which had been
-passing only because of this bug (the evicted session had been swept for inactivity and never
-reflected, so it now correctly reports `session_not_live` instead of the old `session_ended`, a
-sharper assertion than before, since `session_not_live` can only come from the disk fallback while
-`session_ended` could also come from a cached tombstone).
-
-Three things were established by running code, not by reasoning about it, and are why this fix was
-a real defect rather than self-healing. `reverie web` opens its engine with `{ maintenance: false }`
-(`packages/server/src/launch.ts:53,143`) and nothing else in the server runs maintenance
-periodically; maintenance is what reflects an interrupted session, so on that host a session
-interrupted by a hard process death stayed unreflected and mislabelled indefinitely. Even where
-maintenance does run, `runMaintenance` swallows a reflection failure and leaves the session for a
-later retry, while its status still said `'ended'`. And a genuinely live session reported `'ended'`
-from `listStoredSessions` itself, a latent bug in the API surface masked in practice because
-`http-core` overwrites stored entries with the registry's own live view before a response goes out.
-
-This fix does not build session resume. An interrupted session is now labelled honestly and can be
-listed and its transcript read, but nothing lets anyone continue it; that stays open in
-`BACKLOG.md`, and its trigger ("gated on this fix landing first") is now cleared.
-
-All three fixes were verified the same way: `pnpm build`, `pnpm -r exec tsc --noEmit`, and
-`pnpm lint` all exit 0, and 1,693 tests across 81 files pass. Each was falsified by the implementer
-and again on review before being accepted; see commits `a18fd10`, `82d367a`, and `a3e052c`.
-
-A round on 2026-08-29 answered a single consolidated request from the hosted deployment building on
+The 2026-08-29 round answered a single consolidated request from the hosted deployment building on
 this engine, which replaced eight rounds of back and forth and which its authors committed to as
-their last engine request before their first release. Six of its items shipped here and one did
-not, deliberately.
+their last engine request before their first release. Every required item in it shipped, along with
+two addenda raised while they built against it. Two further items are recorded and not built: batch
+model calls for reflection and dreaming, which was asked for as a record rather than as code, and
+the cost of listing sessions, which they measured and we deferred with the diagnosis corrected. This
+became v0.9.0.
 
 Shipped. Ending a session no longer blocks on its reflection: `AgentSession.end` takes an optional
 `runReflection` hook, and `LiveSessionRegistry.end` routes reflection through the same
@@ -349,6 +220,16 @@ is the state a person is in the moment after installing: the memory folder is cr
 answers, search returns an honest 503 rather than an unhandled 500, ending a conversation returns in
 14ms with its reflection still running behind it, and that reflection's outcome is on disk afterwards
 rather than lost to the shutdown.
+
+## Current direction
+
+v0.9.0 is released and nothing is started after it. See [BACKLOG.md](BACKLOG.md) for everything
+named and not built, which is canonical for all of it. The nearest items to hand, none of them
+begun: the search endpoint has no browser interface and session resume has no HTTP route, so two
+capabilities this release added are reachable by code and not by a person; the session listing still
+reads every stored transcript in full on routes that do not need the counts, now that a cheap
+primitive for it exists; and reflection and dreaming moving to provider batch APIs is recorded as a
+direction with no design and an unverified pricing figure behind it.
 
 ## How work happens here
 
