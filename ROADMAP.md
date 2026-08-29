@@ -224,6 +224,66 @@ All three fixes were verified the same way: `pnpm build`, `pnpm -r exec tsc --no
 `pnpm lint` all exit 0, and 1,693 tests across 81 files pass. Each was falsified by the implementer
 and again on review before being accepted; see commits `a18fd10`, `82d367a`, and `a3e052c`.
 
+A round on 2026-08-29 answered a single consolidated request from the hosted deployment building on
+this engine, which replaced eight rounds of back and forth and which its authors committed to as
+their last engine request before their first release. Six of its items shipped here and one did
+not, deliberately.
+
+Shipped. Ending a session no longer blocks on its reflection: `AgentSession.end` takes an optional
+`runReflection` hook, and `LiveSessionRegistry.end` routes reflection through the same
+`runBackground` seam the greeting and every turn already used, so a person who taps "end
+conversation" waits for the transcript to be complete rather than for one or two more model calls
+plus a rewrite per changed arc and person. The default path, which is the one the CLI takes, still
+awaits reflection exactly as before. `POST /api/v1/sessions` accepts `greet: false`, so a client
+whose person opened by typing a first message no longer gets a greeting turn in front of the
+answer. `LiveSessionRegistry` stopped hardcoding its own lifetime: the idle timeout, the sweep
+interval, the dream sweep interval and the greeting timeout are all options now, and the idle sweep
+and dream trigger can each be turned off outright rather than neutered by injecting a scheduler
+that never fires. That last part is a statement, not a convenience: the sweep walks an in-memory
+map, so in a host whose process evicts between messages it can never see the sessions that most
+need sweeping, and saying so in the constructor is more honest than implying it with a no-op.
+`OpenAiConfig` takes optional `headers`, merged with the host's headers first and the fixed
+`content-type` and `authorization` pair last so a supplied header can never clobber authentication;
+this is a privacy fix for a host routing through a gateway whose payload logging is opt-out. And
+`GET /api/v1/search` exposes the same hybrid search the model already reached through its
+`search_memory` tool, deliberately with a `limit` and no cursor, because a relevance ranking has no
+stable tuple a second request could resume from.
+
+Reflection also gained the durable attempt record dreaming already had. An append-only
+`sessions/log.jsonl`, modelled directly on `dreams/log.jsonl`, records that an attempt began and
+how it resolved, so a reflection that throws partway no longer leaves the session looking untouched
+with nothing on disk saying it was tried or why it failed. `summary.md`-written-last stays the
+commit marker; this is a record alongside it, never a replacement. `PublicSession` carries the
+resulting state, and `status: 'open'` now means only that no attempt has ever run, because a
+session that has had reflection attempted against it must never look resumable: a partial
+reflection may already have materialized arcs, people or items from that transcript.
+
+Two problems this round created and closed. Detaching reflection from ending meant a detached
+reflection was awaited by nobody, so on the bundled Node server (whose default `runBackground` is
+fire and forget, and whose launcher opens the engine with maintenance off) ending a session and
+then stopping the server lost that reflection permanently. The registry now tracks in-flight
+detached reflections and drains them on close. Separately, `sessionReflectionState` folded only the
+log, which meant it reported a session as never attempted when `summary.md` on disk said otherwise:
+true of every session an existing self-hosted user already has at the moment they upgrade. It reads
+the disk evidence now, still without reading any transcript, which is the property that made the
+method worth having.
+
+Not built, deliberately. Session resume is designed and not written: the request's own process
+asked for a one-page design before any code, and that design went back as
+[docs/specs/2026-08-29-session-resume-design.md](docs/specs/2026-08-29-session-resume-design.md)
+with three things the request had not named. The stamp rule is a check, not a rendering choice,
+because the stored-stamp helper renders an offset where the live path wrote a zone name. `setMode`
+appends to the transcript and never to history, so `/mode` lines were never part of what the model
+saw, which is a second history/transcript divergence nobody had written down. And the assistant
+tool-call line is appended before the tool is dispatched, so an eviction in that gap leaves a
+durable unanswered tool call that is a provider 400 rather than a degraded answer when replayed.
+One decision sits with the requester: whether the assembled system prompt is persisted per session
+or re-assembled on resume. Two further items from the same document are recorded in
+[BACKLOG.md](BACKLOG.md) rather than built: batch model calls for reflection and dreaming, which
+was asked for as a record and not as code, and the cost of listing sessions, which was measured by
+the requester and deferred here with the diagnosis corrected (it is not the contract question they
+took it for).
+
 ## How work happens here
 
 This project is built with heavy use of AI coding agents under human direction, with per-task adversarial review. The bar for merged code is the same regardless of who or what wrote it: understood, tested, and honest. If you pick something up, open an issue first so nobody duplicates effort.

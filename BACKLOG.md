@@ -480,6 +480,41 @@ item ships, remove it from here and record it in `ROADMAP.md`'s Done narrative.
   - Trigger: not stated.
   - Size: small.
 
+- **Search cannot fall back to its lexical half when embeddings are unavailable.** `searchMemory`
+  (`packages/memory/src/retrieval.ts`) awaits `embeddings.embed` unconditionally with no `try`, and
+  the lexical hits it has *already computed* are discarded when that call throws. So a provider
+  outage, or a bundled Node server with no API key configured, loses hybrid search entirely rather
+  than returning the half that needs no model at all.
+  - Why deferred: found while building `GET /api/v1/search`. Adding a lexical fallback is a
+    retrieval design decision nobody asked for, and it changes what a search result means (a
+    partial result that does not say it is partial is worse than an honest failure). The route has
+    a defined answer in the meantime: it maps `ProviderUnavailableError` to a `503
+    search_unavailable` rather than letting it fall through as an unhandled 500.
+  - Where: `packages/memory/src/retrieval.ts` (`searchMemory`); the route's own catch in
+    `packages/server/src/http-core.ts`.
+  - Trigger: not stated. The case that would force it is a self-hosted person with no configured
+    provider who wants to search their own memory, which is now reachable from the browser and was
+    not before.
+  - Rough size: small, plus a decision about how a partial result declares itself.
+
+- **`EngineSearchResult.documents` is declared narrower than what it actually carries.** It is typed
+  `SearchHit[]` (`packages/memory/src/engine.ts`) while `searchMemory` really returns
+  `DocumentHit[]`, a superset carrying `chunks` and `chunksTotal`. TypeScript's structural typing
+  lets the superset satisfy the narrower declaration without dropping those fields at runtime, so
+  the declared type understates the payload. The original compat reasoning is recorded at
+  `packages/memory/src/retrieval.ts:81-105` and was sound when the payload was internal.
+  - Why deferred: it stopped being internal only just now, and widening the declaration touches
+    every test fake that constructs one. Not worth folding into the release benchmark's own items.
+  - Why it matters more than it did: that payload is public over HTTP as of `GET /api/v1/search`. A
+    response schema built against the *declared* type would fail validation on every real query and
+    return a 500. There is a comment at `searchDocumentHitSchema` in
+    `packages/server/src/http-core.ts` warning about exactly that, which is a trap sign rather than
+    a fix.
+  - Where: `packages/memory/src/engine.ts` (`EngineSearchResult`);
+    `packages/memory/src/retrieval.ts:81-105` (`DocumentHit`).
+  - Trigger: not stated.
+  - Rough size: small.
+
 ## 2. Retrieval and memory quality
 
 - **`DocumentHit.snippet` and `chunks[0]` can name different physical chunks of the same
@@ -1493,20 +1528,23 @@ design conversation first.
 
 ### Post-v0.8 hosted-client requests
 
-- **Greeting suppression on session creation, `AgentSession.resume` with registry rehydration, a
-  configurable idle timeout, a search endpoint, a journaling-cadence tool, and optional provider
-  headers on `OpenAiConfig`.** These are six separate follow-up requests for a hostable deployment.
-  They are recorded together only because they arrived as one release deferral, not because they
-  share an implementation boundary.
-  - Why deferred: "None of them belongs in this release."
-  - Where the thinking already lives: the 2026-08-28 release request. A separate request document
-    is expected after this release.
-  - Trigger to pick up: the separate request document arrives after v0.8.0. **This trigger has now
-    fired**: the separate request arrived as `reverie-cloud/docs/specs/2026-08-28-openreverie-request-round-two.md`,
-    parts E and F. Splitting into the six original asks below, now with the detail the new request
-    and our own review of it added. Our positions and reasoning are in
-    `docs/specs/2026-08-28-reverie-cloud-round-two-reply.md`, sections 5 to 7.
-  - Rough size: not stated.
+- **Requests from a hosted deployment building on this engine.** These arrived as a run of
+  separate asks and were then consolidated into one document, the 2026-08-29 release benchmark,
+  which the requester committed to as their last engine request before their first release.
+  - Where the thinking already lives: the 2026-08-28 release request, then
+    `reverie-cloud/docs/specs/2026-08-28-openreverie-request-round-two.md` parts E and F, then
+    rounds three through eight, then
+    `reverie-cloud/docs/specs/2026-08-29-openreverie-release-benchmark.md`, which supersedes every
+    open item in the earlier rounds. Our positions and reasoning are in the reply documents under
+    `docs/specs/`.
+  - **Four of the six original asks have now shipped** and have been removed from this list rather
+    than left here marked done: greeting suppression on session create (E2), host-owned session
+    lifetime (E3), the search endpoint (E5), and optional provider headers on `OpenAiConfig`
+    (part F). They are recorded in `ROADMAP.md`'s Done narrative. What remains below is E1, which
+    is designed but not built, E4, which stays withdrawn, and the items the release benchmark
+    added.
+  - Rough size: see each entry.
+
   - *`AgentSession.resume` and registry rehydration (E1).* `LiveSessionRegistry` models liveness
     entirely in an in-memory `Map`, and `AgentSession.start()` always mints a new session id; in a
     Durable Object that hibernates after seconds of inactivity, a session ends whenever the object
@@ -1534,6 +1572,27 @@ design conversation first.
     `listStoredSessions` fix landing first; it has now landed in `a3e052c`, so the gate is cleared
     and only the work itself remains. Size: large.
 
+    **Status as of 2026-08-29: designed, not built.** The release benchmark's section 4 asked for
+    a one-page design before any code, and it was sent as
+    [docs/specs/2026-08-29-session-resume-design.md](docs/specs/2026-08-29-session-resume-design.md).
+    Building waits on that design coming back. Three things the design surfaced that the request
+    did not name, all of which the eventual implementation has to honor. First, the stamp rule is
+    a check rather than a rendering choice: `renderStoredStamp` (`packages/memory/src/time.ts`)
+    renders a stored offset, `[Sat 2026-08-29 14:32 UTC+05:30]`, where the live path wrote a zone
+    name, `[Sat 2026-08-29 14:32 Asia/Kolkata]`, so re-deriving from each line's own `ts` and
+    `utcOffsetMinutes` through the obvious helper would still change every user message. Second,
+    there is a second history/transcript divergence nobody had written down: `setMode`
+    (`packages/core/src/agent.ts:273`) appends to the transcript only, never to history, so
+    `/mode` lines were never part of what the model saw, and neither `synthetic` nor content
+    matching can discriminate them. Third, the assistant tool-call line is appended before
+    `dispatchTool` runs, so an eviction in that gap leaves a durable unanswered `tool_call`, and
+    replaying it into history is a provider 400 rather than a degraded answer. One decision is
+    open with the requester: whether the assembled system prompt is persisted per session or
+    re-assembled on resume. Re-assembling invalidates the whole cached prefix regardless of how
+    carefully history is preserved, because the system prompt is the start of that prefix, and it
+    also picks up mid-session `graph.jsonl` writes the live session never refreshed into its own
+    prompt.
+
     A design consideration surfaced by Reverie Cloud after this entry was written, not yet decided:
     `MemoryEngine.remember` (`packages/memory/src/engine.ts:916`) pushes into the in-memory
     `liveItems` map (`packages/memory/src/engine.ts:594`), which reaches disk only inside
@@ -1547,20 +1606,6 @@ design conversation first.
     `reverie-cloud/docs/specs/2026-08-29-openreverie-round-seven.md`, addendum (delivered as chat
     text, not a file, 2026-08-29). Trigger: E1 design starting. Size: not stated, folds into E1's
     own sizing.
-  - *Suppress the greeting on session create (E2).* A `greet: false` or equivalent on `POST
-    /api/v1/sessions`. Without it, a session created by a typed first message greets first and then
-    answers, because `registry.message()` awaits the greeting before running the turn. Verified: we
-    checked the two things that could plausibly depend on a greeting existing,
-    `firstConversationSection` and reflection's abandoned-session check, and neither breaks. Stated
-    fallback: "accept the double turn, which is visibly wrong." Where: `packages/server/src/registry.ts:234,250`.
-    Trigger: not stated (build it: "Cheap and low risk," per our own review). Size: small.
-  - *Configurable idle timeout (E3).* `THIRTY_MINUTES` (`registry.ts:16`) becomes a
-    `LiveSessionRegistryOptions` field. Do it as one pass, not one constant: three sibling hardcoded
-    durations sit next to it, `SWEEP_INTERVAL` and `DREAM_SWEEP_INTERVAL`
-    (`packages/server/src/registry.ts:17-18`) and `GREETING_TIMEOUT_MS` (`packages/core/src/agent.ts`).
-    Stated fallback: "sessions expire in 30 minutes and the 24-hour rule is aspirational." Where:
-    `packages/server/src/registry.ts:16-18`; `packages/core/src/agent.ts` (`GREETING_TIMEOUT_MS`).
-    Trigger: not stated. Size: small.
   - *Journaling cadence, structured storage, and settability (E4), withdrawn as originally scoped.*
     Cadence needs to be settable conversationally and in settings, both writing the same structured
     record. The conversational half already exists via the live `update_journaling_protocol` tool;
@@ -1586,31 +1631,55 @@ design conversation first.
     meta-clobber fix landing first, then a re-raised, narrower ask against the fixed layer. The fix
     has now landed in `82d367a`; what remains is Reverie Cloud re-raising the narrower ask against
     the fixed layer, which has not happened yet. Size: medium.
-  - *A search endpoint, `GET /api/v1/search` (E5).* Over the same hybrid retrieval `engine.search()`
-    (`packages/memory/src/engine.ts:1655`) already exposes: "already a clean decoupled method with no
-    tool-call formatting entangled in it." One wrinkle: the existing cursor and pagination convention
-    does not fit relevance-ranked results, so this should use `limit` only, no cursor. The iOS spec's
-    own words: this "should be specified once the retrieval subsystem has settled rather than
-    invented for iOS in isolation," the least urgent of the five iOS asks. Stated fallback: "per-list
-    client-side filtering, labelled honestly." Where: `packages/memory/src/engine.ts:1655`
-    (`engine.search`). Trigger: not stated. Size: small.
-  - *Optional provider headers on `OpenAiConfig` (part F, not originally one of the five iOS asks but
-    recorded here for the same reason).* `OpenAiConfig` is `{ apiKey, baseUrl? }`
-    (`packages/providers/src/openai.ts:21`) and `authHeaders` (`:233`) returns a fixed pair with no
-    merge point, so a host cannot send provider-gateway headers (Cloudflare AI Gateway's
-    `cf-aig-metadata` for per-user attribution, `cf-aig-collect-log-payload` to turn off payload
-    logging, which is opt-out and stores prompt bodies by default otherwise). We agreed to the static
-    field and declined the alternative the request itself offered, a per-request hook, on a
-    leak-surface reason: "The only cheap way to build it today would hand the hook the full request,
-    message content included, which puts a host-supplied callback in a position to read the person's
-    conversation on its way to the provider. That is a leak surface we will not add to satisfy a need
-    that static headers already meet." Reverie Cloud's round-three reply withdrew the hook alternative
-    on their own side too, so it is not expected to resurface: "We have no case static headers cannot
-    serve, and we are not going to invent one. If we find a real one we will bring it with the case,
-    not the preference." Where: `packages/providers/src/openai.ts:21` (`OpenAiConfig`), `:233`
-    (`authHeaders`); `docs/specs/2026-08-28-reverie-cloud-round-two-reply.md`, section 6 ("Part F");
-    `reverie-cloud/docs/specs/2026-08-28-openreverie-round-three.md`, section 6.1. Trigger: not
-    stated. Size: small (an optional `headers?: Record<string, string>` merged into `authHeaders`).
+  - *Batch model calls for reflection and dreaming (R7), recorded by request, no code asked for.*
+    Reflection and dreaming move to provider batch APIs, which price asynchronous completions
+    below synchronous ones. This entry exists because the requester asked for the consideration to
+    be recorded so the shape is not foreclosed by something built between now and then, and asked
+    that R4 be designed with it in mind. It was: `reflection.state` carries a real, durable
+    `'in_progress'`, which is the state a batched reflection would sit in for a long time.
+    Why deferred: their words, "That is engine work, it is large, and it is not for this release."
+    The obstacle, in their words, so nobody under-sizes it later: "This is not a provider swap.
+    Reflection is a sequential pipeline inside one awaited function (`_doEndSession` calls
+    `reflectSession`, then `resolveNarratives`, then `materializeNew`, then `applyReflection`), and
+    a dream pass is four staged calls. A Durable Object cannot hold a promise across hibernation,
+    and a batch result can outlast any alarm invocation. Making this work means reflection and
+    dreaming become resumable jobs with durable state between stages." The pricing figure that
+    motivates it is "roughly fifty percent, which is Vishal's reading of provider documentation and
+    is **not verified in either repository**. Nobody should size this work without checking it
+    first." Treat that number as unverified, because it is. Where:
+    `reverie-cloud/docs/specs/2026-08-29-openreverie-release-benchmark.md`, R7; the durable record
+    it is cross-referenced from is `packages/memory/src/reflectionLog.ts`. Trigger: their words,
+    "When it is time to build it, we bring the design rather than the ask." Size: large.
+  - *Session listing reads every stored transcript in full (R9).* `SessionStore.describe`
+    (`packages/memory/src/transcripts.ts`) reads every stored session's transcript in full to
+    compute `updatedAt` and four per-role counts, and the sessions route paginates afterwards. Four
+    routes pay it. Measured by the requester inside a real Workers runtime with the page size fixed
+    at 20 throughout: "3.0ms at 200 log rows, 7.0ms at 2,500, 44.0ms at 10,000, 67.0ms at 40,000.
+    Fetching ONE session's transcript at the largest size costs 71.0ms, marginally more than
+    listing everything, because it reads every transcript first and then reads the requested one
+    again. Two hundred sessions is roughly seven months of daily use." Their harness is
+    `bench/sessionListing.bench.test.ts` in their repository.
+    Why deferred: theirs to raise and ours to schedule, on their own framing, "It does not block our
+    release and we are not prescribing a design." Deferred so the release benchmark's own items land
+    first.
+    **It is not a contract question, contrary to how it was raised.** They wrote that "the awkward
+    part is the per-role counts on `PublicSession`, which is a contract question rather than a
+    storage one." Checked against the code, it is not: sorting and pagination use only `createdAt`
+    and `sessionId` (`compareSessions` in `packages/server/src/http-core.ts`, and the
+    `revisionValue`/`tuple` pair on the sessions route), neither of which needs a transcript read,
+    so the counts are only needed for the sessions actually returned on a page. The counts can stay
+    on `PublicSession` untouched. The single-transcript case is worse than a cost problem: the
+    transcript route calls `listStoredSessions().find()` purely to decide 404-or-not and then reads
+    the transcript again, so it needs no counts at all. Of the five callers of
+    `listStoredSessions`, four need no counts or need them for a single session. The cheap
+    primitive already exists inside `packages/memory`: `SessionStore.listSessions` returns id,
+    date, `reflected` and `skipped` with no full transcript read, and is simply not exposed on the
+    engine. Where: `packages/memory/src/transcripts.ts` (`describe`);
+    `packages/memory/src/engine.ts` (`listStoredSessions`); `packages/server/src/http-core.ts` (the
+    sessions, single session and transcript routes); `packages/server/src/registry.ts:199` and its
+    `findStoredSession`. Trigger: not stated by them. Ours: whichever comes first of a real
+    complaint about listing latency, or the next piece of work that would put another caller of the
+    full scan on a hot path. Size: small to medium, no contract change.
 
 ## 5. Smaller improvements, help welcome
 

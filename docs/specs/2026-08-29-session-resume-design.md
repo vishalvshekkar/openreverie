@@ -300,3 +300,111 @@ Only two answers, both in section 5 and section 4:
 2. `readOnly: status !== 'open'`, or keep it conservative.
 
 Everything else here we will build as written unless you object.
+
+---
+
+# Addendum, 2026-08-29: decisions received, and three corrections
+
+Reverie Cloud answered the same day and checked the design's claims against this code rather than
+accepting them. Both open decisions are settled, and their verification found three loose citations
+and one overbroad sentence. Recorded here because the two repositories cite each other, so a wrong
+line number propagates.
+
+## Decisions, both theirs, both taken
+
+**1. Persist the system prompt.** Build it as proposed.
+
+They also dismantled the caveat this design attached to it. The worry offered was that persisting
+freezes prose for the session's remainder. They checked what is frozen today: `this.system` is
+assigned at exactly three sites, and the assembler never reads a clock for the model's benefit, so a
+session's prompt is *already* frozen for its life in every deployment, the CLI included. Persisting
+does not introduce a freeze; it restores the one hibernation accidentally breaks. Re-assembling was
+the option that would have changed behavior, by refreshing a prompt mid-session in a way the engine
+does nowhere else. That also disposes of their own objection, that a corrected crisis resource would
+go stale mid-session: it already does, everywhere, and always has.
+
+Their refinement, which is a real defect in how this design was written and is adopted:
+
+> "You enumerated the write points by trigger name: 'start, the two tool-triggered refreshes,
+> refreshSystemPrompt.' That is four names for three assignment sites, and the mismatch is where a
+> fifth trigger added later gets missed."
+
+Confirmed against the current tree: `this.system` is assigned at `agent.ts:223` (the constructor,
+taking what `start()` assembled), `:303` (`refreshSystemPrompt`), and `:514` (the inline
+re-assembly in `runTurn`'s `update_profile` branch). `setMode` and `update_journaling_protocol`
+both route through `:303` rather than assigning, which is exactly the collapse that made four names
+look like four sites. The implementation enumerates assignment sites, and carries a guard test that
+fails when a new assignment to `this.system` appears with no matching persist.
+
+Their last condition is taken as stated: if the persist write fails, resume falls back to
+re-assembling and **says so**, in the same shape as `stampsExact`, rather than resuming with a
+prompt it cannot vouch for.
+
+**2. `readOnly` stays exactly as it is, and a new `resumable` field carries the other claim.**
+
+Both options this design offered were refused, correctly. Their reasoning:
+
+> "You are right that `status !== 'open'` turns the field from 'this process will accept your next
+> write' into 'this session could be resumed' ... this leaves your own bundled server advertising a
+> compose bar that 409s ... We would rather not buy our clarity with their bug."
+
+So: `readOnly` keeps meaning what it means today, a promise about this process. `resumable` says the
+session could be resumed by a host that chooses to. The bundled server reports `readOnly: true,
+resumable: true`, and a client offers "resume this conversation" rather than a compose bar that
+fails. After a host calls `resume`, the session is genuinely live and `readOnly` is false on its own
+terms, with nothing overloaded.
+
+This lands well against R4, which has since shipped: R4 changed `status` and deliberately left
+`readOnly` hardcoded, so no part of that decision has to be walked back. `resumable` is derived from
+the same rule R4 established, that a session with any recorded reflection attempt is never
+resumable.
+
+## Corrections to this document
+
+**Citations.** Three line numbers they flagged. Two were correct at `8dc071f`, the commit this
+design was written against (`setMode`'s transcript append at `:273`, `appendBoth`'s at `:560`), and
+read as wrong from their checkout only because it carries this branch's then-uncommitted work, which
+moved them to `:286` and `:595`. The third was genuinely loose: the append-then-dispatch pair was
+cited as `:474` then `:486` and is `:476` then `:485` at that same commit. Every citation in the
+body above is against `8dc071f` and should be read that way.
+
+**One sentence was overbroad, and the correction is theirs.** Section 1.2 says a `/mode` line "is on
+disk and was never in history". `setMode`'s transcript append is conditional on
+`options.source !== 'tool'`, so a mode change made by the model writes no transcript line at all:
+its assistant tool-call line and tool result line already record it. The claim is therefore true of
+two of the three sources, the CLI's typed `/mode` and the web picker's click, and not of the third.
+The `historyOmitted` marker is unaffected, since the source that would need it is the one that never
+writes a line.
+
+**R9's framing.** They accepted the correction and returned a fair one:
+
+> "Your (a) and (d) are true about the inputs and misleading about the routes ... both call
+> `engine.listStoredSessions()`, which calls `SessionStore.describe`, which does the full `readAll`
+> per session before any of that reasoning applies. The cheap primitive is real and your conclusion
+> is right; it is the route that has to stop calling the expensive one, not the counts that have to
+> change."
+
+That is the more precise statement and the backlog entry should be read with it. The conclusion is
+unchanged; the reason it holds is about which method a route calls, not about the counts.
+
+## Two things their verification turned up
+
+**This branch reaches them before it is committed.** They consume this repository's compiled `dist`
+through `link:` path dependencies, so uncommitted work here is exercised by their suite with no
+version bump and no action on either side. R8 turned their suite red on a change they had not made.
+The fix is theirs and they are taking it, but the consequence is worth writing down here: work in
+this tree is continuously integrated against a real consumer before it lands.
+
+It also produced independent confirmation of a prediction rather than an argument for one. The test
+that broke was theirs, proving that ending a session in a memory folder with no `journaling.md`
+reaches a written summary, and it failed with `expected 'open' to be 'ended'`. That is exactly the
+second consequence recorded above and in the reply notes: between `POST /end` returning and the
+reflection landing, the list reads the session off disk as open.
+
+**The R8-before-R4 window they flagged is already closed in this tree.** They pointed at the swallow
+in `registry.ts` whose comment said the durable record did not exist yet, correctly noting that
+between R8 and R4 a reflection failure was *more* invisible than before R8, since it used to surface
+as a 500. R4 has since landed here: `_doEndSession` appends a durable attempt record before any
+model call and a `'failed'` outcome carrying the error's own message when reflection throws, and
+that comment now says so. The swallow remains, for the narrower reason that the promise is already
+detached and an unhandled rejection would surface for a request nobody is waiting on.
