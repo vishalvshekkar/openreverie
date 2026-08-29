@@ -21,11 +21,12 @@ implements both over whatever storage it has.
 
 `FileStore.readFile` carries a contract every implementation must satisfy: it must reject with an
 error whose `.code` is `'ENOENT'` when the path does not exist, matching `node:fs/promises`'
-`readFile`. `journal.ts` and `profile.ts` both depend on that exact code to tell "the file does not
-exist yet" apart from any other read failure, and silently swallow anything that isn't `ENOENT`
-into the wrong branch otherwise. This is documented directly on the interface in `store.ts`; read
-it there for the full contract, including the ordering and locking guarantees the other methods
-carry.
+`readFile`. `journal.ts` and `profile.ts` both catch a `readFile` rejection and treat it as absence
+only when `err.code === 'ENOENT'`, letting anything else propagate instead of being silently
+swallowed. An implementation that throws a plain `Error` for a missing path, instead of one with
+that code, turns "file absent" into an unhandled read failure for both callers. This is documented
+directly on the interface in `store.ts`; read it there for the full contract, including atomic
+writes and sorted `readdir` order.
 
 ## Building an engine
 
