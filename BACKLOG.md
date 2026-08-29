@@ -1533,6 +1533,20 @@ design conversation first.
     `reverie-cloud/docs/specs/2026-08-28-openreverie-round-three.md`, section 6.3. Trigger: was the
     `listStoredSessions` fix landing first; it has now landed in `a3e052c`, so the gate is cleared
     and only the work itself remains. Size: large.
+
+    A design consideration surfaced by Reverie Cloud after this entry was written, not yet decided:
+    `MemoryEngine.remember` (`packages/memory/src/engine.ts:916`) pushes into the in-memory
+    `liveItems` map (`packages/memory/src/engine.ts:594`), which reaches disk only inside
+    `applyReflection`. A session resumed after an eviction (their Durable Object hibernates on a
+    timescale of seconds) cannot restore `liveItems` recorded before that eviction, because they
+    were never written; the transcript stays complete and continuous to the person, but the
+    live-recorded items from before the eviction are gone. Not data loss in the serious sense,
+    since reflection re-derives items from the transcript regardless, but it constrains what E1 can
+    actually restore. Two shapes were suggested, undecided: persist `liveItems`, or have resume
+    treat the pre-eviction span as reflect-on-resume. Where:
+    `reverie-cloud/docs/specs/2026-08-29-openreverie-round-seven.md`, addendum (delivered as chat
+    text, not a file, 2026-08-29). Trigger: E1 design starting. Size: not stated, folds into E1's
+    own sizing.
   - *Suppress the greeting on session create (E2).* A `greet: false` or equivalent on `POST
     /api/v1/sessions`. Without it, a session created by a typed first message greets first and then
     answers, because `registry.message()` awaits the greeting before running the turn. Verified: we
