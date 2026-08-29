@@ -356,102 +356,78 @@ item ships, remove it from here and record it in `ROADMAP.md`'s Done narrative.
   - Size: small (mirror `complete()`'s retry-and-warn logic; `ChatEvent` has no warnings-carrying
     variant yet, so that shape needs deciding too).
 
-- **`dreamPersona` falls back to an empty system prompt when a host omits it.**
-  `packages/memory/src/engine.ts:3173`: `const persona = this.deps.dreamPersona?.(this.currentStyle()) ?? ''`,
-  unchanged by the deployment-clause round that added `buildDreamPersona`. A host opening
-  `MemoryEngine` directly and omitting the dependency still gets an empty system prompt for all four
-  dream stages (exploration, insights, narrative, tone gate): no identity, no memory orientation, no
-  voice rule, no crisis stance. What did land: `buildDreamPersona(mode, resources, options)` in
-  `packages/core/src/personas.ts:288`, a supported one-line way for a host to build the
-  `(style) => string` callback `EngineDeps.dreamPersona` expects, now called by
-  `packages/server/src/launch.ts:134` and `packages/cli/src/chat.ts:583`. That gives a host going
-  through either launcher its deployment context in dreams for free. It does not close this entry: a
-  host that opens `MemoryEngine` directly and either omits `dreamPersona` or supplies a persona built
-  some other way still hits the same silent `?? ''`.
+- **A host-supplied `dreamPersona` is not validated for content, so a persona with no crisis stance
+  in it still reaches all four dream stages silently.** The empty-persona half of this entry is
+  fixed: `packages/memory/src/engine.ts:3200` now throws, recording the attempt as `'failed'` first,
+  whenever the rendered persona is empty or whitespace-only, mirroring the `dreamingModel` guard
+  eight lines above it. It guards the rendered value, not whether the dependency is present, so a
+  host stubbing `dreamPersona: () => ''` cannot land back in the silent state. What remains open:
+  `dreamPersona` is still typed `(style: StyleConfig) => string` with no content validation
+  (`engine.ts:330`), so a host can supply a persona that renders real prose and still omit the
+  crisis stance, and this guard will not notice. Composing the crisis stance in the engine itself on
+  the dream path, rather than trusting it to arrive inside a host-supplied string, is still unbuilt,
+  because `packages/memory` sits below `packages/core` and cannot import `buildPersona`.
+  `buildDreamPersona(mode, resources, options)` in `packages/core/src/personas.ts:288` remains the
+  supported one-line way for a host to build the callback, called by
+  `packages/server/src/launch.ts:134` and `packages/cli/src/chat.ts:583`, so a host going through
+  either launcher gets its deployment context in dreams for free; a host opening `MemoryEngine`
+  directly and building a persona some other way is exactly the case still exposed.
   - Why deferred: not a scoping decision, found and recorded during the Reverie Cloud round-two
-    review. In our own words: "the sibling hook `dreamingModel` is enforced with a loud, specific
-    error... `dreamPersona` gets no equivalent guard, and degrades silently instead... This is a
-    live hazard for you specifically... you are one forgotten dependency away from four unguarded
-    model calls per dream, on a mental wellbeing product." Also noted: `dreamPersona` is typed
-    `(style: StyleConfig) => string` with no content validation (`engine.ts:324`), so a host can
-    already omit the crisis stance from dreaming today, not only by omitting the hook but by
-    supplying a persona that does not include it. Composing the crisis stance in the engine itself
-    on the dream path, rather than trusting it to arrive inside a host-supplied string, is "a design
-    round, not a patch, because `memory` sits below `core` and cannot import `buildPersona`."
-  - Reverie Cloud checked their own wiring against this entry in their round-three reply and
-    confirmed the hazard is live for them today, not hypothetical: "We set no `dreamPersona`
-    anywhere. `grep -rn dreamPersona src/ test/` returns nothing." Dreams have not actually run in
-    their product only because of three unrelated accidents (no `dreamingModel` passed, config
-    setting `dreaming.enabled: false`, an injected no-op scheduler): "The loud guard is on a
-    different dependency than the silent one, and the single action that removes reason 1 is wiring
-    `dreamingModel`, which is precisely what slice 2 does when it turns dreaming on. Whoever does
-    that gets past the loud error and into the silent `?? ''` in the same commit, with nothing
-    failing. We would have shipped it."
-  - Their position on the fix: making `dreamPersona` required when dreaming is enabled, failing the
-    way `dreamingModel` fails, "is right and we would take it tomorrow." But they do not want that
-    shipped as though it were the whole fix: "We would rather wait for the real fix than have the
-    required-dep half shipped as though it closed the hole. It does not: it converts 'silently
-    empty' into 'whatever the host returns, unvalidated', which is the same fail-open shape one step
-    along." The "real fix" they mean is composing the crisis stance in the engine itself on the dream
-    path rather than trusting it to arrive inside a host-supplied string, which both sides agree is
-    a design round because `memory` cannot import `buildPersona`.
-  - Where: `packages/memory/src/engine.ts:3173` (the fallback) and `:324` (the hook's type);
-    `packages/core/src/personas.ts:288` (`buildDreamPersona`); `packages/server/src/launch.ts:134`
-    and `packages/cli/src/chat.ts:583` (both now call it); `docs/specs/2026-08-28-reverie-cloud-round-two-reply.md`,
-    section 1 ("Two places where you are wrong"), "1.2 Part B2 closes the front door while the back
-    door is open"; `reverie-cloud/docs/specs/2026-08-28-openreverie-round-three.md`, section 4.
-  - Trigger: now stated, on Reverie Cloud's own side, as a blocking prerequisite rather than a
-    request: "this is now a blocking prerequisite on slice 2 rather than a task inside it: we do not
-    wire `dreamingModel` until `dreamPersona` is wired in the same change, and the hosted deployment
-    string reaches both."
-  - Size: small for the fail-loud fix (mirror `dreamingModel`'s guard); medium for engine-composed
-    dream crisis stance (needs a way for `memory` to receive the crisis text without importing
-    `core`).
+    review. In our own words at the time: "the sibling hook `dreamingModel` is enforced with a loud,
+    specific error... `dreamPersona` gets no equivalent guard, and degrades silently instead... This
+    is a live hazard for you specifically... you are one forgotten dependency away from four
+    unguarded model calls per dream, on a mental wellbeing product." The fail-loud half of that was
+    shipped on 2026-08-29 (`a18fd10`). What is left open is exactly the half Reverie Cloud flagged as
+    not yet closed even once the required-dependency guard shipped: "We would rather wait for the
+    real fix than have the required-dep half shipped as though it closed the hole. It does not: it
+    converts 'silently empty' into 'whatever the host returns, unvalidated', which is the same
+    fail-open shape one step along." The "real fix" they mean is composing the crisis stance in the
+    engine itself on the dream path rather than trusting it to arrive inside a host-supplied string,
+    which both sides agree is a design round because `memory` cannot import `buildPersona`.
+  - Reverie Cloud's round-three reply had confirmed the hazard was live for them before this fix,
+    and their stated position on the fail-loud half was: "making `dreamPersona` required when
+    dreaming is enabled, failing the way `dreamingModel` fails, is right and we would take it
+    tomorrow." That half is now shipped in `a18fd10`; the content-validation half they described in
+    the same reply is what this entry now covers.
+  - Where: `packages/memory/src/engine.ts:3183` (where the persona is rendered), `:3200` (the guard
+    that now ships), `:330` (the hook's type, still unvalidated for content);
+    `packages/memory/src/engineDreaming.test.ts` (the guard's tests); `packages/core/src/personas.ts:288`
+    (`buildDreamPersona`); `packages/server/src/launch.ts:134` and `packages/cli/src/chat.ts:583`
+    (both call it); `docs/specs/2026-08-28-reverie-cloud-round-two-reply.md`, section 1 ("Two places
+    where you are wrong"), "1.2 Part B2 closes the front door while the back door is open";
+    `reverie-cloud/docs/specs/2026-08-28-openreverie-round-three.md`, section 4.
+  - Trigger: not stated for the remaining, engine-composed half. Reverie Cloud's stated blocking
+    condition was about the half that has now shipped: "this is now a blocking prerequisite on
+    slice 2 rather than a task inside it: we do not wire `dreamingModel` until `dreamPersona` is
+    wired in the same change, and the hosted deployment string reaches both."
+  - Size: medium. Needs a way for `memory` to receive the crisis text without importing `core`.
 
-- **`listStoredSessions` marks every session ended, unconditionally.** `packages/memory/src/engine.ts:1744`
-  (`listStoredSessions`) returns `status: 'ended', readOnly: true` at `:1748` for every session directory `SessionStore.describe`
-  finds, regardless of whether `endSession()` was ever called. Combined with `requireLive`'s
-  fallback at `packages/server/src/registry.ts:506`, a host whose process evicts or hibernates a
-  live session (a Cloudflare Durable Object sleeping after seconds of inactivity, for instance)
-  makes every in-progress session look permanently and incorrectly ended.
-  - Why deferred: not a scoping decision, found as a bug during the round-two review. In our own
-    words: "This fires on essentially every session under [a hibernating] hosting model, independent
-    of whether a full 'resume' feature is ever built... Fix that first and separately: it is small,
-    it is a correctness bug on its own terms, and shipping resume on top of it would bake the
-    conflation in."
-  - Where: `packages/memory/src/engine.ts:1744` (`listStoredSessions`), the assignment itself at `:1748`; `packages/server/src/registry.ts:506`
-    (`requireLive`'s fallback); `docs/specs/2026-08-28-reverie-cloud-round-two-reply.md`, section 5
-    ("Part E, the iOS asks"), "E1, resume and rehydration".
-  - Trigger: not stated. Standing correctness bug independent of whether `AgentSession.resume` and
-    registry rehydration (see "Post-v0.8 hosted-client requests" below) is ever built.
-  - Size: small.
-
-- **`writeJournalingProtocol` rebuilds `meta` from scratch on every call.** `packages/memory/src/journal.ts:151`
-  (`writeJournalingProtocol`) writes `meta: { id, kind: 'journaling', updated: now.toISOString() }` at `:165`
-  fresh on every call, discarding any pre-existing meta fields, unlike `setSessionMode`'s explicit
-  read-merge-write pattern (`engine.ts:863-866`), which its own comment calls out as deliberate. Any
-  structured field added to that meta (a cadence field, for example) is discarded by the next prose
-  rewrite, whether from the `update_journaling_protocol` tool or from reflection's own rewrite of the
-  same document.
-
-  Related to, but distinct from, the "`journaling.md` is being overwritten with a session summary"
-  entry above in this section: that entry is about the document's *body* being replaced with the
-  wrong prose (a session narrative instead of the person's journaling method). This entry is about
-  the *meta*/frontmatter being clobbered on every write, regardless of what the body contains.
-  Whether the two share a root cause could not be established by reading alone: both go through this
-  one `writeJournalingProtocol` function, so a caller that gets the body wrong and a caller that adds
-  a meta field would both be silently destructive through the same path, but nothing in either
-  investigation traced whether the same call site or the same bad prompt produced both. That
-  determination is one of the "two things to establish before fixing" the earlier entry already
-  names.
-  - Why deferred: not stated (found during the round-two review, not scoped out of an existing
-    task). Blocks structured journaling cadence and settability (see "Post-v0.8 hosted-client
-    requests" below, E4).
-  - Where: `packages/memory/src/journal.ts:151` (the function), `:165` (the rebuilt meta literal); `packages/memory/src/engine.ts:863-866` (the
-    contrasting merge pattern); `docs/specs/2026-08-28-reverie-cloud-round-two-reply.md`, section 5,
-    "E4, journaling cadence".
+- **The test suite mints a temp fixture directory per test and a full run leaves hundreds of them
+  behind, some never removed by any code path.** A single full `pnpm test` run left 289 `openreverie-*` directories behind in
+  `$TMPDIR`, and repeated runs filled the machine's disk completely, to the point where no command
+  could run at all. Tests create these directories with `mkdtemp(join(tmpdir(), 'openreverie-...'))`
+  across `packages/memory`, `packages/core`, `packages/cli`, and `packages/server`; most pair that
+  call with an `afterEach` that calls `rm(dir, { recursive: true, force: true })` (or, in
+  `packages/memory/src/engine.test.ts`, a retrying `rmWithRetry` wrapper around the same call, added
+  there specifically to ride out a flaky `ENOTEMPTY`), but that pattern is not applied everywhere a
+  directory is minted. Confirmed by reading: `packages/memory/src/reflection.test.ts:1297` mints a
+  second, inline temp directory inside one test (distinct from the suite's own `dir` fixture, which
+  its `afterEach` at `:312`-`313` does clean up), holds it open only in a `try`/`finally` that closes
+  the `MemoryIndex` at `:1323` and never removes the directory itself, so that one leaks on every run
+  regardless of pass or fail.
+  - Why deferred: found while running verification for the three-defects pass on 2026-08-29, not
+    scoped out of an existing task. The fix is mechanical (spread the existing `afterEach` /
+    `rm(dir, { recursive: true, force: true })` pattern, or the retry wrapper where a database file
+    is involved, to every `mkdtemp` call that lacks it), but it touches many test files.
+  - Where: `packages/memory/src/*.test.ts` and others using
+    `mkdtemp(join(tmpdir(), 'openreverie-...'))`; the confirmed leak at
+    `packages/memory/src/reflection.test.ts:1297` (directory minted), `:1322`-`1324` (`finally`
+    block that closes the index but never removes the directory); the cleanup pattern to spread is
+    `packages/memory/src/reflection.test.ts:312`-`313` (plain `afterEach` + `rm`) or
+    `packages/memory/src/engine.test.ts:27`-`37` (`rmWithRetry`, for cases hitting the `ENOTEMPTY`
+    flakiness that motivated the retry).
   - Trigger: not stated.
-  - Size: small.
+  - Size: small per file, medium across the suite.
 
 - **The rollup prompts duplicate `PROSE_VOICE_RULE` and have already diverged, with no test
   coverage.** `DAILY_ROLLUP_PROMPT` and `WEEKLY_ROLLUP_PROMPT` at `packages/memory/src/rollups.ts:154`
@@ -1534,25 +1510,29 @@ design conversation first.
   - *`AgentSession.resume` and registry rehydration (E1).* `LiveSessionRegistry` models liveness
     entirely in an in-memory `Map`, and `AgentSession.start()` always mints a new session id; in a
     Durable Object that hibernates after seconds of inactivity, a session ends whenever the object
-    sleeps. Gated on the `listStoredSessions` defect above (section 1) being fixed first, since
-    shipping resume on top of that conflation would bake it in. The genuinely hard part, per our own
-    review, is not what the request flagged: "turns in flight at eviction leave no durable trace at
-    all, so they cannot be replayed, only retried, and that is a product decision about what the
-    user sees, not an engine detail." Stated fallback: "reopening shows a read-only transcript with
-    no compose bar, which is shippable and noticeably worse." Largest and most valuable of the five
-    iOS asks, per the new request's own sequencing. Reverie Cloud's round-three reply agreed with
-    this framing outright ("Agreed. `engine.ts:1744` sets `status: 'ended'` unconditionally, so
-    eviction already makes in-progress sessions look permanently ended, with or without resume. Fix
-    it first and separately.") and stated their own position for whenever this is built, narrower
-    than a full replay: "retry is acceptable and silence is not. A user whose turn was lost to an
-    eviction should see that it was lost, not a transcript that ends mid-thought. We do not need
-    replay." What that withdraws is the original scope: replay, and resume as the request first framed
-    it. What stays open is the narrower shape they stated, retry with the loss made visible, still
-    gated on the same defect. Where:
+    sleeps. Was gated on the `listStoredSessions` defect (formerly section 1) being fixed first,
+    since shipping resume on top of that conflation would bake it in. **That gate has now cleared**:
+    the fix landed in `a3e052c` (`listStoredSessions` stopped reporting every stored session as
+    ended, and `PublicSession.status` gained an honest `'open'` value for a session that is on disk,
+    never reflected, and not live in this process). Only the resume and rehydration work itself
+    remains. The genuinely hard part, per our own review, is not what the request flagged: "turns in
+    flight at eviction leave no durable trace at all, so they cannot be replayed, only retried, and
+    that is a product decision about what the user sees, not an engine detail." Stated fallback:
+    "reopening shows a read-only transcript with no compose bar, which is shippable and noticeably
+    worse." Largest and most valuable of the five iOS asks, per the new request's own sequencing.
+    Reverie Cloud's round-three reply agreed with this framing outright ("Agreed. `engine.ts:1744`
+    sets `status: 'ended'` unconditionally, so eviction already makes in-progress sessions look
+    permanently ended, with or without resume. Fix it first and separately.") and stated their own
+    position for whenever this is built, narrower than a full replay: "retry is acceptable and
+    silence is not. A user whose turn was lost to an eviction should see that it was lost, not a
+    transcript that ends mid-thought. We do not need replay." What that withdraws is the original
+    scope: replay, and resume as the request first framed it. What stays open is the narrower shape
+    they stated, retry with the loss made visible. Where:
     `packages/server/src/registry.ts` (`LiveSessionRegistry`); `packages/core/src/agent.ts`
-    (`AgentSession.start`); the `listStoredSessions` defect entry in section 1;
-    `reverie-cloud/docs/specs/2026-08-28-openreverie-round-three.md`, section 6.3. Trigger: the
-    `listStoredSessions` fix landing first. Size: large.
+    (`AgentSession.start`); the `listStoredSessions` fix, `a3e052c`;
+    `reverie-cloud/docs/specs/2026-08-28-openreverie-round-three.md`, section 6.3. Trigger: was the
+    `listStoredSessions` fix landing first; it has now landed in `a3e052c`, so the gate is cleared
+    and only the work itself remains. Size: large.
   - *Suppress the greeting on session create (E2).* A `greet: false` or equivalent on `POST
     /api/v1/sessions`. Without it, a session created by a typed first message greets first and then
     answers, because `registry.message()` awaits the greeting before running the turn. Verified: we
@@ -1570,25 +1550,28 @@ design conversation first.
   - *Journaling cadence, structured storage, and settability (E4), withdrawn as originally scoped.*
     Cadence needs to be settable conversationally and in settings, both writing the same structured
     record. The conversational half already exists via the live `update_journaling_protocol` tool;
-    what is missing is a screen-readable structured record, and that is blocked on the
-    `writeJournalingProtocol` meta clobber defect in section 1: "Adding a cadence tool on top of that
-    would produce a setting that silently forgets itself. Fix the meta clobber first, then the
-    structured field, then decide whether a second tool is needed at all. We suspect it is not."
-    Stated fallback: "cadence is a host-side setting the companion cannot change, which contradicts
-    what was asked for but does not block the notification." Reverie Cloud's round-three reply
-    withdrew this ask as scoped, agreeing the layer was wrong: "You are right and we aimed at the
-    wrong layer... A tool writing a setting that the next unrelated write silently erases is worse
-    than no tool." They will re-raise a narrower successor once the meta clobber is fixed: "What we
-    actually need is a screen-readable structured record, because the hosted schedule work has to
-    recompute a Durable Object alarm when cadence changes and cannot do that by parsing prose. We
-    will re-raise that against the fixed layer rather than restating the original ask." The
-    `writeJournalingProtocol` meta clobber defect in section 1 stays open and is unaffected; it is
-    still the prerequisite either way. Where: `packages/memory/src/journal.ts:151`
-    (`writeJournalingProtocol`); `packages/core/src/tools.ts` (`update_journaling_protocol`); the
-    `writeJournalingProtocol` defect entry in section 1;
-    `reverie-cloud/docs/specs/2026-08-28-openreverie-round-three.md`, section 6.2. Trigger: the
-    meta-clobber fix landing first, then a re-raised, narrower ask against the fixed layer. Size:
-    medium.
+    what is missing is a screen-readable structured record. That was blocked on the
+    `writeJournalingProtocol` meta clobber defect: "Adding a cadence tool on top of that would
+    produce a setting that silently forgets itself. Fix the meta clobber first, then the structured
+    field, then decide whether a second tool is needed at all. We suspect it is not." **The meta
+    clobber fix has now landed**, in `82d367a`: `writeJournalingProtocol` reads, merges, and writes
+    `meta` instead of rebuilding it from scratch, on the same read-merge-write shape
+    `setSessionMode` already used, so a structured field written by another caller now survives the
+    next prose rewrite. Stated fallback: "cadence is a host-side setting the companion cannot
+    change, which contradicts what was asked for but does not block the notification." Reverie
+    Cloud's round-three reply withdrew this ask as scoped, agreeing the layer was wrong: "You are
+    right and we aimed at the wrong layer... A tool writing a setting that the next unrelated write
+    silently erases is worse than no tool." That withdrawal stands; this entry does not un-withdraw
+    the ask itself. They said they would re-raise a narrower successor once the meta clobber was
+    fixed: "What we actually need is a screen-readable structured record, because the hosted
+    schedule work has to recompute a Durable Object alarm when cadence changes and cannot do that by
+    parsing prose. We will re-raise that against the fixed layer rather than restating the original
+    ask." Where: `packages/memory/src/journal.ts` (`writeJournalingProtocol`);
+    `packages/core/src/tools.ts` (`update_journaling_protocol`); the meta clobber fix, `82d367a`;
+    `reverie-cloud/docs/specs/2026-08-28-openreverie-round-three.md`, section 6.2. Trigger: was the
+    meta-clobber fix landing first, then a re-raised, narrower ask against the fixed layer. The fix
+    has now landed in `82d367a`; what remains is Reverie Cloud re-raising the narrower ask against
+    the fixed layer, which has not happened yet. Size: medium.
   - *A search endpoint, `GET /api/v1/search` (E5).* Over the same hybrid retrieval `engine.search()`
     (`packages/memory/src/engine.ts:1655`) already exposes: "already a clean decoupled method with no
     tool-call formatting entangled in it." One wrinkle: the existing cursor and pagination convention

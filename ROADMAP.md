@@ -148,9 +148,11 @@ into dream runs in one line instead of hand-writing the closure itself; `package
 and `packages/cli/src/chat.ts` both call it now. This does not close the standing dream hazard.
 `EngineDeps.dreamPersona` is still optional, and a host that omits it, or builds a persona some
 other way, still gets an empty system prompt for all four dream stages through the untouched `?? ''`
-fallback at `packages/memory/src/engine.ts:3173`. Composing the crisis stance in the engine itself on
-the dream path, rather than trusting it to arrive inside a host-supplied string, also remains
-unbuilt. Both stay open in `BACKLOG.md`; neither is fixed by this round.
+fallback at `packages/memory/src/engine.ts:3173` (the empty-persona half of this was closed by the
+2026-08-29 pass described below; the content-validation half stays open). Composing the crisis
+stance in the engine itself on the dream path, rather than trusting it to arrive inside a
+host-supplied string, also remains unbuilt. Both stay open in `BACKLOG.md` as of this round; neither
+is fixed by this round.
 
 Separately, `PRECEDENCE_SENTENCE` was reworded from ranking the prompt's blocks by their stock
 structure to ranking them by role: the crisis stance first, then any first-conversation guidance,
@@ -162,6 +164,65 @@ else the rule stays byte identity, no exceptions. It shipped alone, as its own c
 exact replacement wording proposed in writing and signed off by Vishal in advance, because the
 sentence ranks how crisis behavior outranks everything else, and both this project's and Reverie
 Cloud's `AGENTS.md` require explicit human sign-off before that kind of text changes.
+
+A follow-up round on 2026-08-29 was a bounded three-defects pass, each a real, previously recorded
+gap rather than new scope.
+
+Dreaming now fails loudly, in `packages/memory/src/engine.ts`, when the rendered `dreamPersona` is
+empty or whitespace-only, recording the attempt as `'failed'` before throwing so a hibernating host
+gets a durable recorded failure and a retry rather than four dream stages silently run on an empty
+system prompt. The guard checks the rendered value, not whether the dependency is present, so a
+host stubbing `dreamPersona: () => ''` cannot land back in the silent state it closes. This fixes
+only the empty-persona half of the standing dream hazard noted above. A non-empty host-supplied
+persona is still unvalidated for content: a host can still pass a persona that renders real prose
+with no crisis stance in it, and composing the crisis stance in the engine itself on the dream path
+remains unbuilt, because `packages/memory` sits below `packages/core` and cannot import
+`buildPersona`. That half stays open in `BACKLOG.md`, its entry rewritten to describe only what
+still remains.
+
+`writeJournalingProtocol` in `packages/memory/src/journal.ts` now reads, merges, and writes `meta`
+instead of rebuilding it from scratch on every call, on the same read-merge-write shape
+`setSessionMode` already used. A pre-existing meta field now survives the next prose rewrite,
+whether that rewrite comes from the `update_journaling_protocol` tool or from reflection. This is
+unrelated to, and does not fix, the separate open defect about `journaling.md`'s body being
+overwritten with a session summary instead of the person's actual journaling method; that one
+stays open in `BACKLOG.md`.
+
+`listStoredSessions` stopped reporting every session stored on disk as `'ended'`. The status is now
+derived honestly from whether the session was ever reflected: `PublicSession.status` gains a fourth
+value, `'open'`, for a session that is on disk, never reflected, and not live in this process
+(deliberately distinct from `'expired'`, the in-memory idle sweep's own state). `readOnly` stays
+true either way, because the stored view still cannot serve writes until session resume exists;
+only the label was wrong, not the permission underneath it. `requireLive` and `end()` in
+`packages/server/src/registry.ts` now distinguish the two, failing closed: `'open'` gets the softer
+`409 session_not_live`, and any status this code does not recognise, including one added later and
+not yet handled, falls to the more restrictive `409 session_ended` rather than being admitted. This
+also touched `packages/web/src/api.ts`, so the browser's own type for a session status matches, and
+needed two things the original brief for it missed: the strict response validator at
+`packages/server/src/http-core.ts:723`, which would otherwise have made the server return 500 on
+listing an interrupted session, and one assertion in the tombstone eviction test, which had been
+passing only because of this bug (the evicted session had been swept for inactivity and never
+reflected, so it now correctly reports `session_not_live` instead of the old `session_ended`, a
+sharper assertion than before, since `session_not_live` can only come from the disk fallback while
+`session_ended` could also come from a cached tombstone).
+
+Three things were established by running code, not by reasoning about it, and are why this fix was
+a real defect rather than self-healing. `reverie web` opens its engine with `{ maintenance: false }`
+(`packages/server/src/launch.ts:53,143`) and nothing else in the server runs maintenance
+periodically; maintenance is what reflects an interrupted session, so on that host a session
+interrupted by a hard process death stayed unreflected and mislabelled indefinitely. Even where
+maintenance does run, `runMaintenance` swallows a reflection failure and leaves the session for a
+later retry, while its status still said `'ended'`. And a genuinely live session reported `'ended'`
+from `listStoredSessions` itself, a latent bug in the API surface masked in practice because
+`http-core` overwrites stored entries with the registry's own live view before a response goes out.
+
+This fix does not build session resume. An interrupted session is now labelled honestly and can be
+listed and its transcript read, but nothing lets anyone continue it; that stays open in
+`BACKLOG.md`, and its trigger ("gated on this fix landing first") is now cleared.
+
+All three fixes were verified the same way: `pnpm build`, `pnpm -r exec tsc --noEmit`, and
+`pnpm lint` all exit 0, and 1,692 tests across 81 files pass. Each was falsified by the implementer
+and again on review before being accepted; see commits `a18fd10`, `82d367a`, and `a3e052c`.
 
 ## How work happens here
 
