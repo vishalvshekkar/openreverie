@@ -12,6 +12,33 @@ and
 [docs/superpowers/specs/2026-08-27-hostable-engine-canonical-origin-design.md](superpowers/specs/2026-08-27-hostable-engine-canonical-origin-design.md).
 This page only points at what exists and where; it does not re-argue why.
 
+## Installing
+
+The engine packages are on npm. Before v0.9.1 they were not, and the only way to consume them was a
+path dependency onto a working copy of this repository, which is not a dependency so much as a
+shared directory: it does not survive a branch switch, a second machine, or a continuous
+integration run.
+
+A host embedding the whole engine installs the server, which pulls the rest down with it:
+
+```
+npm i @openreverie/server
+```
+
+That gives you `@openreverie/core`, `@openreverie/memory` and `@openreverie/providers` as
+transitive dependencies. A host that only needs the memory layer, with its own agent loop above it,
+can install `@openreverie/memory` on its own.
+
+`@openreverie/web` is an optional peer dependency of the server rather than a hard one, because
+only the Node static-serving path touches it. If you serve the bundled browser interface, install
+it explicitly (`npm i @openreverie/server @openreverie/web`). If you run `createFetchApp` on a
+Worker and mount no interface, leave it out and npm will report it as an unmet optional peer, which
+is the intended state rather than a broken install.
+
+Note that `@openreverie/memory` depends on `better-sqlite3` for the self-hosted convenience path.
+A host with no native modules does not need it: implement the `SqlDatabase` interface over your own
+SQL engine and use `MemoryEngine.fromPaths` rather than `MemoryEngine.open`, as described below.
+
 ## Storage
 
 Every filesystem touch in `@openreverie/memory` goes through two injected interfaces in

@@ -242,6 +242,20 @@ React, sigma and graphology to serve an interface it never mounts. It is an opti
 the resolver says which of the two fixes applies when it is absent instead of surfacing a bare
 module-not-found.
 
+All six packages are on npm as of this release, which took one manual step that will not recur. npm
+cannot configure trusted publishing on a package that does not exist, so the five scoped names had
+to be created by a human at an interactive terminal before the workflow could ever publish them. On
+the tag itself the workflow found those five versions already present, skipped them by design, and
+published the CLI alone with provenance. From v0.9.2 all six go through the workflow.
+
+Publishing them surfaced one defect that the dry run could not, because it only appeared once the
+tarballs were read rather than packed. `tsconfig` compiles `src`, tests live beside the code, so
+`tsc` emitted them into `dist` and `files: ["dist"]` shipped them: compiled test code was about 60
+percent of every engine tarball. They are excluded through the `files` field rather than a
+`tsconfig` `exclude`, deliberately, because excluding them from the build would also stop
+`tsc --noEmit` typechecking them, and vitest does not typecheck at all. `@openreverie/memory`
+unpacked went from 2936KB to 878KB.
+
 ## Current direction
 
 v0.9.1 is released and nothing is started after it. See [BACKLOG.md](BACKLOG.md) for everything

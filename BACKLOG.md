@@ -2284,6 +2284,22 @@ help welcome" section. Read [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](A
     a host confused by an origin check.
   - Size: tiny.
 
+- **The five scoped packages have no README, so their npm pages are blank.** Each engine package
+  publishes `dist/`, `package.json` and `LICENSE` and nothing else, so npmjs.com renders an empty
+  page for `@openreverie/core`, `@openreverie/memory`, `@openreverie/providers`,
+  `@openreverie/server` and `@openreverie/web`. The npm page is where someone evaluating a package
+  actually reads what it does, and right now it says nothing. The repository README's "Installing
+  the packages" section carries those descriptions instead.
+  - Why deferred: not stated. Noticed on 2026-08-30 while verifying the first publish of the scoped
+    names, after the tarball contents had already been fixed and the release tagged.
+  - Where the thinking already lives: `README.md`, "Installing the packages", whose per-package
+    table is the content a README would start from; `docs/releases/v0.9.1.md`, "Verification",
+    which records the tarballs as carrying `dist/` and the licence only.
+  - Trigger: the next release that publishes these packages, since a README added at any point
+    ships automatically with the next version and needs no separate release.
+  - Size: small (five `README.md` files, plus a `files` entry per package if the licence-only
+    manifest does not already pick them up).
+
 ## 6. Decided against, with a trigger to revisit
 
 - **A default or remembered mode (persisted in `profile.md`, or as the CLI's sticky default).**
