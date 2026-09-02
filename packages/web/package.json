@@ -1,6 +1,6 @@
 {
   "name": "@openreverie/web",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "description": "The openreverie web interface: a local, browser-based view of a person's memory graph and chat, built for the Node static-serving path in @openreverie/server.",
   "homepage": "https://reverie.my",
   "license": "FSL-1.1-ALv2",

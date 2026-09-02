@@ -301,7 +301,7 @@ describe('MemoryIndex', () => {
           items: [
             {
               id: 'item_natural',
-              text: 'Tickets are booked with Arjun for Nightfall on Sunday, 23 Aug 2026 at 6:45pm.',
+              text: 'Tickets are booked with Arjun for Nightfall on Sunday, 23 Aug 2026 at 7:20pm.',
               ts: '2026-08-20',
               kind: 'event',
             },
@@ -330,7 +330,10 @@ describe('MemoryIndex', () => {
       )
       await upsertDoc(
         index,
-        doc({ meta: { id: 'doc_fewer_terms' }, body: 'Arjun mentioned Nightfall once in passing.' }),
+        doc({
+          meta: { id: 'doc_fewer_terms' },
+          body: 'Arjun mentioned Nightfall once in passing.',
+        }),
         'realm',
         embedFn(),
       )
@@ -896,15 +899,15 @@ describe('MemoryIndex', () => {
           {
             id: 'person_2',
             type: 'person',
-            label: 'Nicolette',
+            label: 'Lorenzo',
             ts: '2026-08-02T00:00:00.000Z',
           },
-          { id: 'person_3', type: 'person', label: 'col', ts: '2026-07-01T00:00:00.000Z' },
+          { id: 'person_3', type: 'person', label: 'ren', ts: '2026-07-01T00:00:00.000Z' },
           { id: 'entity_1', type: 'entity', label: 'Unrelated', ts: '2026-08-03T00:00:00.000Z' },
         ]),
       )
 
-      const hits = index.searchNodes('col', 10)
+      const hits = index.searchNodes('ren', 10)
       // Exact label match first, then the prefix match, then the mid-word
       // substring match. "Unrelated" does not match at all.
       expect(hits.map((h) => h.id)).toEqual(['person_3', 'person_1', 'person_2'])

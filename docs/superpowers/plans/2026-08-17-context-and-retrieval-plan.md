@@ -2420,7 +2420,7 @@ async function dispatchListEntities(engine: MemoryEngine, value: unknown): Promi
 
 A listing tool alone cannot find the 41st person: a tool returning a page of 40 has the prompt's problem one page further along. A search alone cannot enumerate: ranked results are not a roster. Both are needed, and they answer different questions. Task 9 built the roster; this builds the search.
 
-The implementation is a case-folded substring scan over `nodes.label`, not an FTS5 table. Node counts are hundreds to low thousands after years of daily use, so a full scan of that table in SQLite is sub-millisecond and is dwarfed by the embedding round trip the same search already makes. `replaceGraph` wipes and refills `nodes` on every engine open and every graph change, and keeping an external-content FTS5 table correct across that requires delete bookkeeping that buys nothing at this size; a desynced FTS index is exactly the silent-wrong-answer bug this release exists to remove. Name lookup also wants substring and prefix behavior, and FTS5 matches whole tokens, giving prefix matching only with an explicit trailing `*` and never mid-token: "col" should find "Renata".
+The implementation is a case-folded substring scan over `nodes.label`, not an FTS5 table. Node counts are hundreds to low thousands after years of daily use, so a full scan of that table in SQLite is sub-millisecond and is dwarfed by the embedding round trip the same search already makes. `replaceGraph` wipes and refills `nodes` on every engine open and every graph change, and keeping an external-content FTS5 table correct across that requires delete bookkeeping that buys nothing at this size; a desynced FTS index is exactly the silent-wrong-answer bug this release exists to remove. Name lookup also wants substring and prefix behavior, and FTS5 matches whole tokens, giving prefix matching only with an explicit trailing `*` and never mid-token: "ren" should find "Renata".
 
 Node hits are never fused into the RRF ranking. A node has no chunk, no FTS rank and no cosine score, so any score assigned to it for fusion would be invented, and mixing an invented score into a real ranking is how a retrieval system starts lying quietly.
 
@@ -2514,15 +2514,15 @@ Every node type is included, not just person and entity. An arc or realm with a 
           {
             id: 'person_2',
             type: 'person',
-            label: 'Nicolette',
+            label: 'Lorenzo',
             ts: '2026-08-02T00:00:00.000Z',
           },
-          { id: 'person_3', type: 'person', label: 'col', ts: '2026-07-01T00:00:00.000Z' },
+          { id: 'person_3', type: 'person', label: 'ren', ts: '2026-07-01T00:00:00.000Z' },
           { id: 'entity_1', type: 'entity', label: 'Unrelated', ts: '2026-08-03T00:00:00.000Z' },
         ]),
       )
 
-      const hits = index.searchNodes('col', 10)
+      const hits = index.searchNodes('ren', 10)
       // Exact label match first, then the prefix match, then the mid-word
       // substring match. "Unrelated" does not match at all.
       expect(hits.map((h) => h.id)).toEqual(['person_3', 'person_1', 'person_2'])

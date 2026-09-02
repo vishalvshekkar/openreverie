@@ -12,9 +12,9 @@ Session `2026-08-22-session_01M0MHZ78SMTVC83DARMWPB5SD`, opened at 16:29 IST on 
 
 Reverie opened with "Did you end up going to Nightfall with Arjun, how did it land for you?" about a
 film booked for the following day. Asked directly what day it was and when the movie was, it replied
-that the movie was "at 7:25 pm on Sunday, Aug 16 (PVR IMAX, Westgate Mall)" and that the
+that the movie was "at 8:10 pm on Sunday, Aug 16 (PVR IMAX, Westgate Mall)" and that the
 person "ended up seeing it that night in Ashford". The booking is 6:40pm on Sunday 23 August in
-Bangalore. The 7:25pm Ashford showing was a different film (Halcyon) on 16 August.
+Bangalore. The 8:10pm Ashford showing was a different film (Halcyon) on 16 August.
 
 ### What was not wrong
 
@@ -32,7 +32,7 @@ what time it is now and has no reliable way to date anything it remembers.
 
 The correct fact was in memory the entire time. `graph.jsonl` line 925, asserted 2026-08-20:
 
-> Tickets are booked with Arjun for Nightfall on Sunday, 23 Aug 2026 at 6:45pm.
+> Tickets are booked with Arjun for Nightfall on Sunday, 23 Aug 2026 at 7:20pm.
 
 It lives in `sessions/2026-08-20-session_01M0F1SBG4YYGJC45APRBSMCWS/summary.md`, which is
 `doc_01M0F375ARVVYBW8Y0XAHEAEAQ`. That document **was retrieved** by the search the model ran. The
@@ -70,7 +70,7 @@ should be relying on.
 
 Note the limit of this fix honestly: document date is not event date. Returning the span would have
 told the model that a passage came from 20 August. It would not have produced "Sunday 23 August at
-6:45pm". Defect 1 is what lost that; this one is what leaves everything else undatable.
+7:20pm". Defect 1 is what lost that; this one is what leaves everything else undatable.
 
 ### 3. `eventTime` is captured, stored, and surfaced nowhere
 
@@ -106,7 +106,7 @@ the section, and state the standing rule in the prompt, that a recorded intentio
 person said they meant to do something and is never evidence that they did it.
 
 Related and out of scope for this round, recorded here so it is not lost: superseded facts are never
-retracted. `Fri Aug 21`, `Friday not confirmed`, `Sunday 23 Aug 6:45pm` and `about 6:40pm` all
+retracted. `Fri Aug 21`, `Friday not confirmed`, `Sunday 23 Aug 7:20pm` and `about 6:40pm` all
 coexist as live assertions, and RRF scores are `1 / (60 + rank)`, so ordering carries no recency
 signal at all. That needs its own design conversation.
 

@@ -21,7 +21,7 @@ timezone. `context.today` comes from `MemoryEngine.sessionContext`
 A model told only a calendar date cannot reason about elapsed time within a day. A user who says at
 4:19pm local "I'm watching Halcyon tonight at 7.25pm" is describing something in the future; the
 model has no way to know that, because it has no concept of 4:19pm at all. In a real session on this
-codebase, the companion later asked "how was Halcyon tonight?" before 7:25pm had happened.
+codebase, the companion later asked "how was Halcyon tonight?" before 8:10pm had happened.
 
 **Defect 2: every day boundary in the system is UTC, not local.** For a user at UTC+5:30 (India),
 every local hour from 00:00 to 05:29 is still the previous UTC day. A midnight-to-1am journal entry

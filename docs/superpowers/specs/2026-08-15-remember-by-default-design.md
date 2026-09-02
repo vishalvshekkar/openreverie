@@ -16,8 +16,8 @@ From a real session on a memory folder predating v0.3.0:
 
 ```
 reverie> Hey, before we dive in, a tiny housekeeping thing I'd been meaning to ask: since you
-mentioned Renata, do you want me to add her to your people list?
-you> Yes, add Renata to your list.
+mentioned Nadia, do you want me to add her to your people list?
+you> Yes, add Nadia to your list.
 reverie> Done. Do you want me to keep it as just her name, or note the basics?
 ```
 

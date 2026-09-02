@@ -3106,7 +3106,7 @@ Append to `packages/memory/src/reflection.test.ts`:
     const out: ReflectionOutput = {
       ...emptyReflectionOutput('An evening plan.'),
       items: [
-        { text: 'Watching Halcyon', kind: 'event', eventTime: 'tonight at 7:25pm' },
+        { text: 'Watching Halcyon', kind: 'event', eventTime: 'tonight at 8:10pm' },
         { text: 'Feeling behind lately', kind: 'feeling' },
       ],
     }
@@ -3130,7 +3130,7 @@ Append to `packages/memory/src/reflection.test.ts`:
       async () => {},
     )
 
-    expect(mintedItems[0]?.eventTime).toBe('tonight at 7:25pm')
+    expect(mintedItems[0]?.eventTime).toBe('tonight at 8:10pm')
     expect(mintedItems[0]?.ts).toBe('2026-08-16T10:49:00.000Z')
     expect(mintedItems[1]?.eventTime).toBeUndefined()
   })
@@ -3149,7 +3149,7 @@ Append to `packages/core/src/tools.test.ts`, in the block that covers `remember`
       arguments: JSON.stringify({
         text: 'Watching Halcyon',
         kind: 'event',
-        eventTime: 'tonight at 7:25pm',
+        eventTime: 'tonight at 8:10pm',
       }),
     })
 

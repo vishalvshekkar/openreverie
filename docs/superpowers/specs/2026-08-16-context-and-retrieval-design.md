@@ -361,8 +361,8 @@ Reasons for the scan:
   that buys nothing at this size, and a desynced FTS index is a silent-wrong-answer bug of exactly
   the kind this spec is about.
 - Semantics. Name lookup wants substring and prefix behavior. FTS5 matches whole tokens, and gives
-  prefix matching only with an explicit trailing `*` and never mid-token. "col" should find
-  "Renata"; under FTS5 it does so only if the caller remembers to write `col*`.
+  prefix matching only with an explicit trailing `*` and never mid-token. "ren" should find
+  "Renata"; under FTS5 it does so only if the caller remembers to write `ren*`.
 - No migration. The `label` column already exists, so 6a adds no schema change on top of section 5's.
 
 **Matching rule.** The query is case-folded and split on non-word characters. Tokens shorter than

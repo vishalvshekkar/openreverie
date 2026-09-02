@@ -372,7 +372,7 @@ describe('searchMemory', () => {
             { id: 'item_vague', text: 'Vishal booked tickets to see Nightfall with Arjun.' },
             {
               id: 'item_precise',
-              text: 'Tickets are booked with Arjun for Nightfall on Sunday, 23 Aug 2026 at 6:45pm.',
+              text: 'Tickets are booked with Arjun for Nightfall on Sunday, 23 Aug 2026 at 7:20pm.',
             },
             { id: 'item_unrelated', text: 'Went to the gym in the morning, nothing else notable.' },
           ],
@@ -383,12 +383,13 @@ describe('searchMemory', () => {
       embedFn(embeddings),
     )
 
-    const hits = (await searchMemory(index, embeddings, MODEL, 'Nightfall tickets booked with Arjun'))
-      .documents
+    const hits = (
+      await searchMemory(index, embeddings, MODEL, 'Nightfall tickets booked with Arjun')
+    ).documents
 
     expect(hits.length).toBe(1)
     expect(hits[0]?.chunks.length).toBeGreaterThan(1)
-    expect(hits[0]?.chunks.some((c) => c.includes('6:45pm'))).toBe(true)
+    expect(hits[0]?.chunks.some((c) => c.includes('7:20pm'))).toBe(true)
     expect(hits[0]?.chunks.some((c) => c.includes('Vishal booked tickets'))).toBe(true)
   })
 

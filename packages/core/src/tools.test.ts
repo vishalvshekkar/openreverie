@@ -486,7 +486,7 @@ describe('dispatchTool', () => {
       arguments: JSON.stringify({
         text: 'Watching Halcyon',
         kind: 'event',
-        eventTime: 'tonight at 7:25pm',
+        eventTime: 'tonight at 8:10pm',
       }),
     })
 

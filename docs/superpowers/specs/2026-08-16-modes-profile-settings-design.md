@@ -118,7 +118,7 @@ Three files, three jobs, no overlap:
 - **`constitution.md` holds meaning and narrative.** Who this person is, what holds steady, what
   changed and what it meant.
 
-The dividing line, stated as one example: `location: Bangalore` is profile.
+The dividing line, with one example: `location: Bangalore` is profile.
 "Moved to Bangalore and the move landed harder than expected" is constitution. The fact is a field.
 What the fact means is prose.
 

@@ -589,7 +589,7 @@ item ships, remove it from here and record it in `ROADMAP.md`'s Done narrative.
   assertions with nothing marking the dead ones. Observed live: four mutually contradictory
   records of one cinema booking, all equally retrievable and equally ranked ("Wants help picking
   an IMAX showtime," "remains open and has not yet been confirmed," "Tickets are booked... Sunday
-  6:45pm," "booked... around 6:40pm"). An item is a fact and a fact can only be appended; it has
+  7:20pm," "booked... around 6:40pm"). An item is a fact and a fact can only be appended; it has
   no identity, so it can never be revised. On the retrieval side, RRF scores are `1 / (60 + rank)`,
   so ordering carries no recency signal at all. The commitments design fixes this for commitments
   only (a commitment is a graph node with identity, so `assert` on an existing node id is a

@@ -28,8 +28,8 @@ records of one cinema booking:
 ```
 2026-08-18  Wants help picking an IMAX Westgate showtime for Nightfall on Fri Aug 21 with Arjun
 2026-08-20  Friday's plan to see Nightfall with Arjun remains open and has not yet been confirmed
-2026-08-20  Tickets are booked with Arjun for Nightfall on Sunday, 23 Aug 2026 at 6:45pm
-2026-08-22  Nightfall showtime is booked for Sunday, Aug 23, 2026 at around 6:40 pm
+2026-08-20  Tickets are booked with Arjun for Nightfall on Sunday, 23 Aug 2026 at 7:20pm
+2026-08-22  Nightfall showtime is booked for Sunday, Aug 23, 2026 at around 7:15 pm
 ```
 
 Three of those are dead and nothing says so. All four are equally retrievable and equally ranked. On
