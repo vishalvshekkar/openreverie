@@ -539,6 +539,21 @@ item ships, remove it from here and record it in `ROADMAP.md`'s Done narrative.
     file failing in CI is the likeliest place it shows up next.
   - Rough size: small, once it is reproducible.
 
+- **The tombstone cache test in `registry.test.ts` times out under full-suite load.** "keeps only
+  recent expired sessions in the tombstone cache" runs in about 2 to 3 seconds on its own, and
+  exceeded vitest's 15 second default timeout once during a full `pnpm test` run on 2026-09-04. It
+  passed on an immediate re-run of the whole suite, and three times in a row in isolation, so it is
+  a load-sensitive timeout rather than a logic failure. It still matters: the publish workflow gates
+  releasing on a green suite, so this can turn a release red for no real reason.
+  - Why deferred: found while verifying the suite before the v0.9.2 release, and unrelated to what
+    that release changes. Recorded rather than fixed on the spot, and recorded rather than waved
+    off, for the same reason the entry above gives.
+  - Where: `packages/server/src/registry.test.ts:429`, the `FakeScheduler`-driven test in
+    `LiveSessionRegistry`. No spec covers it; the thinking is only this entry.
+  - Trigger: a second occurrence, or any CI run that fails on it.
+  - Rough size: small. Most likely an explicit per-test timeout, or cutting the real time the fake
+    scheduler makes the test spend.
+
 ## 2. Retrieval and memory quality
 
 - **`DocumentHit.snippet` and `chunks[0]` can name different physical chunks of the same
