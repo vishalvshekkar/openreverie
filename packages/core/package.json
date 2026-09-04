@@ -4,6 +4,13 @@
   "description": "The openreverie agent core: conversation loop, context assembly, tool dispatch, and safety mode enforcement.",
   "homepage": "https://reverie.my",
   "license": "FSL-1.1-ALv2",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vishalvshekkar/openreverie.git"
+  },
+  "bugs": {
+    "url": "https://github.com/vishalvshekkar/openreverie/issues"
+  },
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

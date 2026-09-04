@@ -136,6 +136,20 @@ jobs:
               cat /tmp/packed-manifest.json
               exit 1
             fi
+            # The same posture, for the one other field that can only fail
+            # on the registry. --provenance makes npm compare the packed
+            # manifest's repository url against the repository the
+            # attestation says built it, and reject the publish outright if
+            # it is missing or does not match. A manifest with no repository
+            # field publishes fine without provenance and 422s with it,
+            # which is exactly how the five scoped packages passed when a
+            # human published them by hand for v0.9.1 and then went red the
+            # first time this workflow tried to publish them itself.
+            if ! node -e 'const r=require("/tmp/packed-manifest.json").repository; const u=typeof r==="string"?r:r&&r.url; if(!u){process.exit(1)}'; then
+              echo "refusing to publish $name: its packed manifest has no repository url, which --provenance requires"
+              cat /tmp/packed-manifest.json
+              exit 1
+            fi
             echo "publishing $name@$version from $tarball"
             npm publish "$tarball" --provenance --access public
           done

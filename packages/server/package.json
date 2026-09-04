@@ -1,6 +1,13 @@
 {
   "name": "@openreverie/server",
   "version": "0.9.2",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vishalvshekkar/openreverie.git"
+  },
+  "bugs": {
+    "url": "https://github.com/vishalvshekkar/openreverie/issues"
+  },
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
